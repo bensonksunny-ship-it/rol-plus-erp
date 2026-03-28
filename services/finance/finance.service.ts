@@ -18,6 +18,7 @@ import type {
   Transaction,
   CreateTransactionInput,
 } from "@/types/finance";
+import { logAction } from "@/services/audit/audit.service";
 
 const TRANSACTIONS = "transactions";
 
@@ -112,6 +113,23 @@ export async function createTransaction(
     updatedAt:      new Date().toISOString(),
   });
 
+  logAction({
+    action:        "TRANSACTION_CREATED",
+    initiatorId:   data.receivedBy,
+    initiatorRole: "admin",
+    approverId:    null,
+    approverRole:  null,
+    reason:        null,
+    metadata:      {
+      transactionId: snap.id,
+      studentUid:    data.studentUid,
+      centerId:      data.centerId,
+      amount:        data.amount,
+      method:        data.method,
+      status:        data.status,
+    },
+  });
+
   return { id: snap.id, ...snap.data() } as Transaction;
 }
 
@@ -172,7 +190,69 @@ export async function applyMonthlyFee(studentUid: string): Promise<boolean> {
     updatedAt:      new Date().toISOString(),
   });
 
+  logAction({
+    action:        "MONTHLY_FEE_APPLIED",
+    initiatorId:   "system",
+    initiatorRole: "admin",
+    approverId:    null,
+    approverRole:  null,
+    reason:        null,
+    metadata:      {
+      studentUid,
+      centerId:   student.centerId,
+      amount:     feeStructure.amount,
+      cycleKey,
+    },
+  });
+
   return true;
+}
+
+/**
+ * Auto-charge a student per class attendance.
+ * Used by the attendance page after a successful markAttendance.
+ * Skips center/student existence validation — caller already verified.
+ */
+export async function chargeStudentPerClass(
+  studentUid: string,
+  centerId: string,
+  amount: number,
+): Promise<void> {
+  if (amount <= 0) return;
+
+  await addDoc(collection(db, TRANSACTIONS), {
+    studentUid,
+    centerId,
+    amount,
+    method:     "auto",
+    receivedBy: "system",
+    date:       new Date().toISOString().slice(0, 10),
+    status:     "completed",
+    createdAt:  serverTimestamp(),
+  });
+
+  await updateDoc(doc(db, "users", studentUid), {
+    currentBalance: increment(amount),
+    updatedAt:      new Date().toISOString(),
+  });
+
+  logAction({
+    action:        "PER_CLASS_FEE_APPLIED",
+    initiatorId:   "system",
+    initiatorRole: "admin",
+    approverId:    null,
+    approverRole:  null,
+    reason:        null,
+    metadata:      { studentUid, centerId, amount },
+  });
+}
+
+/**
+ * Get all transactions.
+ */
+export async function getTransactions(): Promise<Transaction[]> {
+  const snap = await getDocs(collection(db, TRANSACTIONS));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }) as Transaction);
 }
 
 /**

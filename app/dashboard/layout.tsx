@@ -7,20 +7,35 @@ import { signOut } from "@/services/firebase/auth.service";
 import { ROLES } from "@/config/constants";
 
 interface NavItem {
-  label: string;
-  href: string;
-  roles: string[];
+  label:   string;
+  // href can be a static string or a function that receives (uid, role) and returns a string
+  href:    string | ((uid: string, role: string) => string);
+  // matchPrefix is used for active-link detection when href is dynamic
+  matchPrefix?: string;
+  roles:   string[];
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Overview",       href: "/dashboard",                    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Centers",        href: "/dashboard/centers",            roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Students",       href: "/dashboard/students",           roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Attendance",     href: "/dashboard/attendance",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Finance",        href: "/dashboard/finance",            roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Syllabus",       href: "/dashboard/syllabus",           roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Audit logs",     href: "/dashboard/audit-logs",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Super admin",    href: "/dashboard/super-admin",        roles: [ROLES.SUPER_ADMIN] },
+  { label: "Dashboard",    href: "/dashboard",                     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
+  { label: "Centers",      href: "/dashboard/centers",             roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Students",     href: "/dashboard/students",            roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
+  { label: "Attendance",   href: "/dashboard/attendance",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
+  { label: "Finance",      href: "/dashboard/finance",             roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  // Syllabus: Admin/Teacher → master syllabus manager; Student → their own lesson progress
+  {
+    label: "Syllabus",
+    href:  (uid, role) =>
+      role === ROLES.STUDENT
+        ? `/dashboard/student-syllabus/${uid}`
+        : "/dashboard/syllabus",
+    matchPrefix: "/dashboard/syllabus",
+    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT],
+  },
+  { label: "Alerts",       href: "/dashboard/alerts",              roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Audit Logs",   href: "/dashboard/audit-logs",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Leaderboards", href: "/dashboard/leaderboards",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "My Score",     href: "/dashboard/teacher-score",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
+  { label: "Super Admin",  href: "/dashboard/super-admin",         roles: [ROLES.SUPER_ADMIN] },
 ];
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -41,7 +56,14 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     return null;
   }
 
-  const visibleNav = NAV_ITEMS.filter(item => item.roles.includes(user.role));
+  const visibleNav = NAV_ITEMS
+    .filter(item => item.roles.includes(user.role))
+    .map(item => ({
+      ...item,
+      resolvedHref: typeof item.href === "function"
+        ? item.href(user.uid, user.role)
+        : item.href,
+    }));
 
   return (
     <div style={styles.shell}>
@@ -55,12 +77,14 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
         <nav style={styles.nav}>
           {visibleNav.map(item => {
-            const active = pathname === item.href ||
-              (item.href !== "/dashboard" && pathname.startsWith(item.href));
+            const checkPrefix = item.matchPrefix ?? item.resolvedHref;
+            const active =
+              pathname === item.resolvedHref ||
+              (checkPrefix !== "/dashboard" && pathname.startsWith(checkPrefix));
             return (
               <a
-                key={item.href}
-                href={item.href}
+                key={item.resolvedHref}
+                href={item.resolvedHref}
                 style={{
                   ...styles.navItem,
                   ...(active ? styles.navItemActive : {}),
@@ -94,10 +118,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         {/* Topbar */}
         <header style={styles.topbar}>
           <div style={styles.topbarTitle}>
-            {visibleNav.find(item =>
-              item.href === pathname ||
-              (item.href !== "/dashboard" && pathname.startsWith(item.href))
-            )?.label ?? "Dashboard"}
+            {visibleNav.find(item => {
+              const checkPrefix = item.matchPrefix ?? item.resolvedHref;
+              return item.resolvedHref === pathname ||
+                (checkPrefix !== "/dashboard" && pathname.startsWith(checkPrefix));
+            })?.label ?? "Dashboard"}
           </div>
           <div style={styles.topbarRight}>
             <span style={styles.topbarUser}>{user.email}</span>

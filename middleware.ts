@@ -11,6 +11,9 @@ import { PUBLIC_ROUTES } from "@/config/constants";
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  // Root path is handled by app/page.tsx which redirects based on auth state
+  if (pathname === "/") return NextResponse.next();
+
   const isPublic = PUBLIC_ROUTES.some(
     (route) => pathname === route || pathname.startsWith(route + "/")
   );

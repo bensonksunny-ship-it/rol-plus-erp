@@ -34,9 +34,10 @@ export const ATTENDANCE_MODE = {
 } as const;
 
 export const ROLE_ROUTES: Record<string, string> = {
-  [ROLES.SUPER_ADMIN]: "/dashboard/super-admin",
-  [ROLES.ADMIN]: "/dashboard/admin",
-  [ROLES.TEACHER]: "/dashboard/teacher",
+  [ROLES.SUPER_ADMIN]: "/dashboard",
+  [ROLES.ADMIN]: "/dashboard",
+  [ROLES.TEACHER]: "/dashboard",
+  [ROLES.STUDENT]: "/dashboard",
 };
 
 export const PUBLIC_ROUTES = ["/login", "/forgot-password"];

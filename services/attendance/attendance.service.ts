@@ -19,6 +19,8 @@ import type {
   MarkAttendanceInput,
 } from "@/types/attendance";
 import { getFeeStructureByCenter } from "@/services/finance/finance.service";
+import { logAction } from "@/services/audit/audit.service";
+import { detectRevenueLeakage } from "@/services/alert/alert.service";
 
 const CLASSES    = "classes";
 const ATTENDANCE = "attendance";
@@ -161,6 +163,23 @@ export async function markAttendance(data: MarkAttendanceInput): Promise<Attenda
   const snap = await getDocFromServer(ref);
   if (!snap.exists()) throw new Error("ATTENDANCE_CREATE_FAILED: document not found after write");
 
+  logAction({
+    action:        "ATTENDANCE_MARKED",
+    initiatorId:   data.studentUid,
+    initiatorRole: "student",
+    approverId:    null,
+    approverRole:  null,
+    reason:        null,
+    metadata:      {
+      attendanceId: snap.id,
+      classId:      data.classId,
+      studentUid:   data.studentUid,
+      centerId:     data.centerId,
+      status:       data.status,
+      method:       data.method,
+    },
+  });
+
   // Per-class billing: charge student only on first (present) attendance mark
   if (data.status === "present") {
     const feeStructure = await getFeeStructureByCenter(classData.centerId);
@@ -170,6 +189,11 @@ export async function markAttendance(data: MarkAttendanceInput): Promise<Attenda
         updatedAt:      new Date().toISOString(),
       });
     }
+
+    // Non-blocking: check for revenue leakage (outstanding balance at class time)
+    detectRevenueLeakage(data.studentUid, data.centerId).catch(err =>
+      console.error("detectRevenueLeakage failed:", err)
+    );
   }
 
   return { id: snap.id, ...snap.data() } as AttendanceRecord;

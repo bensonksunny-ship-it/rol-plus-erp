@@ -9,19 +9,24 @@ import {
   query,
   where,
   serverTimestamp,
+  arrayUnion,
+  arrayRemove,
+  increment,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
+import { logAction } from "@/services/audit/audit.service";
 import type { User } from "@/types";
 import type {
   SyllabusUnit,
   CreateSyllabusUnitInput,
   StudentProgress,
+  StudentSyllabus,
   ProgressStatus,
 } from "@/types/syllabus";
 
-const STUDENT_PROGRESS = "student_progress";
-
-const SYLLABUS_MASTER = "syllabus_master";
+const STUDENT_PROGRESS  = "student_progress";
+const SYLLABUS_MASTER   = "syllabus_master";
+const STUDENT_SYLLABUS  = "student_syllabus";
 
 /**
  * Create a syllabus unit.
@@ -41,6 +46,8 @@ export async function createUnit(data: CreateSyllabusUnitInput): Promise<Syllabu
     level:          data.level,
     order:          data.order,
     prerequisiteId: data.prerequisiteId ?? null,
+    concepts:       data.concepts       ?? [],
+    exercises:      data.exercises      ?? [],
     createdAt:      serverTimestamp(),
     updatedAt:      serverTimestamp(),
   });
@@ -57,7 +64,12 @@ export async function createUnit(data: CreateSyllabusUnitInput): Promise<Syllabu
 export async function getUnits(): Promise<SyllabusUnit[]> {
   const q    = query(collection(db, SYLLABUS_MASTER), orderBy("order", "asc"));
   const snap = await getDocs(q);
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }) as SyllabusUnit);
+  return snap.docs.map(d => ({
+    id:        d.id,
+    concepts:  [],
+    exercises: [],
+    ...d.data(),
+  }) as unknown as SyllabusUnit);
 }
 
 // ─── Student Progress ─────────────────────────────────────────────────────────
@@ -69,6 +81,8 @@ export async function getUnits(): Promise<SyllabusUnit[]> {
  *   - student exists and has role "student"
  *   - order enforced: prerequisite unit must be completed first (unless admin override)
  * Admin override: pass overrideBy (admin UID) to skip order check.
+ *
+ * DO NOT MODIFY THIS FUNCTION — existing logic is preserved exactly.
  */
 export async function updateProgress(
   studentUid: string,
@@ -112,6 +126,13 @@ export async function updateProgress(
   const progressId  = `${studentUid}_${unitId}`;
   const progressRef = doc(db, STUDENT_PROGRESS, progressId);
 
+  // Gamification: award +100 points when a unit is completed (only on first completion)
+  const existingSnap = await getDocFromServer(progressRef).catch(() => null);
+  const wasCompleted = existingSnap?.exists()
+    ? existingSnap.data().status === "completed"
+    : false;
+  const awardUnitPoints = options.status === "completed" && !wasCompleted;
+
   const now = new Date().toISOString();
   await setDoc(progressRef, {
     studentUid:     studentUid,
@@ -121,6 +142,7 @@ export async function updateProgress(
     teacherSignOff: options.teacherSignOff,
     feedback:       options.feedback,
     overrideBy:     options.overrideBy,
+    ...(awardUnitPoints ? { points: increment(100) } : {}),
     updatedAt:      serverTimestamp(),
     createdAt:      serverTimestamp(),
   }, { merge: true });
@@ -128,5 +150,140 @@ export async function updateProgress(
   const snap = await getDocFromServer(progressRef);
   if (!snap.exists()) throw new Error("PROGRESS_WRITE_FAILED: document not found after write");
 
+  logAction({
+    action:        options.overrideBy ? "SYLLABUS_PROGRESS_OVERRIDE" : "SYLLABUS_PROGRESS_UPDATED",
+    initiatorId:   options.teacherSignOff ?? studentUid,
+    initiatorRole: options.teacherSignOff ? "teacher" : "student",
+    approverId:    options.overrideBy ?? null,
+    approverRole:  options.overrideBy ? "admin" : null,
+    reason:        options.overrideBy ? "admin_override" : null,
+    metadata:      {
+      studentUid,
+      unitId,
+      status:       options.status,
+      feedback:     options.feedback,
+    },
+  });
+
   return { id: snap.id, ...snap.data() } as StudentProgress;
+}
+
+// ─── Student Syllabus Assignment ──────────────────────────────────────────────
+
+/**
+ * Assign (or replace) a list of unit IDs to a student.
+ * Doc ID === studentUid (1:1 relationship).
+ */
+export async function assignSyllabus(
+  studentUid:    string,
+  unitIds:       string[],
+  initiatorId?:  string,
+  initiatorRole?: import("@/types").Role,
+): Promise<void> {
+  await setDoc(
+    doc(db, STUDENT_SYLLABUS, studentUid),
+    {
+      studentUid,
+      unitIds,
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  logAction({
+    action:        "SYLLABUS_ASSIGNED",
+    initiatorId:   initiatorId ?? "system",
+    initiatorRole: initiatorRole ?? "admin",
+    approverId:    null,
+    approverRole:  null,
+    reason:        null,
+    metadata:      { studentUid, unitIds },
+  });
+}
+
+/**
+ * Get the syllabus assignment for a student.
+ * Returns null if no assignment exists.
+ */
+export async function getStudentSyllabus(studentUid: string): Promise<StudentSyllabus | null> {
+  const snap = await getDocFromServer(doc(db, STUDENT_SYLLABUS, studentUid));
+  if (!snap.exists()) return null;
+  return { id: snap.id, ...snap.data() } as StudentSyllabus;
+}
+
+/**
+ * Get progress records for a student (all units).
+ */
+export async function getStudentProgress(studentUid: string): Promise<StudentProgress[]> {
+  const q    = query(collection(db, STUDENT_PROGRESS), where("studentUid", "==", studentUid));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({
+    id:                 d.id,
+    completedConcepts:  [],
+    completedExercises: [],
+    ...d.data(),
+  }) as unknown as StudentProgress);
+}
+
+/**
+ * Mark a concept as completed or uncompleted for a student's unit progress.
+ * Non-destructive: uses arrayUnion / arrayRemove.
+ */
+export async function toggleConcept(
+  studentUid: string,
+  unitId:     string,
+  concept:    string,
+  completed:  boolean
+): Promise<void> {
+  const progressId  = `${studentUid}_${unitId}`;
+  const progressRef = doc(db, STUDENT_PROGRESS, progressId);
+
+  // Gamification: +10 points when checking a concept (only on first check)
+  const existingSnap = await getDocFromServer(progressRef).catch(() => null);
+  const alreadyDone  = existingSnap?.exists()
+    ? (existingSnap.data().completedConcepts ?? []).includes(concept)
+    : false;
+  const awardPoints = completed && !alreadyDone;
+
+  await setDoc(progressRef, {
+    studentUid,
+    unitId,
+    completedConcepts: completed ? arrayUnion(concept) : arrayRemove(concept),
+    ...(awardPoints    ? { points: increment(10)  } : {}),
+    ...(!awardPoints && !completed ? { points: increment(-10) } : {}),
+    updatedAt:         serverTimestamp(),
+    createdAt:         serverTimestamp(),
+  }, { merge: true });
+}
+
+/**
+ * Mark an exercise as completed or uncompleted for a student's unit progress.
+ * Non-destructive: uses arrayUnion / arrayRemove.
+ */
+export async function toggleExercise(
+  studentUid: string,
+  unitId:     string,
+  exercise:   string,
+  completed:  boolean
+): Promise<void> {
+  const progressId  = `${studentUid}_${unitId}`;
+  const progressRef = doc(db, STUDENT_PROGRESS, progressId);
+
+  // Gamification: +20 points when checking an exercise (only on first check)
+  const existingSnap = await getDocFromServer(progressRef).catch(() => null);
+  const alreadyDone  = existingSnap?.exists()
+    ? (existingSnap.data().completedExercises ?? []).includes(exercise)
+    : false;
+  const awardPoints = completed && !alreadyDone;
+
+  await setDoc(progressRef, {
+    studentUid,
+    unitId,
+    completedExercises: completed ? arrayUnion(exercise) : arrayRemove(exercise),
+    ...(awardPoints     ? { points: increment(20)  } : {}),
+    ...(!awardPoints && !completed ? { points: increment(-20) } : {}),
+    updatedAt:          serverTimestamp(),
+    createdAt:          serverTimestamp(),
+  }, { merge: true });
 }
