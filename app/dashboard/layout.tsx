@@ -1,29 +1,30 @@
 "use client";
 
-import { type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { signOut } from "@/services/firebase/auth.service";
 import { ROLES } from "@/config/constants";
 
+// ─── Nav config ───────────────────────────────────────────────────────────────
+
 interface NavItem {
-  label:   string;
-  // href can be a static string or a function that receives (uid, role) and returns a string
-  href:    string | ((uid: string, role: string) => string);
-  // matchPrefix is used for active-link detection when href is dynamic
+  label:        string;
+  icon:         string;
+  href:         string | ((uid: string, role: string) => string);
   matchPrefix?: string;
-  roles:   string[];
+  roles:        string[];
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard",    href: "/dashboard",                     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
-  { label: "Centers",      href: "/dashboard/centers",             roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Students",     href: "/dashboard/students",            roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Attendance",   href: "/dashboard/attendance",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
-  { label: "Finance",      href: "/dashboard/finance",             roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  // Syllabus: Admin/Teacher → master syllabus manager; Student → their own lesson progress
+  { label: "Dashboard",    icon: "⊞",  href: "/dashboard",               roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
+  { label: "Centers",      icon: "🏫", href: "/dashboard/centers",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Students",     icon: "👥", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
+  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
+  { label: "Finance",      icon: "₹",  href: "/dashboard/finance",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   {
-    label: "Syllabus",
+    label: "Syllabus",     icon: "📚",
     href:  (uid, role) =>
       role === ROLES.STUDENT
         ? `/dashboard/student-syllabus/${uid}`
@@ -31,17 +32,23 @@ const NAV_ITEMS: NavItem[] = [
     matchPrefix: "/dashboard/syllabus",
     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT],
   },
-  { label: "Alerts",       href: "/dashboard/alerts",              roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Audit Logs",   href: "/dashboard/audit-logs",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Leaderboards", href: "/dashboard/leaderboards",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "My Score",     href: "/dashboard/teacher-score",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Super Admin",  href: "/dashboard/super-admin",         roles: [ROLES.SUPER_ADMIN] },
+  { label: "Alerts",       icon: "🔔", href: "/dashboard/alerts",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Audit Logs",   icon: "📋", href: "/dashboard/audit-logs",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
+  { label: "Super Admin",  icon: "⚙",  href: "/dashboard/super-admin",   roles: [ROLES.SUPER_ADMIN] },
 ];
+
+const BOTTOM_NAV_LABELS = ["Dashboard", "Attendance", "Syllabus", "Students", "My Score"];
+
+// ─── Layout ───────────────────────────────────────────────────────────────────
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
-  const router   = useRouter();
-  const pathname = usePathname();
+  const router            = useRouter();
+  const pathname          = usePathname();
+  const isMobile          = useIsMobile();
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   async function handleSignOut() {
     await signOut();
@@ -50,11 +57,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   }
 
   if (loading) return null;
-
-  if (!user) {
-    router.replace("/login");
-    return null;
-  }
+  if (!user)   { router.replace("/login"); return null; }
 
   const visibleNav = NAV_ITEMS
     .filter(item => item.roles.includes(user.role))
@@ -65,225 +68,179 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         : item.href,
     }));
 
-  return (
-    <div style={styles.shell}>
+  function isActive(item: (typeof visibleNav)[number]): boolean {
+    const prefix = item.matchPrefix ?? item.resolvedHref;
+    return pathname === item.resolvedHref ||
+      (prefix !== "/dashboard" && pathname.startsWith(prefix));
+  }
 
-      {/* Sidebar */}
-      <aside style={styles.sidebar}>
-        <div style={styles.sidebarTop}>
-          <div style={styles.logo}>ROL</div>
-          <div style={styles.roleTag}>{user.role.replace("_", " ")}</div>
-        </div>
+  const pageTitle = visibleNav.find(isActive)?.label ?? "Dashboard";
+  const initials  = user.displayName.charAt(0).toUpperCase();
 
-        <nav style={styles.nav}>
-          {visibleNav.map(item => {
-            const checkPrefix = item.matchPrefix ?? item.resolvedHref;
-            const active =
-              pathname === item.resolvedHref ||
-              (checkPrefix !== "/dashboard" && pathname.startsWith(checkPrefix));
-            return (
+  const bottomNav = BOTTOM_NAV_LABELS
+    .map(label => visibleNav.find(i => i.label === label))
+    .filter((i): i is (typeof visibleNav)[number] => i !== undefined);
+
+  function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
+    return (
+      <>
+        {visibleNav.map(item => (
+          <a
+            key={item.resolvedHref}
+            href={item.resolvedHref}
+            onClick={onNavigate}
+            style={{ ...s.navItem, ...(isActive(item) ? s.navItemActive : {}) }}
+          >
+            <span style={s.navIcon}>{item.icon}</span>
+            <span>{item.label}</span>
+          </a>
+        ))}
+      </>
+    );
+  }
+
+  // ── MOBILE ─────────────────────────────────────────────────────────────────
+  if (isMobile) {
+    return (
+      <div style={s.mobileShell}>
+
+        <header style={s.mobileTopbar}>
+          <button onClick={() => setDrawerOpen(true)} style={s.hamburger} aria-label="Open menu">☰</button>
+          <div style={s.mobileTopbarCenter}>
+            <span style={s.mobileLogo}>ROL</span>
+            <span style={s.mobilePageTitle}>{pageTitle}</span>
+          </div>
+          <div style={s.mobileAvatar}>{initials}</div>
+        </header>
+
+        {drawerOpen && <div style={s.drawerOverlay} onClick={() => setDrawerOpen(false)} />}
+
+        <aside style={{ ...s.drawer, transform: drawerOpen ? "translateX(0)" : "translateX(-100%)" }}>
+          <div style={s.drawerHeader}>
+            <div>
+              <div style={s.logo}>ROL's Plus</div>
+              <div style={s.roleTag}>{user.role.replace(/_/g, " ")}</div>
+            </div>
+            <button onClick={() => setDrawerOpen(false)} style={s.drawerClose}>✕</button>
+          </div>
+          <nav style={s.drawerNav}>
+            <NavLinks onNavigate={() => setDrawerOpen(false)} />
+          </nav>
+          <div style={s.drawerFooter}>
+            <div style={s.userInfo}>
+              <div style={s.userAvatar}>{initials}</div>
+              <div style={s.userMeta}>
+                <div style={s.userName}>{user.displayName}</div>
+                <div style={s.userEmail}>{user.email}</div>
+              </div>
+            </div>
+            <button onClick={handleSignOut} style={s.signOutBtn}>Sign out</button>
+          </div>
+        </aside>
+
+        <main style={s.mobileMain}>{children}</main>
+
+        {bottomNav.length > 0 && (
+          <nav style={s.bottomNav}>
+            {bottomNav.map(item => (
               <a
                 key={item.resolvedHref}
                 href={item.resolvedHref}
-                style={{
-                  ...styles.navItem,
-                  ...(active ? styles.navItemActive : {}),
-                }}
+                style={{ ...s.bottomNavItem, ...(isActive(item) ? s.bottomNavItemActive : {}) }}
               >
-                {item.label}
+                <span style={s.bottomNavIcon}>{item.icon}</span>
+                <span style={s.bottomNavLabel}>{item.label}</span>
               </a>
-            );
-          })}
-        </nav>
+            ))}
+          </nav>
+        )}
+      </div>
+    );
+  }
 
-        <div style={styles.sidebarBottom}>
-          <div style={styles.userInfo}>
-            <div style={styles.userAvatar}>
-              {user.displayName.charAt(0).toUpperCase()}
-            </div>
-            <div>
-              <div style={styles.userName}>{user.displayName}</div>
-              <div style={styles.userEmail}>{user.email}</div>
+  // ── DESKTOP ────────────────────────────────────────────────────────────────
+  return (
+    <div style={s.shell}>
+      <aside style={s.sidebar}>
+        <div style={s.sidebarTop}>
+          <div style={s.logo}>ROL</div>
+          <div style={s.roleTag}>{user.role.replace(/_/g, " ")}</div>
+        </div>
+        <nav style={s.nav}><NavLinks /></nav>
+        <div style={s.sidebarBottom}>
+          <div style={s.userInfo}>
+            <div style={s.userAvatar}>{initials}</div>
+            <div style={s.userMeta}>
+              <div style={s.userName}>{user.displayName}</div>
+              <div style={s.userEmail}>{user.email}</div>
             </div>
           </div>
-          <button onClick={handleSignOut} style={styles.signOutBtn}>
-            Sign out
-          </button>
+          <button onClick={handleSignOut} style={s.signOutBtn}>Sign out</button>
         </div>
       </aside>
-
-      {/* Right panel: topbar + content */}
-      <div style={styles.rightPanel}>
-
-        {/* Topbar */}
-        <header style={styles.topbar}>
-          <div style={styles.topbarTitle}>
-            {visibleNav.find(item => {
-              const checkPrefix = item.matchPrefix ?? item.resolvedHref;
-              return item.resolvedHref === pathname ||
-                (checkPrefix !== "/dashboard" && pathname.startsWith(checkPrefix));
-            })?.label ?? "Dashboard"}
-          </div>
-          <div style={styles.topbarRight}>
-            <span style={styles.topbarUser}>{user.email}</span>
-          </div>
+      <div style={s.rightPanel}>
+        <header style={s.topbar}>
+          <div style={s.topbarTitle}>{pageTitle}</div>
+          <span style={s.topbarUser}>{user.email}</span>
         </header>
-
-        {/* Main content */}
-        <main style={styles.main}>
-          {children}
-        </main>
-
+        <main style={s.main}>{children}</main>
       </div>
-
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  shell: {
-    display: "flex",
-    height: "100vh",
-    overflow: "hidden",
-  },
-  sidebar: {
-    width: 220,
-    flexShrink: 0,
-    borderRight: "1px solid var(--color-border)",
-    background: "var(--color-surface)",
-    display: "flex",
-    flexDirection: "column",
-    padding: "20px 0",
-  },
-  sidebarTop: {
-    padding: "0 20px 20px",
-    borderBottom: "1px solid var(--color-border)",
-    marginBottom: 12,
-  },
-  logo: {
-    fontSize: 20,
-    fontWeight: 700,
-    color: "var(--color-accent)",
-    letterSpacing: "-0.5px",
-    marginBottom: 4,
-  },
-  roleTag: {
-    fontSize: 11,
-    fontWeight: 500,
-    textTransform: "capitalize",
-    color: "var(--color-text-secondary)",
-    background: "#f3f4f6",
-    borderRadius: 4,
-    padding: "2px 7px",
-    display: "inline-block",
-  },
-  nav: {
-    flex: 1,
-    padding: "0 12px",
-    display: "flex",
-    flexDirection: "column",
-    gap: 2,
-    overflowY: "auto",
-  },
-  navItem: {
-    display: "block",
-    padding: "8px 10px",
-    borderRadius: 6,
-    fontSize: 13,
-    fontWeight: 400,
-    color: "var(--color-text-secondary)",
-    transition: "background 0.1s, color 0.1s",
-  },
-  navItemActive: {
-    background: "#ede9fe",
-    color: "var(--color-accent)",
-    fontWeight: 500,
-  },
-  sidebarBottom: {
-    padding: "16px 16px 0",
-    borderTop: "1px solid var(--color-border)",
-    marginTop: "auto",
-  },
-  userInfo: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 12,
-  },
-  userAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: "50%",
-    background: "var(--color-accent)",
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: 600,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-  },
-  userName: {
-    fontSize: 13,
-    fontWeight: 500,
-    color: "var(--color-text-primary)",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    maxWidth: 120,
-  },
-  userEmail: {
-    fontSize: 11,
-    color: "var(--color-text-secondary)",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    maxWidth: 120,
-  },
-  signOutBtn: {
-    width: "100%",
-    padding: "8px 0",
-    background: "transparent",
-    border: "1px solid var(--color-border)",
-    borderRadius: 6,
-    fontSize: 12,
-    color: "var(--color-text-secondary)",
-    cursor: "pointer",
-  },
-  rightPanel: {
-    flex: 1,
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-  },
-  topbar: {
-    height: 52,
-    flexShrink: 0,
-    borderBottom: "1px solid var(--color-border)",
-    background: "var(--color-surface)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "0 24px",
-  },
-  topbarTitle: {
-    fontSize: 14,
-    fontWeight: 600,
-    color: "var(--color-text-primary)",
-    textTransform: "capitalize",
-  },
-  topbarRight: {
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-  },
-  topbarUser: {
-    fontSize: 12,
-    color: "var(--color-text-secondary)",
-  },
-  main: {
-    flex: 1,
-    overflowY: "auto",
-    padding: "32px",
-  },
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const s: Record<string, React.CSSProperties> = {
+  // Desktop
+  shell:               { display: "flex", height: "100vh", overflow: "hidden" },
+  sidebar:             { width: 220, flexShrink: 0, borderRight: "1px solid var(--color-border)", background: "var(--color-surface)", display: "flex", flexDirection: "column", padding: "20px 0" },
+  sidebarTop:          { padding: "0 20px 16px", borderBottom: "1px solid var(--color-border)", marginBottom: 12 },
+  nav:                 { flex: 1, padding: "0 10px", display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" },
+  sidebarBottom:       { padding: "14px 14px 0", borderTop: "1px solid var(--color-border)", marginTop: "auto" },
+  rightPanel:          { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
+  topbar:              { height: 52, flexShrink: 0, borderBottom: "1px solid var(--color-border)", background: "var(--color-surface)", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px" },
+  topbarTitle:         { fontSize: 14, fontWeight: 600, color: "var(--color-text-primary)" },
+  topbarUser:          { fontSize: 12, color: "var(--color-text-secondary)" },
+  main:                { flex: 1, overflowY: "auto", padding: "28px 32px" },
+
+  // Shared nav
+  navItem:             { display: "flex", alignItems: "center", gap: 9, padding: "9px 10px", borderRadius: 7, fontSize: 13, fontWeight: 400, color: "var(--color-text-secondary)", textDecoration: "none", transition: "background 0.12s" },
+  navItemActive:       { background: "#ede9fe", color: "var(--color-accent)", fontWeight: 600 },
+  navIcon:             { fontSize: 14, width: 18, textAlign: "center", flexShrink: 0 },
+
+  // Shared identity
+  logo:                { fontSize: 18, fontWeight: 700, color: "var(--color-accent)", letterSpacing: "-0.5px", marginBottom: 4 },
+  roleTag:             { fontSize: 11, fontWeight: 500, textTransform: "capitalize", color: "var(--color-text-secondary)", background: "#f3f4f6", borderRadius: 4, padding: "2px 7px", display: "inline-block" },
+  userInfo:            { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
+  userAvatar:          { width: 32, height: 32, borderRadius: "50%", background: "var(--color-accent)", color: "#fff", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  userMeta:            { overflow: "hidden", flex: 1 },
+  userName:            { fontSize: 13, fontWeight: 500, color: "var(--color-text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  userEmail:           { fontSize: 11, color: "var(--color-text-secondary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  signOutBtn:          { width: "100%", padding: "8px 0", background: "transparent", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 12, color: "var(--color-text-secondary)", cursor: "pointer" },
+
+  // Mobile shell
+  mobileShell:         { display: "flex", flexDirection: "column", height: "100dvh", overflow: "hidden", background: "var(--color-background)" },
+  mobileTopbar:        { height: 52, flexShrink: 0, background: "var(--color-surface)", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", padding: "0 12px", gap: 10, zIndex: 100 },
+  hamburger:           { background: "none", border: "none", fontSize: 22, cursor: "pointer", color: "var(--color-text-primary)", padding: "2px 4px", flexShrink: 0, lineHeight: 1 },
+  mobileTopbarCenter:  { flex: 1, display: "flex", flexDirection: "column", gap: 1 },
+  mobileLogo:          { fontSize: 9, fontWeight: 700, color: "var(--color-accent)", textTransform: "uppercase", letterSpacing: "0.06em", lineHeight: 1 },
+  mobilePageTitle:     { fontSize: 14, fontWeight: 600, color: "var(--color-text-primary)", lineHeight: 1.2 },
+  mobileAvatar:        { width: 32, height: 32, borderRadius: "50%", background: "var(--color-accent)", color: "#fff", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  mobileMain:          { flex: 1, overflowY: "auto", padding: "16px 14px 80px" },
+
+  // Drawer
+  drawerOverlay:       { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 200 },
+  drawer:              { position: "fixed", top: 0, left: 0, bottom: 0, width: 260, background: "var(--color-surface)", zIndex: 300, display: "flex", flexDirection: "column", transition: "transform 0.24s ease", boxShadow: "4px 0 20px rgba(0,0,0,0.18)" },
+  drawerHeader:        { display: "flex", alignItems: "flex-start", justifyContent: "space-between", padding: "20px 16px 16px", borderBottom: "1px solid var(--color-border)" },
+  drawerClose:         { background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "var(--color-text-secondary)", padding: 0, lineHeight: 1 },
+  drawerNav:           { flex: 1, padding: "10px", display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" },
+  drawerFooter:        { padding: "14px", borderTop: "1px solid var(--color-border)" },
+
+  // Bottom nav
+  bottomNav:           { position: "fixed", bottom: 0, left: 0, right: 0, height: 60, background: "var(--color-surface)", borderTop: "1px solid var(--color-border)", display: "flex", zIndex: 100 },
+  bottomNavItem:       { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, textDecoration: "none", color: "var(--color-text-secondary)", padding: "4px 0" },
+  bottomNavItemActive: { color: "var(--color-accent)" },
+  bottomNavIcon:       { fontSize: 18, lineHeight: 1 },
+  bottomNavLabel:      { fontSize: 9, fontWeight: 600, letterSpacing: "0.02em", textAlign: "center", lineHeight: 1 },
 };

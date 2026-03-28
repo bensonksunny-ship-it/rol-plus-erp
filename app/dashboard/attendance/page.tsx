@@ -318,7 +318,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "var(--color-surface)",
     border: "1px solid var(--color-border)",
     borderRadius: 10,
-    overflow: "hidden",
+    overflow: "auto",
   },
   stateRow: {
     padding: "24px 16px",
@@ -328,6 +328,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   table: {
     width: "100%",
+    minWidth: 640,
     borderCollapse: "collapse",
   },
   th: {

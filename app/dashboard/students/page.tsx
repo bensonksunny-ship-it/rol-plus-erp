@@ -516,10 +516,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 20,
+    flexWrap: "wrap" as const,
+    gap: 10,
+    marginBottom: 16,
   },
   heading: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: 600,
     color: "var(--color-text-primary)",
   },
@@ -532,9 +534,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
+    flexShrink: 0,
   },
   searchRow: {
-    marginBottom: 16,
+    marginBottom: 14,
   },
   searchInput: {
     width: "100%",

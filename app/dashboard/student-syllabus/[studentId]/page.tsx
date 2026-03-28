@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useState, useEffect, useCallback } from "react";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { doc, getDoc } from "firebase/firestore";
@@ -36,6 +37,7 @@ interface StudentMeta {
 }
 
 function StudentSyllabusContent({ studentId }: { studentId: string }) {
+  const isMobile                  = useIsMobile();
   const [sylDoc, setSylDoc]       = useState<StudentSyllabusDoc | null>(null);
   const [student, setStudent]     = useState<StudentMeta | null>(null);
   const [loading, setLoading]     = useState(true);
@@ -114,9 +116,9 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
         </div>
       </div>
 
-      <div style={s.layout}>
-        {/* Lesson sidebar */}
-        <div style={s.sidebar}>
+      {/* Lesson tabs — horizontal strip on mobile, vertical sidebar on desktop */}
+      {isMobile ? (
+        <div style={s.tabStrip}>
           {sylDoc.lessons
             .sort((a, b) => a.order - b.order)
             .map(lesson => {
@@ -126,18 +128,43 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
               return (
                 <button
                   key={lesson.id}
-                  style={{ ...s.lessonTab, ...(active ? s.lessonTabActive : {}) }}
+                  style={{ ...s.tabChip, ...(active ? s.tabChipActive : {}) }}
                   onClick={() => setActiveLessonId(lesson.id)}
                 >
-                  <div style={s.lessonTabTitle}>{lesson.title}</div>
-                  <div style={s.lessonTabMeta}>
-                    {completed}/{total} done
-                    {completed === total && total > 0 && <span style={s.doneCheck}> ✓</span>}
-                  </div>
+                  <span style={s.tabChipTitle}>{lesson.title}</span>
+                  <span style={s.tabChipMeta}>{completed}/{total}</span>
                 </button>
               );
             })}
         </div>
+      ) : null}
+
+      <div style={isMobile ? s.mobileLayout : s.layout}>
+        {/* Lesson sidebar — desktop only */}
+        {!isMobile && (
+          <div style={s.sidebar}>
+            {sylDoc.lessons
+              .sort((a, b) => a.order - b.order)
+              .map(lesson => {
+                const total     = lesson.items.length;
+                const completed = lesson.items.filter(i => i.completed).length;
+                const active    = lesson.id === activeLesson.id;
+                return (
+                  <button
+                    key={lesson.id}
+                    style={{ ...s.lessonTab, ...(active ? s.lessonTabActive : {}) }}
+                    onClick={() => setActiveLessonId(lesson.id)}
+                  >
+                    <div style={s.lessonTabTitle}>{lesson.title}</div>
+                    <div style={s.lessonTabMeta}>
+                      {completed}/{total} done
+                      {completed === total && total > 0 && <span style={s.doneCheck}> ✓</span>}
+                    </div>
+                  </button>
+                );
+              })}
+          </div>
+        )}
 
         {/* Items panel */}
         <div style={s.panel}>
@@ -288,7 +315,7 @@ const s: Record<string, React.CSSProperties> = {
   emptyTitle:     { fontSize: 18, fontWeight: 600, color: "var(--color-text-primary)", marginBottom: 8 },
   emptySub:       { fontSize: 13, color: "var(--color-text-secondary)", maxWidth: 360 },
 
-  header:         { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 },
+  header:         { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap" as const, gap: 12 },
   heading:        { fontSize: 22, fontWeight: 600, color: "var(--color-text-primary)", margin: 0 },
   studentMeta:    { display: "flex", gap: 10, alignItems: "center", marginTop: 6 },
   studentName:    { fontSize: 14, fontWeight: 600, color: "var(--color-text-primary)" },
@@ -297,10 +324,20 @@ const s: Record<string, React.CSSProperties> = {
   progressChip:   { textAlign: "right" as const },
   progressNum:    { fontSize: 22, fontWeight: 700, color: "var(--color-text-primary)" },
   progressLabel:  { fontSize: 12, color: "var(--color-text-secondary)" },
-  progressBarOuter: { height: 6, background: "#e5e7eb", borderRadius: 99, width: 160, marginTop: 6, overflow: "hidden" },
+  progressBarOuter: { height: 6, background: "#e5e7eb", borderRadius: 99, width: "100%", minWidth: 120, maxWidth: 160, marginTop: 6, overflow: "hidden" },
   progressBarInner: { height: "100%", background: "#4f46e5", borderRadius: 99, transition: "width 0.4s ease" },
 
+  // Desktop layout
   layout:         { display: "flex", gap: 16, alignItems: "flex-start" },
+  // Mobile layout (full width, no sidebar)
+  mobileLayout:   { display: "flex", flexDirection: "column" as const, gap: 12 },
+
+  // Mobile tab strip
+  tabStrip:       { display: "flex", gap: 8, overflowX: "auto" as const, paddingBottom: 8, marginBottom: 8, WebkitOverflowScrolling: "touch" as unknown as undefined },
+  tabChip:        { flexShrink: 0, background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 20, padding: "6px 14px", cursor: "pointer", textAlign: "left" as const, display: "flex", flexDirection: "column" as const, gap: 2 },
+  tabChipActive:  { background: "#ede9fe", borderColor: "#a78bfa" },
+  tabChipTitle:   { fontSize: 12, fontWeight: 600, color: "var(--color-text-primary)", whiteSpace: "nowrap" as const },
+  tabChipMeta:    { fontSize: 10, color: "var(--color-text-secondary)" },
 
   sidebar:        { width: 220, flexShrink: 0, display: "flex", flexDirection: "column" as const, gap: 2 },
   lessonTab:      { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "10px 14px", textAlign: "left" as const, cursor: "pointer", transition: "all 0.15s", width: "100%" },
