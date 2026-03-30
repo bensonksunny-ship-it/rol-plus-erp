@@ -104,9 +104,10 @@ export function subscribeToAuthState(
       return;
     }
     const profile = await getUserProfile(firebaseUser.uid);
-    // If profile missing or inactive, treat as signed out
+    // If profile missing or inactive, treat as signed out.
+    // DO NOT call firebaseSignOut here — doing so triggers onAuthStateChanged
+    // again, which calls this callback again → infinite reload loop.
     if (!profile || profile.status !== USER_STATUS.ACTIVE) {
-      await firebaseSignOut(auth);
       callback(null);
       return;
     }

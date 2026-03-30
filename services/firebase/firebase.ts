@@ -11,18 +11,23 @@ const firebaseConfig = {
   appId:             "1:230996545595:web:3bf7b9602f56ab038a0c1e",
 };
 
+// Delete the stale Firebase indexedDB token store.
+// When we switched from indexedDB → browserLocalPersistence, old browsers
+// still have a cached token in "firebaseLocalStorageDb" (indexedDB).
+// Firebase reads that stale token on startup, fires an accounts:lookup that
+// hangs, and causes onAuthStateChanged to loop. Deleting it forces Firebase
+// to start clean; the user simply logs in again (one-time cost).
+if (typeof indexedDB !== "undefined") {
+  try { indexedDB.deleteDatabase("firebaseLocalStorageDb"); } catch {}
+  try { indexedDB.deleteDatabase("firebase-heartbeat-database"); } catch {}
+}
+
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 export const auth = getAuth(app);
 export const db   = getFirestore(app);
 
-// Force localStorage persistence (not indexedDB).
-// indexedDB can hang indefinitely on Vercel / certain browsers when a stale
-// cached token exists, causing onAuthStateChanged to never fire and leaving
-// the app frozen on a blank screen.
-setPersistence(auth, browserLocalPersistence).catch(() => {
-  // Non-fatal: if localStorage is blocked (private browsing strictest mode),
-  // Firebase falls back gracefully. We still proceed.
-});
+// Use localStorage persistence so Firebase never touches indexedDB again.
+setPersistence(auth, browserLocalPersistence).catch(() => {});
 
 export default app;
