@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { getAuth, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -12,8 +12,17 @@ const firebaseConfig = {
 };
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-console.log("FIREBASE PROJECT ID:", app.options.projectId);
 
 export const auth = getAuth(app);
 export const db   = getFirestore(app);
+
+// Force localStorage persistence (not indexedDB).
+// indexedDB can hang indefinitely on Vercel / certain browsers when a stale
+// cached token exists, causing onAuthStateChanged to never fire and leaving
+// the app frozen on a blank screen.
+setPersistence(auth, browserLocalPersistence).catch(() => {
+  // Non-fatal: if localStorage is blocked (private browsing strictest mode),
+  // Firebase falls back gracefully. We still proceed.
+});
+
 export default app;
