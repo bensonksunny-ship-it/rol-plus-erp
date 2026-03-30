@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { signIn } from "@/services/firebase/auth.service";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_ROUTES } from "@/config/constants";
@@ -15,19 +14,19 @@ const ERROR_MESSAGES: Record<string, string> = {
 
 export default function LoginPage() {
   const { user, loading } = useAuth();
-  const router = useRouter();
 
   const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
   const [error,    setError]    = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // If already authenticated, redirect immediately
+  // If already authenticated, redirect immediately via hard nav
+  // so middleware sees the existing cookie on the very first request.
   useEffect(() => {
     if (!loading && user) {
-      router.replace(ROLE_ROUTES[user.role] ?? "/");
+      window.location.href = ROLE_ROUTES[user.role] ?? "/dashboard";
     }
-  }, [user, loading, router]);
+  }, [user, loading]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -36,16 +35,23 @@ export default function LoginPage() {
 
     try {
       const session = await signIn(email.trim(), password);
-      // Set session cookie for middleware (httpOnly not possible client-side —
-      // a real production app would exchange this via an API route)
-      document.cookie = `rol_session=${session.token}; path=/; SameSite=Strict`;
-      router.replace(ROLE_ROUTES[session.user.role] ?? "/");
+
+      // Set session cookie for middleware.
+      // We use a hard navigation (window.location) instead of router.replace()
+      // so that the browser flushes the cookie BEFORE the next request is made.
+      // With router.replace() (client-side nav), Next.js edge middleware runs
+      // before the cookie is visible — causing a redirect loop to /login.
+      const maxAge = 60 * 60 * 24 * 7; // 7 days
+      document.cookie = `rol_session=${session.token}; path=/; SameSite=Strict; max-age=${maxAge}`;
+
+      const destination = ROLE_ROUTES[session.user.role] ?? "/dashboard";
+      window.location.href = destination;
     } catch (err: unknown) {
       const code = err instanceof Error ? err.message : "unknown";
       setError(ERROR_MESSAGES[code] ?? "Something went wrong. Please try again.");
-    } finally {
       setSubmitting(false);
     }
+    // NOTE: do not setSubmitting(false) on success — the page is navigating away.
   }
 
   if (loading || user) return null;

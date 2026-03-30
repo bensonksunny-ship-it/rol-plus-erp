@@ -22,9 +22,7 @@ export function middleware(request: NextRequest) {
 
   // Redirect unauthenticated users away from protected pages
   if (!isPublic && !sessionCookie) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("redirect", pathname);
-    return NextResponse.redirect(loginUrl);
+    return NextResponse.redirect(new URL("/login", request.url));
   }
 
   // Redirect authenticated users away from login page
