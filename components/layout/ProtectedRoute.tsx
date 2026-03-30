@@ -36,8 +36,19 @@ export default function ProtectedRoute({ children, allowedRoles }: ProtectedRout
     }
   }, [user, loading, allowedRoles, router]);
 
-  // Show nothing while resolving auth state
-  if (loading || !user) return null;
+  // Show a neutral background while auth resolves — never return null which
+  // would cause a hydration mismatch and a blank flash on SSR.
+  if (loading) return (
+    <div style={{
+      height: "100vh",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      background: "var(--color-bg)",
+    }} />
+  );
+
+  if (!user) return null;
 
   // Block render if status or role fails — redirect already triggered above
   if (!validateUserAccess(user) || !isRoleAllowed(user, allowedRoles)) return null;

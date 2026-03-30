@@ -20,13 +20,19 @@ export default function LoginPage() {
   const [error,    setError]    = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // If already authenticated, redirect immediately via hard nav
-  // so middleware sees the existing cookie on the very first request.
+  // Once auth resolves: if already logged in, redirect away from login page.
+  // We do NOT gate rendering on `loading` — that causes a blank screen on SSR
+  // because the server has no auth state and loading starts true.
   useEffect(() => {
     if (!loading && user) {
       window.location.href = ROLE_ROUTES[user.role] ?? "/dashboard";
     }
   }, [user, loading]);
+
+  // Redirect away silently while auth is resolving (already-logged-in case).
+  // The form is visible immediately on SSR/first paint; this just hides it
+  // momentarily if we're about to navigate away anyway.
+  if (user) return null;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -53,8 +59,6 @@ export default function LoginPage() {
     }
     // NOTE: do not setSubmitting(false) on success — the page is navigating away.
   }
-
-  if (loading || user) return null;
 
   return (
     <div style={styles.page}>
@@ -102,10 +106,10 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || loading}
             style={{
               ...styles.button,
-              opacity: submitting ? 0.7 : 1,
+              opacity: (submitting || loading) ? 0.7 : 1,
             }}
           >
             {submitting ? "Signing in…" : "Sign in"}
