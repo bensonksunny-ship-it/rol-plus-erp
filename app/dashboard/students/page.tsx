@@ -1,23 +1,14 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import ReactDOM from "react-dom";
 import { collection, getDocs, addDoc, query, where, serverTimestamp } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
-import { getUnits, assignSyllabus, getStudentSyllabus } from "@/services/syllabus/syllabus.service";
 import { logAction } from "@/services/audit/audit.service";
 import { useAuth } from "@/hooks/useAuth";
-import type { SyllabusUnit } from "@/types/syllabus";
-import {
-  buildLessonsFromRows,
-  validateSyllabusRows,
-  saveStudentSyllabus,
-} from "@/services/studentSyllabus/studentSyllabus.service";
-import type { SyllabusImportRow } from "@/types/studentSyllabus";
 import Link from "next/link";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -326,121 +317,10 @@ function StudentsContent() {
   );
 }
 
-// ─── Set Syllabus Modal ────────────────────────────────────────────────────────
-
-function SetSyllabusModal({
-  studentId,
-  studentName,
-  onClose,
-  onSaved,
-}: {
-  studentId:   string;
-  studentName: string;
-  onClose:     () => void;
-  onSaved:     () => void;
-}) {
-  const [units, setUnits]       = useState<SyllabusUnit[]>([]);
-  const [checked, setChecked]   = useState<Set<string>>(new Set());
-  const [loading, setLoading]   = useState(true);
-  const [saving, setSaving]     = useState(false);
-  const { toasts, toast, remove } = useToast();
-
-  useEffect(() => {
-    async function load() {
-      try {
-        const [allUnits, assignment] = await Promise.all([
-          getUnits(),
-          getStudentSyllabus(studentId),
-        ]);
-        setUnits(allUnits);
-        if (assignment) setChecked(new Set(assignment.unitIds));
-      } catch (err) {
-        console.error("Failed to load syllabus data:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    load();
-  }, [studentId]);
-
-  function toggle(unitId: string) {
-    setChecked(prev => {
-      const next = new Set(prev);
-      next.has(unitId) ? next.delete(unitId) : next.add(unitId);
-      return next;
-    });
-  }
-
-  async function handleSave() {
-    setSaving(true);
-    try {
-      await assignSyllabus(studentId, Array.from(checked));
-      toast("Syllabus assigned.", "success");
-      setTimeout(() => { onSaved(); onClose(); }, 800);
-    } catch (err) {
-      console.error("Failed to assign syllabus:", err);
-      toast("Failed to assign syllabus.", "error");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={modalStyles.overlay} onClick={onClose}>
-      <div style={modalStyles.box} onClick={e => e.stopPropagation()}>
-        <ToastContainer toasts={toasts} onRemove={remove} />
-        <div style={modalStyles.header}>
-          <div>
-            <div style={modalStyles.title}>Set Syllabus</div>
-            <div style={modalStyles.sub}>{studentName}</div>
-          </div>
-          <button onClick={onClose} style={modalStyles.closeBtn}>✕</button>
-        </div>
-
-        {loading ? (
-          <div style={modalStyles.state}>Loading units…</div>
-        ) : units.length === 0 ? (
-          <div style={modalStyles.state}>No units found in syllabus master.</div>
-        ) : (
-          <div style={modalStyles.list}>
-            {units.map(unit => (
-              <label key={unit.id} style={modalStyles.item}>
-                <input
-                  type="checkbox"
-                  checked={checked.has(unit.id)}
-                  onChange={() => toggle(unit.id)}
-                  style={{ marginRight: 10, accentColor: "#4f46e5" }}
-                />
-                <span style={modalStyles.unitLabel}>
-                  <span style={modalStyles.unitTitle}>{unit.title}</span>
-                  <span style={modalStyles.unitLevel}>{unit.level}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-        )}
-
-        <div style={modalStyles.footer}>
-          <button onClick={onClose} style={modalStyles.cancelBtn}>Cancel</button>
-          <button
-            onClick={handleSave}
-            disabled={saving || loading}
-            style={{ ...modalStyles.saveBtn, opacity: saving || loading ? 0.6 : 1 }}
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Row component ─────────────────────────────────────────────────────────────
 
 function StudentRow({ student: s, index }: { student: StudentRow; index: number }) {
-  const [hover, setHover]                     = useState(false);
-  const [showSyllabus, setShowSyllabus]       = useState(false);
-  const [showImportSyllabus, setShowImportSyllabus] = useState(false);
+  const [hover, setHover] = useState(false);
 
   const rowBase  = index % 2 === 0 ? styles.rowEven : styles.rowOdd;
   const rowStyle: React.CSSProperties = {
@@ -449,63 +329,41 @@ function StudentRow({ student: s, index }: { student: StudentRow; index: number 
   };
 
   return (
-    <>
-      {showSyllabus && typeof document !== "undefined" && ReactDOM.createPortal(
-        <SetSyllabusModal
-          studentId={s.id}
-          studentName={s.name}
-          onClose={() => setShowSyllabus(false)}
-          onSaved={() => {}}
-        />,
-        document.body
-      )}
-      {showImportSyllabus && typeof document !== "undefined" && ReactDOM.createPortal(
-        <ImportSyllabusModal
-          studentId={s.id}
-          studentName={s.name}
-          admissionNumber={s.admissionNumber}
-          onClose={() => setShowImportSyllabus(false)}
-        />,
-        document.body
-      )}
-      <tr
-        style={rowStyle}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-      >
-        <td style={{ ...styles.td, minWidth: 140 }}>{s.name}</td>
-        <td style={{ ...styles.td, ...styles.mono, minWidth: 120 }}>{s.admissionNumber}</td>
-        <td style={{ ...styles.td, ...styles.mono, minWidth: 100 }}>{s.centerId}</td>
-        <td style={styles.td}>{s.instrument}</td>
-        <td style={styles.td}>{s.course}</td>
-        <td style={styles.td}>
-          <span style={{
-            ...styles.badge,
-            ...(s.feeCycle === "per_class"
-              ? { background: "#ede9fe", color: "#7c3aed" }
-              : { background: "#dbeafe", color: "#1d4ed8" }),
-          }}>
-            {s.feeCycle === "per_class" ? "Per Class" : s.feeCycle === "monthly" ? "Monthly" : s.feeCycle}
-          </span>
-        </td>
-        <td style={styles.td}>
-          {s.feeCycle === "per_class" ? `₹${s.feePerClass}` : "—"}
-        </td>
-        <td style={styles.td}>
-          <StatusBadge status={s.status} />
-        </td>
-        <td style={{ ...styles.td, minWidth: 280 }}>
-          <div style={actionStyles.row}>
-            <Link href={`/dashboard/student-syllabus/${s.id}`} style={actionStyles.linkBtn}>
-              Syllabus
-            </Link>
-            <ActionButton label="Import Syllabus" variant="ghost"  onClick={() => setShowImportSyllabus(true)} />
-            <ActionButton label="Set Syllabus"    variant="ghost"  onClick={() => setShowSyllabus(true)} />
-            <ActionButton label="Deactivate"      variant="danger" onClick={() => {}} />
-          </div>
-        </td>
-      </tr>
-    </>
+    <tr
+      style={rowStyle}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <td style={{ ...styles.td, minWidth: 140 }}>{s.name}</td>
+      <td style={{ ...styles.td, ...styles.mono, minWidth: 120 }}>{s.admissionNumber}</td>
+      <td style={{ ...styles.td, ...styles.mono, minWidth: 100 }}>{s.centerId}</td>
+      <td style={styles.td}>{s.instrument}</td>
+      <td style={styles.td}>{s.course}</td>
+      <td style={styles.td}>
+        <span style={{
+          ...styles.badge,
+          ...(s.feeCycle === "per_class"
+            ? { background: "#ede9fe", color: "#7c3aed" }
+            : { background: "#dbeafe", color: "#1d4ed8" }),
+        }}>
+          {s.feeCycle === "per_class" ? "Per Class" : s.feeCycle === "monthly" ? "Monthly" : s.feeCycle}
+        </span>
+      </td>
+      <td style={styles.td}>
+        {s.feeCycle === "per_class" ? `₹${s.feePerClass}` : "—"}
+      </td>
+      <td style={styles.td}>
+        <StatusBadge status={s.status} />
+      </td>
+      <td style={{ ...styles.td, minWidth: 200 }}>
+        <div style={actionStyles.row}>
+          <Link href={`/dashboard/student-syllabus/${s.id}`} style={actionStyles.linkBtn}>
+            View Syllabus
+          </Link>
+          <ActionButton label="Deactivate" variant="danger" onClick={() => {}} />
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -695,428 +553,5 @@ const actionStyles: Record<string, React.CSSProperties> = {
   },
 };
 
-const modalStyles: Record<string, React.CSSProperties> = {
-  overlay: {
-    position:        "fixed",
-    inset:           0,
-    background:      "rgba(0,0,0,0.45)",
-    display:         "flex",
-    alignItems:      "center",
-    justifyContent:  "center",
-    zIndex:          1000,
-  },
-  box: {
-    background:   "#ffffff",
-    borderRadius: 12,
-    width:        "100%",
-    maxWidth:     480,
-    maxHeight:    "80vh",
-    display:      "flex",
-    flexDirection:"column",
-    overflow:     "hidden",
-    boxShadow:    "0 20px 60px rgba(0,0,0,0.18)",
-  },
-  header: {
-    display:        "flex",
-    alignItems:     "flex-start",
-    justifyContent: "space-between",
-    padding:        "20px 24px 16px",
-    borderBottom:   "1px solid #e5e7eb",
-  },
-  title: {
-    fontSize:   16,
-    fontWeight: 700,
-    color:      "#111827",
-  },
-  sub: {
-    fontSize:    12,
-    color:       "#6b7280",
-    marginTop:   2,
-  },
-  closeBtn: {
-    background:   "transparent",
-    border:       "none",
-    fontSize:     16,
-    cursor:       "pointer",
-    color:        "#9ca3af",
-    padding:      "2px 6px",
-    borderRadius: 4,
-  },
-  state: {
-    padding:    "24px",
-    fontSize:   13,
-    color:      "#6b7280",
-    textAlign:  "center",
-  },
-  list: {
-    overflowY: "auto",
-    padding:   "12px 24px",
-    flex:      1,
-    display:   "flex",
-    flexDirection: "column",
-    gap:       4,
-  },
-  item: {
-    display:     "flex",
-    alignItems:  "center",
-    padding:     "8px 0",
-    cursor:      "pointer",
-    borderBottom:"1px solid #f3f4f6",
-    fontSize:    13,
-  },
-  unitLabel: {
-    display:       "flex",
-    alignItems:    "center",
-    gap:           8,
-    flex:          1,
-  },
-  unitTitle: {
-    fontWeight: 500,
-    color:      "#111827",
-  },
-  unitLevel: {
-    fontSize:    11,
-    background:  "#f3f4f6",
-    color:       "#6b7280",
-    padding:     "1px 7px",
-    borderRadius:99,
-  },
-  footer: {
-    display:        "flex",
-    justifyContent: "flex-end",
-    gap:            8,
-    padding:        "16px 24px",
-    borderTop:      "1px solid #e5e7eb",
-  },
-  cancelBtn: {
-    background:   "#f3f4f6",
-    color:        "#374151",
-    border:       "none",
-    padding:      "8px 16px",
-    borderRadius: 6,
-    fontSize:     13,
-    fontWeight:   600,
-    cursor:       "pointer",
-  },
-  saveBtn: {
-    background:   "#4f46e5",
-    color:        "#ffffff",
-    border:       "none",
-    padding:      "8px 20px",
-    borderRadius: 6,
-    fontSize:     13,
-    fontWeight:   600,
-    cursor:       "pointer",
-  },
-};
 
-// ─── Native xlsx parser (browser-only, no external deps) ──────────────────────
 
-async function readZipEntry(
-  buffer: ArrayBuffer,
-  filename: string,
-): Promise<string | null> {
-  const bytes = new Uint8Array(buffer);
-  let offset  = 0;
-
-  while (offset + 30 < bytes.length) {
-    const sig = (bytes[offset]! | (bytes[offset + 1]! << 8) | (bytes[offset + 2]! << 16) | (bytes[offset + 3]! << 24)) >>> 0;
-    if (sig !== 0x04034b50) break;
-
-    const compression  = bytes[offset + 8]! | (bytes[offset + 9]! << 8);
-    const compSize     = bytes[offset + 18]! | (bytes[offset + 19]! << 8) | (bytes[offset + 20]! << 16) | (bytes[offset + 21]! << 24);
-    const nameLen      = bytes[offset + 26]! | (bytes[offset + 27]! << 8);
-    const extraLen     = bytes[offset + 28]! | (bytes[offset + 29]! << 8);
-    const nameBytes    = bytes.slice(offset + 30, offset + 30 + nameLen);
-    const entryName    = new TextDecoder().decode(nameBytes);
-    const dataStart    = offset + 30 + nameLen + extraLen;
-    const compData     = bytes.slice(dataStart, dataStart + compSize);
-
-    if (entryName === filename) {
-      if (compression === 0) {
-        return new TextDecoder().decode(compData);
-      }
-      if (compression === 8) {
-        const ds     = new DecompressionStream("deflate-raw");
-        const writer = ds.writable.getWriter();
-        const reader = ds.readable.getReader();
-        writer.write(compData);
-        writer.close();
-        const chunks: Uint8Array[] = [];
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-        }
-        const total  = chunks.reduce((s, c) => s + c.length, 0);
-        const merged = new Uint8Array(total);
-        let pos = 0;
-        for (const c of chunks) { merged.set(c, pos); pos += c.length; }
-        return new TextDecoder().decode(merged);
-      }
-    }
-
-    offset = dataStart + compSize;
-  }
-  return null;
-}
-
-async function parseXlsxToSyllabusRows(
-  buffer: ArrayBuffer,
-): Promise<{ rows: SyllabusImportRow[]; error: string | null }> {
-  try {
-    const ssXml    = await readZipEntry(buffer, "xl/sharedStrings.xml");
-    const sheetXml = await readZipEntry(buffer, "xl/worksheets/sheet1.xml");
-    if (!sheetXml) return { rows: [], error: "Could not read sheet1.xml from the xlsx file." };
-
-    // Parse shared strings
-    const shared: string[] = [];
-    if (ssXml) {
-      const tMatches = ssXml.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g);
-      for (const m of tMatches) shared.push(m[1] ?? "");
-    }
-
-    function cellValue(c: string, t: string, v: string): string {
-      if (t === "s") return shared[parseInt(v, 10)] ?? "";
-      if (t === "inlineStr") {
-        const m = c.match(/<t>([\s\S]*?)<\/t>/);
-        return m?.[1] ?? "";
-      }
-      return v;
-    }
-
-    const rowMatches = [...sheetXml.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)];
-    if (rowMatches.length < 2) return { rows: [], error: "File has no data rows." };
-
-    // Parse header
-    const headerRowXml = rowMatches[0]?.[1] ?? "";
-    const headers: string[] = [];
-    for (const cellMatch of headerRowXml.matchAll(/<c\s[^>]*r="([A-Z]+)\d+"[^>]*(?:t="([^"]*)")?[^>]*>(?:<v>([\s\S]*?)<\/v>|<is><t>([\s\S]*?)<\/t><\/is>)?<\/c>/g)) {
-      const t   = cellMatch[2] ?? "";
-      const v   = cellMatch[3] ?? cellMatch[4] ?? "";
-      const full = cellMatch[0] ?? "";
-      headers.push(cellValue(full, t, v).trim().toLowerCase().replace(/[\s_]/g, ""));
-    }
-
-    const lessonIdx  = headers.indexOf("lesson");
-    const typeIdx    = headers.indexOf("type");
-    const titleIdx   = headers.indexOf("title");
-
-    if (lessonIdx === -1 || typeIdx === -1 || titleIdx === -1) {
-      return { rows: [], error: `Missing required columns. Expected: Lesson, Type, Title. Found: ${headers.join(", ")}` };
-    }
-
-    const rows: SyllabusImportRow[] = [];
-    for (let ri = 1; ri < rowMatches.length; ri++) {
-      const rowXml = rowMatches[ri]?.[1] ?? "";
-      const cells: string[] = [];
-      for (const cellMatch of rowXml.matchAll(/<c\s[^>]*r="([A-Z]+)\d+"[^>]*(?:t="([^"]*)")?[^>]*>(?:<v>([\s\S]*?)<\/v>|<is><t>([\s\S]*?)<\/t><\/is>)?<\/c>/g)) {
-        const col   = cellMatch[1] ?? "";
-        const t     = cellMatch[2] ?? "";
-        const v     = cellMatch[3] ?? cellMatch[4] ?? "";
-        const colIndex = col.charCodeAt(0) - 65; // A=0, B=1 …
-        const full = cellMatch[0] ?? "";
-        cells[colIndex] = cellValue(full, t, v);
-      }
-      const lesson = (cells[lessonIdx] ?? "").trim();
-      const type   = (cells[typeIdx]   ?? "").trim();
-      const title  = (cells[titleIdx]  ?? "").trim();
-      if (!lesson && !type && !title) continue; // skip blank rows
-      rows.push({ lesson, type, title });
-    }
-
-    return { rows, error: null };
-  } catch {
-    return { rows: [], error: "Failed to parse the xlsx file. Please check the format." };
-  }
-}
-
-// ─── Import Syllabus Modal ────────────────────────────────────────────────────
-
-function ImportSyllabusModal({
-  studentId,
-  studentName,
-  admissionNumber,
-  onClose,
-}: {
-  studentId:       string;
-  studentName:     string;
-  admissionNumber: string;
-  onClose:         () => void;
-}) {
-  const [rows, setRows]         = useState<SyllabusImportRow[]>([]);
-  const [errors, setErrors]     = useState<string[]>([]);
-  const [fileName, setFileName] = useState("");
-  const [saving, setSaving]     = useState(false);
-  const [done, setDone]         = useState(false);
-  const [parseErr, setParseErr] = useState("");
-  const fileRef                 = useRef<HTMLInputElement>(null);
-
-  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setFileName(file.name);
-    setErrors([]);
-    setParseErr("");
-    setRows([]);
-    setDone(false);
-
-    const buffer  = await file.arrayBuffer();
-    const { rows: parsed, error } = await parseXlsxToSyllabusRows(buffer);
-    if (error) { setParseErr(error); return; }
-
-    const validation = validateSyllabusRows(parsed);
-    setRows(parsed);
-    setErrors(validation.errors);
-  }
-
-  async function handleImport() {
-    if (errors.length > 0 || rows.length === 0) return;
-    setSaving(true);
-    try {
-      const lessons = buildLessonsFromRows(rows);
-      await saveStudentSyllabus(studentId, lessons);
-      setDone(true);
-    } catch {
-      setErrors(["Failed to save. Please try again."]);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const lessonsPreview = (() => {
-    const map = new Map<string, number>();
-    for (const r of rows) {
-      const k = r.lesson.trim();
-      if (k) map.set(k, (map.get(k) ?? 0) + 1);
-    }
-    return [...map.entries()];
-  })();
-
-  return (
-    <div style={importStyles.overlay}>
-      <div style={importStyles.modal}>
-        <div style={importStyles.header}>
-          <div>
-            <div style={importStyles.title}>Import Syllabus</div>
-            <div style={importStyles.sub}>
-              {studentName}
-              <span style={importStyles.admNo}> · {admissionNumber}</span>
-            </div>
-          </div>
-          <button onClick={onClose} style={importStyles.closeBtn}>✕</button>
-        </div>
-
-        {!done ? (
-          <>
-            {/* Format hint */}
-            <div style={importStyles.hint}>
-              Expected columns: <code style={importStyles.code}>Lesson</code>{" "}
-              <code style={importStyles.code}>Type</code>{" "}
-              <code style={importStyles.code}>Title</code>
-              <br />
-              Type values: <code style={importStyles.code}>concept</code>{" "}
-              <code style={importStyles.code}>exercise</code>{" "}
-              <code style={importStyles.code}>songsheet</code>
-            </div>
-
-            {/* File input */}
-            <div style={importStyles.uploadArea} onClick={() => fileRef.current?.click()}>
-              <div style={importStyles.uploadIcon}>📂</div>
-              <div style={importStyles.uploadLabel}>
-                {fileName || "Click to select .xlsx file"}
-              </div>
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".xlsx"
-                style={{ display: "none" }}
-                onChange={handleFile}
-              />
-            </div>
-
-            {/* Parse error */}
-            {parseErr && (
-              <div style={importStyles.errorBox}>{parseErr}</div>
-            )}
-
-            {/* Validation errors */}
-            {errors.length > 0 && (
-              <div style={importStyles.errorBox}>
-                {errors.slice(0, 5).map((e, i) => <div key={i}>{e}</div>)}
-                {errors.length > 5 && <div>…and {errors.length - 5} more errors</div>}
-              </div>
-            )}
-
-            {/* Preview */}
-            {rows.length > 0 && errors.length === 0 && (
-              <div style={importStyles.previewBox}>
-                <div style={importStyles.previewTitle}>
-                  Ready to import — {lessonsPreview.length} lesson{lessonsPreview.length !== 1 ? "s" : ""},{" "}
-                  {rows.length} item{rows.length !== 1 ? "s" : ""}
-                </div>
-                <div style={importStyles.previewList}>
-                  {lessonsPreview.map(([title, count]) => (
-                    <div key={title} style={importStyles.previewRow}>
-                      <span style={importStyles.previewLesson}>{title}</span>
-                      <span style={importStyles.previewCount}>{count} item{count !== 1 ? "s" : ""}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div style={importStyles.footer}>
-              <button onClick={onClose} style={importStyles.cancelBtn}>Cancel</button>
-              <button
-                onClick={handleImport}
-                disabled={saving || rows.length === 0 || errors.length > 0}
-                style={{ ...importStyles.importBtn, opacity: (saving || rows.length === 0 || errors.length > 0) ? 0.5 : 1 }}
-              >
-                {saving ? "Importing…" : "Import"}
-              </button>
-            </div>
-          </>
-        ) : (
-          <div style={importStyles.successBox}>
-            <div style={importStyles.successIcon}>✅</div>
-            <div style={importStyles.successTitle}>Syllabus imported</div>
-            <div style={importStyles.successSub}>
-              {lessonsPreview.length} lesson{lessonsPreview.length !== 1 ? "s" : ""} saved for {studentName}.
-            </div>
-            <button onClick={onClose} style={importStyles.importBtn}>Done</button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-const importStyles: Record<string, React.CSSProperties> = {
-  overlay:      { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1100 },
-  modal:        { background: "#fff", borderRadius: 12, width: "100%", maxWidth: 520, maxHeight: "90vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" },
-  header:       { display: "flex", alignItems: "flex-start", justifyContent: "space-between", padding: "20px 24px 0" },
-  title:        { fontSize: 16, fontWeight: 700, color: "#111827" },
-  sub:          { fontSize: 12, color: "#6b7280", marginTop: 2 },
-  admNo:        { fontFamily: "monospace", color: "#4f46e5" },
-  closeBtn:     { background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "#6b7280", padding: "0 0 0 8px", lineHeight: 1 },
-  hint:         { margin: "16px 24px 0", fontSize: 12, color: "#6b7280", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 6, padding: "10px 12px", lineHeight: 1.7 },
-  code:         { fontFamily: "monospace", background: "#ede9fe", color: "#5b21b6", borderRadius: 3, padding: "1px 4px", fontSize: 11 },
-  uploadArea:   { margin: "16px 24px 0", border: "2px dashed #d1d5db", borderRadius: 8, padding: "24px", textAlign: "center", cursor: "pointer" },
-  uploadIcon:   { fontSize: 24, marginBottom: 8 },
-  uploadLabel:  { fontSize: 13, color: "#374151", fontWeight: 500 },
-  errorBox:     { margin: "12px 24px 0", background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 6, padding: "10px 14px", fontSize: 12, color: "#991b1b" },
-  previewBox:   { margin: "16px 24px 0", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, padding: "12px 16px" },
-  previewTitle: { fontSize: 12, fontWeight: 700, color: "#15803d", marginBottom: 10 },
-  previewList:  { display: "flex", flexDirection: "column" as const, gap: 4 },
-  previewRow:   { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: "#166534" },
-  previewLesson:{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const, maxWidth: 320 },
-  previewCount: { color: "#15803d", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" as const, marginLeft: 12 },
-  footer:       { display: "flex", justifyContent: "flex-end", gap: 8, padding: "20px 24px" },
-  cancelBtn:    { background: "#f3f4f6", color: "#374151", border: "none", padding: "8px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" },
-  importBtn:    { background: "#4f46e5", color: "#fff", border: "none", padding: "8px 20px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" },
-  successBox:   { display: "flex", flexDirection: "column" as const, alignItems: "center", padding: "40px 24px", gap: 10 },
-  successIcon:  { fontSize: 32 },
-  successTitle: { fontSize: 16, fontWeight: 700, color: "#111827" },
-  successSub:   { fontSize: 13, color: "#6b7280", marginBottom: 8 },
-};

@@ -1,468 +1,671 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { collection, getDocs, query, where } from "firebase/firestore";
+import { db } from "@/config/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuth } from "@/hooks/useAuth";
 import {
-  getUnits,
-  getStudentSyllabus,
-  getStudentProgress,
-  updateProgress,
-  toggleConcept,
-  toggleExercise,
-} from "@/services/syllabus/syllabus.service";
-import type { SyllabusUnit, StudentProgress } from "@/types/syllabus";
+  getLessonsByCenter,
+  assignLessonsToStudent,
+  getLessonAssignment,
+} from "@/services/lesson/lesson.service";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
-
-// ─── Status helpers ────────────────────────────────────────────────────────────
-
-const STATUS_STYLES: Record<string, React.CSSProperties> = {
-  completed:   { background: "#dcfce7", color: "#16a34a" },
-  in_progress: { background: "#fef9c3", color: "#b45309" },
-  not_started: { background: "#f3f4f6", color: "#6b7280" },
-};
-
-function StatusBadge({ status }: { status: string }) {
-  return (
-    <span style={{ ...styles.badge, ...(STATUS_STYLES[status] ?? STATUS_STYLES.not_started) }}>
-      {status.replace(/_/g, " ")}
-    </span>
-  );
-}
+import type { Lesson } from "@/types/lesson";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SyllabusPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
       <SyllabusContent />
     </ProtectedRoute>
   );
 }
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface StudentOption {
+  uid:             string;
+  displayName:     string;
+  admissionNumber: string;
+  centerId:        string;
+}
+
+interface CenterOption {
+  id:   string;
+  name: string;
+}
+
+type Tab = "lessons" | "assign" | "track";
+
+// ─── Content ──────────────────────────────────────────────────────────────────
+
 function SyllabusContent() {
-  const { user } = useAuth();
+  const { user, role }                          = useAuth();
+  const router                                  = useRouter();
+  const [tab, setTab]                           = useState<Tab>("lessons");
+  const [centers, setCenters]                   = useState<CenterOption[]>([]);
+  const [students, setStudents]                 = useState<StudentOption[]>([]);
+  const [selectedCenter, setSelectedCenter]     = useState<string>("");
+  const [lessons, setLessons]                   = useState<Lesson[]>([]);
+  const [loading, setLoading]                   = useState(false);
+  const [initialising, setInitialising]         = useState(true);
+  const { toasts, toast, remove }               = useToast();
 
-  const [units, setUnits]           = useState<SyllabusUnit[]>([]);
-  const [progressMap, setProgressMap] = useState<Record<string, StudentProgress>>({});
-  const [loading, setLoading]       = useState(true);
-  const [toggling, setToggling]     = useState<Record<string, boolean>>({});
-  const { toasts, toast, remove }   = useToast();
+  // Assign tab state
+  const [assignStudent, setAssignStudent]       = useState<string>("");
+  const [selectedLessonIds, setSelectedLessonIds] = useState<Set<string>>(new Set());
+  const [assigning, setAssigning]               = useState(false);
+  const [assignedInfo, setAssignedInfo]         = useState<string | null>(null);
 
-  const studentUid = user?.uid ?? "";
+  // Load centers + students on mount
+  useEffect(() => {
+    async function init() {
+      try {
+        const [centersSnap, studentsSnap] = await Promise.all([
+          getDocs(collection(db, "centers")),
+          getDocs(query(collection(db, "users"), where("role", "==", "student"))),
+        ]);
+        setCenters(centersSnap.docs.map(d => ({ id: d.id, name: (d.data().name as string) ?? d.id })));
+        setStudents(studentsSnap.docs.map(d => ({
+          uid:             d.id,
+          displayName:     (d.data().displayName as string) ?? (d.data().name as string) ?? "",
+          admissionNumber: (d.data().admissionNumber as string) ?? "",
+          centerId:        (d.data().centerId as string) ?? "",
+        })));
+      } catch {
+        toast("Failed to load centers/students.", "error");
+      } finally {
+        setInitialising(false);
+      }
+    }
+    init();
+  }, []);
 
-  async function loadData() {
-    if (!studentUid) return;
+  async function loadLessons() {
+    if (!selectedCenter) { toast("Select a center first.", "error"); return; }
+    setLoading(true);
+    setLessons([]);
     try {
-      const [assignment, allUnits, allProgress] = await Promise.all([
-        getStudentSyllabus(studentUid),
-        getUnits(),
-        getStudentProgress(studentUid),
-      ]);
-
-      // Filter to assigned units only; fall back to all units if no assignment
-      const assignedIds = assignment?.unitIds ?? [];
-      const filtered = assignedIds.length > 0
-        ? allUnits.filter(u => assignedIds.includes(u.id))
-        : allUnits;
-
-      setUnits(filtered);
-
-      // Build progress map keyed by unitId
-      const map: Record<string, StudentProgress> = {};
-      allProgress.forEach(p => { map[p.unitId] = p; });
-      setProgressMap(map);
+      const data = await getLessonsByCenter(selectedCenter);
+      setLessons(data);
+      if (data.length === 0) toast("No lessons found for this center.", "success");
     } catch (err) {
-      console.error("Failed to load syllabus:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast(`Failed to load lessons: ${msg}`, "error");
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => { loadData(); }, [studentUid]);
-
-  // ── Toggle concept ──────────────────────────────────────────────────────────
-
-  async function handleToggleConcept(unit: SyllabusUnit, concept: string) {
-    const key = `concept_${unit.id}_${concept}`;
-    if (toggling[key]) return;
-    const progress = progressMap[unit.id];
-    const alreadyDone = progress?.completedConcepts?.includes(concept) ?? false;
-
-    setToggling(prev => ({ ...prev, [key]: true }));
-    try {
-      await toggleConcept(studentUid, unit.id, concept, !alreadyDone);
-
-      // Optimistic local update
-      setProgressMap(prev => {
-        const existing = prev[unit.id] ?? emptyProgress(studentUid, unit.id);
-        const updated  = { ...existing };
-        const set      = new Set(updated.completedConcepts ?? []);
-        alreadyDone ? set.delete(concept) : set.add(concept);
-        updated.completedConcepts = Array.from(set);
-
-        // Auto-advance status to in_progress when first item is checked
-        if (updated.status === "not_started" && (set.size > 0 || (updated.completedExercises?.length ?? 0) > 0)) {
-          updated.status = "in_progress";
-          triggerStatusUpdate(unit, updated, "in_progress");
-        }
-        return { ...prev, [unit.id]: updated };
-      });
-    } catch (err) {
-      console.error("Failed to toggle concept:", err);
-      toast("Failed to update concept.", "error");
-    } finally {
-      setToggling(prev => ({ ...prev, [key]: false }));
+  // When student is selected in assign tab, load their current assignment
+  async function loadStudentAssignment(studentId: string) {
+    if (!studentId) {
+      setAssignedInfo(null);
+      setSelectedLessonIds(new Set());
+      return;
     }
-  }
-
-  // ── Toggle exercise ─────────────────────────────────────────────────────────
-
-  async function handleToggleExercise(unit: SyllabusUnit, exercise: string) {
-    const key = `exercise_${unit.id}_${exercise}`;
-    if (toggling[key]) return;
-    const progress = progressMap[unit.id];
-    const alreadyDone = progress?.completedExercises?.includes(exercise) ?? false;
-
-    setToggling(prev => ({ ...prev, [key]: true }));
     try {
-      await toggleExercise(studentUid, unit.id, exercise, !alreadyDone);
-
-      setProgressMap(prev => {
-        const existing = prev[unit.id] ?? emptyProgress(studentUid, unit.id);
-        const updated  = { ...existing };
-        const set      = new Set(updated.completedExercises ?? []);
-        alreadyDone ? set.delete(exercise) : set.add(exercise);
-        updated.completedExercises = Array.from(set);
-
-        if (updated.status === "not_started" && (set.size > 0 || (updated.completedConcepts?.length ?? 0) > 0)) {
-          updated.status = "in_progress";
-          triggerStatusUpdate(unit, updated, "in_progress");
-        }
-        return { ...prev, [unit.id]: updated };
-      });
-    } catch (err) {
-      console.error("Failed to toggle exercise:", err);
-      toast("Failed to update exercise.", "error");
-    } finally {
-      setToggling(prev => ({ ...prev, [key]: false }));
-    }
-  }
-
-  // ── Mark unit status ────────────────────────────────────────────────────────
-
-  async function handleMarkStatus(unit: SyllabusUnit, status: "in_progress" | "completed") {
-    const key = `status_${unit.id}`;
-    if (toggling[key]) return;
-    setToggling(prev => ({ ...prev, [key]: true }));
-    try {
-      const result = await updateProgress(studentUid, unit.id, {
-        status,
-        teacherSignOff: null,
-        feedback:       null,
-        overrideBy:     null,
-      });
-      setProgressMap(prev => ({ ...prev, [unit.id]: result }));
-      toast(
-        status === "completed" ? "Unit marked as completed." : "Unit marked as in progress.",
-        "success"
-      );
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("ORDER_VIOLATION")) {
-        toast("Complete the prerequisite unit first.", "error");
+      const assignment = await getLessonAssignment(studentId);
+      if (assignment && assignment.lessonIds.length > 0) {
+        setSelectedLessonIds(new Set(assignment.lessonIds));
+        setAssignedInfo(`Currently assigned: ${assignment.lessonIds.length} lessons`);
       } else {
-        toast("Failed to update status.", "error");
+        setSelectedLessonIds(new Set());
+        setAssignedInfo("No lessons assigned yet");
       }
-    } finally {
-      setToggling(prev => ({ ...prev, [key]: false }));
+    } catch {
+      setAssignedInfo(null);
     }
   }
 
-  // Non-blocking background status push (used from toggleConcept/Exercise)
-  function triggerStatusUpdate(unit: SyllabusUnit, _progress: StudentProgress, status: "in_progress") {
-    updateProgress(studentUid, unit.id, {
-      status,
-      teacherSignOff: null,
-      feedback:       null,
-      overrideBy:     null,
-    }).catch(() => {/* silent — optimistic update already applied */});
+  function toggleLessonSelection(lessonId: string) {
+    setSelectedLessonIds(prev => {
+      const next = new Set(prev);
+      next.has(lessonId) ? next.delete(lessonId) : next.add(lessonId);
+      return next;
+    });
   }
 
-  if (loading) {
-    return (
-      <div style={styles.stateRow}>Loading syllabus…</div>
-    );
+  function selectAll() {
+    setSelectedLessonIds(new Set(lessons.map(l => l.id)));
   }
 
-  if (units.length === 0) {
-    return (
-      <div>
-        <h1 style={styles.heading}>My Syllabus</h1>
-        <div style={styles.stateRow}>No syllabus assigned yet. Contact your admin.</div>
-      </div>
-    );
+  function deselectAll() {
+    setSelectedLessonIds(new Set());
   }
+
+  async function handleAssign() {
+    if (!user || !assignStudent || !selectedCenter) {
+      toast("Select a student and center first.", "error");
+      return;
+    }
+    if (selectedLessonIds.size === 0) {
+      toast("Select at least one lesson to assign.", "error");
+      return;
+    }
+    setAssigning(true);
+    try {
+      // Preserve order from the lessons array
+      const orderedIds = lessons
+        .filter(l => selectedLessonIds.has(l.id))
+        .map(l => l.id);
+
+      await assignLessonsToStudent(
+        assignStudent,
+        selectedCenter,
+        orderedIds,
+        user.uid,
+        role ?? "admin",
+      );
+      toast(`${orderedIds.length} lessons assigned successfully.`, "success");
+      setAssignedInfo(`Currently assigned: ${orderedIds.length} lessons`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast(`Assignment failed: ${msg}`, "error");
+    } finally {
+      setAssigning(false);
+    }
+  }
+
+  const visibleStudents = selectedCenter
+    ? students.filter(s => s.centerId === selectedCenter)
+    : students;
+
+  const isAdmin = role === "admin" || role === "super_admin";
 
   return (
     <div>
       <ToastContainer toasts={toasts} onRemove={remove} />
 
-      <div style={styles.header}>
-        <h1 style={styles.heading}>My Syllabus</h1>
-        <span style={styles.unitCount}>{units.length} unit{units.length !== 1 ? "s" : ""}</span>
+      {/* Header */}
+      <div style={s.header}>
+        <h1 style={s.heading}>Syllabus</h1>
+        {isAdmin && (
+          <button
+            onClick={() => router.push("/dashboard/lessons/import")}
+            style={s.importBtn}
+          >
+            Import from Excel
+          </button>
+        )}
       </div>
 
-      <div style={styles.unitList}>
-        {units.map((unit, idx) => {
-          const progress  = progressMap[unit.id];
-          const status    = progress?.status ?? "not_started";
-          const doneConcepts   = progress?.completedConcepts  ?? [];
-          const doneExercises  = progress?.completedExercises ?? [];
-          const statusKey = `status_${unit.id}`;
-          const isUpdating = !!toggling[statusKey];
+      {/* Tabs */}
+      <div style={s.tabs}>
+        {(["lessons", "assign", "track"] as Tab[]).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            style={{ ...s.tab, ...(tab === t ? s.tabActive : {}) }}
+          >
+            {t === "lessons" ? "📚 Lessons" : t === "assign" ? "🎯 Assign" : "📊 Track"}
+          </button>
+        ))}
+      </div>
 
-          return (
-            <div key={unit.id} style={styles.unitCard}>
-              {/* Unit header */}
-              <div style={styles.unitHeader}>
-                <div style={styles.unitMeta}>
-                  <span style={styles.unitOrder}>{idx + 1}</span>
-                  <div>
-                    <div style={styles.unitTitle}>{unit.title}</div>
-                    <div style={styles.unitLevel}>{unit.level}</div>
-                  </div>
-                </div>
-                <div style={styles.unitActions}>
-                  <StatusBadge status={status} />
-                  {status !== "completed" && (
-                    <button
-                      onClick={() => handleMarkStatus(unit, status === "not_started" ? "in_progress" : "completed")}
-                      disabled={isUpdating}
-                      style={{ ...styles.markBtn, opacity: isUpdating ? 0.6 : 1 }}
-                    >
-                      {isUpdating
-                        ? "…"
-                        : status === "not_started"
-                        ? "Start"
-                        : "Mark Complete"}
-                    </button>
-                  )}
-                </div>
+      {/* Center selector — shared across tabs */}
+      <div style={s.filterCard}>
+        <div style={s.filterTitle}>Select Center</div>
+        <div style={s.selectRow}>
+          <select
+            value={selectedCenter}
+            onChange={e => { setSelectedCenter(e.target.value); setLessons([]); setAssignedInfo(null); }}
+            style={s.select}
+            disabled={initialising}
+          >
+            <option value="">— Select center —</option>
+            {centers.map(c => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+          <button
+            onClick={loadLessons}
+            disabled={loading || !selectedCenter || initialising}
+            style={{ ...s.loadBtn, opacity: (loading || !selectedCenter) ? 0.5 : 1 }}
+          >
+            {loading ? "Loading…" : "Load Lessons"}
+          </button>
+        </div>
+      </div>
+
+      {/* ─── LESSONS TAB ───────────────────────────────────────────────────── */}
+      {tab === "lessons" && (
+        <>
+          {lessons.length > 0 && (
+            <div style={s.tableWrapper}>
+              <div style={s.tableHeader}>
+                <span style={s.tableTitle}>
+                  {lessons.length} lesson{lessons.length !== 1 ? "s" : ""}
+                  {" · "}{centers.find(c => c.id === selectedCenter)?.name ?? ""}
+                </span>
               </div>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    {["Order", "No.", "Title", ""].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {lessons.map((lesson, i) => (
+                    <tr key={lesson.id} style={i % 2 === 0 ? s.rowEven : s.rowOdd}>
+                      <td style={{ ...s.td, ...s.mono }}>{lesson.order}</td>
+                      <td style={{ ...s.td, ...s.mono }}>{lesson.lessonNumber}</td>
+                      <td style={{ ...s.td, fontWeight: 600, color: "var(--color-text-primary)" }}>
+                        {lesson.title}
+                      </td>
+                      <td style={s.td}>
+                        <span style={s.centerBadge}>Center</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-              {/* Concepts */}
-              {unit.concepts?.length > 0 && (
-                <div style={styles.section}>
-                  <div style={styles.sectionLabel}>Concepts</div>
-                  <div style={styles.checkList}>
-                    {unit.concepts.map(concept => {
-                      const done = doneConcepts.includes(concept);
-                      const key  = `concept_${unit.id}_${concept}`;
-                      return (
-                        <label key={concept} style={styles.checkItem}>
-                          <input
-                            type="checkbox"
-                            checked={done}
-                            disabled={!!toggling[key]}
-                            onChange={() => handleToggleConcept(unit, concept)}
-                            style={{ marginRight: 8, accentColor: "#4f46e5" }}
-                          />
-                          <span style={{ ...styles.checkLabel, textDecoration: done ? "line-through" : "none", color: done ? "#9ca3af" : "#111827" }}>
-                            {concept}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
+          {!loading && lessons.length === 0 && (
+            <div style={s.emptyState}>
+              <div style={s.emptyIcon}>📚</div>
+              <div style={s.emptyText}>Select a center and click "Load Lessons".</div>
+              {isAdmin && (
+                <div style={s.emptyHint}>
+                  No lessons yet?{" "}
+                  <button onClick={() => router.push("/dashboard/lessons/import")} style={s.linkBtn}>
+                    Import from Excel
+                  </button>
                 </div>
-              )}
-
-              {/* Exercises */}
-              {unit.exercises?.length > 0 && (
-                <div style={styles.section}>
-                  <div style={styles.sectionLabel}>Exercises</div>
-                  <div style={styles.checkList}>
-                    {unit.exercises.map(exercise => {
-                      const done = doneExercises.includes(exercise);
-                      const key  = `exercise_${unit.id}_${exercise}`;
-                      return (
-                        <label key={exercise} style={styles.checkItem}>
-                          <input
-                            type="checkbox"
-                            checked={done}
-                            disabled={!!toggling[key]}
-                            onChange={() => handleToggleExercise(unit, exercise)}
-                            style={{ marginRight: 8, accentColor: "#059669" }}
-                          />
-                          <span style={{ ...styles.checkLabel, textDecoration: done ? "line-through" : "none", color: done ? "#9ca3af" : "#111827" }}>
-                            {exercise}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Empty unit */}
-              {(!unit.concepts?.length && !unit.exercises?.length) && (
-                <div style={styles.emptyUnit}>No concepts or exercises added yet.</div>
               )}
             </div>
-          );
-        })}
-      </div>
+          )}
+        </>
+      )}
+
+      {/* ─── ASSIGN TAB ──────────────────────────────────────────────────── */}
+      {tab === "assign" && (
+        <div style={s.assignCard}>
+          <div style={s.assignTitle}>Assign Lessons to Student</div>
+
+          {/* Student selector */}
+          <div style={s.fieldGroup}>
+            <label style={s.label}>Student</label>
+            <select
+              value={assignStudent}
+              onChange={e => {
+                setAssignStudent(e.target.value);
+                loadStudentAssignment(e.target.value);
+              }}
+              style={s.select}
+              disabled={initialising || !selectedCenter}
+            >
+              <option value="">— Select student —</option>
+              {visibleStudents.map(st => (
+                <option key={st.uid} value={st.uid}>
+                  {st.admissionNumber ? `[${st.admissionNumber}] ` : ""}{st.displayName || st.uid}
+                </option>
+              ))}
+            </select>
+            {assignedInfo && <div style={s.assignedTag}>{assignedInfo}</div>}
+          </div>
+
+          {/* Lesson checkboxes */}
+          {lessons.length > 0 ? (
+            <>
+              <div style={s.lessonSelectHeader}>
+                <span style={s.lessonSelectTitle}>Select lessons to assign ({selectedLessonIds.size}/{lessons.length})</span>
+                <div style={s.bulkActions}>
+                  <button onClick={selectAll} style={s.bulkBtn}>Select All</button>
+                  <button onClick={deselectAll} style={s.bulkBtn}>Deselect All</button>
+                </div>
+              </div>
+              <div style={s.checkList}>
+                {lessons.map(lesson => (
+                  <label key={lesson.id} style={s.checkItem}>
+                    <input
+                      type="checkbox"
+                      checked={selectedLessonIds.has(lesson.id)}
+                      onChange={() => toggleLessonSelection(lesson.id)}
+                      style={{ marginRight: 10, accentColor: "#a78bfa" }}
+                    />
+                    <span style={s.checkOrder}>{lesson.order}.</span>
+                    <span style={s.checkLabel}>{lesson.title}</span>
+                  </label>
+                ))}
+              </div>
+              <button
+                onClick={handleAssign}
+                disabled={assigning || !assignStudent || selectedLessonIds.size === 0}
+                style={{
+                  ...s.assignBtn,
+                  opacity: (assigning || !assignStudent || selectedLessonIds.size === 0) ? 0.5 : 1,
+                }}
+              >
+                {assigning ? "Assigning…" : `Assign ${selectedLessonIds.size} Lessons`}
+              </button>
+            </>
+          ) : (
+            <div style={s.emptyInline}>Load lessons from a center first.</div>
+          )}
+        </div>
+      )}
+
+      {/* ─── TRACK TAB ───────────────────────────────────────────────────── */}
+      {tab === "track" && (
+        <div style={s.trackCard}>
+          <div style={s.trackTitle}>Track Student Progress</div>
+          <div style={s.fieldGroup}>
+            <label style={s.label}>Student</label>
+            <select
+              value={assignStudent}
+              onChange={e => setAssignStudent(e.target.value)}
+              style={s.select}
+              disabled={initialising || !selectedCenter}
+            >
+              <option value="">— Select student —</option>
+              {visibleStudents.map(st => (
+                <option key={st.uid} value={st.uid}>
+                  {st.admissionNumber ? `[${st.admissionNumber}] ` : ""}{st.displayName || st.uid}
+                </option>
+              ))}
+            </select>
+          </div>
+          {assignStudent ? (
+            <button
+              onClick={() => router.push(`/dashboard/student-syllabus/${assignStudent}`)}
+              style={s.viewProgressBtn}
+            >
+              View Full Syllabus Progress →
+            </button>
+          ) : (
+            <div style={s.emptyInline}>Select a student to view their progress.</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-// ─── Utility ───────────────────────────────────────────────────────────────────
+// ─── 2026 Design Tokens ───────────────────────────────────────────────────────
 
-function emptyProgress(studentUid: string, unitId: string): StudentProgress {
-  return {
-    id:                 `${studentUid}_${unitId}`,
-    studentUid,
-    unitId,
-    status:             "not_started",
-    completionDate:     null,
-    teacherSignOff:     null,
-    feedback:           null,
-    overrideBy:         null,
-    completedConcepts:  [],
-    completedExercises: [],
-    points:             0,
-    createdAt:          "",
-    updatedAt:          "",
-  };
-}
+const T = {
+  charcoal:      "#1a1a2e",
+  surface:       "#16213e",
+  surfaceAlt:    "#0f3460",
+  gold:          "#e2b96f",
+  goldGlow:      "rgba(226,185,111,0.18)",
+  lavender:      "#a78bfa",
+  lavenderGlow:  "rgba(167,139,250,0.18)",
+  sage:          "#6ee7b7",
+  sageGlow:      "rgba(110,231,183,0.15)",
+  rose:          "#f87171",
+  border:        "rgba(255,255,255,0.08)",
+  borderGold:    "rgba(226,185,111,0.28)",
+  textPrimary:   "#f1f5f9",
+  textSecondary: "#94a3b8",
+  textMuted:     "#64748b",
+  glass:         "rgba(255,255,255,0.04)",
+  glassHover:    "rgba(255,255,255,0.07)",
+  radius:        12,
+  radiusSm:      8,
+};
 
-// ─── Styles ────────────────────────────────────────────────────────────────────
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
-const styles: Record<string, React.CSSProperties> = {
-  header: {
-    display:        "flex",
-    alignItems:     "center",
-    justifyContent: "space-between",
-    marginBottom:   24,
+const s: Record<string, React.CSSProperties> = {
+  // Header
+  header:       { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 },
+  heading:      { fontSize: 24, fontWeight: 700, color: T.textPrimary, margin: 0, letterSpacing: "-0.5px" },
+  importBtn:    {
+    background: `linear-gradient(135deg, ${T.gold}, #c99a4e)`,
+    color: T.charcoal,
+    border: "none",
+    padding: "9px 18px",
+    borderRadius: T.radiusSm,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    boxShadow: `0 4px 14px ${T.goldGlow}`,
+    transition: "all 0.2s",
   },
-  heading: {
-    fontSize:   22,
-    fontWeight: 600,
-    color:      "var(--color-text-primary)",
+
+  // Tabs
+  tabs:         {
+    display: "flex",
+    gap: 4,
+    marginBottom: 20,
+    background: T.glass,
+    borderRadius: T.radius,
+    padding: 4,
+    border: `1px solid ${T.border}`,
+    backdropFilter: "blur(10px)",
   },
-  unitCount: {
-    fontSize:    12,
-    color:       "var(--color-text-secondary)",
-    fontWeight:  500,
+  tab:          {
+    flex: 1,
+    padding: "9px 0",
+    borderRadius: T.radiusSm,
+    border: "none",
+    background: "transparent",
+    fontSize: 13,
+    fontWeight: 500,
+    color: T.textSecondary,
+    cursor: "pointer",
+    textAlign: "center" as const,
+    transition: "all 0.18s",
   },
-  stateRow: {
-    padding:   "24px 0",
-    fontSize:  13,
-    color:     "var(--color-text-secondary)",
-    textAlign: "center",
+  tabActive:    {
+    background: `linear-gradient(135deg, ${T.lavender}22, ${T.lavender}11)`,
+    color: T.lavender,
+    fontWeight: 700,
+    boxShadow: `0 1px 8px ${T.lavenderGlow}, inset 0 0 0 1px ${T.lavender}44`,
   },
-  unitList: {
-    display:       "flex",
-    flexDirection: "column",
-    gap:           16,
+
+  // Filter card
+  filterCard:   {
+    background: T.glass,
+    border: `1px solid ${T.border}`,
+    borderRadius: T.radius,
+    padding: "16px 20px",
+    marginBottom: 16,
+    backdropFilter: "blur(12px)",
   },
-  unitCard: {
-    background:   "var(--color-surface)",
-    border:       "1px solid var(--color-border)",
-    borderRadius: 10,
-    overflow:     "hidden",
+  filterTitle:  { fontSize: 10, fontWeight: 700, color: T.gold, textTransform: "uppercase" as const, letterSpacing: "0.1em", marginBottom: 10 },
+  selectRow:    { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" as const },
+  select:       {
+    padding: "9px 12px",
+    border: `1px solid ${T.border}`,
+    borderRadius: T.radiusSm,
+    fontSize: 13,
+    color: T.textPrimary,
+    background: T.glass,
+    outline: "none",
+    minWidth: 200,
+    backdropFilter: "blur(8px)",
   },
-  unitHeader: {
-    display:        "flex",
-    alignItems:     "center",
-    justifyContent: "space-between",
-    padding:        "16px 20px",
-    borderBottom:   "1px solid var(--color-border)",
-    background:     "#f9fafb",
+  loadBtn:      {
+    background: `linear-gradient(135deg, ${T.lavender}, #7c3aed)`,
+    color: "#fff",
+    border: "none",
+    padding: "9px 20px",
+    borderRadius: T.radiusSm,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    boxShadow: `0 4px 14px ${T.lavenderGlow}`,
+    transition: "all 0.2s",
   },
-  unitMeta: {
-    display:    "flex",
+
+  // Table
+  tableWrapper: {
+    background: T.glass,
+    border: `1px solid ${T.border}`,
+    borderRadius: T.radius,
+    overflow: "hidden",
+    marginBottom: 16,
+    backdropFilter: "blur(12px)",
+  },
+  tableHeader:  {
+    display: "flex",
     alignItems: "center",
-    gap:        12,
+    justifyContent: "space-between",
+    padding: "14px 18px",
+    borderBottom: `1px solid ${T.border}`,
+    background: `linear-gradient(90deg, ${T.goldGlow}, transparent)`,
   },
-  unitOrder: {
-    width:        28,
-    height:       28,
-    borderRadius: "50%",
-    background:   "#e0e7ff",
-    color:        "#4f46e5",
-    fontSize:     12,
-    fontWeight:   700,
-    display:      "flex",
-    alignItems:   "center",
-    justifyContent:"center",
-    flexShrink:   0,
-  } as React.CSSProperties,
-  unitTitle: {
-    fontSize:   14,
-    fontWeight: 600,
-    color:      "#111827",
-  },
-  unitLevel: {
-    fontSize: 12,
-    color:    "#6b7280",
-    marginTop: 2,
-  },
-  unitActions: {
-    display:    "flex",
-    alignItems: "center",
-    gap:        10,
-  },
-  markBtn: {
-    background:   "#4f46e5",
-    color:        "#fff",
-    border:       "none",
-    padding:      "5px 14px",
-    borderRadius: 6,
-    fontSize:     12,
-    fontWeight:   600,
-    cursor:       "pointer",
-  },
-  section: {
-    padding:      "14px 20px",
-    borderBottom: "1px solid #f3f4f6",
-  },
-  sectionLabel: {
-    fontSize:      11,
-    fontWeight:    700,
-    color:         "#9ca3af",
-    textTransform: "uppercase",
+  tableTitle:   { fontSize: 11, fontWeight: 700, color: T.gold, textTransform: "uppercase" as const, letterSpacing: "0.06em" },
+  table:        { width: "100%", borderCollapse: "collapse" as const },
+  th:           {
+    padding: "10px 18px",
+    textAlign: "left" as const,
+    fontSize: 10,
+    fontWeight: 700,
+    color: T.textMuted,
+    textTransform: "uppercase" as const,
     letterSpacing: "0.06em",
-    marginBottom:  10,
+    background: "rgba(255,255,255,0.02)",
+    borderBottom: `1px solid ${T.border}`,
   },
-  checkList: {
-    display:       "flex",
-    flexDirection: "column",
-    gap:           8,
+  td:           {
+    padding: "13px 18px",
+    fontSize: 13,
+    color: T.textPrimary,
+    borderBottom: `1px solid ${T.border}`,
+    transition: "background 0.15s",
   },
-  checkItem: {
-    display:    "flex",
-    alignItems: "center",
-    cursor:     "pointer",
-  },
-  checkLabel: {
-    fontSize:   13,
-    transition: "color 0.15s",
-  },
-  emptyUnit: {
-    padding:  "14px 20px",
-    fontSize: 12,
-    color:    "#9ca3af",
-  },
-  badge: {
-    display:      "inline-block",
-    padding:      "2px 10px",
+  rowEven:      { background: "transparent" },
+  rowOdd:       { background: "rgba(255,255,255,0.015)" },
+  mono:         { fontFamily: "monospace", fontSize: 12, color: T.textMuted },
+  centerBadge:  {
+    background: T.lavenderGlow,
+    color: T.lavender,
+    padding: "2px 10px",
     borderRadius: 99,
-    fontSize:     11,
-    fontWeight:   600,
-    textTransform:"capitalize",
+    fontSize: 11,
+    fontWeight: 700,
+    border: `1px solid ${T.lavender}33`,
+  },
+
+  // Empty states
+  emptyState:   { padding: "56px 16px", textAlign: "center" as const },
+  emptyIcon:    { fontSize: 44, marginBottom: 14 },
+  emptyText:    { fontSize: 14, color: T.textSecondary, marginBottom: 8 },
+  emptyHint:    { fontSize: 13, color: T.textMuted },
+  linkBtn:      {
+    background: "none",
+    border: "none",
+    color: T.gold,
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 13,
+    padding: 0,
+    textDecoration: "underline",
+  },
+  emptyInline:  { padding: "16px 0", fontSize: 13, color: T.textMuted },
+
+  // Assign tab
+  assignCard:   {
+    background: T.glass,
+    border: `1px solid ${T.border}`,
+    borderRadius: T.radius,
+    padding: "22px",
+    backdropFilter: "blur(12px)",
+  },
+  assignTitle:  { fontSize: 15, fontWeight: 700, color: T.textPrimary, marginBottom: 18 },
+  fieldGroup:   { marginBottom: 18 },
+  label:        {
+    display: "block",
+    fontSize: 10,
+    fontWeight: 700,
+    color: T.gold,
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.08em",
+    marginBottom: 7,
+  },
+  assignedTag:  {
+    marginTop: 7,
+    fontSize: 12,
+    color: T.sage,
+    fontWeight: 600,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+  },
+
+  lessonSelectHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  lessonSelectTitle:  { fontSize: 12, fontWeight: 600, color: T.textSecondary },
+  bulkActions:  { display: "flex", gap: 10 },
+  bulkBtn:      {
+    background: "none",
+    border: `1px solid ${T.border}`,
+    color: T.lavender,
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+    padding: "3px 10px",
+    borderRadius: 6,
+    transition: "all 0.15s",
+  },
+
+  checkList:    {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 4,
+    marginBottom: 18,
+    maxHeight: 320,
+    overflowY: "auto" as const,
+    padding: "4px 0",
+  },
+  checkItem:    {
+    display: "flex",
+    alignItems: "center",
+    cursor: "pointer",
+    padding: "8px 10px",
+    borderRadius: T.radiusSm,
+    transition: "background 0.12s",
+    border: `1px solid transparent`,
+  },
+  checkOrder:   { fontSize: 11, fontWeight: 700, color: T.textMuted, fontFamily: "monospace", minWidth: 30 },
+  checkLabel:   { fontSize: 13, fontWeight: 500, color: T.textPrimary },
+
+  assignBtn:    {
+    background: `linear-gradient(135deg, ${T.lavender}, #7c3aed)`,
+    color: "#fff",
+    border: "none",
+    padding: "11px 28px",
+    borderRadius: T.radiusSm,
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    boxShadow: `0 4px 20px ${T.lavenderGlow}`,
+    transition: "all 0.2s",
+    letterSpacing: "0.02em",
+  },
+
+  // Track tab
+  trackCard:    {
+    background: T.glass,
+    border: `1px solid ${T.border}`,
+    borderRadius: T.radius,
+    padding: "22px",
+    backdropFilter: "blur(12px)",
+  },
+  trackTitle:   { fontSize: 15, fontWeight: 700, color: T.textPrimary, marginBottom: 18 },
+  viewProgressBtn: {
+    background: `linear-gradient(135deg, ${T.sage}, #34d399)`,
+    color: T.charcoal,
+    border: "none",
+    padding: "11px 24px",
+    borderRadius: T.radiusSm,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    marginTop: 10,
+    boxShadow: `0 4px 16px ${T.sageGlow}`,
+    transition: "all 0.2s",
   },
 };

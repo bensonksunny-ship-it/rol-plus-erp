@@ -29,7 +29,7 @@ const NAV_ITEMS: NavItem[] = [
       role === ROLES.STUDENT
         ? `/dashboard/student-syllabus/${uid}`
         : "/dashboard/syllabus",
-    matchPrefix: "/dashboard/syllabus",
+    matchPrefix: "/dashboard/syllabus,/dashboard/student-syllabus",
     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT],
   },
   { label: "Alerts",       icon: "🔔", href: "/dashboard/alerts",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
@@ -69,9 +69,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     }));
 
   function isActive(item: (typeof visibleNav)[number]): boolean {
-    const prefix = item.matchPrefix ?? item.resolvedHref;
-    return pathname === item.resolvedHref ||
-      (prefix !== "/dashboard" && pathname.startsWith(prefix));
+    if (pathname === item.resolvedHref) return true;
+    const prefixes = (item.matchPrefix ?? item.resolvedHref).split(",");
+    return prefixes.some(p => p !== "/dashboard" && pathname.startsWith(p));
   }
 
   const pageTitle = visibleNav.find(isActive)?.label ?? "Dashboard";

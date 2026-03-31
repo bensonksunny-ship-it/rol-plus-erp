@@ -4,34 +4,39 @@ import {
   onAuthStateChanged,
   type User as FirebaseUser,
 } from "firebase/auth";
-import { doc, getDocFromServer, setDoc, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, getDocFromServer, setDoc, serverTimestamp } from "firebase/firestore";
 import { auth, db } from "@/services/firebase/firebase";
 import type { User, AuthSession } from "@/types";
 import { USER_STATUS } from "@/config/constants";
 
 /**
- * Fetch the Firestore user profile for a Firebase Auth uid.
+ * Fetch the Firestore user profile — cache-first for speed.
+ * Falls back to a server read only if the document is not in cache.
  * Returns null if the document does not exist.
  */
 export async function getUserProfile(uid: string): Promise<User | null> {
-  const ref = doc(db, "users", uid);
-  const snap = await getDocFromServer(ref);
+  const ref  = doc(db, "users", uid);
+  // getDoc uses Firestore's local cache when available (offline-first).
+  // This is typically instant on subsequent page loads, preventing the
+  // auth timeout from firing before the profile resolves.
+  const snap = await getDoc(ref);
   if (!snap.exists()) return null;
   return snap.data() as User;
 }
 
 /**
  * Create a Firestore user document if one does not already exist.
+ * Uses cache-first read for the existence check to avoid slow server
+ * round-trips that could race with the AuthContext timeout.
  * Never overwrites an existing document.
  */
 async function ensureUserDocument(user: FirebaseUser): Promise<boolean> {
   const userRef = doc(db, "users", user.uid);
-  const snap = await getDocFromServer(userRef);
-  console.log("SERVER SNAP EXISTS?", snap.exists());
-  if (snap.exists()) {
-    return true;
-  }
-  console.log("WRITING TO PROJECT:", db.app.options.projectId);
+  // Cache-first check: if the doc is in Firestore cache it resolves instantly.
+  const snap = await getDoc(userRef);
+  if (snap.exists()) return true;
+
+  // Doc not in cache — write it for the first time.
   await setDoc(userRef, {
     uid:          user.uid,
     email:        user.email || "",
@@ -42,9 +47,9 @@ async function ensureUserDocument(user: FirebaseUser): Promise<boolean> {
     createdAt:    serverTimestamp(),
     updatedAt:    serverTimestamp(),
   });
-  console.log("USER CREATED");
+
+  // Verify with a server read only on first-time creation.
   const verifySnap = await getDocFromServer(userRef);
-  console.log("USER DOC VERIFIED:", verifySnap.exists());
   if (!verifySnap.exists()) {
     throw new Error("FIRESTORE WRITE FAILED: document not found after setDoc");
   }
@@ -59,14 +64,11 @@ export async function signIn(
   email: string,
   password: string
 ): Promise<AuthSession> {
-  const credential = await signInWithEmailAndPassword(auth, email, password);
-  const firebaseUser = credential.user;
-  console.log("LOGIN SUCCESS", firebaseUser.uid);
+  const credential    = await signInWithEmailAndPassword(auth, email, password);
+  const firebaseUser  = credential.user;
 
-  // Ensure a Firestore profile exists before reading it
-  console.log("CALLING ensureUserDocument");
+  // Ensure a Firestore profile exists before reading it.
   await ensureUserDocument(firebaseUser);
-  console.log("USER DOC READY");
 
   const profile = await getUserProfile(firebaseUser.uid);
   if (!profile) {

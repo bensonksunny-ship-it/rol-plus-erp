@@ -1,37 +1,46 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { signIn } from "@/services/firebase/auth.service";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_ROUTES } from "@/config/constants";
 
 const ERROR_MESSAGES: Record<string, string> = {
-  "AUTH/USER_NOT_FOUND":    "Account not found. Contact your administrator.",
-  "AUTH/ACCOUNT_INACTIVE":  "Your account is inactive. Contact your administrator.",
+  "AUTH/USER_NOT_FOUND":     "Account not found. Contact your administrator.",
+  "AUTH/ACCOUNT_INACTIVE":   "Your account is inactive. Contact your administrator.",
   "auth/invalid-credential": "Incorrect email or password.",
   "auth/too-many-requests":  "Too many attempts. Try again later.",
 };
 
 export default function LoginPage() {
   const { user, loading } = useAuth();
+  const redirectingRef    = useRef(false); // prevents double-redirect
 
-  const [email,    setEmail]    = useState("");
-  const [password, setPassword] = useState("");
-  const [error,    setError]    = useState<string | null>(null);
+  const [email,      setEmail]      = useState("");
+  const [password,   setPassword]   = useState("");
+  const [error,      setError]      = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // Once auth resolves: if already logged in, redirect away from login page.
-  // We do NOT gate rendering on `loading` — that causes a blank screen on SSR
-  // because the server has no auth state and loading starts true.
+  // If auth resolves and the user is already logged in, redirect once.
+  // Guard with redirectingRef so a re-render during the navigation (which
+  // can happen as React reconciles) does not fire a second window.location
+  // assignment — that causes the one-second blink/refresh loop.
   useEffect(() => {
-    if (!loading && user) {
-      window.location.href = ROLE_ROUTES[user.role] ?? "/dashboard";
-    }
+    if (loading) return;
+    if (!user) return;
+    if (redirectingRef.current) return;
+    redirectingRef.current = true;
+    window.location.replace(ROLE_ROUTES[user.role] ?? "/dashboard");
   }, [user, loading]);
 
-  // Redirect away silently while auth is resolving (already-logged-in case).
-  // The form is visible immediately on SSR/first paint; this just hides it
-  // momentarily if we're about to navigate away anyway.
+  // While auth is resolving, show a neutral full-screen placeholder instead
+  // of the form. This prevents the form from flashing in then immediately
+  // disappearing when a valid session is detected.
+  if (loading) {
+    return <div style={styles.loadingScreen} />;
+  }
+
+  // Auth resolved and user exists — redirect is in flight, show nothing.
   if (user) return null;
 
   async function handleSubmit(e: React.FormEvent) {
@@ -42,22 +51,25 @@ export default function LoginPage() {
     try {
       const session = await signIn(email.trim(), password);
 
-      // Set session cookie for middleware.
-      // We use a hard navigation (window.location) instead of router.replace()
-      // so that the browser flushes the cookie BEFORE the next request is made.
-      // With router.replace() (client-side nav), Next.js edge middleware runs
-      // before the cookie is visible — causing a redirect loop to /login.
+      // Set the session cookie BEFORE navigating so edge middleware sees it
+      // on the very first request. window.location.replace (not href=) avoids
+      // adding a /login history entry the user can navigate back to.
+      //
+      // SameSite=Lax (not Strict) is required for mobile Safari and PWA mode:
+      // SameSite=Strict causes iOS Safari to drop the cookie on ANY navigation
+      // that it considers "cross-site" (including PWA launch, in-app browser
+      // redirects, and some same-domain navigations) → middleware sees no cookie
+      // → redirects to /login → refresh loop on mobile.
       const maxAge = 60 * 60 * 24 * 7; // 7 days
-      document.cookie = `rol_session=${session.token}; path=/; SameSite=Strict; max-age=${maxAge}`;
+      document.cookie = `rol_session=${session.token}; path=/; SameSite=Lax; max-age=${maxAge}`;
 
-      const destination = ROLE_ROUTES[session.user.role] ?? "/dashboard";
-      window.location.href = destination;
+      window.location.replace(ROLE_ROUTES[session.user.role] ?? "/dashboard");
     } catch (err: unknown) {
       const code = err instanceof Error ? err.message : "unknown";
       setError(ERROR_MESSAGES[code] ?? "Something went wrong. Please try again.");
       setSubmitting(false);
     }
-    // NOTE: do not setSubmitting(false) on success — the page is navigating away.
+    // Do NOT setSubmitting(false) on success — the page is navigating away.
   }
 
   return (
@@ -106,10 +118,10 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={submitting || loading}
+            disabled={submitting}
             style={{
               ...styles.button,
-              opacity: (submitting || loading) ? 0.7 : 1,
+              opacity: submitting ? 0.7 : 1,
             }}
           >
             {submitting ? "Signing in…" : "Sign in"}
@@ -122,6 +134,10 @@ export default function LoginPage() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  loadingScreen: {
+    minHeight: "100vh",
+    background: "var(--color-bg)",
+  },
   page: {
     minHeight: "100vh",
     display: "flex",

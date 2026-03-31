@@ -2,32 +2,39 @@ import { NextRequest, NextResponse } from "next/server";
 import { PUBLIC_ROUTES } from "@/config/constants";
 
 /**
- * Middleware runs on the edge before any page renders.
- * It checks for the Firebase session cookie set during login.
+ * Edge middleware — runs before any page renders.
+ * Only checks for the presence of the session cookie (no token verification).
  *
- * Full token verification (via Firebase Admin SDK) happens in
- * individual API route handlers — middleware only gates the UI.
+ * Mobile-safe loop prevention:
+ *  - On mobile (especially iOS Safari), SameSite=Strict cookies can be
+ *    silently dropped on PWA launches or navigations the browser classifies
+ *    as cross-site, causing a /login → /dashboard → /login redirect loop.
+ *  - We use SameSite=Lax on the session cookie to prevent this.
+ *  - The middleware does NOT redirect /login → /dashboard when a session
+ *    cookie exists because the cookie may be stale (token revoked, profile
+ *    deleted). The client-side AuthContext is the authoritative checker.
+ *    If the cookie is valid the login page will redirect away client-side.
+ *  - Protected routes with no cookie are still redirected to /login — this
+ *    is safe because unauthenticated users genuinely have no cookie.
  */
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Root path is handled by app/page.tsx which redirects based on auth state
+  // "/" — always pass through; app/page.tsx handles client-side redirect.
   if (pathname === "/") return NextResponse.next();
 
   const isPublic = PUBLIC_ROUTES.some(
-    (route) => pathname === route || pathname.startsWith(route + "/")
+    (route) => pathname === route || pathname.startsWith(route + "/"),
   );
 
-  const sessionCookie = request.cookies.get("rol_session")?.value;
+  const hasSession = Boolean(request.cookies.get("rol_session")?.value);
 
-  // Redirect unauthenticated users away from protected pages
-  if (!isPublic && !sessionCookie) {
+  // Protected route with no session cookie → send to login.
+  // This is the only server-side redirect we make. The reverse redirect
+  // (/login with cookie → /dashboard) is intentionally handled client-side
+  // only, to avoid server loops on mobile where the cookie may be stale.
+  if (!isPublic && !hasSession) {
     return NextResponse.redirect(new URL("/login", request.url));
-  }
-
-  // Redirect authenticated users away from login page
-  if (isPublic && sessionCookie && pathname === "/login") {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
   return NextResponse.next();

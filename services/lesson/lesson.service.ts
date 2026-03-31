@@ -10,6 +10,7 @@ import {
   where,
   orderBy,
   serverTimestamp,
+  type Timestamp,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
@@ -503,6 +504,145 @@ export async function getLessonProgressSummary(
       inProgressLessons,
       avgAttemptsPerItem,
     };
+  } catch (err) {
+    throw new Error(friendlyError(err));
+  }
+}
+
+// ─── Lesson Assignment ───────────────────────────────────────────────────────
+// Assigns a set of center-scope lessons to a student by writing a lightweight
+// document to the `lesson_assignments` collection.
+// Doc ID = studentId (1:1 per student). Contains centerId + lessonIds[].
+
+const LESSON_ASSIGNMENTS = "lesson_assignments";
+
+export interface LessonAssignment {
+  id:         string;   // doc ID = studentId
+  studentId:  string;
+  centerId:   string;
+  lessonIds:  string[]; // ordered list of lesson IDs assigned
+  assignedBy: string;   // UID of admin/teacher who assigned
+  createdAt:  Timestamp | string;
+  updatedAt:  Timestamp | string;
+}
+
+/**
+ * Assign a set of lessons (by ID) from a center to a student.
+ * Overwrites any previous assignment for this student.
+ */
+export async function assignLessonsToStudent(
+  studentId:     string,
+  centerId:      string,
+  lessonIds:     string[],
+  initiatorId:   string,
+  initiatorRole: Role,
+): Promise<void> {
+  try {
+    // Validate student exists and is a student
+    const studentSnap = await getDocFromServer(doc(db, "users", studentId));
+    if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
+    if (studentSnap.data().role !== "student") throw new Error(`ROLE_MISMATCH: ${studentId}`);
+
+    // Validate all lesson IDs exist
+    for (const lid of lessonIds) {
+      const lSnap = await getDocFromServer(doc(db, LESSONS, lid));
+      if (!lSnap.exists()) throw new Error(`LESSON_NOT_FOUND: ${lid}`);
+    }
+
+    const ref = doc(db, LESSON_ASSIGNMENTS, studentId);
+    await setDoc(ref, {
+      studentId,
+      centerId,
+      lessonIds,
+      assignedBy: initiatorId,
+      updatedAt:  serverTimestamp(),
+      createdAt:  serverTimestamp(),
+    }, { merge: true });
+
+    logAction({
+      action:        "LESSONS_ASSIGNED_TO_STUDENT",
+      initiatorId,
+      initiatorRole,
+      approverId:    null,
+      approverRole:  null,
+      reason:        null,
+      metadata:      { studentId, centerId, lessonCount: lessonIds.length },
+    });
+  } catch (err) {
+    throw new Error(friendlyError(err));
+  }
+}
+
+/**
+ * Get the lesson assignment for a student. Returns null if none.
+ */
+export async function getLessonAssignment(
+  studentId: string,
+): Promise<LessonAssignment | null> {
+  try {
+    const snap = await getDocFromServer(doc(db, LESSON_ASSIGNMENTS, studentId));
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...snap.data() } as LessonAssignment;
+  } catch (err) {
+    throw new Error(friendlyError(err));
+  }
+}
+
+/**
+ * Get all assigned lessons for a student with their items.
+ * Returns lessons ordered by `order` ascending.
+ * Falls back to center lessons if student has a centerId but no explicit assignment.
+ */
+export async function getAssignedLessonsWithItems(
+  studentId: string,
+): Promise<{ lessons: (Lesson & { items: LessonItem[] })[]; centerId: string | null }> {
+  try {
+    // Check explicit assignment first
+    const assignment = await getLessonAssignment(studentId);
+
+    let lessons: Lesson[] = [];
+    let centerId: string | null = null;
+
+    if (assignment && assignment.lessonIds.length > 0) {
+      centerId = assignment.centerId;
+      // Fetch each assigned lesson
+      const lessonPromises = assignment.lessonIds.map(lid =>
+        getDocFromServer(doc(db, LESSONS, lid))
+      );
+      const lessonSnaps = await Promise.all(lessonPromises);
+      lessons = lessonSnaps
+        .filter(s => s.exists())
+        .map(s => ({ id: s.id, ...s.data() }) as Lesson)
+        .sort((a, b) => a.order - b.order);
+    } else {
+      // Fallback: resolve student's centerId, load all center lessons
+      const studentSnap = await getDocFromServer(doc(db, "users", studentId));
+      if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
+      centerId = (studentSnap.data().centerId as string) ?? null;
+
+      if (centerId) {
+        lessons = await getLessonsByCenter(centerId);
+      }
+
+      // Also include student-specific lessons
+      const studentLessons = await getLessonsByStudent(studentId);
+      if (studentLessons.length > 0) {
+        lessons = [...lessons, ...studentLessons].sort((a, b) => a.order - b.order);
+      }
+    }
+
+    if (lessons.length === 0) return { lessons: [], centerId };
+
+    // Fetch items for all lessons in parallel
+    const itemPromises = lessons.map(l => getItemsByLesson(l.id));
+    const itemArrays   = await Promise.all(itemPromises);
+
+    const result = lessons.map((lesson, idx) => ({
+      ...lesson,
+      items: itemArrays[idx] ?? [],
+    }));
+
+    return { lessons: result, centerId };
   } catch (err) {
     throw new Error(friendlyError(err));
   }
