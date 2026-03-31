@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -49,15 +49,53 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const pathname          = usePathname();
   const isMobile          = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const redirectingRef    = useRef(false);
+
+  // CRITICAL: Never call router.replace() during render — it triggers a
+  // navigation on every render cycle, causing an infinite reload loop on mobile.
+  // Always redirect inside useEffect which runs only once after paint.
+  useEffect(() => {
+    if (loading) return;
+    if (user) return;
+    if (redirectingRef.current) return;
+    redirectingRef.current = true;
+    // Clear the session cookie before redirecting so middleware doesn't
+    // bounce the user back to /dashboard immediately.
+    document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
+    router.replace("/login");
+  }, [loading, user, router]);
 
   async function handleSignOut() {
     await signOut();
-    document.cookie = "rol_session=; path=/; max-age=0";
+    document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
     router.replace("/login");
   }
 
-  if (loading) return null;
-  if (!user)   { router.replace("/login"); return null; }
+  // Show a stable loading screen while auth resolves.
+  // Returning null here causes a blank flash on every render — on mobile
+  // this appears as a white blink between every navigation.
+  if (loading) {
+    return (
+      <div style={{
+        height: "100dvh",
+        background: "var(--color-bg)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }} />
+    );
+  }
+
+  // Auth resolved but no user — redirect is queued in useEffect above.
+  // Return the same loading screen so there's no flash of content.
+  if (!user) {
+    return (
+      <div style={{
+        height: "100dvh",
+        background: "var(--color-bg)",
+      }} />
+    );
+  }
 
   const visibleNav = NAV_ITEMS
     .filter(item => item.roles.includes(user.role))

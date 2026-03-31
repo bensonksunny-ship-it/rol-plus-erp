@@ -96,23 +96,42 @@ export async function signOut(): Promise<void> {
 /**
  * Subscribe to Firebase Auth state. Resolves the full User profile on change.
  * Returns the unsubscribe function.
+ *
+ * IMPORTANT: onAuthStateChanged fires multiple times on mobile:
+ *  1. Immediately with the cached token (null or previous user)
+ *  2. Again after the token is refreshed over the network
+ * The AuthContext guards against processing multiple callbacks via resolvedRef.
+ * This function simply propagates each callback as-is.
  */
 export function subscribeToAuthState(
   callback: (user: User | null) => void
 ): () => void {
-  return onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+  let cancelled = false;
+
+  const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+    if (cancelled) return;
+
     if (!firebaseUser) {
       callback(null);
       return;
     }
+
     const profile = await getUserProfile(firebaseUser.uid);
+    if (cancelled) return; // component may have unmounted during await
+
     // If profile missing or inactive, treat as signed out.
     // DO NOT call firebaseSignOut here — doing so triggers onAuthStateChanged
-    // again, which calls this callback again → infinite reload loop.
+    // again → callback fires again → infinite loop.
     if (!profile || profile.status !== USER_STATUS.ACTIVE) {
       callback(null);
       return;
     }
+
     callback(profile);
   });
+
+  return () => {
+    cancelled = true;
+    unsubscribe();
+  };
 }
