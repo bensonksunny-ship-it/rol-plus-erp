@@ -2,10 +2,41 @@
 
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
+import { collection, getDocs, query, where } from "firebase/firestore";
+import { db } from "@/services/firebase/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { signOut } from "@/services/firebase/auth.service";
 import { ROLES } from "@/config/constants";
+
+// ─── Alert count hook ─────────────────────────────────────────────────────────
+// Fetches the count of active alerts. Only runs for Admin/Super Admin roles.
+// Refreshes every 60 seconds. Errors are silently swallowed — never crash the layout.
+
+function useAlertCount(enabled: boolean): number {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    async function fetch() {
+      try {
+        const snap = await getDocs(
+          query(collection(db, "alerts"), where("status", "==", "active"))
+        );
+        setCount(snap.size);
+      } catch {
+        // silently ignore — layout must never break due to alert fetch failure
+      }
+    }
+
+    fetch();
+    const id = setInterval(fetch, 60_000);
+    return () => clearInterval(id);
+  }, [enabled]);
+
+  return count;
+}
 
 // ─── Nav config ───────────────────────────────────────────────────────────────
 
@@ -39,7 +70,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Audit Logs",   icon: "📋", href: "/dashboard/audit-logs",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Super Admin",  icon: "⚙",  href: "/dashboard/super-admin",   roles: [ROLES.SUPER_ADMIN] },
+  { label: "Centre Suite", icon: "⚙",  href: "/dashboard/super-admin",   roles: [ROLES.SUPER_ADMIN] },
 
   // ── Teacher: single entry point — all navigation is inside Faculty Suite ──
   { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",       roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
@@ -123,8 +154,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     return prefixes.some(p => p !== "/dashboard" && pathname.startsWith(p));
   }
 
-  const pageTitle = visibleNav.find(isActive)?.label ?? "Dashboard";
-  const initials  = user.displayName.charAt(0).toUpperCase();
+  const pageTitle  = visibleNav.find(isActive)?.label ?? "Dashboard";
+  const initials   = user.displayName.charAt(0).toUpperCase();
+  const canSeeAlerts = user.role === ROLES.SUPER_ADMIN || user.role === ROLES.ADMIN;
+  const alertCount = useAlertCount(canSeeAlerts);
 
   const bottomNav = BOTTOM_NAV_LABELS
     .map(label => visibleNav.find(i => i.label === label))
@@ -159,7 +192,17 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             <span style={s.mobileLogo}>ROL</span>
             <span style={s.mobilePageTitle}>{pageTitle}</span>
           </div>
-          <div style={s.mobileAvatar}>{initials}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {canSeeAlerts && (
+              <a href="/dashboard/alerts" style={s.alertBubble} aria-label={`${alertCount} active alerts`}>
+                🔔
+                <span style={{ ...s.alertBadge, background: alertCount > 0 ? "#16a34a" : "#9ca3af" }}>
+                  {alertCount}
+                </span>
+              </a>
+            )}
+            <div style={s.mobileAvatar}>{initials}</div>
+          </div>
         </header>
 
         {drawerOpen && <div style={s.drawerOverlay} onClick={() => setDrawerOpen(false)} />}
@@ -230,7 +273,17 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       <div style={s.rightPanel}>
         <header style={s.topbar}>
           <div style={s.topbarTitle}>{pageTitle}</div>
-          <span style={s.topbarUser}>{user.email}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            {canSeeAlerts && (
+              <a href="/dashboard/alerts" style={s.alertBubble} aria-label={`${alertCount} active alerts`}>
+                🔔
+                <span style={{ ...s.alertBadge, background: alertCount > 0 ? "#16a34a" : "#9ca3af" }}>
+                  {alertCount}
+                </span>
+              </a>
+            )}
+            <span style={s.topbarUser}>{user.email}</span>
+          </div>
         </header>
         <main style={s.main}>{children}</main>
       </div>
@@ -285,6 +338,10 @@ const s: Record<string, React.CSSProperties> = {
   drawerClose:         { background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "var(--color-text-secondary)", padding: 0, lineHeight: 1 },
   drawerNav:           { flex: 1, padding: "10px", display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" },
   drawerFooter:        { padding: "14px", borderTop: "1px solid var(--color-border)" },
+
+  // Alert bubble
+  alertBubble:         { position: "relative", display: "inline-flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, borderRadius: "50%", background: "var(--color-bg)", border: "1px solid var(--color-border)", textDecoration: "none", fontSize: 15, flexShrink: 0, cursor: "pointer" },
+  alertBadge:          { position: "absolute", top: -4, right: -4, minWidth: 18, height: 18, borderRadius: 99, fontSize: 10, fontWeight: 700, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px", lineHeight: 1, border: "2px solid var(--color-surface)" },
 
   // Bottom nav
   bottomNav:           { position: "fixed", bottom: 0, left: 0, right: 0, height: 60, background: "var(--color-surface)", borderTop: "1px solid var(--color-border)", display: "flex", zIndex: 100 },

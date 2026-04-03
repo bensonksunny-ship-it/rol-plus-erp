@@ -53,6 +53,7 @@ interface CenterStats {
   teacherName:    string;
   pendingFeeCount:number;
   revenue30d:     number;
+  growthPct:      number | null;   // % change in student count vs previous 30d period
 }
 
 interface SystemData {
@@ -280,6 +281,9 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
 
   // ── Per-center stats ─────────────────────────────────────────────────────────
   const centerStats: CenterStats[] = useMemo(() => {
+    // Growth windows: current = last 30 days, previous = 31–60 days ago
+    const days60ago = isoDaysAgo(60);
+
     return data.centers.map(center => {
       const cStudents     = data.students.filter(s => s.centerId === center.id);
       const activeCount   = cStudents.filter(s => s.status === "active").length;
@@ -299,6 +303,22 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
         .filter(t => t.centerId === center.id && t.date >= days30ago)
         .reduce((s, t) => s + t.amount, 0);
 
+      // Growth: students enrolled in current 30d vs previous 30d window
+      // Uses createdAt ISO string; falls back to null if no createdAt data
+      const studentsWithDate = cStudents.filter(s => !!s.createdAt);
+      let growthPct: number | null = null;
+      if (studentsWithDate.length > 0) {
+        const newThis = studentsWithDate.filter(s => s.createdAt >= days30ago).length;
+        const newPrev = studentsWithDate.filter(s => s.createdAt >= days60ago && s.createdAt < days30ago).length;
+        if (newPrev > 0) {
+          growthPct = Math.round(((newThis - newPrev) / newPrev) * 100);
+        } else if (newThis > 0) {
+          growthPct = 100; // any new students with zero previous = 100% growth
+        } else {
+          growthPct = 0;
+        }
+      }
+
       return {
         center,
         studentCount:    cStudents.length,
@@ -307,6 +327,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
         teacherName:     teacherNameMap[center.teacherUid] ?? "—",
         pendingFeeCount,
         revenue30d:      rev30,
+        growthPct,
       };
     }).sort((a, b) => (b.attendancePct ?? -1) - (a.attendancePct ?? -1));
   }, [data.centers, data.students, data.attendance, completedTx, teacherNameMap, days7ago, days30ago]);
@@ -385,7 +406,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
       {/* ── HEADER ── */}
       <div style={s.header}>
         <div>
-          <div style={s.headerTitle}>System Overview</div>
+          <div style={s.headerTitle}>Centre Suite</div>
           <div style={s.headerSub}>
             {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </div>
@@ -475,7 +496,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
         <table style={s.table}>
           <thead>
             <tr>
-              {["Centre", "Teacher", "Students", "Active", "7d Att%", "Pending Fees", "Rev (30d)", "Status"].map(h => (
+              {["Centre", "Teacher", "Students", "Growth", "Active", "7d Att%", "Pending Fees", "Rev (30d)", "Status"].map(h => (
                 <th key={h} style={s.th}>{h}</th>
               ))}
             </tr>
@@ -494,6 +515,18 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
                   </td>
                   <td style={s.td}>{cs.teacherName}</td>
                   <td style={{ ...s.td, textAlign: "center" }}>{cs.studentCount}</td>
+                  <td style={{ ...s.td, textAlign: "center" }}>
+                    {cs.growthPct === null ? (
+                      <span style={{ color: "#9ca3af" }}>—</span>
+                    ) : (
+                      <span style={{
+                        fontWeight: 700,
+                        color: cs.growthPct > 0 ? "#16a34a" : cs.growthPct < 0 ? "#dc2626" : "#9ca3af",
+                      }}>
+                        {cs.growthPct > 0 ? "▲" : cs.growthPct < 0 ? "▼" : ""}{Math.abs(cs.growthPct)}%
+                      </span>
+                    )}
+                  </td>
                   <td style={{ ...s.td, textAlign: "center" }}>{cs.activeCount}</td>
                   <td style={{ ...s.td, textAlign: "center" }}>
                     <span style={{ color: attColor, fontWeight: 700 }}>
@@ -511,7 +544,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
               );
             })}
             {centerStats.length === 0 && (
-              <tr><td colSpan={8} style={{ ...s.td, textAlign: "center", color: "#9ca3af" }}>No centres found.</td></tr>
+              <tr><td colSpan={9} style={{ ...s.td, textAlign: "center", color: "#9ca3af" }}>No centres found.</td></tr>
             )}
           </tbody>
         </table>
