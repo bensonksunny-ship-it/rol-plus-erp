@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/config/firebase";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuthContext } from "@/features/auth/AuthContext";
 import { ROLES } from "@/config/constants";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { getCenters } from "@/services/center/center.service";
@@ -29,12 +30,24 @@ export default function DashboardPage() {
 }
 
 function DashboardContent() {
-  const { user } = useAuth();
-  const [stats, setStats]     = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { user, loading: authLoading } = useAuthContext();
+  const router                         = useRouter();
+  const [stats, setStats]              = useState<Stats | null>(null);
+  const [loading, setLoading]          = useState(true);
   const today = new Date().toISOString().slice(0, 10);
 
+  // Redirect students before any admin UI renders
   useEffect(() => {
+    if (authLoading) return;
+    if (user?.role === ROLES.STUDENT) {
+      router.replace("/dashboard/student");
+    }
+  }, [authLoading, user, router]);
+
+  useEffect(() => {
+    // Only fetch admin stats once we know the user is not a student
+    if (authLoading || !user || user.role === ROLES.STUDENT) return;
+
     async function fetchStats() {
       try {
         // 1. Total students
@@ -72,9 +85,10 @@ function DashboardContent() {
     }
 
     fetchStats();
-  }, []);
+  }, [authLoading, user]);
 
-  if (!user) return null;
+  // Show nothing while auth resolves or while redirecting students
+  if (authLoading || !user || user.role === ROLES.STUDENT) return null;
 
   const cards = [
     { label: "Total Students",   value: stats?.totalStudents,   accent: "#4f46e5" },

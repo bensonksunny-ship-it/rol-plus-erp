@@ -46,6 +46,8 @@ export interface StudentUser extends UserBase {
   role: typeof ROLES.STUDENT;
   centerId: string;              // required — cannot be null for a student
   currentBalance: number;        // finance source of truth — required
+  studentID: string;             // auto-generated: ROL20260001 — system identifier
+  admissionNo: string | null;    // optional external/legacy admission number
   studentStatus: StudentStatus;
   deactivationReason: string | null;
   deactivationRequestedBy: string | null;  // uid of requesting teacher
@@ -94,6 +96,7 @@ export type User = StudentUser | TeacherUser | AdminUser;
 
 export interface Center {
   id: string;
+  centerCode: string;            // auto-generated: CTR001, CTR002… — never user-entered
   name: string;
   location: string;
   timeSlot: string;              // e.g. "Mon/Wed/Fri 17:00–18:30"

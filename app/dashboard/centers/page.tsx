@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { getCenters, createCenter, updateCenter } from "@/services/center/center.service";
+import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import type { Center } from "@/types";
+import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 
@@ -80,8 +82,10 @@ function DayChips({ selected, onChange }: { selected: Day[]; onChange: (d: Day[]
 
 // ─── View Modal ────────────────────────────────────────────────────────────────
 
-function ViewModal({ center, onClose }: { center: Center; onClose: () => void }) {
+function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () => void; teachers: TeacherUser[] }) {
   const raw = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
+  const teacher = teachers.find(t => t.uid === center.teacherUid);
+  const teacherLabel = teacher ? `${teacher.displayName} (${teacher.email})` : center.teacherUid || "-";
   return (
     <div style={modalStyles.overlay} onClick={onClose}>
       <div style={modalStyles.box} onClick={e => e.stopPropagation()}>
@@ -90,7 +94,8 @@ function ViewModal({ center, onClose }: { center: Center; onClose: () => void })
           <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
         </div>
         <div style={modalStyles.body}>
-          <ViewRow label="Teacher UID"  value={center.teacherUid || "-"} mono />
+          <ViewRow label="Center Code"  value={(center as Center & { centerCode?: string }).centerCode || "-"} mono />
+          <ViewRow label="Teacher"      value={teacherLabel} />
           <ViewRow label="Days"         value={raw.daysOfWeek?.join(", ") || center.timeSlot || "-"} />
           <ViewRow label="Start Time"   value={raw.startTime  || "-"} />
           <ViewRow label="End Time"     value={raw.endTime    || "-"} />
@@ -122,6 +127,7 @@ export default function CentersPage() {
 
 function CentersContent() {
   const [centers, setCenters]       = useState<Center[]>([]);
+  const [teachers, setTeachers]     = useState<TeacherUser[]>([]);
   const [loading, setLoading]       = useState(true);
   const [showForm, setShowForm]     = useState(false);
   const [editTarget, setEditTarget] = useState<Center | null>(null);
@@ -133,8 +139,12 @@ function CentersContent() {
 
   async function fetchCenters() {
     try {
-      const data = await getCenters();
+      const [data, teacherList] = await Promise.all([
+        getCenters(),
+        getTeachers(),
+      ]);
       setCenters(data);
+      setTeachers(teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName)));
     } catch (err) {
       console.error("Failed to fetch centers:", err);
     } finally {
@@ -233,7 +243,7 @@ function CentersContent() {
   return (
     <div>
       <ToastContainer toasts={toasts} onRemove={remove} />
-      {viewTarget && <ViewModal center={viewTarget} onClose={() => setViewTarget(null)} />}
+      {viewTarget && <ViewModal center={viewTarget} onClose={() => setViewTarget(null)} teachers={teachers} />}
 
       {/* Header */}
       <div style={styles.header}>
@@ -254,9 +264,19 @@ function CentersContent() {
               <input name="name" value={form.name} onChange={handleChange} required
                 placeholder="e.g. Koramangala Center" style={formStyles.input} />
             </FormField>
-            <FormField label="Teacher UID" required>
-              <input name="teacherUid" value={form.teacherUid} onChange={handleChange} required
-                placeholder="UID of assigned teacher" style={formStyles.input} />
+            <FormField label="Assigned Teacher" required>
+              <select
+                name="teacherUid"
+                value={form.teacherUid}
+                onChange={handleChange}
+                required
+                style={formStyles.input}
+              >
+                <option value="">— Select a teacher —</option>
+                {teachers.map(t => (
+                  <option key={t.uid} value={t.uid}>{t.displayName} ({t.email})</option>
+                ))}
+              </select>
             </FormField>
             <FormField label="Status">
               <select name="status" value={form.status} onChange={handleChange} style={formStyles.input}>
@@ -301,9 +321,10 @@ function CentersContent() {
           <table style={styles.table}>
             <thead>
               <tr>
+                <th style={styles.th}>Code</th>
                 <th style={styles.th}>Name</th>
+                <th style={styles.th}>Teacher</th>
                 <th style={styles.th}>Schedule</th>
-                <th style={styles.th}>Teacher UID</th>
                 <th style={styles.th}>Status</th>
                 <th style={styles.th}>Actions</th>
               </tr>
@@ -311,6 +332,7 @@ function CentersContent() {
             <tbody>
               {centers.map((center, i) => (
                 <CenterRow key={center.id} center={center} index={i}
+                  teachers={teachers}
                   onView={() => setViewTarget(center)}
                   onEdit={() => openEdit(center)} />
               ))}
@@ -324,16 +346,25 @@ function CentersContent() {
 
 // ─── Row ───────────────────────────────────────────────────────────────────────
 
-function CenterRow({ center, index, onView, onEdit }: {
-  center: Center; index: number; onView: () => void; onEdit: () => void;
+function CenterRow({ center, index, teachers, onView, onEdit }: {
+  center: Center; index: number; teachers: TeacherUser[]; onView: () => void; onEdit: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const raw = center as Center & { centerCode?: string };
+  const teacher = teachers.find(t => t.uid === center.teacherUid);
   return (
     <tr style={{ ...(index % 2 === 0 ? styles.rowEven : styles.rowOdd), ...(hover ? styles.rowHover : {}) }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      <td style={{ ...styles.td, ...styles.mono }}>
+        <span style={styles.codeChip}>{raw.centerCode || "-"}</span>
+      </td>
       <td style={styles.tdBold}>{center.name}</td>
+      <td style={styles.td}>
+        {teacher
+          ? <span>{teacher.displayName}</span>
+          : <span style={{ color: "#9ca3af", fontSize: 12 }}>Unassigned</span>}
+      </td>
       <td style={styles.td}>{center.timeSlot || "-"}</td>
-      <td style={{ ...styles.td, ...styles.mono }}>{center.teacherUid || "-"}</td>
       <td style={styles.td}><StatusBadge status={center.status} /></td>
       <td style={styles.td}>
         <div style={actionStyles.row}>
@@ -361,6 +392,7 @@ const styles: Record<string, React.CSSProperties> = {
   rowOdd:      { background: "#fafafa" },
   rowHover:    { background: "#f0f4ff" },
   mono:        { fontFamily: "monospace", fontSize: 12, color: "var(--color-text-secondary)" },
+  codeChip:    { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4, fontWeight: 600 },
   badge:       { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" },
 };
 

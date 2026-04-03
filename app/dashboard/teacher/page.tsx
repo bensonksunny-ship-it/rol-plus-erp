@@ -1,683 +1,1203 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { collection, getDocs, doc, getDoc, query, where } from "firebase/firestore";
-import { db } from "@/config/firebase";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  collection,
+  getDocs,
+  query,
+  where,
+} from "firebase/firestore";
+import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuthContext } from "@/features/auth/AuthContext";
+import { useCentreAccess } from "@/hooks/useCentreAccess";
+import { getCenterById } from "@/services/center/center.service";
 import {
-  getUnits,
-  getStudentSyllabus,
-  getStudentProgress,
-} from "@/services/syllabus/syllabus.service";
-import type { SyllabusUnit, StudentProgress, StudentSyllabus } from "@/types/syllabus";
+  getAttendanceByCentreDate,
+  saveCentreAttendance,
+} from "@/services/attendance/attendance.service";
+import {
+  getLessonsForStudent,
+  getProgressByStudent,
+  calcOverallPercent,
+  calcLessonPercent,
+  addAttempt,
+  markItemCompleted,
+  isItemUnlocked,
+} from "@/services/lesson/lesson.service";
+import type { Center } from "@/types";
+import type { StudentUser } from "@/types";
+import { isTeacher } from "@/types";
+import type { Lesson, LessonItem, StudentLessonProgress } from "@/types/lesson";
+import type { Role } from "@/types";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
-
-interface TeacherInfo {
-  name:      string;
-  centerIds: string[];
-}
+// ─── Local types ──────────────────────────────────────────────────────────────
 
 interface StudentRow {
-  uid:       string;
-  name:      string;
-  course:    string;
-  centerId:  string;
-  status:    string;
-  pct:       number;           // 0–100 overall progress
-  trackStatus: "on_track" | "behind" | "completed" | "not_started";
+  uid:        string;
+  name:       string;
+  instrument: string;
+  status:     string;
+  centerId:   string;
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
-function computeOverallPct(
-  assignment:   StudentSyllabus | null,
-  progressList: StudentProgress[],
-  allUnits:     SyllabusUnit[]
-): number {
-  const assignedIds = assignment?.unitIds ?? [];
-  const units = assignedIds.length > 0
-    ? allUnits.filter(u => assignedIds.includes(u.id))
-    : allUnits;
-
-  if (units.length === 0) return 0;
-
-  const progressMap: Record<string, StudentProgress> = {};
-  progressList.forEach(p => { progressMap[p.unitId] = p; });
-
-  let totalItems = 0;
-  let doneItems  = 0;
-
-  units.forEach(unit => {
-    const p            = progressMap[unit.id];
-    const concepts     = unit.concepts?.length  ?? 0;
-    const exercises    = unit.exercises?.length ?? 0;
-    const total        = concepts + exercises;
-
-    if (total === 0) {
-      totalItems += 1;
-      if (p?.status === "completed") doneItems += 1;
-    } else {
-      totalItems += total;
-      doneItems  += (p?.completedConcepts?.length  ?? 0)
-                  + (p?.completedExercises?.length ?? 0);
-    }
-  });
-
-  return totalItems === 0 ? 0 : Math.round((doneItems / totalItems) * 100);
+interface AttendanceState {
+  [studentUid: string]: "present" | "absent";
 }
 
-function trackStatus(pct: number, status: string): StudentRow["trackStatus"] {
-  if (status === "inactive") return "behind";
-  if (pct === 100)           return "completed";
-  if (pct < 40)              return "behind";
-  return "on_track";
+interface StudentProgress {
+  uid:        string;
+  name:       string;
+  instrument: string;
+  pct:        number;
+  balance:    number;
+  status:     string;
 }
 
-// ─── Sub-components ────────────────────────────────────────────────────────────
-
-function ProgressBar({ pct }: { pct: number }) {
-  const color = pct === 100 ? "#16a34a" : pct < 40 ? "#dc2626" : "#4f46e5";
-  return (
-    <div style={styles.barTrack}>
-      <div style={{ ...styles.barFill, width: `${pct}%`, background: color }} />
-    </div>
-  );
+interface WeekDay {
+  date:    string;   // YYYY-MM-DD
+  label:   string;   // "Mon"
+  pct:     number | null;
 }
 
-const TRACK_STYLES: Record<string, React.CSSProperties> = {
-  completed:   { background: "#dcfce7", color: "#16a34a" },
-  on_track:    { background: "#dbeafe", color: "#1d4ed8" },
-  behind:      { background: "#fee2e2", color: "#dc2626" },
-  not_started: { background: "#f3f4f6", color: "#6b7280" },
-};
-
-const STATUS_STYLES: Record<string, React.CSSProperties> = {
-  active:   { background: "#dcfce7", color: "#16a34a" },
-  inactive: { background: "#f3f4f6", color: "#6b7280" },
-};
-
-function Badge({ label, styleMap, value }: { label: string; styleMap: Record<string, React.CSSProperties>; value: string }) {
-  return (
-    <span style={{ ...styles.badge, ...(styleMap[value] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
-      {label}
-    </span>
-  );
+interface DashboardInsights {
+  teacherScore:      number;
+  scoreChange:       number;   // vs last week average
+  weeklyTrend:       WeekDay[];
+  studentProgress:   StudentProgress[];
+  presentCount:      number;
+  absentCount:       number;
+  pendingFeeCount:   number;
+  deactivationCount: number;
 }
 
-function SummaryCard({ label, value, accent }: { label: string; value: string; accent: string }) {
-  return (
-    <div style={styles.summaryCard}>
-      <div style={{ ...styles.summaryAccent, background: accent }} />
-      <div style={styles.summaryBody}>
-        <div style={styles.summaryLabel}>{label}</div>
-        <div style={{ ...styles.summaryValue, color: accent }}>{value}</div>
-      </div>
-    </div>
-  );
-}
+type View =
+  | { type: "overview" }
+  | { type: "attendance" }
+  | { type: "students" }
+  | { type: "progress"; student: StudentRow };
 
-// ─── Page ──────────────────────────────────────────────────────────────────────
+// ─── Page shell ───────────────────────────────────────────────────────────────
 
 export default function TeacherDashboardPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.ADMIN, ROLES.SUPER_ADMIN]}>
       <TeacherDashboardContent />
     </ProtectedRoute>
   );
 }
 
-function TeacherDashboardContent() {
-  const { user }                      = useAuth();
-  const [teacherInfo, setTeacherInfo] = useState<TeacherInfo | null>(null);
-  const [students, setStudents]       = useState<StudentRow[]>([]);
-  const [loading, setLoading]         = useState(true);
+// ─── Main content ─────────────────────────────────────────────────────────────
 
-  const teacherUid = user?.uid ?? "";
+function TeacherDashboardContent() {
+  const { user } = useAuthContext();
+  const { isAllowed, isTeacherRole } = useCentreAccess(); // isAllowed guards per-centre access
+
+  // Safely extract centerIds using the type guard — TeacherUser has centerIds: string[]
+  // AdminUser has centerIds?: never so we must not access it without narrowing first
+  // Serialised as a string so effects re-run when the list actually changes
+  const centerIdsKey: string = user && isTeacher(user) ? user.centerIds.join(",") : "";
+  const centerIds: string[]  = useMemo(
+    () => centerIdsKey ? centerIdsKey.split(",") : [],
+    [centerIdsKey],
+  );
+
+  const [centers, setCenters]               = useState<Center[]>([]);
+  const [selectedCenter, setSelectedCenter] = useState<string>("");
+  const [view, setView]                     = useState<View>({ type: "overview" });
+  const [loading, setLoading]               = useState(true);
+
+  // Loaded per-center
+  const [students, setStudents]             = useState<StudentRow[]>([]);
+  const [attendancePct, setAttendancePct]   = useState<number | null>(null);
+  const [lowProgressCount, setLowProgressCount] = useState<number | null>(null);
+  const [centerDataLoading, setCenterDataLoading] = useState(false);
+  const [insights, setInsights]             = useState<DashboardInsights | null>(null);
+
+  // Stable date string — computed once on mount, never changes reference
+  const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
+  // ── Load centers the teacher/admin is assigned to ─────────────────────────
 
   useEffect(() => {
-    if (!teacherUid) return;
+    if (!user) return;
 
-    async function load() {
+    // Teacher with no assigned centres yet — show empty state
+    if (isTeacherRole && centerIds.length === 0) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+
+    async function loadCenters() {
       try {
-        // 1. Fetch teacher doc for name + centerIds
-        const teacherSnap = await getDoc(doc(db, "users", teacherUid));
-        let centerIds: string[] = [];
-        if (teacherSnap.exists()) {
-          const d = teacherSnap.data();
-          setTeacherInfo({
-            name:      d.name ?? d.displayName ?? "—",
-            centerIds: d.centerIds ?? [],
-          });
-          centerIds = d.centerIds ?? [];
+        let mine: Center[];
+        if (centerIds.length > 0) {
+          // Fetch each assigned centre by ID — respects teacher.centerIds exactly
+          const results = await Promise.allSettled(centerIds.map(id => getCenterById(id)));
+          mine = results
+            .filter((r): r is PromiseFulfilledResult<Center> => r.status === "fulfilled")
+            .map(r => r.value);
+        } else {
+          // Admin with no specific centres — fetch all centres
+          const snap = await getDocs(collection(db, "centers"));
+          mine = snap.docs.map(d => ({ id: d.id, ...d.data() } as Center));
         }
-
-        // 2. Fetch all students (filter by teacher's centers)
-        const studentsSnap = await getDocs(
-          query(collection(db, "users"), where("role", "==", "student"))
-        );
-        const rawStudents = studentsSnap.docs
-          .map(d => ({ uid: d.id, ...d.data() } as Record<string, unknown> & { uid: string }))
-          .filter(s =>
-            centerIds.length === 0 || centerIds.includes(s.centerId as string)
-          );
-
-        // 3. Fetch shared unit master once
-        const allUnits = await getUnits();
-
-        // 4. For each student, fetch syllabus + progress in parallel
-        const rows: StudentRow[] = await Promise.all(
-          rawStudents.map(async (s) => {
-            const [assignment, progressList] = await Promise.all([
-              getStudentSyllabus(s.uid),
-              getStudentProgress(s.uid),
-            ]);
-
-            const pct   = computeOverallPct(assignment, progressList, allUnits);
-            const track = trackStatus(pct, (s.status as string) ?? "active");
-
-            return {
-              uid:         s.uid,
-              name:        (s.name as string)     ?? "—",
-              course:      (s.course as string)   ?? "—",
-              centerId:    (s.centerId as string)  ?? "—",
-              status:      (s.status as string)   ?? "active",
-              pct,
-              trackStatus: track,
-            };
-          })
-        );
-
-        // Sort: behind first, then by pct asc
-        rows.sort((a, b) => {
-          const order: Record<string, number> = { behind: 0, not_started: 1, on_track: 2, completed: 3 };
-          const diff = (order[a.trackStatus] ?? 2) - (order[b.trackStatus] ?? 2);
-          return diff !== 0 ? diff : a.pct - b.pct;
-        });
-
-        setStudents(rows);
+        setCenters(mine);
+        // Select first centre by default (teacher.centerIds[0])
+        if (mine.length > 0) {
+          setSelectedCenter(prev => prev && mine.some(c => c.id === prev) ? prev : mine[0].id);
+        }
       } catch (err) {
-        console.error("Failed to load teacher dashboard:", err);
+        console.error("Failed to load centers:", err);
       } finally {
         setLoading(false);
       }
     }
+    loadCenters();
+  // Re-run when uid changes OR when centerIds list changes (firebase may populate later)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid, centerIdsKey]);
 
-    load();
-  }, [teacherUid]);
+  // ── Load data for the selected center ────────────────────────────────────
 
-  // ── Stats ───────────────────────────────────────────────────────────────────
+  const loadCenterData = useCallback(async (centerId: string) => {
+    if (!centerId || !user) return;
 
-  const total      = students.length;
-  const inProgress = students.filter(s => s.trackStatus === "on_track").length;
-  const completed  = students.filter(s => s.trackStatus === "completed").length;
+    // Clear stale data immediately so previous centre never bleeds through
+    setStudents([]);
+    setAttendancePct(null);
+    setLowProgressCount(null);
+    setInsights(null);
+    setCenterDataLoading(true);
 
-  // ── Alerts ──────────────────────────────────────────────────────────────────
+    try {
+      // ── 1. Students for this centre ─────────────────────────────────────
+      // Two-field equality query — uses the deployed composite index
+      // (role ASC + centerId ASC). Same pattern used in the attendance page.
+      const studentSnap = await getDocs(query(
+        collection(db, "users"),
+        where("role",     "==", "student"),
+        where("centerId", "==", centerId),
+      ));
 
-  const lowProgress = students.filter(s => s.pct < 40 && s.trackStatus !== "completed");
-  const inactive    = students.filter(s => s.status === "inactive");
+      // Client-side filter: role === "student" AND status active.
+      // Fallback: old docs may only have studentStatus (written before dual-write fix).
+      // Mirror the same fallback chain used in admin students page fetchData.
+      const rows: StudentRow[] = studentSnap.docs
+        .filter(d => {
+          const u = d.data();
+          const effectiveStatus = (u.status ?? u.studentStatus ?? "active") as string;
 
-  if (loading) {
-    return <div style={styles.stateRow}>Loading dashboard…</div>;
+          // Safety check: warn and skip if student.centerId does not match queried centerId.
+          // This catches data inconsistencies (e.g. student assigned to wrong centre in Firestore).
+          if (u.centerId && u.centerId !== centerId) {
+            console.warn(
+              `[Faculty Suite] Student ${d.id} has centerId "${u.centerId}"` +
+              ` but was returned in query for centerId "${centerId}" — skipping.`
+            );
+            return false;
+          }
+
+          return u.role === "student" && effectiveStatus === "active";
+        })
+        .map(d => {
+          const u = d.data();
+          return {
+            uid:        d.id,
+            name:       (u.displayName ?? u.name ?? "—") as string,
+            instrument: (u.instrument ?? "—") as string,
+            status:     ((u.status ?? u.studentStatus ?? "active") as string),
+            centerId:   (u.centerId ?? "") as string,
+          };
+        });
+      setStudents(rows);
+
+      // ── 2. Today's attendance (centre-based) ────────────────────────────
+      // Use rows.length (enrolled students) as denominator, not todayRecs.length.
+      // todayRecs only contains students already marked — using it as denominator
+      // inflates the percentage (5 marked present out of 5 marked = 100%, not 5/10).
+      // Same logic as attendance page summary: total = students.length.
+      const allTodayRecs = await getAttendanceByCentreDate(centerId, today);
+      // Safety: skip attendance records whose centerId doesn't match — these are stale
+      // records from a previous centre assignment before data was corrected.
+      const todayRecs = allTodayRecs.filter(r => {
+        if ((r as unknown as Record<string, unknown>).centerId !== centerId) {
+          console.warn(
+            `[Faculty Suite] Attendance record ${r.id} has centerId mismatch — skipping.`
+          );
+          return false;
+        }
+        return true;
+      });
+      const presentCnt = todayRecs.filter(r => r.status === "present").length;
+      const absentCnt  = todayRecs.filter(r => r.status === "absent").length;
+      const attTotal   = rows.length;   // enrolled students, not marked records
+      const todayPct   = attTotal > 0 ? Math.round((presentCnt / attTotal) * 100) : null;
+      setAttendancePct(todayPct);
+
+      // ── 3. Per-student progress (parallel, best-effort) ─────────────────
+      const progressList: StudentProgress[] = await Promise.all(
+        rows.map(async st => {
+          try {
+            const [prog, { lessons }] = await Promise.all([
+              getProgressByStudent(st.uid),
+              getLessonsForStudent(st.uid),
+            ]);
+            const allItems = lessons.flatMap(l => l.items);
+            const pm: Record<string, StudentLessonProgress> = {};
+            prog.forEach(p => { pm[p.itemId] = p; });
+            const pct = calcOverallPercent(allItems, pm);
+            const raw = studentSnap.docs.find(d => d.id === st.uid)?.data();
+            return {
+              uid: st.uid, name: st.name, instrument: st.instrument,
+              pct, balance: Number(raw?.currentBalance ?? 0), status: st.status,
+            };
+          } catch {
+            return { uid: st.uid, name: st.name, instrument: st.instrument, pct: 0, balance: 0, status: st.status };
+          }
+        }),
+      );
+
+      const lowCount = progressList.filter(p => p.pct < 40).length;
+      setLowProgressCount(lowCount);
+
+      // ── 4. Weekly attendance trend (last 7 days) ────────────────────────
+      // Query all attendance for this centre, filter by date client-side
+      const allAttSnap = await getDocs(
+        query(collection(db, "attendance"), where("centerId", "==", centerId)),
+      );
+      const allAttRecs = allAttSnap.docs.map(d => d.data() as { date?: string; status?: string });
+
+      const weekDays: WeekDay[] = Array.from({ length: 7 }, (_, i) => {
+        const d    = new Date();
+        d.setDate(d.getDate() - (6 - i));
+        const iso  = d.toISOString().slice(0, 10);
+        const label = d.toLocaleDateString("en-IN", { weekday: "short" });
+        const recs  = allAttRecs.filter(r => r.date === iso);
+        const prs   = recs.filter(r => r.status === "present").length;
+        const pct   = recs.length > 0 ? Math.round((prs / recs.length) * 100) : null;
+        return { date: iso, label, pct };
+      });
+
+      // ── 5. Alerts: pending fees + deactivation requests ─────────────────
+      const pendingFeeCount = progressList.filter(p => p.balance > 0).length;
+      // Count deactivation requests from THIS centre's students only.
+      // studentSnap is already scoped to centerId so this is correct.
+      // Admin writes status: "deactivation_requested" (not a separate field).
+      const deactivationCount = studentSnap.docs.filter(d => {
+        const data = d.data();
+        const effectiveStatus = (data.status ?? data.studentStatus ?? "") as string;
+        return effectiveStatus === "deactivation_requested";
+      }).length;
+
+      // ── 6. Teacher score (0–100) ────────────────────────────────────────
+      // Weighted: attendance(40%) + avg progress(40%) + consistency(20%)
+      const attScore   = todayPct ?? 0;                              // 0–100
+      const avgPct     = progressList.length > 0
+        ? progressList.reduce((s, p) => s + p.pct, 0) / progressList.length
+        : 0;                                                         // 0–100
+      const markedDays = weekDays.filter(d => d.pct !== null).length;
+      const consistency = Math.round((markedDays / 7) * 100);       // 0–100
+      const teacherScore = Math.round(attScore * 0.4 + avgPct * 0.4 + consistency * 0.2);
+
+      // Score change: compare today's score vs the average of the previous 6 days
+      const prevDayScores = weekDays.slice(0, 6).map(d => d.pct ?? 0);
+      const prevAvg = prevDayScores.length > 0
+        ? prevDayScores.reduce((a, b) => a + b, 0) / prevDayScores.length
+        : 0;
+      const scoreChange = Math.round(attScore - prevAvg);
+
+      setInsights({
+        teacherScore, scoreChange, weeklyTrend: weekDays,
+        studentProgress: progressList,
+        presentCount: presentCnt, absentCount: absentCnt,
+        pendingFeeCount, deactivationCount,
+      });
+    } catch (err) {
+      console.error("loadCenterData error:", err);
+    } finally {
+      setCenterDataLoading(false);
+    }
+  // today is stable (useMemo []); user.uid is the meaningful identity dep
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid, today]);
+
+  useEffect(() => {
+    if (selectedCenter) loadCenterData(selectedCenter);
+  }, [selectedCenter, loadCenterData]);
+
+  // ── Guards ────────────────────────────────────────────────────────────────
+
+  if (loading) return <div style={s.center}>Loading Faculty Suite…</div>;
+
+  if (centers.length === 0) {
+    return (
+      <div style={s.emptyState}>
+        {isTeacherRole
+          ? "You have not been assigned to any centre yet. Contact your administrator."
+          : "No centres found."}
+      </div>
+    );
   }
 
-  return (
-    <div>
-
-      {/* ── Teacher Info ──────────────────────────────────────────────────── */}
-      <div style={styles.header}>
-        <h1 style={styles.heading}>Teacher Dashboard</h1>
+  // Hard block: teacher somehow navigated to a centre outside their list
+  if (selectedCenter && isTeacherRole && !isAllowed(selectedCenter)) {
+    return (
+      <div style={{ ...s.emptyState, color: "#dc2626" }}>
+        🚫 Access Denied — you are not assigned to this centre.
       </div>
+    );
+  }
 
-      {teacherInfo && (
-        <div style={styles.infoCard}>
-          <div style={styles.avatar}>{teacherInfo.name.charAt(0).toUpperCase()}</div>
-          <div style={styles.infoBody}>
-            <div style={styles.infoName}>{teacherInfo.name}</div>
-            <div style={styles.infoMeta}>
-              {teacherInfo.centerIds.length === 0 ? (
-                <span style={styles.infoChip}>No centers assigned</span>
-              ) : (
-                teacherInfo.centerIds.map(id => (
-                  <span key={id} style={styles.infoChip}>{id}</span>
-                ))
-              )}
-            </div>
+  const selectedCentreObj = centers.find(c => c.id === selectedCenter);
+  const centerName = selectedCentreObj?.name ?? selectedCenter;
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
+  return (
+    <div style={s.page}>
+
+      {/* ── Top Bar ── */}
+      <div style={s.topBar}>
+        <div style={s.topBarLeft}>
+          <div style={s.teacherName}>{user?.displayName}</div>
+          <div style={s.todayDate}>
+            {new Date().toLocaleDateString("en-IN", {
+              weekday: "long", day: "numeric", month: "long", year: "numeric",
+            })}
           </div>
         </div>
-      )}
-
-      {/* ── Quick Stats ───────────────────────────────────────────────────── */}
-      <div style={styles.summaryGrid}>
-        <SummaryCard label="Total Students"    value={String(total)}      accent="#4f46e5" />
-        <SummaryCard label="On Track"          value={String(inProgress)} accent="#1d4ed8" />
-        <SummaryCard label="Completed"         value={String(completed)}  accent="#16a34a" />
-        <SummaryCard label="Need Attention"    value={String(lowProgress.length)} accent="#dc2626" />
-      </div>
-
-      {/* ── Alerts ───────────────────────────────────────────────────────── */}
-      {(lowProgress.length > 0 || inactive.length > 0) && (
-        <div style={styles.alertsSection}>
-          {lowProgress.length > 0 && (
-            <div style={styles.alertCard}>
-              <div style={styles.alertHeader}>
-                <span style={styles.alertDot} />
-                <span style={styles.alertTitle}>Low Progress (below 40%)</span>
-                <span style={styles.alertCount}>{lowProgress.length}</span>
-              </div>
-              <div style={styles.alertList}>
-                {lowProgress.map(s => (
-                  <div key={s.uid} style={styles.alertRow}>
-                    <span style={styles.alertName}>{s.name}</span>
-                    <span style={styles.alertCourse}>{s.course}</span>
-                    <div style={styles.alertBarWrap}>
-                      <ProgressBar pct={s.pct} />
-                    </div>
-                    <span style={styles.alertPct}>{s.pct}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {inactive.length > 0 && (
-            <div style={{ ...styles.alertCard, borderColor: "#d1d5db" }}>
-              <div style={styles.alertHeader}>
-                <span style={{ ...styles.alertDot, background: "#6b7280" }} />
-                <span style={styles.alertTitle}>Inactive Students</span>
-                <span style={{ ...styles.alertCount, background: "#f3f4f6", color: "#374151" }}>
-                  {inactive.length}
-                </span>
-              </div>
-              <div style={styles.alertList}>
-                {inactive.map(s => (
-                  <div key={s.uid} style={styles.alertRow}>
-                    <span style={styles.alertName}>{s.name}</span>
-                    <span style={styles.alertCourse}>{s.course}</span>
-                    <Badge label="Inactive" styleMap={STATUS_STYLES} value="inactive" />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+        {/* Centre badge / count on the right */}
+        <div style={s.topBarRight}>
+          <span style={s.centerBadge}>
+            🏫 {centers.length} {centers.length === 1 ? "Centre" : "Centres"}
+          </span>
         </div>
+      </div>
+
+      {/* ── Centre Tab Bar (shown for all counts; tabs only clickable when > 1) ── */}
+      <div style={s.tabBar}>
+        {centers.map(c => (
+          <button
+            key={c.id}
+            style={{
+              ...s.tab,
+              ...(c.id === selectedCenter ? s.tabActive : {}),
+            }}
+            onClick={() => {
+              if (c.id !== selectedCenter) {
+                setSelectedCenter(c.id);
+                setView({ type: "overview" });
+              }
+            }}
+          >
+            {c.name}
+            {c.id === selectedCenter && centerDataLoading && (
+              <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.6 }}>…</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Back button ── */}
+      {view.type !== "overview" && (
+        <button style={s.backBtn} onClick={() => setView({ type: "overview" })}>
+          ← Back to Overview
+        </button>
       )}
 
-      {/* ── Student Overview Table ────────────────────────────────────────── */}
-      <div style={styles.sectionTitle}>Student Overview</div>
+      {/* ── Views ── */}
+      {view.type === "overview" && (
+        centerDataLoading
+          ? <div style={{ ...s.center, paddingTop: 64 }}>Loading centre data…</div>
+          : <OverviewView
+              teacherName={user?.displayName ?? "Teacher"}
+              centerId={selectedCenter}
+              centerName={centerName}
+              today={today}
+              students={students}
+              attendancePct={attendancePct}
+              lowProgressCount={lowProgressCount}
+              insights={insights}
+              onMarkAttendance={() => setView({ type: "attendance" })}
+              onViewStudents={() => setView({ type: "students" })}
+              onViewProgress={st => setView({ type: "progress", student: st })}
+              onRefresh={() => loadCenterData(selectedCenter)}
+            />
+      )}
 
-      <div style={styles.tableWrapper}>
-        {students.length === 0 ? (
-          <div style={styles.emptyState}>No students found for your centers.</div>
-        ) : (
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Student</th>
-                <th style={styles.th}>Course</th>
-                <th style={styles.th}>Center</th>
-                <th style={styles.th}>Progress</th>
-                <th style={styles.th}>Status</th>
-                <th style={styles.th}>Track</th>
-              </tr>
-            </thead>
-            <tbody>
-              {students.map((s, i) => (
-                <StudentTableRow key={s.uid} student={s} index={i} />
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {view.type === "attendance" && (
+        <AttendanceView
+          centerId={selectedCenter}
+          date={today}
+          students={students}
+          markedBy={user?.uid ?? ""}
+          onDone={() => { setView({ type: "overview" }); loadCenterData(selectedCenter); }}
+        />
+      )}
+
+      {view.type === "students" && (
+        <StudentsView
+          students={students}
+          onViewProgress={st => setView({ type: "progress", student: st })}
+        />
+      )}
+
+      {view.type === "progress" && (
+        <ProgressView
+          student={view.student}
+          teacherUid={user?.uid ?? ""}
+          teacherRole={(user?.role ?? ROLES.TEACHER) as Role}
+        />
+      )}
 
     </div>
   );
 }
 
-// ─── Student Table Row ─────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// OVERVIEW
+// ═══════════════════════════════════════════════════════════════════════════════
 
-function StudentTableRow({ student: s, index }: { student: StudentRow; index: number }) {
-  const [hover, setHover] = useState(false);
+function OverviewView({
+  teacherName, centerId, centerName, today,
+  students, attendancePct, lowProgressCount, insights,
+  onMarkAttendance, onViewStudents, onViewProgress, onRefresh,
+}: {
+  teacherName:      string;
+  centerId:         string;
+  centerName:       string;
+  today:            string;
+  students:         StudentRow[];
+  attendancePct:    number | null;
+  lowProgressCount: number | null;
+  insights:         DashboardInsights | null;
+  onMarkAttendance: () => void;
+  onViewStudents:   () => void;
+  onViewProgress:   (st: StudentRow) => void;
+  onRefresh:        () => void;
+}) {
+  void centerId; void onRefresh; // kept for future use
 
-  const rowBase  = index % 2 === 0 ? styles.rowEven : styles.rowOdd;
-  const rowStyle: React.CSSProperties = { ...rowBase, ...(hover ? styles.rowHover : {}) };
+  const score       = insights?.teacherScore ?? null;
+  const scoreChange = insights?.scoreChange  ?? 0;
+  const trend       = insights?.weeklyTrend  ?? [];
 
-  const trackLabel: Record<string, string> = {
-    completed:   "Completed",
-    on_track:    "On Track",
-    behind:      "Behind",
-    not_started: "Not Started",
-  };
+  // Top / bottom 3 students by progress
+  const sorted      = [...(insights?.studentProgress ?? [])].sort((a,b) => b.pct - a.pct);
+  const top3        = sorted.slice(0, 3);
+  const bottom3     = sorted.slice(-3).reverse();
+
+  // Alert list
+  const alerts: { icon: string; msg: string; color: string }[] = [];
+  if (attendancePct === null)
+    alerts.push({ icon: "📋", msg: "Attendance not marked today.", color: "#b45309" });
+  if ((lowProgressCount ?? 0) > 0)
+    alerts.push({ icon: "📉", msg: `${lowProgressCount} student(s) below 40% progress.`, color: "#dc2626" });
+  if ((insights?.pendingFeeCount ?? 0) > 0)
+    alerts.push({ icon: "💰", msg: `${insights!.pendingFeeCount} student(s) have pending fees.`, color: "#7c3aed" });
+  if ((insights?.deactivationCount ?? 0) > 0)
+    alerts.push({ icon: "⚠️", msg: `${insights!.deactivationCount} deactivation request(s) pending.`, color: "#dc2626" });
 
   return (
-    <tr
-      style={rowStyle}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      <td style={styles.td}>
-        <div style={styles.studentCell}>
-          <span style={styles.studentInitial}>{s.name.charAt(0).toUpperCase()}</span>
-          <span style={styles.studentName}>{s.name}</span>
+    <div>
+
+      {/* ── HERO ── */}
+      <div style={{
+        background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
+        borderRadius: 14, padding: "24px 28px", marginBottom: 20,
+        color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16,
+      }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 2 }}>
+            Welcome, {teacherName} 👋
+          </div>
+          <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>
+            {centerName} · {new Date(today + "T12:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {attendancePct === null && (
+              <span style={{ background: "#fef9c3", color: "#b45309", borderRadius: 99, padding: "3px 12px", fontSize: 12, fontWeight: 700 }}>
+                📋 Attendance not marked today
+              </span>
+            )}
+          </div>
         </div>
-      </td>
-      <td style={styles.td}>{s.course}</td>
-      <td style={{ ...styles.td, ...styles.mono }}>{s.centerId}</td>
-      <td style={{ ...styles.td, minWidth: 140 }}>
-        <div style={styles.progressCell}>
-          <ProgressBar pct={s.pct} />
-          <span style={styles.pctLabel}>{s.pct}%</span>
+        {score !== null && (
+          <div style={{ textAlign: "center", background: "rgba(255,255,255,0.15)", borderRadius: 12, padding: "16px 28px" }}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", opacity: 0.8, marginBottom: 4 }}>
+              Faculty Score
+            </div>
+            <div style={{ fontSize: 42, fontWeight: 900, lineHeight: 1 }}>{score}</div>
+            <div style={{ fontSize: 12, marginTop: 4, opacity: 0.8 }}>
+              {scoreChange >= 0 ? "▲" : "▼"} {Math.abs(scoreChange)}% vs last week
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── TODAY'S STATUS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12, marginBottom: 20 }}>
+        <InsightCard label="Students"    value={String(students.length)}                                         color="#4f46e5" />
+        <InsightCard label="Att. Today"  value={attendancePct !== null ? `${attendancePct}%` : "—"}              color="#16a34a" />
+        <InsightCard label="Present"     value={insights?.presentCount != null ? String(insights.presentCount) : "—"} color="#0891b2" />
+        <InsightCard label="Low Progress" value={lowProgressCount !== null ? String(lowProgressCount) : "—"}    color="#dc2626" />
+      </div>
+
+      {/* Action bar */}
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "14px 18px", marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
+            {centerName} · Today
+          </div>
+          <span style={{ fontSize: 14, color: "#6b7280" }}>
+            {students.length === 0
+              ? "No active students in this centre."
+              : `${students.length} active student${students.length === 1 ? "" : "s"} enrolled`}
+          </span>
         </div>
-      </td>
-      <td style={styles.td}>
-        <Badge label={s.status} styleMap={STATUS_STYLES} value={s.status} />
-      </td>
-      <td style={styles.td}>
-        <Badge
-          label={trackLabel[s.trackStatus] ?? s.trackStatus}
-          styleMap={TRACK_STYLES}
-          value={s.trackStatus}
-        />
-      </td>
-    </tr>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button style={s.btnPrimary} onClick={onMarkAttendance}>✓ Mark Attendance</button>
+          <button style={s.btnGhost}   onClick={onViewStudents}>👥 Students</button>
+        </div>
+      </div>
+
+      {/* ── QUICK ACTIONS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 10, marginBottom: 24 }}>
+        {[
+          { label: "✓ Mark Attendance", fn: onMarkAttendance, bg: "#4f46e5", fg: "#fff" },
+          { label: "👥 View Students",  fn: onViewStudents,   bg: "#f3f4f6", fg: "#374151" },
+          { label: "📊 View Progress",  fn: () => { if(sorted[0]) onViewProgress(students.find(s=>s.uid===sorted[0].uid) ?? students[0]); }, bg: "#f3f4f6", fg: "#374151" },
+          { label: "🔄 Refresh Data",   fn: onRefresh,        bg: "#f3f4f6", fg: "#374151" },
+        ].map(a => (
+          <button key={a.label} onClick={a.fn}
+            style={{ background: a.bg, color: a.fg, border: "none", borderRadius: 10, padding: "14px 10px", fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "center" }}>
+            {a.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── ALERTS ── */}
+      {alerts.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={s.sectionTitle}>⚠️ Alerts</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            {alerts.map((a, i) => (
+              <div key={i} style={{
+                display: "flex", alignItems: "center", gap: 10,
+                background: "#fff", border: `1px solid #e5e7eb`, borderLeft: `4px solid ${a.color}`,
+                borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#374151",
+              }}>
+                <span>{a.icon}</span>
+                <span style={{ flex: 1 }}>{a.msg}</span>
+                {i === 0 && attendancePct === null && (
+                  <button style={s.btnSm} onClick={onMarkAttendance}>Mark now</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── ATTENDANCE SUMMARY ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
+        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "16px 20px", textAlign: "center" }}>
+          <div style={{ fontSize: 32, fontWeight: 800, color: "#16a34a" }}>{insights?.presentCount ?? "—"}</div>
+          <div style={{ fontSize: 12, color: "#15803d", fontWeight: 600, marginTop: 4 }}>Present Today</div>
+        </div>
+        <div style={{ background: "#fff1f2", border: "1px solid #fecaca", borderRadius: 10, padding: "16px 20px", textAlign: "center" }}>
+          <div style={{ fontSize: 32, fontWeight: 800, color: "#dc2626" }}>{insights?.absentCount ?? "—"}</div>
+          <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 600, marginTop: 4 }}>Absent Today</div>
+        </div>
+      </div>
+
+      {/* ── STUDENT PERFORMANCE SNAPSHOT ── */}
+      {sorted.length > 0 && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
+            {/* Top 3 */}
+            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ padding: "10px 14px", background: "#f0fdf4", fontSize: 12, fontWeight: 700, color: "#15803d", borderBottom: "1px solid #bbf7d0" }}>
+                🏆 Top Students
+              </div>
+              {top3.map((st, i) => (
+                <div key={st.uid} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: i < top3.length-1 ? "1px solid #f3f4f6" : "none", gap: 8 }}>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: "#9ca3af", minWidth: 16 }}>{i+1}</span>
+                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#111" }}>{st.name}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#16a34a" }}>{st.pct}%</span>
+                  <button style={s.linkBtn} onClick={() => { const row = students.find(s=>s.uid===st.uid); if(row) onViewProgress(row); }}>→</button>
+                </div>
+              ))}
+            </div>
+            {/* Bottom 3 */}
+            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ padding: "10px 14px", background: "#fff1f2", fontSize: 12, fontWeight: 700, color: "#b91c1c", borderBottom: "1px solid #fecaca" }}>
+                📉 Need Attention
+              </div>
+              {bottom3.map((st, i) => (
+                <div key={st.uid} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: i < bottom3.length-1 ? "1px solid #f3f4f6" : "none", gap: 8 }}>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: "#9ca3af", minWidth: 16 }}>{sorted.length - (bottom3.length - 1 - i)}</span>
+                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#111" }}>{st.name}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#dc2626" }}>{st.pct}%</span>
+                  <button style={s.linkBtn} onClick={() => { const row = students.find(s=>s.uid===st.uid); if(row) onViewProgress(row); }}>→</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── WEEKLY PERFORMANCE TREND ── */}
+      {trend.length > 0 && (
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 18px", marginBottom: 20 }}>
+          <div style={{ ...s.sectionTitle, marginBottom: 14 }}>📈 Weekly Attendance Trend</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80 }}>
+            {trend.map(d => {
+              const h   = d.pct !== null ? Math.max(8, Math.round(d.pct * 0.72)) : 8;
+              const bg  = d.date === today ? "#4f46e5" : d.pct !== null ? "#a5b4fc" : "#e5e7eb";
+              const col = d.date === today ? "#4f46e5" : "#9ca3af";
+              return (
+                <div key={d.date} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                  <span style={{ fontSize: 10, fontWeight: 600, color: col }}>
+                    {d.pct !== null ? `${d.pct}%` : "—"}
+                  </span>
+                  <div style={{ width: "100%", height: h, background: bg, borderRadius: 4 }} />
+                  <span style={{ fontSize: 10, color: col, fontWeight: d.date === today ? 800 : 400 }}>{d.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+    </div>
   );
 }
 
-// ─── Styles ────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ATTENDANCE VIEW
+// ═══════════════════════════════════════════════════════════════════════════════
 
-const styles: Record<string, React.CSSProperties> = {
+function AttendanceView({ centerId, date, students, markedBy, onDone }: {
+  centerId:  string;
+  date:      string;         // YYYY-MM-DD
+  students:  StudentRow[];
+  markedBy:  string;
+  onDone:    () => void;
+}) {
+  const [marks,   setMarks]   = useState<AttendanceState>({});
+  const [loading, setLoading] = useState(true);
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+  const [err,     setErr]     = useState<string | null>(null);
 
-  header: {
-    display:        "flex",
-    alignItems:     "center",
-    justifyContent: "space-between",
-    marginBottom:   20,
-  },
-  heading: {
-    fontSize:   22,
-    fontWeight: 600,
-    color:      "var(--color-text-primary)",
-  },
-  stateRow: {
-    padding:   "40px 0",
-    textAlign: "center",
-    fontSize:  13,
-    color:     "var(--color-text-secondary)",
-  },
+  // Pre-fill from existing records on mount
+  useEffect(() => {
+    const init: AttendanceState = {};
+    students.forEach(s => { init[s.uid] = "present"; }); // default all present
+    setMarks(init);
 
-  // Info card
-  infoCard: {
-    background:   "var(--color-surface)",
-    border:       "1px solid var(--color-border)",
-    borderRadius: 10,
-    padding:      "16px 20px",
-    display:      "flex",
-    alignItems:   "center",
-    gap:          14,
-    marginBottom: 20,
-    boxShadow:    "var(--shadow-sm)",
-  },
-  avatar: {
-    width:          44,
-    height:         44,
-    borderRadius:   "50%",
-    background:     "#fef3c7",
-    color:          "#d97706",
-    fontSize:       18,
-    fontWeight:     700,
-    display:        "flex",
-    alignItems:     "center",
-    justifyContent: "center",
-    flexShrink:     0,
-  } as React.CSSProperties,
-  infoBody: { flex: 1 },
-  infoName: {
-    fontSize:     15,
-    fontWeight:   600,
-    color:        "#111827",
-    marginBottom: 6,
-  },
-  infoMeta: {
-    display:  "flex",
-    flexWrap: "wrap",
-    gap:      6,
-  },
-  infoChip: {
-    display:      "inline-block",
-    padding:      "2px 9px",
-    borderRadius: 99,
-    fontSize:     11,
-    fontWeight:   500,
-    background:   "#e0e7ff",
-    color:        "#4f46e5",
-    fontFamily:   "monospace",
-  },
+    getAttendanceByCentreDate(centerId, date)
+      .then(recs => {
+        setMarks(prev => {
+          const next = { ...prev };
+          recs.forEach(r => {
+            if (r.status === "present" || r.status === "absent") {
+              next[r.studentUid] = r.status;
+            }
+          });
+          return next;
+        });
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centerId, date]);
 
-  // Summary cards
-  summaryGrid: {
-    display:             "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
-    gap:                 14,
-    marginBottom:        20,
-  },
-  summaryCard: {
-    background:    "var(--color-surface)",
-    border:        "1px solid var(--color-border)",
-    borderRadius:  10,
-    overflow:      "hidden",
-    display:       "flex",
-    flexDirection: "column",
-    boxShadow:     "var(--shadow-sm)",
-  },
-  summaryAccent: { height: 4 },
-  summaryBody:   { padding: "14px 18px" },
-  summaryLabel: {
-    fontSize:      11,
-    color:         "var(--color-text-secondary)",
-    fontWeight:    500,
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
-    marginBottom:  6,
-  },
-  summaryValue: {
-    fontSize:   24,
-    fontWeight: 700,
-  },
+  function toggle(uid: string) {
+    setMarks(prev => ({ ...prev, [uid]: prev[uid] === "present" ? "absent" : "present" }));
+  }
 
-  // Alerts
-  alertsSection: {
-    display:       "flex",
-    flexDirection: "column",
-    gap:           12,
-    marginBottom:  24,
-  },
-  alertCard: {
-    background:   "var(--color-surface)",
-    border:       "1px solid #fecaca",
-    borderRadius: 10,
-    overflow:     "hidden",
-  },
-  alertHeader: {
-    display:      "flex",
-    alignItems:   "center",
-    gap:          8,
-    padding:      "12px 16px",
-    borderBottom: "1px solid #fee2e2",
-    background:   "#fff5f5",
-  },
-  alertDot: {
-    width:        8,
-    height:       8,
-    borderRadius: "50%",
-    background:   "#dc2626",
-    flexShrink:   0,
-  } as React.CSSProperties,
-  alertTitle: {
-    fontSize:   13,
-    fontWeight: 600,
-    color:      "#111827",
-    flex:       1,
-  },
-  alertCount: {
-    fontSize:     11,
-    fontWeight:   700,
-    background:   "#fee2e2",
-    color:        "#dc2626",
-    padding:      "1px 8px",
-    borderRadius: 99,
-  },
-  alertList: {
-    display:       "flex",
-    flexDirection: "column",
-    padding:       "8px 0",
-  },
-  alertRow: {
-    display:    "flex",
-    alignItems: "center",
-    gap:        12,
-    padding:    "8px 16px",
-    fontSize:   13,
-  },
-  alertName: {
-    fontWeight: 500,
-    color:      "#111827",
-    minWidth:   140,
-    flexShrink: 0,
-  },
-  alertCourse: {
-    color:      "#6b7280",
-    fontSize:   12,
-    minWidth:   100,
-    flexShrink: 0,
-  },
-  alertBarWrap: {
-    flex: 1,
-  },
-  alertPct: {
-    fontSize:   12,
-    fontWeight: 700,
-    color:      "#dc2626",
-    minWidth:   34,
-    textAlign:  "right",
-    flexShrink: 0,
-  },
+  function markAll(status: "present" | "absent") {
+    const next: AttendanceState = {};
+    students.forEach(s => { next[s.uid] = status; });
+    setMarks(next);
+  }
 
-  // Section title
-  sectionTitle: {
-    fontSize:      13,
-    fontWeight:    700,
-    color:         "#374151",
-    textTransform: "uppercase",
-    letterSpacing: "0.05em",
-    marginBottom:  12,
-  },
+  async function handleSave() {
+    setSaving(true);
+    setSaved(false);
+    setErr(null);
+    try {
+      await Promise.all(
+        students.map(st =>
+          saveCentreAttendance({
+            studentUid: st.uid,
+            centerId,
+            date,
+            status:   marks[st.uid] ?? "present",
+            markedBy,
+          }),
+        ),
+      );
+      setSaved(true);
+      // Return to overview and reload dashboard data automatically
+      setTimeout(() => onDone(), 800);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to save attendance.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const presentCount = Object.values(marks).filter(v => v === "present").length;
+
+  if (loading) return <div style={s.center}>Loading attendance…</div>;
+
+  return (
+    <div>
+      <div style={s.sectionHeader}>
+        <div style={s.sectionTitle}>Attendance — {date}</div>
+        <span style={{ fontSize: 12, color: "#6b7280" }}>{centerId}</span>
+      </div>
+
+      {err   && <div style={s.errBanner}>{err}</div>}
+      {saved && <div style={s.successBanner}>Saved — {presentCount}/{students.length} present.</div>}
+
+      <div style={s.attActions}>
+        <button style={s.btnSm} onClick={() => markAll("present")}>✓ All Present</button>
+        <button style={{ ...s.btnSm, marginLeft: 8 }} onClick={() => markAll("absent")}>✗ All Absent</button>
+        <span style={s.attCount}>{presentCount}/{students.length} present</span>
+      </div>
+
+      {students.length === 0 ? (
+        <div style={s.emptyCard}>No active students enrolled in this centre.</div>
+      ) : (
+        <div style={s.attList}>
+          {students.map(st => {
+            const status = marks[st.uid] ?? "present";
+            return (
+              <div key={st.uid} style={s.attRow}>
+                <div style={s.attName}>{st.name}</div>
+                <div style={s.attInst}>{st.instrument}</div>
+                <button
+                  style={{ ...s.attToggle, ...(status === "present" ? s.attPresent : s.attAbsent) }}
+                  onClick={() => toggle(st.uid)}
+                >
+                  {status === "present" ? "✔ Present" : "✗ Absent"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={s.attFooter}>
+        <button style={s.btnGhost} onClick={onDone}>← Back</button>
+        <button
+          style={{ ...s.btnPrimary, opacity: saving ? 0.5 : 1, marginLeft: 10 }}
+          onClick={handleSave}
+          disabled={saving}
+        >
+          {saving ? "Saving…" : "Save Attendance"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STUDENTS VIEW
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function StudentsView({ students, onViewProgress }: {
+  students:       StudentRow[];
+  onViewProgress: (s: StudentRow) => void;
+}) {
+  const [progressMap, setProgressMap] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    (async () => {
+      const map: Record<string, number> = {};
+      await Promise.all(students.map(async st => {
+        try {
+          const [progress, { lessons }] = await Promise.all([
+            getProgressByStudent(st.uid),
+            getLessonsForStudent(st.uid),
+          ]);
+          const allItems = lessons.flatMap(l => l.items);
+          const pm: Record<string, StudentLessonProgress> = {};
+          progress.forEach(p => { pm[p.itemId] = p; });
+          map[st.uid] = calcOverallPercent(allItems, pm);
+        } catch {
+          map[st.uid] = 0;
+        }
+      }));
+      setProgressMap(map);
+    })();
+  }, [students]);
+
+  if (students.length === 0) {
+    return <div style={s.emptyCard}>No students enrolled in this centre.</div>;
+  }
+
+  return (
+    <div>
+      <div style={s.sectionTitle}>Students ({students.length})</div>
+      <div style={s.card}>
+        <table style={s.table}>
+          <thead>
+            <tr>
+              {["Name", "Instrument", "Progress", "Status", ""].map(h => (
+                <th key={h} style={s.th}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {students.map(st => {
+              const pct = progressMap[st.uid] ?? null;
+              return (
+                <tr key={st.uid} style={s.tr}>
+                  <td style={{ ...s.td, fontWeight: 600, color: "#111" }}>{st.name}</td>
+                  <td style={s.td}>{st.instrument}</td>
+                  <td style={{ ...s.td, minWidth: 140 }}>
+                    {pct === null ? <span style={{ color: "#9ca3af" }}>—</span> : <ProgressBar pct={pct} />}
+                  </td>
+                  <td style={s.td}><StatusBadge status={st.status} /></td>
+                  <td style={s.td}>
+                    <button style={s.linkBtn} onClick={() => onViewProgress(st)}>
+                      View Progress →
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROGRESS VIEW
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function ProgressView({ student, teacherUid, teacherRole }: {
+  student:     StudentRow;
+  teacherUid:  string;
+  teacherRole: Role;
+}) {
+  type LessonWithItems = Lesson & { items: LessonItem[] };
+
+  const [lessons, setLessons]         = useState<LessonWithItems[]>([]);
+  const [progressMap, setProgressMap] = useState<Record<string, StudentLessonProgress>>({});
+  const [unlockedMap, setUnlockedMap] = useState<Record<string, boolean>>({});
+  const [loading, setLoading]         = useState(true);
+  const [actionErr, setActionErr]     = useState<string | null>(null);
+  const [busy, setBusy]               = useState<string | null>(null);
+
+  async function load() {
+    try {
+      const [{ lessons: ls }, progress] = await Promise.all([
+        getLessonsForStudent(student.uid),
+        getProgressByStudent(student.uid),
+      ]);
+      const pm: Record<string, StudentLessonProgress> = {};
+      progress.forEach(p => { pm[p.itemId] = p; });
+      setProgressMap(pm);
+      setLessons(ls);
+
+      // Unlock state per item
+      const um: Record<string, boolean> = {};
+      for (const lesson of ls) {
+        for (const item of lesson.items) {
+          um[item.id] = await isItemUnlocked(student.uid, lesson, item, ls, lesson.items);
+        }
+      }
+      setUnlockedMap(um);
+    } catch (err) {
+      console.error("ProgressView load error:", err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, [student.uid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleAddAttempt(lesson: LessonWithItems, item: LessonItem) {
+    setActionErr(null);
+    setBusy(item.id);
+    try {
+      await addAttempt(student.uid, lesson.id, item.id, teacherUid, teacherRole, null);
+      await load();
+    } catch (err) {
+      setActionErr(err instanceof Error ? err.message : "Failed to add attempt.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleMarkComplete(lesson: LessonWithItems, item: LessonItem) {
+    setActionErr(null);
+    setBusy(item.id);
+    try {
+      await markItemCompleted(student.uid, lesson.id, item.id, teacherUid, teacherRole);
+      await load();
+    } catch (err) {
+      setActionErr(err instanceof Error ? err.message : "Failed to mark complete.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (loading) return <div style={s.center}>Loading progress…</div>;
+
+  const allItems   = lessons.flatMap(l => l.items);
+  const overallPct = calcOverallPercent(allItems, progressMap);
+
+  return (
+    <div>
+      <div style={s.sectionHeader}>
+        <div style={s.sectionTitle}>{student.name} — Lesson Progress</div>
+        <span style={s.overallBadge}>{overallPct}% overall</span>
+      </div>
+
+      {actionErr && <div style={s.errBanner}>{actionErr}</div>}
+
+      {lessons.length === 0 ? (
+        <div style={s.emptyCard}>No lessons available for this student.</div>
+      ) : (
+        lessons.map(lesson => {
+          const lessonPct = calcLessonPercent(lesson.items, progressMap);
+          return (
+            <div key={lesson.id} style={s.lessonBlock}>
+              <div style={s.lessonHeader}>
+                <span style={s.lessonTitle}>{lesson.title}</span>
+                <span style={s.lessonPct}>{lessonPct}%</span>
+              </div>
+              <ProgressBar pct={lessonPct} />
+              <div style={s.itemList}>
+                {lesson.items.map(item => {
+                  const prog     = progressMap[item.id];
+                  const attempts = prog?.totalAttempts ?? 0;
+                  const done     = prog?.completed ?? false;
+                  const unlocked = unlockedMap[item.id] ?? false;
+                  const isBusy   = busy === item.id;
+
+                  return (
+                    <div key={item.id} style={{ ...s.itemRow, opacity: unlocked ? 1 : 0.45 }}>
+                      <div style={s.itemLeft}>
+                        <TypeBadge type={item.type} />
+                        <span style={s.itemTitle}>{item.title}</span>
+                        {!unlocked && <span style={s.lockedHint}>🔒 locked</span>}
+                      </div>
+                      <div style={s.itemRight}>
+                        {done ? (
+                          <span style={s.doneBadge}>✔ Done</span>
+                        ) : (
+                          <>
+                            <span style={s.attemptCount}>{attempts}/{item.maxAttempts}</span>
+                            <button
+                              style={{
+                                ...s.btnSm,
+                                opacity: (!unlocked || isBusy || attempts >= item.maxAttempts) ? 0.4 : 1,
+                              }}
+                              disabled={!unlocked || isBusy || attempts >= item.maxAttempts}
+                              onClick={() => handleAddAttempt(lesson, item)}
+                            >
+                              {isBusy ? "…" : "+ Attempt"}
+                            </button>
+                            {attempts > 0 && (
+                              <button
+                                style={{ ...s.btnSuccess, opacity: (!unlocked || isBusy) ? 0.4 : 1 }}
+                                disabled={!unlocked || isBusy}
+                                onClick={() => handleMarkComplete(lesson, item)}
+                              >
+                                {isBusy ? "…" : "Mark Done"}
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SHARED SUB-COMPONENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function InsightCard({ label, value, color, small }: {
+  label: string; value: string; color: string; small?: boolean;
+}) {
+  return (
+    <div style={s.insightCard}>
+      <div style={{ ...s.insightAccent, background: color }} />
+      <div style={s.insightBody}>
+        <div style={s.insightLabel}>{label}</div>
+        <div style={{ ...s.insightValue, color, fontSize: small ? 15 : 26 }}>{value}</div>
+      </div>
+    </div>
+  );
+}
+
+function ProgressBar({ pct }: { pct: number }) {
+  const color = pct >= 80 ? "#16a34a" : pct >= 40 ? "#f59e0b" : "#dc2626";
+  return (
+    <div style={{ position: "relative", paddingTop: 10 }}>
+      <div style={s.barTrack}>
+        <div style={{ ...s.barFill, width: `${pct}%`, background: color }} />
+      </div>
+      <span style={s.barLabel}>{pct}%</span>
+    </div>
+  );
+}
+
+function TypeBadge({ type }: { type: string }) {
+  const map: Record<string, { bg: string; color: string }> = {
+    concept:   { bg: "#dbeafe", color: "#1d4ed8" },
+    exercise:  { bg: "#fef3c7", color: "#b45309" },
+    songsheet: { bg: "#f3e8ff", color: "#7c3aed" },
+  };
+  const c = map[type] ?? { bg: "#f3f4f6", color: "#374151" };
+  return (
+    <span style={{ ...s.typeBadge, background: c.bg, color: c.color }}>
+      {type.charAt(0).toUpperCase() + type.slice(1)}
+    </span>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, React.CSSProperties> = {
+    active:                 { background: "#dcfce7", color: "#16a34a" },
+    scheduled:              { background: "#dbeafe", color: "#1d4ed8" },
+    completed:              { background: "#f3f4f6", color: "#6b7280" },
+    ghost:                  { background: "#fef2f2", color: "#dc2626" },
+    inactive:               { background: "#f3f4f6", color: "#6b7280" },
+    deactivation_requested: { background: "#fef9c3", color: "#b45309" },
+  };
+  return (
+    <span style={{ ...s.badge, ...(map[status] ?? map.inactive) }}>
+      {status.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const s: Record<string, React.CSSProperties> = {
+  page:       { maxWidth: 860, margin: "0 auto", paddingBottom: 40 },
+  center:     { padding: "60px 0", textAlign: "center", fontSize: 14, color: "#9ca3af" },
+  emptyState: { padding: "48px 24px", textAlign: "center", fontSize: 14, color: "#9ca3af", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginTop: 24 },
+
+  // Top bar
+  topBar:      { display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "16px 20px", marginBottom: 12 },
+  topBarLeft:  { display: "flex", flexDirection: "column", gap: 2 },
+  topBarRight: { display: "flex", alignItems: "center" },
+  teacherName: { fontSize: 18, fontWeight: 700, color: "#111" },
+  todayDate:   { fontSize: 12, color: "#9ca3af" },
+  centerBadge: { padding: "6px 14px", background: "#ede9fe", color: "#4f46e5", borderRadius: 99, fontSize: 12, fontWeight: 600 },
+  backBtn:     { background: "none", border: "none", color: "#4f46e5", fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "0 0 16px", display: "block" },
+
+  // Centre tab bar
+  tabBar:    { display: "flex", gap: 4, marginBottom: 20, overflowX: "auto", paddingBottom: 2 },
+  tab:       { background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 18px", fontSize: 13, fontWeight: 500, color: "#6b7280", cursor: "pointer", whiteSpace: "nowrap" as const, transition: "all 0.12s" },
+  tabActive: { background: "#ede9fe", border: "1px solid #c4b5fd", color: "#4f46e5", fontWeight: 700 },
+
+  // Insights
+  insightRow:   { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 28 },
+  insightCard:  { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column" },
+  insightAccent:{ height: 4 },
+  insightBody:  { padding: "14px 18px" },
+  insightLabel: { fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "#9ca3af", marginBottom: 6 },
+  insightValue: { fontWeight: 700, lineHeight: 1.2 },
+
+  // Section
+  sectionHeader:{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, marginTop: 28 },
+  sectionTitle: { fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em" },
+
+  // Classes
+  classGrid:    { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 14, marginBottom: 8 },
+  classCard:    { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "16px 18px", display: "flex", flexDirection: "column", gap: 10 },
+  classTime:    { fontSize: 18, fontWeight: 700, color: "#111" },
+  classInfo:    { display: "flex", alignItems: "center", gap: 8 },
+  classStudents:{ fontSize: 12, color: "#6b7280" },
+
+  createClassCard: { display: "flex", alignItems: "center", gap: 10, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 10, padding: "12px 16px", marginBottom: 14, flexWrap: "wrap" },
+  fieldLabel:   { fontSize: 12, fontWeight: 500, color: "#6b7280" },
+  timeInput:    { padding: "6px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, color: "#111" },
+
+  emptyCard:    { background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 10, padding: "24px", textAlign: "center", fontSize: 13, color: "#9ca3af" },
+
+  // Student preview
+  previewList:  { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden" },
+  previewRow:   { display: "flex", alignItems: "center", gap: 12, padding: "12px 18px", borderBottom: "1px solid #f3f4f6" },
+  previewName:  { flex: 1, fontSize: 13, fontWeight: 600, color: "#111" },
+  previewInst:  { fontSize: 12, color: "#6b7280", minWidth: 80 },
+  moreRow:      { padding: "10px 18px", fontSize: 12, color: "#9ca3af" },
+
+  // Attendance
+  attActions:   { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 },
+  attCount:     { marginLeft: "auto", fontSize: 13, fontWeight: 600, color: "#4f46e5" },
+  attList:      { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", marginBottom: 16 },
+  attRow:       { display: "flex", alignItems: "center", gap: 12, padding: "12px 18px", borderBottom: "1px solid #f3f4f6" },
+  attName:      { flex: 1, fontSize: 13, fontWeight: 600, color: "#111" },
+  attInst:      { fontSize: 12, color: "#6b7280", minWidth: 80 },
+  attToggle:    { border: "none", borderRadius: 20, padding: "5px 16px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  attPresent:   { background: "#dcfce7", color: "#16a34a" },
+  attAbsent:    { background: "#fef2f2", color: "#dc2626" },
+  attFooter:    { display: "flex", alignItems: "center", justifyContent: "flex-end", marginTop: 8 },
 
   // Table
-  tableWrapper: {
-    background:   "var(--color-surface)",
-    border:       "1px solid var(--color-border)",
-    borderRadius: 10,
-    overflow:     "hidden",
-  },
-  emptyState: {
-    padding:   "24px",
-    textAlign: "center",
-    fontSize:  13,
-    color:     "var(--color-text-secondary)",
-  },
-  table: {
-    width:           "100%",
-    borderCollapse:  "collapse",
-  },
-  th: {
-    padding:       "11px 16px",
-    textAlign:     "left",
-    fontSize:      12,
-    fontWeight:    600,
-    color:         "var(--color-text-secondary)",
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
-    borderBottom:  "1px solid var(--color-border)",
-    background:    "#f9fafb",
-  },
-  td: {
-    padding:     "12px 16px",
-    fontSize:    13,
-    color:       "var(--color-text-primary)",
-    borderBottom:"1px solid var(--color-border)",
-  },
-  rowEven:  { background: "var(--color-surface)" },
-  rowOdd:   { background: "#fafafa" },
-  rowHover: { background: "#f0f4ff" },
-  mono: {
-    fontFamily: "monospace",
-    fontSize:   11,
-    color:      "var(--color-text-secondary)",
-  },
+  card:  { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", marginBottom: 16 },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
+  th:    { textAlign: "left", padding: "9px 16px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "#9ca3af", borderBottom: "1px solid #e5e7eb", background: "#f9fafb" },
+  tr:    { borderBottom: "1px solid #f3f4f6" },
+  td:    { padding: "12px 16px", color: "#6b7280", verticalAlign: "middle" },
 
-  // Student cell
-  studentCell: {
-    display:    "flex",
-    alignItems: "center",
-    gap:        8,
-  },
-  studentInitial: {
-    width:          26,
-    height:         26,
-    borderRadius:   "50%",
-    background:     "#e0e7ff",
-    color:          "#4f46e5",
-    fontSize:       11,
-    fontWeight:     700,
-    display:        "flex",
-    alignItems:     "center",
-    justifyContent: "center",
-    flexShrink:     0,
-  } as React.CSSProperties,
-  studentName: {
-    fontWeight: 500,
-    color:      "#111827",
-  },
-
-  // Progress cell
-  progressCell: {
-    display:    "flex",
-    alignItems: "center",
-    gap:        8,
-  },
-  pctLabel: {
-    fontSize:   11,
-    fontWeight: 700,
-    color:      "#6b7280",
-    flexShrink: 0,
-    minWidth:   28,
-    textAlign:  "right",
-  },
+  // Progress / lessons
+  overallBadge: { padding: "4px 14px", background: "#ede9fe", color: "#4f46e5", borderRadius: 99, fontSize: 13, fontWeight: 600 },
+  lessonBlock:  { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "16px 18px", marginBottom: 14 },
+  lessonHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  lessonTitle:  { fontSize: 14, fontWeight: 700, color: "#111" },
+  lessonPct:    { fontSize: 13, fontWeight: 700, color: "#4f46e5" },
+  itemList:     { display: "flex", flexDirection: "column", gap: 8, marginTop: 12 },
+  itemRow:      { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #f3f4f6", gap: 12, flexWrap: "wrap" },
+  itemLeft:     { display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 },
+  itemRight:    { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 },
+  itemTitle:    { fontSize: 13, color: "#111", fontWeight: 500 },
+  lockedHint:   { fontSize: 11, color: "#9ca3af" },
+  attemptCount: { fontSize: 12, color: "#6b7280", minWidth: 40, textAlign: "center" },
+  doneBadge:    { padding: "3px 12px", background: "#dcfce7", color: "#16a34a", borderRadius: 99, fontSize: 12, fontWeight: 600 },
 
   // Progress bar
-  barTrack: {
-    flex:         1,
-    height:       6,
-    background:   "#e5e7eb",
-    borderRadius: 99,
-    overflow:     "hidden",
-    minWidth:     80,
-  },
-  barFill: {
-    height:       "100%",
-    borderRadius: 99,
-    transition:   "width 0.4s ease",
-  },
+  barTrack: { height: 8, background: "#e5e7eb", borderRadius: 99, overflow: "hidden" },
+  barFill:  { height: "100%", borderRadius: 99, transition: "width 0.3s ease" },
+  barLabel: { position: "absolute", right: 0, top: 0, fontSize: 11, fontWeight: 600, color: "#6b7280" },
 
-  // Badge
-  badge: {
-    display:       "inline-block",
-    padding:       "2px 10px",
-    borderRadius:  99,
-    fontSize:      11,
-    fontWeight:    600,
-    textTransform: "capitalize",
-  },
+  // Badges + buttons
+  typeBadge: { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, flexShrink: 0 },
+  badge:     { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600 },
+  btnPrimary:{ background: "#4f46e5", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  btnGhost:  { background: "transparent", color: "#6b7280", border: "1px solid #e5e7eb", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer" },
+  btnSm:     { background: "#f3f4f6", color: "#374151", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  btnSuccess:{ background: "#dcfce7", color: "#16a34a", border: "none", borderRadius: 6, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  btnWarning:{ background: "#fef9c3", color: "#b45309", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  linkBtn:   { background: "none", border: "none", color: "#4f46e5", fontSize: 12, fontWeight: 600, cursor: "pointer", padding: 0 },
+
+  errBanner:     { background: "#fef2f2", border: "1px solid #fecaca", color: "#dc2626", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 14 },
+  successBanner: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 14 },
+  errText:       { fontSize: 12, color: "#dc2626", marginLeft: 8 },
 };

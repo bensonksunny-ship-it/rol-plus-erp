@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
@@ -8,7 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import {
-  getAssignedLessonsWithItems,
+  getLessonsForStudent,
   getProgressByStudent,
   addAttempt,
   markItemCompleted,
@@ -20,9 +20,9 @@ import type { Lesson, LessonItem, StudentLessonProgress, Attempt } from "@/types
 export default function StudentSyllabusPage({
   params,
 }: {
-  params: Promise<{ studentId: string }>;
+  params: { studentId: string };
 }) {
-  const { studentId } = use(params);
+  const { studentId } = params;
   return (
     <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT]}>
       <StudentSyllabusContent studentId={studentId} />
@@ -59,7 +59,7 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
     setError(null);
     try {
       const [assignedData, allProgress, userSnap] = await Promise.all([
-        getAssignedLessonsWithItems(studentId),
+        getLessonsForStudent(studentId),
         getProgressByStudent(studentId),
         getDoc(doc(db, "users", studentId)),
       ]);
@@ -100,7 +100,13 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
         <div style={s.emptyIcon}>📋</div>
         <div style={s.emptyTitle}>No syllabus assigned yet</div>
         <div style={s.emptySub}>
-          Import lessons via Excel, then assign them to this student from the Syllabus &gt; Assign page.
+          No lessons are available for this student yet. Lessons are shown automatically once
+          they have been imported for the student&apos;s center via{" "}
+          <strong>Syllabus → Import from Excel</strong>. Student-specific lessons can also be
+          imported directly for this student.
+        </div>
+        <div style={{ marginTop: 16, display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+          <a href="/dashboard/lessons/import" style={s.importLink}>Import from Excel →</a>
         </div>
       </div>
     );
@@ -247,7 +253,6 @@ function ItemCard({
     setBusy(true);
     setErrMsg(null);
     try {
-      const isAdmin = teacherRole === "admin" || teacherRole === "super_admin";
       await addAttempt(
         studentId,
         lessonId,
@@ -255,7 +260,6 @@ function ItemCard({
         teacherId,
         teacherRole as import("@/types").Role,
         notes.trim() || null,
-        isAdmin ? teacherId : null,
       );
       setNotes("");
       onUpdated();
@@ -272,14 +276,12 @@ function ItemCard({
     setBusy(true);
     setErrMsg(null);
     try {
-      const isAdmin = teacherRole === "admin" || teacherRole === "super_admin";
       await markItemCompleted(
         studentId,
         lessonId,
         item.id,
         teacherId,
         teacherRole as import("@/types").Role,
-        isAdmin ? teacherId : null,
       );
       onUpdated();
     } catch (err) {
@@ -311,9 +313,9 @@ function ItemCard({
       {/* Title */}
       <div style={s.itemTitle}>{item.title}</div>
 
-      {/* Attempt dots (5 slots) */}
+      {/* Attempt dots (slots = item.maxAttempts) */}
       <div style={s.attemptsRow}>
-        {Array.from({ length: 5 }).map((_, i) => (
+        {Array.from({ length: item.maxAttempts }).map((_, i) => (
           <span
             key={i}
             style={{
@@ -324,7 +326,7 @@ function ItemCard({
             title={i < attemptCount ? `Attempt ${i + 1} done` : `Attempt ${i + 1} not done`}
           />
         ))}
-        <span style={s.attemptsLabel}>{attemptCount}/5 attempts</span>
+        <span style={s.attemptsLabel}>{attemptCount}/{item.maxAttempts} attempts</span>
       </div>
 
       {/* Attempt history */}
@@ -367,15 +369,15 @@ function ItemCard({
             onChange={e => setNotes(e.target.value)}
             placeholder="Notes (optional)…"
             style={s.notesInput}
-            disabled={busy || attemptCount >= 5}
+            disabled={busy || attemptCount >= item.maxAttempts}
           />
           <button
             onClick={handleAttempt}
-            disabled={busy || attemptCount >= 5}
+            disabled={busy || attemptCount >= item.maxAttempts}
             style={{
               ...s.attemptBtn,
-              opacity: (busy || attemptCount >= 5) ? 0.5 : 1,
-              cursor:  (busy || attemptCount >= 5) ? "not-allowed" : "pointer",
+              opacity: (busy || attemptCount >= item.maxAttempts) ? 0.5 : 1,
+              cursor:  (busy || attemptCount >= item.maxAttempts) ? "not-allowed" : "pointer",
             }}
           >
             + Add Attempt
@@ -397,286 +399,259 @@ function ItemCard({
   );
 }
 
-// ─── 2026 Design Tokens ───────────────────────────────────────────────────────
-
-const T = {
-  charcoal:      "#1a1a2e",
-  surface:       "#16213e",
-  glass:         "rgba(255,255,255,0.04)",
-  glassHover:    "rgba(255,255,255,0.08)",
-  gold:          "#e2b96f",
-  goldGlow:      "rgba(226,185,111,0.18)",
-  goldGlowStr:   "rgba(226,185,111,0.35)",
-  lavender:      "#a78bfa",
-  lavenderGlow:  "rgba(167,139,250,0.18)",
-  sage:          "#6ee7b7",
-  sageGlow:      "rgba(110,231,183,0.18)",
-  rose:          "#f87171",
-  roseGlow:      "rgba(248,113,113,0.15)",
-  border:        "rgba(255,255,255,0.08)",
-  borderActive:  "rgba(167,139,250,0.4)",
-  textPrimary:   "#f1f5f9",
-  textSecondary: "#94a3b8",
-  textMuted:     "#64748b",
-  radius:        12,
-  radiusSm:      8,
-};
-
-// ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Styles (light-background safe — explicit hex only) ───────────────────────
 
 const s: Record<string, React.CSSProperties> = {
   state: {
-    padding: "56px 16px",
-    textAlign: "center",
-    fontSize: 13,
-    color: T.textSecondary,
-    background: `radial-gradient(ellipse at 50% 0%, ${T.lavenderGlow}, transparent 70%)`,
-    borderRadius: T.radius,
+    padding:      "56px 16px",
+    textAlign:    "center",
+    fontSize:     13,
+    color:        "#6b7280",
+    background:   "#fff",
+    borderRadius: 12,
   },
 
   empty: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    padding: "72px 16px",
-    textAlign: "center",
+    display:        "flex",
+    flexDirection:  "column",
+    alignItems:     "center",
+    padding:        "72px 16px",
+    textAlign:      "center",
+    background:     "#fff",
   },
   emptyIcon:  { fontSize: 48, marginBottom: 14 },
-  emptyTitle: { fontSize: 20, fontWeight: 700, color: T.textPrimary, marginBottom: 10 },
-  emptySub:   { fontSize: 13, color: T.textSecondary, maxWidth: 380, lineHeight: 1.6 },
+  emptyTitle: { fontSize: 20, fontWeight: 700, color: "#111111", marginBottom: 10 },
+  emptySub:   { fontSize: 13, color: "#6b7280", maxWidth: 420, lineHeight: 1.6 },
+  importLink: {
+    display:        "inline-block",
+    background:     "#4f46e5",
+    color:          "#fff",
+    padding:        "9px 18px",
+    borderRadius:   8,
+    fontSize:       13,
+    fontWeight:     700,
+    textDecoration: "none",
+  },
 
   // Page header
   header: {
-    display: "flex",
-    alignItems: "flex-start",
+    display:        "flex",
+    alignItems:     "flex-start",
     justifyContent: "space-between",
-    marginBottom: 20,
-    flexWrap: "wrap" as const,
-    gap: 14,
+    marginBottom:   20,
+    flexWrap:       "wrap" as const,
+    gap:            14,
   },
-  heading:     { fontSize: 24, fontWeight: 700, color: T.textPrimary, margin: 0, letterSpacing: "-0.5px" },
+  heading:     { fontSize: 24, fontWeight: 700, color: "#111111", margin: 0 },
   studentMeta: { display: "flex", gap: 10, alignItems: "center", marginTop: 6 },
-  studentName: { fontSize: 14, fontWeight: 600, color: T.textPrimary },
+  studentName: { fontSize: 14, fontWeight: 600, color: "#111111" },
   admNo: {
-    fontSize: 11,
-    fontFamily: "monospace",
-    background: T.goldGlow,
-    color: T.gold,
-    padding: "3px 10px",
+    fontSize:     11,
+    fontFamily:   "monospace",
+    background:   "#fef3c7",
+    color:        "#92400e",
+    padding:      "3px 10px",
     borderRadius: 99,
-    border: `1px solid ${T.gold}33`,
-    fontWeight: 700,
+    border:       "1px solid #fde68a",
+    fontWeight:   700,
   },
 
   // Progress chip
   progressChip: { textAlign: "right" as const },
-  progressNum:  { fontSize: 26, fontWeight: 800, color: T.textPrimary, display: "block", lineHeight: 1.1 },
-  progressLabel:{ fontSize: 11, color: T.textMuted },
+  progressNum:  { fontSize: 26, fontWeight: 800, color: "#111111", display: "block", lineHeight: 1.1 },
+  progressLabel:{ fontSize: 11, color: "#6b7280" },
   progressBarOuter: {
-    height: 5,
-    background: "rgba(255,255,255,0.06)",
+    height:       5,
+    background:   "#e5e7eb",
     borderRadius: 99,
-    width: "100%",
-    minWidth: 120,
-    maxWidth: 160,
-    marginTop: 8,
-    overflow: "hidden",
+    width:        "100%",
+    minWidth:     120,
+    maxWidth:     160,
+    marginTop:    8,
+    overflow:     "hidden",
   },
   progressBarInner: {
-    height: "100%",
-    background: `linear-gradient(90deg, ${T.lavender}, ${T.sage})`,
+    height:     "100%",
+    background: "#4f46e5",
     borderRadius: 99,
-    transition: "width 0.5s cubic-bezier(0.34,1.56,0.64,1)",
-    boxShadow: `0 0 8px ${T.lavenderGlow}`,
+    transition: "width 0.4s ease",
   },
 
   layout:      { display: "flex", gap: 16, alignItems: "flex-start" },
   mobileLayout:{ display: "flex", flexDirection: "column" as const, gap: 12 },
 
   // Mobile tab strip
-  tabStrip:    {
-    display: "flex",
-    gap: 6,
-    overflowX: "auto" as const,
+  tabStrip: {
+    display:       "flex",
+    gap:           6,
+    overflowX:     "auto" as const,
     paddingBottom: 10,
-    marginBottom: 10,
-    WebkitOverflowScrolling: "touch" as unknown as undefined,
+    marginBottom:  10,
   },
   tabChip: {
-    flexShrink: 0,
-    background: T.glass,
-    border: `1px solid ${T.border}`,
-    borderRadius: 20,
-    padding: "7px 14px",
-    cursor: "pointer",
-    textAlign: "left" as const,
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: 2,
-    backdropFilter: "blur(8px)",
-    transition: "all 0.18s",
+    flexShrink:     0,
+    background:     "#f3f4f6",
+    border:         "1px solid #e5e7eb",
+    borderRadius:   20,
+    padding:        "7px 14px",
+    cursor:         "pointer",
+    textAlign:      "left" as const,
+    display:        "flex",
+    flexDirection:  "column" as const,
+    gap:            2,
   },
   tabChipActive: {
-    background: T.lavenderGlow,
-    borderColor: T.lavender + "66",
-    boxShadow: `0 0 12px ${T.lavenderGlow}`,
+    background:   "#ede9fe",
+    borderColor:  "#a78bfa",
   },
-  tabChipTitle: { fontSize: 12, fontWeight: 600, color: T.textPrimary, whiteSpace: "nowrap" as const },
-  tabChipMeta:  { fontSize: 10, color: T.textMuted },
+  tabChipTitle: { fontSize: 12, fontWeight: 600, color: "#111111", whiteSpace: "nowrap" as const },
+  tabChipMeta:  { fontSize: 10, color: "#6b7280" },
 
   // Lesson sidebar
   sidebar: { width: 228, flexShrink: 0, display: "flex", flexDirection: "column" as const, gap: 4 },
   lessonTab: {
-    background: T.glass,
-    border: `1px solid ${T.border}`,
-    borderRadius: T.radiusSm,
-    padding: "11px 14px",
-    textAlign: "left" as const,
-    cursor: "pointer",
-    transition: "all 0.18s",
-    width: "100%",
-    backdropFilter: "blur(8px)",
+    background:   "#fff",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 8,
+    padding:      "11px 14px",
+    textAlign:    "left" as const,
+    cursor:       "pointer",
+    width:        "100%",
   },
   lessonTabActive: {
-    background: T.lavenderGlow,
-    borderColor: T.lavender + "55",
-    boxShadow: `0 0 14px ${T.lavenderGlow}`,
+    background:  "#ede9fe",
+    borderColor: "#a78bfa",
   },
-  lessonTabTitle: { fontSize: 13, fontWeight: 600, color: T.textPrimary, marginBottom: 3 },
-  lessonTabMeta:  { fontSize: 11, color: T.textMuted },
-  doneCheck:      { color: T.sage, fontWeight: 700 },
+  lessonTabTitle: { fontSize: 13, fontWeight: 600, color: "#111111", marginBottom: 3 },
+  lessonTabMeta:  { fontSize: 11, color: "#6b7280" },
+  doneCheck:      { color: "#16a34a", fontWeight: 700 },
 
   panel:       { flex: 1, minWidth: 0 },
   panelHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 },
-  panelTitle:  { fontSize: 17, fontWeight: 700, color: T.textPrimary },
-  panelCount:  { fontSize: 12, color: T.textMuted },
+  panelTitle:  { fontSize: 17, fontWeight: 700, color: "#111111" },
+  panelCount:  { fontSize: 12, color: "#6b7280" },
 
   itemList: { display: "flex", flexDirection: "column" as const, gap: 10 },
 
   // Item card
   itemCard: {
-    background: T.glass,
-    border: `1px solid ${T.border}`,
-    borderRadius: T.radius,
-    padding: "18px 22px",
-    backdropFilter: "blur(12px)",
-    transition: "border-color 0.2s, box-shadow 0.2s",
+    background:   "#fff",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 12,
+    padding:      "18px 22px",
+    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
   },
   itemCardDone: {
-    background: T.sageGlow,
-    borderColor: T.sage + "44",
-    boxShadow: `0 0 16px ${T.sageGlow}`,
+    background:  "#f0fdf4",
+    borderColor: "#86efac",
+    boxShadow:   "0 1px 4px rgba(22,163,74,0.10)",
   },
   itemTop:     { display: "flex", alignItems: "center", gap: 8, marginBottom: 7 },
   typeBadge:   { fontSize: 10, fontWeight: 800, borderRadius: 99, padding: "3px 10px", textTransform: "capitalize" as const, letterSpacing: "0.04em" },
-  orderBadge:  { fontSize: 11, color: T.textMuted, fontFamily: "monospace" },
+  orderBadge:  { fontSize: 11, color: "#9ca3af", fontFamily: "monospace" },
   completedBadge: {
-    fontSize: 10,
-    fontWeight: 800,
-    background: T.sageGlow,
-    color: T.sage,
+    fontSize:     10,
+    fontWeight:   800,
+    background:   "#dcfce7",
+    color:        "#16a34a",
     borderRadius: 99,
-    padding: "3px 10px",
-    border: `1px solid ${T.sage}33`,
+    padding:      "3px 10px",
+    border:       "1px solid #86efac",
   },
 
-  itemTitle: { fontSize: 14, fontWeight: 600, color: T.textPrimary, marginBottom: 12 },
+  itemTitle: { fontSize: 14, fontWeight: 600, color: "#111111", marginBottom: 12 },
 
   // Attempt dots
   attemptsRow:  { display: "flex", alignItems: "center", gap: 7, marginBottom: 10 },
   dot: {
-    width: 13,
-    height: 13,
+    width:        13,
+    height:       13,
     borderRadius: "50%",
-    display: "inline-block",
-    transition: "background 0.25s, box-shadow 0.25s",
+    display:      "inline-block",
+    transition:   "background 0.2s",
   },
-  attemptsLabel: { fontSize: 11, color: T.textMuted, marginLeft: 6 },
+  attemptsLabel: { fontSize: 11, color: "#6b7280", marginLeft: 6 },
 
   // Attempt history
   attemptHistory: {
-    background: "rgba(255,255,255,0.025)",
-    border: `1px solid ${T.border}`,
-    borderRadius: T.radiusSm,
-    padding: "10px 14px",
+    background:   "#f9fafb",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 8,
+    padding:      "10px 14px",
     marginBottom: 10,
   },
   historyLabel: {
-    fontSize: 10,
-    fontWeight: 700,
-    color: T.gold,
+    fontSize:      10,
+    fontWeight:    700,
+    color:         "#374151",
     textTransform: "uppercase" as const,
     letterSpacing: "0.08em",
-    marginBottom: 6,
+    marginBottom:  6,
   },
-  attemptRow:   {
-    display: "flex",
-    gap: 10,
-    alignItems: "center",
-    fontSize: 12,
-    padding: "4px 0",
-    borderBottom: `1px solid ${T.border}`,
+  attemptRow: {
+    display:      "flex",
+    gap:          10,
+    alignItems:   "center",
+    fontSize:     12,
+    padding:      "4px 0",
+    borderBottom: "1px solid #f3f4f6",
   },
-  attemptDone:   { background: T.sageGlow, borderRadius: 4, padding: "4px 6px" },
-  attemptNo:     { fontFamily: "monospace", fontWeight: 700, color: T.textPrimary, minWidth: 28 },
-  attemptDate:   { color: T.textMuted, minWidth: 80 },
+  attemptDone:   { background: "#dcfce7", borderRadius: 4, padding: "4px 6px" },
+  attemptNo:     { fontFamily: "monospace", fontWeight: 700, color: "#111111", minWidth: 28 },
+  attemptDate:   { color: "#6b7280", minWidth: 80 },
   attemptStatus: { fontWeight: 600, minWidth: 70 },
-  attemptNotes:  { color: T.textSecondary, fontStyle: "italic" as const, flex: 1 },
+  attemptNotes:  { color: "#374151", fontStyle: "italic" as const, flex: 1 },
 
   analyticsRow: { display: "flex", gap: 8, flexWrap: "wrap" as const, marginBottom: 10 },
   analyticChip: {
-    fontSize: 11,
-    color: T.textMuted,
-    background: T.glass,
+    fontSize:     11,
+    color:        "#6b7280",
+    background:   "#f3f4f6",
     borderRadius: 99,
-    padding: "3px 10px",
-    border: `1px solid ${T.border}`,
+    padding:      "3px 10px",
+    border:       "1px solid #e5e7eb",
   },
 
-  errMsg: { fontSize: 12, color: T.rose, marginBottom: 8, padding: "6px 10px", background: T.roseGlow, borderRadius: 6 },
+  errMsg: { fontSize: 12, color: "#dc2626", marginBottom: 8, padding: "6px 10px", background: "#fef2f2", borderRadius: 6, border: "1px solid #fecaca" },
 
   // Item actions
   itemActions: {
-    display: "flex",
-    gap: 8,
-    marginTop: 6,
+    display:    "flex",
+    gap:        8,
+    marginTop:  6,
     alignItems: "center",
-    flexWrap: "wrap" as const,
+    flexWrap:   "wrap" as const,
   },
   notesInput: {
-    flex: 1,
-    minWidth: 160,
-    padding: "7px 12px",
-    border: `1px solid ${T.border}`,
-    borderRadius: T.radiusSm,
-    fontSize: 12,
-    color: T.textPrimary,
-    background: T.glass,
-    outline: "none",
-    backdropFilter: "blur(8px)",
+    flex:         1,
+    minWidth:     160,
+    padding:      "7px 12px",
+    border:       "1px solid #d1d5db",
+    borderRadius: 8,
+    fontSize:     12,
+    color:        "#111111",
+    background:   "#fff",
+    outline:      "none",
   },
   attemptBtn: {
-    background: T.glass,
-    color: T.textSecondary,
-    border: `1px solid ${T.border}`,
-    padding: "7px 14px",
-    borderRadius: T.radiusSm,
-    fontSize: 12,
-    fontWeight: 700,
-    cursor: "pointer",
-    transition: "all 0.15s",
+    background:   "#f3f4f6",
+    color:        "#374151",
+    border:       "1px solid #d1d5db",
+    padding:      "7px 14px",
+    borderRadius: 8,
+    fontSize:     12,
+    fontWeight:   700,
+    cursor:       "pointer",
   },
   doneBtn: {
-    background: `linear-gradient(135deg, ${T.sage}, #34d399)`,
-    color: T.charcoal,
-    border: "none",
-    padding: "7px 16px",
-    borderRadius: T.radiusSm,
-    fontSize: 12,
-    fontWeight: 800,
-    cursor: "pointer",
-    boxShadow: `0 4px 14px ${T.sageGlow}`,
-    transition: "all 0.2s",
+    background:    "#16a34a",
+    color:         "#fff",
+    border:        "none",
+    padding:       "7px 16px",
+    borderRadius:  8,
+    fontSize:      12,
+    fontWeight:    800,
+    cursor:        "pointer",
     letterSpacing: "0.02em",
   },
 };

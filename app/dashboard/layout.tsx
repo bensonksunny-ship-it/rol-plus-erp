@@ -18,10 +18,13 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard",    icon: "⊞",  href: "/dashboard",               roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
+  // ── Admin / Super Admin / Student nav ──────────────────────────────────────
+  { label: "Dashboard",    icon: "⊞",  href: "/dashboard",               roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT] },
   { label: "Centers",      icon: "🏫", href: "/dashboard/centers",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Students",     icon: "👥", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
-  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT] },
+  { label: "Teachers",     icon: "👥", href: "/dashboard/teachers",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Admins",       icon: "👤", href: "/dashboard/admins",         roles: [ROLES.SUPER_ADMIN] },
+  { label: "Students",     icon: "👥", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT] },
   { label: "Finance",      icon: "₹",  href: "/dashboard/finance",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   {
     label: "Syllabus",     icon: "📚",
@@ -30,16 +33,20 @@ const NAV_ITEMS: NavItem[] = [
         ? `/dashboard/student-syllabus/${uid}`
         : "/dashboard/syllabus",
     matchPrefix: "/dashboard/syllabus,/dashboard/student-syllabus",
-    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT],
+    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT],
   },
   { label: "Alerts",       icon: "🔔", href: "/dashboard/alerts",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Audit Logs",   icon: "📋", href: "/dashboard/audit-logs",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER] },
+  { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Super Admin",  icon: "⚙",  href: "/dashboard/super-admin",   roles: [ROLES.SUPER_ADMIN] },
+
+  // ── Teacher: single entry point — all navigation is inside Faculty Suite ──
+  { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",       roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
 ];
 
-const BOTTOM_NAV_LABELS = ["Dashboard", "Attendance", "Syllabus", "Students", "My Score"];
+// Mobile bottom nav per role
+const BOTTOM_NAV_LABELS = ["Dashboard", "Attendance", "Syllabus", "Students", "My Score", "Faculty Suite"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 
@@ -56,14 +63,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // Always redirect inside useEffect which runs only once after paint.
   useEffect(() => {
     if (loading) return;
-    if (user) return;
-    if (redirectingRef.current) return;
-    redirectingRef.current = true;
-    // Clear the session cookie before redirecting so middleware doesn't
-    // bounce the user back to /dashboard immediately.
-    document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
-    router.replace("/login");
-  }, [loading, user, router]);
+    if (!user) {
+      if (redirectingRef.current) return;
+      redirectingRef.current = true;
+      document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
+      router.replace("/login");
+      return;
+    }
+    // Teachers have a single entry point — redirect /dashboard → /dashboard/teacher
+    if (user.role === ROLES.TEACHER && pathname === "/dashboard") {
+      router.replace("/dashboard/teacher");
+    }
+  }, [loading, user, pathname, router]);
 
   async function handleSignOut() {
     await signOut();

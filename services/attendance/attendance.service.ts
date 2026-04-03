@@ -199,6 +199,107 @@ export async function markAttendance(data: MarkAttendanceInput): Promise<Attenda
   return { id: snap.id, ...snap.data() } as AttendanceRecord;
 }
 
+// ─── Centre-based Attendance (no classId) ────────────────────────────────────
+
+/**
+ * Fetch all attendance records for a centre on a specific date.
+ * Uses centerId + date fields directly — no classId required.
+ */
+export async function getAttendanceByCentreDate(
+  centerId: string,
+  date: string,
+): Promise<AttendanceRecord[]> {
+  // Single-field query only — avoids composite index requirement.
+  // Filter by date client-side after fetching all records for this centre.
+  const q = query(
+    collection(db, ATTENDANCE),
+    where("centerId", "==", centerId),
+  );
+  const snap = await getDocs(q);
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }) as AttendanceRecord & { date?: string })
+    .filter(r => r.date === date);
+}
+
+export type AttendanceStatus = "present" | "absent";
+
+export interface CentreAttendanceInput {
+  studentUid: string;
+  centerId:   string;
+  date:       string;
+  status:     AttendanceStatus;
+  markedBy:   string;
+}
+
+/**
+ * Upsert attendance for a single student on a centre+date basis.
+ * If a record exists (centerId + date + studentUid) → update status.
+ * If not → create a new record. classId stored as "" for schema compatibility.
+ *
+ * CONSISTENCY RULE: centerId is always derived from the student's own document
+ * (student.centerId). The input.centerId is used only as a fallback if the
+ * student doc cannot be fetched. If there is a mismatch, a warning is logged
+ * and the student's canonical centerId wins — this prevents stale UI values
+ * from creating mismatched attendance records.
+ */
+export async function saveCentreAttendance(
+  input: CentreAttendanceInput,
+): Promise<void> {
+  // ── Derive authoritative centerId from student document ──────────────────────
+  let canonicalCenterId = input.centerId;
+  try {
+    const studentSnap = await getDocFromServer(doc(db, "users", input.studentUid));
+    if (studentSnap.exists()) {
+      const studentCenterId = studentSnap.data().centerId as string | undefined;
+      if (studentCenterId && studentCenterId !== input.centerId) {
+        console.warn(
+          `[attendance.service] saveCentreAttendance: centerId mismatch for student ${input.studentUid}` +
+          ` — input centerId "${input.centerId}" overridden by student.centerId "${studentCenterId}"`
+        );
+        canonicalCenterId = studentCenterId;
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[attendance.service] saveCentreAttendance: could not fetch student ${input.studentUid}` +
+      ` to verify centerId — using input centerId "${input.centerId}" as fallback:`, err
+    );
+  }
+
+  // Query by two fields only (centerId + studentUid) then filter date client-side
+  // to avoid requiring a composite Firestore index.
+  const dupeQ = query(
+    collection(db, ATTENDANCE),
+    where("centerId",   "==", canonicalCenterId),
+    where("studentUid", "==", input.studentUid),
+  );
+  const dupeSnap  = await getDocs(dupeQ);
+  const existing  = { empty: true, docs: dupeSnap.docs.filter(d => d.data().date === input.date) };
+  if (existing.docs.length > 0) existing.empty = false;
+
+  if (!existing.empty) {
+    await updateDoc(doc(db, ATTENDANCE, existing.docs[0].id), {
+      status:   input.status,
+      markedAt: new Date().toISOString(),
+      markedBy: input.markedBy,
+    });
+  } else {
+    await addDoc(collection(db, ATTENDANCE), {
+      classId:    "",
+      studentUid: input.studentUid,
+      centerId:   canonicalCenterId,
+      date:       input.date,
+      markedAt:   new Date().toISOString(),
+      markedBy:   input.markedBy,
+      method:     "manual",
+      status:     input.status,
+      createdAt:  serverTimestamp(),
+    });
+  }
+}
+
+// ─── Class-based Attendance ────────────────────────────────────────────────────
+
 /**
  * Get all attendance records for a class.
  */

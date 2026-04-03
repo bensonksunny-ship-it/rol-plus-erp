@@ -8,9 +8,7 @@ import {
   deleteDoc,
   query,
   where,
-  orderBy,
   serverTimestamp,
-  type Timestamp,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
@@ -19,12 +17,14 @@ import type {
   LessonItem,
   LessonItemType,
   StudentLessonProgress,
+  StudentProgressSummary,
   Attempt,
   CreateLessonInput,
   CreateLessonItemInput,
   ExcelImportRow,
   LessonProgressSummary,
 } from "@/types/lesson";
+import { MAX_ATTEMPTS_BY_TYPE } from "@/types/lesson";
 import type { Role } from "@/types";
 
 // ─── Collection names ─────────────────────────────────────────────────────────
@@ -32,8 +32,8 @@ import type { Role } from "@/types";
 const LESSONS          = "lessons";
 const LESSON_ITEMS     = "lesson_items";
 const STUDENT_PROGRESS = "student_lesson_progress";
+const PROGRESS_SUMMARY = "student_progress_summary";
 
-const MAX_ATTEMPTS = 5;
 const VALID_ITEM_TYPES: LessonItemType[] = ["concept", "exercise", "songsheet"];
 
 // ─── Error helpers ────────────────────────────────────────────────────────────
@@ -41,19 +41,18 @@ const VALID_ITEM_TYPES: LessonItemType[] = ["concept", "exercise", "songsheet"];
 function friendlyError(raw: unknown): string {
   if (raw instanceof Error) {
     const m = raw.message;
-    if (m.startsWith("USER_NOT_FOUND"))        return "Student not found. Verify the student ID.";
-    if (m.startsWith("ROLE_MISMATCH"))         return "The specified user is not a student.";
-    if (m.startsWith("ITEM_NOT_FOUND"))        return "Lesson item not found.";
-    if (m.startsWith("LESSON_NOT_FOUND"))      return "Lesson not found.";
-    if (m.startsWith("CENTER_NOT_FOUND"))      return "Center not found.";
-    if (m.startsWith("ORDER_VIOLATION"))       return "Complete the previous lesson before attempting this one.";
-    if (m.startsWith("ITEM_LOCKED"))           return "This item is already completed and cannot accept new attempts.";
-    if (m.startsWith("MAX_ATTEMPTS_REACHED"))  return `Maximum ${MAX_ATTEMPTS} attempts reached for this item.`;
-    if (m.startsWith("NO_ATTEMPTS"))           return "At least 1 attempt must be logged before marking as completed.";
-    if (m.startsWith("ALREADY_COMPLETED"))     return "This item has already been marked as completed.";
-    if (m.startsWith("DUPLICATE_ORDER"))       return "A lesson with this order number already exists.";
-    if (m.startsWith("NO_ITEMS"))              return "This lesson has no items. Add items before accessing.";
-    if (m.startsWith("INVALID_ITEM_TYPE"))     return "Item type must be one of: concept, exercise, songsheet.";
+    if (m.startsWith("USER_NOT_FOUND"))       return "Student not found. Verify the student ID.";
+    if (m.startsWith("ROLE_MISMATCH"))        return "The specified user is not a student.";
+    if (m.startsWith("ITEM_NOT_FOUND"))       return "Lesson item not found.";
+    if (m.startsWith("LESSON_NOT_FOUND"))     return "Lesson not found.";
+    if (m.startsWith("CENTER_NOT_FOUND"))     return "Center not found.";
+    if (m.startsWith("ITEM_LOCKED"))          return "This item is locked. Complete the previous activity first.";
+    if (m.startsWith("MAX_ATTEMPTS_REACHED")) return "Maximum attempts reached for this item.";
+    if (m.startsWith("NO_ATTEMPTS"))          return "At least 1 attempt must be logged before marking as completed.";
+    if (m.startsWith("ALREADY_COMPLETED"))    return "This item has already been marked as completed.";
+    if (m.startsWith("DUPLICATE_ORDER"))      return "A lesson with this order number already exists.";
+    if (m.startsWith("NO_ITEMS"))             return "This lesson has no items.";
+    if (m.startsWith("INVALID_ITEM_TYPE"))    return "Item type must be one of: concept, exercise, songsheet.";
     return m;
   }
   return String(raw);
@@ -113,13 +112,11 @@ export async function createLesson(
 export async function getLessonsByCenter(centerId: string): Promise<Lesson[]> {
   try {
     const snap = await getDocs(
-      query(
-        collection(db, LESSONS),
-        where("centerId", "==", centerId),
-        orderBy("order", "asc"),
-      )
+      query(collection(db, LESSONS), where("centerId", "==", centerId))
     );
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }) as Lesson);
+    return snap.docs
+      .map(d => ({ id: d.id, ...d.data() }) as Lesson)
+      .sort((a, b) => a.order - b.order);
   } catch (err) {
     throw new Error(friendlyError(err));
   }
@@ -128,13 +125,58 @@ export async function getLessonsByCenter(centerId: string): Promise<Lesson[]> {
 export async function getLessonsByStudent(studentId: string): Promise<Lesson[]> {
   try {
     const snap = await getDocs(
-      query(
-        collection(db, LESSONS),
-        where("studentId", "==", studentId),
-        orderBy("order", "asc"),
-      )
+      query(collection(db, LESSONS), where("studentId", "==", studentId))
     );
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }) as Lesson);
+    return snap.docs
+      .map(d => ({ id: d.id, ...d.data() }) as Lesson)
+      .sort((a, b) => a.order - b.order);
+  } catch (err) {
+    throw new Error(friendlyError(err));
+  }
+}
+
+/**
+ * Get ALL lessons for a student:
+ *   - center-wide lessons (lesson.centerId == student.centerId)
+ *   - student-specific lessons (lesson.studentId == studentId)
+ * Both types merged into a single list sorted by order ascending.
+ * No assignment system — lessons are available directly.
+ */
+export async function getLessonsForStudent(
+  studentId: string,
+): Promise<{ lessons: (Lesson & { items: LessonItem[] })[]; centerId: string | null }> {
+  try {
+    const studentSnap = await getDocFromServer(doc(db, "users", studentId));
+    if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
+    const centerId: string | null = (studentSnap.data().centerId as string) ?? null;
+
+    // Fetch center-wide + student-specific lessons in parallel
+    const [centerLessons, studentLessons] = await Promise.all([
+      centerId ? getLessonsByCenter(centerId) : Promise.resolve([]),
+      getLessonsByStudent(studentId),
+    ]);
+
+    // Merge and sort by order — dedup by id in case of overlap
+    const seen = new Set<string>();
+    const allLessons: Lesson[] = [];
+    for (const l of [...centerLessons, ...studentLessons]) {
+      if (!seen.has(l.id)) {
+        seen.add(l.id);
+        allLessons.push(l);
+      }
+    }
+    allLessons.sort((a, b) => a.order - b.order);
+
+    if (allLessons.length === 0) return { lessons: [], centerId };
+
+    // Fetch items for all lessons in parallel
+    const itemArrays = await Promise.all(allLessons.map(l => getItemsByLesson(l.id)));
+    const lessons = allLessons.map((lesson, idx) => ({
+      ...lesson,
+      items: itemArrays[idx] ?? [],
+    }));
+
+    return { lessons, centerId };
   } catch (err) {
     throw new Error(friendlyError(err));
   }
@@ -155,11 +197,13 @@ export async function createLessonItem(
     const lessonSnap = await getDocFromServer(doc(db, LESSONS, data.lessonId));
     if (!lessonSnap.exists()) throw new Error(`LESSON_NOT_FOUND: ${data.lessonId}`);
 
+    const maxAttempts = MAX_ATTEMPTS_BY_TYPE[data.type];
+
     const ref = await addDoc(collection(db, LESSON_ITEMS), {
       lessonId:    data.lessonId,
       type:        data.type,
       title:       data.title,
-      maxAttempts: MAX_ATTEMPTS,
+      maxAttempts,
       order:       data.order,
       createdAt:   serverTimestamp(),
       updatedAt:   serverTimestamp(),
@@ -185,13 +229,11 @@ export async function createLessonItem(
 export async function getItemsByLesson(lessonId: string): Promise<LessonItem[]> {
   try {
     const snap = await getDocs(
-      query(
-        collection(db, LESSON_ITEMS),
-        where("lessonId", "==", lessonId),
-        orderBy("order", "asc"),
-      )
+      query(collection(db, LESSON_ITEMS), where("lessonId", "==", lessonId))
     );
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }) as LessonItem);
+    return snap.docs
+      .map(d => ({ id: d.id, ...d.data() }) as LessonItem)
+      .sort((a, b) => a.order - b.order);
   } catch (err) {
     throw new Error(friendlyError(err));
   }
@@ -199,7 +241,9 @@ export async function getItemsByLesson(lessonId: string): Promise<LessonItem[]> 
 
 // ─── Student Lesson Progress ──────────────────────────────────────────────────
 
-export async function getProgressByStudent(studentId: string): Promise<StudentLessonProgress[]> {
+export async function getProgressByStudent(
+  studentId: string,
+): Promise<StudentLessonProgress[]> {
   try {
     const snap = await getDocs(
       query(collection(db, STUDENT_PROGRESS), where("studentId", "==", studentId))
@@ -224,86 +268,157 @@ export async function getProgressRecord(
   }
 }
 
-// ─── Order enforcement helper ─────────────────────────────────────────────────
+// ─── Sequential unlock helpers ────────────────────────────────────────────────
 
 /**
- * Validates that the student has completed at least 1 item in the previous
- * lesson within the same scope (center or student).
- * Throws ORDER_VIOLATION if the check fails.
+ * Returns true if the item at `itemOrder` in `lessonId` is unlocked for `studentId`.
+ *
+ * Rules:
+ *  - First item (order === 1) of first lesson (lesson.order === 1) → always unlocked.
+ *  - First item (order === 1) of any other lesson → unlocked only when ALL items
+ *    of the previous lesson are completed.
+ *  - Any other item → unlocked when the immediately preceding item (order - 1)
+ *    in the same lesson is completed.
  */
-async function enforceOrderCheck(
+export async function isItemUnlocked(
   studentId: string,
   lesson:    Lesson,
-): Promise<void> {
-  if (lesson.order <= 1) return; // first lesson — always allowed
+  item:      LessonItem,
+  allLessonsForStudent: Lesson[],    // pre-fetched, sorted by order
+  allItemsForLesson:    LessonItem[], // pre-fetched for this lesson, sorted by order
+): Promise<boolean> {
+  // First item of the lesson
+  if (item.order === 1) {
+    // First lesson — always unlocked
+    if (lesson.order === 1) return true;
 
-  const scopeField = lesson.centerId ? "centerId" : "studentId";
-  const scopeValue = lesson.centerId ?? lesson.studentId;
-  if (!scopeValue) return;
+    // Otherwise need all items of the previous lesson to be completed
+    const prevLesson = allLessonsForStudent.find(l => l.order === lesson.order - 1);
+    if (!prevLesson) return true; // no previous lesson found — allow
 
-  const prevSnap = await getDocs(
-    query(
-      collection(db, LESSONS),
-      where(scopeField, "==", scopeValue),
-      where("order", "==", lesson.order - 1),
-    )
-  );
-  if (prevSnap.empty) return; // no previous lesson found — allow
+    const prevItems = await getItemsByLesson(prevLesson.id);
+    if (prevItems.length === 0) return true; // previous lesson has no items — allow
 
-  const prevLessonId = prevSnap.docs[0].id;
-  const prevItemsSnap = await getDocs(
-    query(collection(db, LESSON_ITEMS), where("lessonId", "==", prevLessonId))
-  );
-
-  if (prevItemsSnap.empty) return; // previous lesson has no items — allow
-
-  for (const prevItemDoc of prevItemsSnap.docs) {
-    const prog = await getProgressRecord(studentId, prevItemDoc.id);
-    if (prog?.completed) return; // at least one item completed — pass
+    for (const prevItem of prevItems) {
+      const prog = await getProgressRecord(studentId, prevItem.id);
+      if (!prog?.completed) return false;
+    }
+    return true;
   }
 
-  throw new Error(
-    `ORDER_VIOLATION: student ${studentId} has not completed any item in lesson ${prevLessonId}`
-  );
+  // Non-first item — previous item in same lesson must be completed
+  const prevItem = allItemsForLesson.find(i => i.order === item.order - 1);
+  if (!prevItem) return true; // no previous item — allow
+
+  const prog = await getProgressRecord(studentId, prevItem.id);
+  return prog?.completed === true;
+}
+
+// ─── Progress percent helpers (pure — no DB) ─────────────────────────────────
+
+export function calcLessonPercent(
+  items:       LessonItem[],
+  progressMap: Record<string, StudentLessonProgress>,
+): number {
+  if (items.length === 0) return 0;
+  const completed = items.filter(i => progressMap[i.id]?.completed).length;
+  return Math.round((completed / items.length) * 100);
+}
+
+export function calcOverallPercent(
+  allItems:    LessonItem[],
+  progressMap: Record<string, StudentLessonProgress>,
+): number {
+  if (allItems.length === 0) return 0;
+  const completed = allItems.filter(i => progressMap[i.id]?.completed).length;
+  return Math.round((completed / allItems.length) * 100);
+}
+
+/**
+ * Recalculate and store lessonPercents + overallPercent for a student.
+ * Called after every teacher write (addAttempt / markItemCompleted).
+ * Single doc write to `student_progress_summary/{studentId}`.
+ */
+async function refreshProgressSummary(studentId: string): Promise<void> {
+  try {
+    const { lessons } = await getLessonsForStudent(studentId);
+    const allProgress  = await getProgressByStudent(studentId);
+
+    const progressMap: Record<string, StudentLessonProgress> = {};
+    allProgress.forEach(p => { progressMap[p.itemId] = p; });
+
+    const lessonPercents: Record<string, number> = {};
+    const allItems: LessonItem[] = [];
+
+    for (const lesson of lessons) {
+      lessonPercents[lesson.id] = calcLessonPercent(lesson.items, progressMap);
+      allItems.push(...lesson.items);
+    }
+
+    const overallPercent = calcOverallPercent(allItems, progressMap);
+
+    await setDoc(
+      doc(db, PROGRESS_SUMMARY, studentId),
+      {
+        studentId,
+        overallPercent,
+        lessonPercents,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  } catch (err) {
+    // Non-blocking: log but don't fail the primary action
+    console.error("refreshProgressSummary failed:", err);
+  }
+}
+
+export async function getProgressSummary(
+  studentId: string,
+): Promise<StudentProgressSummary | null> {
+  try {
+    const snap = await getDocFromServer(doc(db, PROGRESS_SUMMARY, studentId));
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...snap.data() } as StudentProgressSummary;
+  } catch (err) {
+    throw new Error(friendlyError(err));
+  }
 }
 
 // ─── Add Attempt ──────────────────────────────────────────────────────────────
 
 export async function addAttempt(
-  studentId:    string,
-  lessonId:     string,
-  itemId:       string,
-  teacherId:    string,
-  teacherRole:  Role,
-  notes:        string | null,
-  overrideBy:   string | null,
+  studentId:   string,
+  lessonId:    string,
+  itemId:      string,
+  teacherId:   string,
+  teacherRole: Role,
+  notes:       string | null,
 ): Promise<StudentLessonProgress> {
   try {
-    // Validate student exists and has correct role
+    // Validate student
     const studentSnap = await getDocFromServer(doc(db, "users", studentId));
     if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
     if (studentSnap.data().role !== "student") throw new Error(`ROLE_MISMATCH: ${studentId}`);
 
-    // Validate item exists
+    // Validate item + lesson
     const itemSnap = await getDocFromServer(doc(db, LESSON_ITEMS, itemId));
     if (!itemSnap.exists()) throw new Error(`ITEM_NOT_FOUND: ${itemId}`);
+    const item = { id: itemSnap.id, ...itemSnap.data() } as LessonItem;
 
-    // Validate lesson exists
     const lessonSnap = await getDocFromServer(doc(db, LESSONS, lessonId));
     if (!lessonSnap.exists()) throw new Error(`LESSON_NOT_FOUND: ${lessonId}`);
+    const lesson = { id: lessonSnap.id, ...lessonSnap.data() } as Lesson;
 
-    // Block access if lesson has no items (edge case guard)
-    const itemsSnap = await getDocs(
-      query(collection(db, LESSON_ITEMS), where("lessonId", "==", lessonId))
-    );
-    if (itemsSnap.empty) throw new Error(`NO_ITEMS: lesson ${lessonId} has no items`);
-
-    // Order enforcement — skip only if admin override provided
-    if (!overrideBy) {
-      await enforceOrderCheck(studentId, lessonSnap.data() as Lesson);
+    // Sequential unlock check
+    const { lessons: allLessons } = await getLessonsForStudent(studentId);
+    const allItemsForLesson = await getItemsByLesson(lessonId);
+    const unlocked = await isItemUnlocked(studentId, lesson, item, allLessons, allItemsForLesson);
+    if (!unlocked) {
+      throw new Error(`ITEM_LOCKED: complete the previous activity before attempting this one`);
     }
 
-    // Load existing progress record
+    // Load existing progress
     const progressId  = `${studentId}_${itemId}`;
     const progressRef = doc(db, STUDENT_PROGRESS, progressId);
     const existing    = await getDocFromServer(progressRef).catch(() => null);
@@ -311,12 +426,14 @@ export async function addAttempt(
       ? (existing.data() as Omit<StudentLessonProgress, "id">)
       : null;
 
-    // Hard locks
     if (current?.completed) throw new Error(`ITEM_LOCKED: ${itemId} is already completed`);
 
     const currentAttempts: Attempt[] = current?.attempts ?? [];
-    if (currentAttempts.length >= MAX_ATTEMPTS) {
-      throw new Error(`MAX_ATTEMPTS_REACHED: ${itemId} has reached the limit of ${MAX_ATTEMPTS} attempts`);
+    const maxAttempts = MAX_ATTEMPTS_BY_TYPE[item.type] ?? 5;
+    if (currentAttempts.length >= maxAttempts) {
+      throw new Error(
+        `MAX_ATTEMPTS_REACHED: ${item.type} has a limit of ${maxAttempts} attempts`
+      );
     }
 
     const attemptNo   = currentAttempts.length + 1;
@@ -346,14 +463,17 @@ export async function addAttempt(
     }, { merge: true });
 
     logAction({
-      action:        overrideBy ? "ATTEMPT_LOGGED_OVERRIDE" : "ATTEMPT_LOGGED",
+      action:        "ATTEMPT_LOGGED",
       initiatorId:   teacherId,
       initiatorRole: teacherRole,
-      approverId:    overrideBy ?? null,
-      approverRole:  overrideBy ? "admin" : null,
-      reason:        overrideBy ? "admin_override" : null,
+      approverId:    null,
+      approverRole:  null,
+      reason:        null,
       metadata:      { studentId, lessonId, itemId, attemptNo, notes },
     });
+
+    // Refresh stored progress percents (non-blocking)
+    void refreshProgressSummary(studentId);
 
     const snap = await getDocFromServer(progressRef);
     return { id: snap.id, ...snap.data() } as StudentLessonProgress;
@@ -370,7 +490,6 @@ export async function markItemCompleted(
   itemId:      string,
   teacherId:   string,
   teacherRole: Role,
-  overrideBy:  string | null,
 ): Promise<StudentLessonProgress> {
   try {
     const progressId  = `${studentId}_${itemId}`;
@@ -401,18 +520,21 @@ export async function markItemCompleted(
     }, { merge: true });
 
     logAction({
-      action:        overrideBy ? "ITEM_COMPLETED_OVERRIDE" : "ITEM_COMPLETED",
+      action:        "ITEM_COMPLETED",
       initiatorId:   teacherId,
       initiatorRole: teacherRole,
-      approverId:    overrideBy ?? null,
-      approverRole:  overrideBy ? "admin" : null,
-      reason:        overrideBy ? "admin_override" : null,
+      approverId:    null,
+      approverRole:  null,
+      reason:        null,
       metadata:      {
         studentId, lessonId, itemId,
         totalAttempts:  updatedAttempts.length,
         completionDate: today,
       },
     });
+
+    // Refresh stored progress percents (non-blocking)
+    void refreshProgressSummary(studentId);
 
     const snap = await getDocFromServer(progressRef);
     return { id: snap.id, ...snap.data() } as StudentLessonProgress;
@@ -421,228 +543,47 @@ export async function markItemCompleted(
   }
 }
 
-// ─── Lesson Progress Summary ──────────────────────────────────────────────────
+// ─── Live progress summary ────────────────────────────────────────────────────
 
-/**
- * Aggregate lesson-level progress for a student.
- * Fetches all lessons the student has scope over (center + student-specific),
- * then computes totals from progress records.
- */
 export async function getLessonProgressSummary(
   studentId: string,
 ): Promise<LessonProgressSummary> {
   try {
-    // Resolve student's centerId
-    const studentSnap = await getDocFromServer(doc(db, "users", studentId));
-    if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
-    const centerId: string | undefined = studentSnap.data().centerId;
+    const { lessons } = await getLessonsForStudent(studentId);
 
-    // Fetch all lessons in scope
-    const lessonPromises: Promise<Lesson[]>[] = [getLessonsByStudent(studentId)];
-    if (centerId) lessonPromises.push(getLessonsByCenter(centerId));
-
-    const lessonArrays = await Promise.all(lessonPromises);
-    const allLessons = lessonArrays.flat();
-
-    if (allLessons.length === 0) {
-      return { totalLessons: 0, completedLessons: 0, inProgressLessons: 0, avgAttemptsPerItem: 0 };
+    if (lessons.length === 0) {
+      return { totalLessons: 0, completedLessons: 0, inProgressLessons: 0, overallPercent: 0 };
     }
 
-    // Fetch all items for all lessons
-    const lessonIds = allLessons.map(l => l.id);
-    const itemPromises = lessonIds.map(id =>
-      getDocs(query(collection(db, LESSON_ITEMS), where("lessonId", "==", id)))
-    );
-    const itemSnaps = await Promise.all(itemPromises);
-
-    // Map: lessonId → itemIds
-    const lessonItemMap: Record<string, string[]> = {};
-    for (let i = 0; i < lessonIds.length; i++) {
-      lessonItemMap[lessonIds[i]] = itemSnaps[i].docs.map(d => d.id);
-    }
-
-    // Fetch all progress records for student
-    const allProgress = await getProgressByStudent(studentId);
+    const allProgress  = await getProgressByStudent(studentId);
     const progressMap: Record<string, StudentLessonProgress> = {};
     allProgress.forEach(p => { progressMap[p.itemId] = p; });
 
     let completedLessons  = 0;
     let inProgressLessons = 0;
-    let totalAttemptSum   = 0;
-    let itemsWithAttempts = 0;
+    const allItems: LessonItem[] = [];
 
-    for (const lesson of allLessons) {
-      const items = lessonItemMap[lesson.id] ?? [];
-      if (items.length === 0) continue;
+    for (const lesson of lessons) {
+      allItems.push(...lesson.items);
+      if (lesson.items.length === 0) continue;
 
-      let anyStarted    = false;
-      let allCompleted  = true;
+      const completed  = lesson.items.filter(i => progressMap[i.id]?.completed).length;
+      const anyStarted = lesson.items.some(i =>
+        (progressMap[i.id]?.attempts.length ?? 0) > 0
+      );
 
-      for (const itemId of items) {
-        const prog = progressMap[itemId];
-        if (!prog || prog.attempts.length === 0) {
-          allCompleted = false;
-          continue;
-        }
-        anyStarted = true;
-        if (!prog.completed) allCompleted = false;
-        totalAttemptSum += prog.totalAttempts;
-        itemsWithAttempts++;
-      }
-
-      if (allCompleted && anyStarted) completedLessons++;
-      else if (anyStarted)            inProgressLessons++;
+      if (completed === lesson.items.length) completedLessons++;
+      else if (anyStarted)                   inProgressLessons++;
     }
 
-    const avgAttemptsPerItem = itemsWithAttempts > 0
-      ? Math.round((totalAttemptSum / itemsWithAttempts) * 10) / 10
-      : 0;
+    const overallPercent = calcOverallPercent(allItems, progressMap);
 
     return {
-      totalLessons:      allLessons.length,
+      totalLessons:      lessons.length,
       completedLessons,
       inProgressLessons,
-      avgAttemptsPerItem,
+      overallPercent,
     };
-  } catch (err) {
-    throw new Error(friendlyError(err));
-  }
-}
-
-// ─── Lesson Assignment ───────────────────────────────────────────────────────
-// Assigns a set of center-scope lessons to a student by writing a lightweight
-// document to the `lesson_assignments` collection.
-// Doc ID = studentId (1:1 per student). Contains centerId + lessonIds[].
-
-const LESSON_ASSIGNMENTS = "lesson_assignments";
-
-export interface LessonAssignment {
-  id:         string;   // doc ID = studentId
-  studentId:  string;
-  centerId:   string;
-  lessonIds:  string[]; // ordered list of lesson IDs assigned
-  assignedBy: string;   // UID of admin/teacher who assigned
-  createdAt:  Timestamp | string;
-  updatedAt:  Timestamp | string;
-}
-
-/**
- * Assign a set of lessons (by ID) from a center to a student.
- * Overwrites any previous assignment for this student.
- */
-export async function assignLessonsToStudent(
-  studentId:     string,
-  centerId:      string,
-  lessonIds:     string[],
-  initiatorId:   string,
-  initiatorRole: Role,
-): Promise<void> {
-  try {
-    // Validate student exists and is a student
-    const studentSnap = await getDocFromServer(doc(db, "users", studentId));
-    if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
-    if (studentSnap.data().role !== "student") throw new Error(`ROLE_MISMATCH: ${studentId}`);
-
-    // Validate all lesson IDs exist
-    for (const lid of lessonIds) {
-      const lSnap = await getDocFromServer(doc(db, LESSONS, lid));
-      if (!lSnap.exists()) throw new Error(`LESSON_NOT_FOUND: ${lid}`);
-    }
-
-    const ref = doc(db, LESSON_ASSIGNMENTS, studentId);
-    await setDoc(ref, {
-      studentId,
-      centerId,
-      lessonIds,
-      assignedBy: initiatorId,
-      updatedAt:  serverTimestamp(),
-      createdAt:  serverTimestamp(),
-    }, { merge: true });
-
-    logAction({
-      action:        "LESSONS_ASSIGNED_TO_STUDENT",
-      initiatorId,
-      initiatorRole,
-      approverId:    null,
-      approverRole:  null,
-      reason:        null,
-      metadata:      { studentId, centerId, lessonCount: lessonIds.length },
-    });
-  } catch (err) {
-    throw new Error(friendlyError(err));
-  }
-}
-
-/**
- * Get the lesson assignment for a student. Returns null if none.
- */
-export async function getLessonAssignment(
-  studentId: string,
-): Promise<LessonAssignment | null> {
-  try {
-    const snap = await getDocFromServer(doc(db, LESSON_ASSIGNMENTS, studentId));
-    if (!snap.exists()) return null;
-    return { id: snap.id, ...snap.data() } as LessonAssignment;
-  } catch (err) {
-    throw new Error(friendlyError(err));
-  }
-}
-
-/**
- * Get all assigned lessons for a student with their items.
- * Returns lessons ordered by `order` ascending.
- * Falls back to center lessons if student has a centerId but no explicit assignment.
- */
-export async function getAssignedLessonsWithItems(
-  studentId: string,
-): Promise<{ lessons: (Lesson & { items: LessonItem[] })[]; centerId: string | null }> {
-  try {
-    // Check explicit assignment first
-    const assignment = await getLessonAssignment(studentId);
-
-    let lessons: Lesson[] = [];
-    let centerId: string | null = null;
-
-    if (assignment && assignment.lessonIds.length > 0) {
-      centerId = assignment.centerId;
-      // Fetch each assigned lesson
-      const lessonPromises = assignment.lessonIds.map(lid =>
-        getDocFromServer(doc(db, LESSONS, lid))
-      );
-      const lessonSnaps = await Promise.all(lessonPromises);
-      lessons = lessonSnaps
-        .filter(s => s.exists())
-        .map(s => ({ id: s.id, ...s.data() }) as Lesson)
-        .sort((a, b) => a.order - b.order);
-    } else {
-      // Fallback: resolve student's centerId, load all center lessons
-      const studentSnap = await getDocFromServer(doc(db, "users", studentId));
-      if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
-      centerId = (studentSnap.data().centerId as string) ?? null;
-
-      if (centerId) {
-        lessons = await getLessonsByCenter(centerId);
-      }
-
-      // Also include student-specific lessons
-      const studentLessons = await getLessonsByStudent(studentId);
-      if (studentLessons.length > 0) {
-        lessons = [...lessons, ...studentLessons].sort((a, b) => a.order - b.order);
-      }
-    }
-
-    if (lessons.length === 0) return { lessons: [], centerId };
-
-    // Fetch items for all lessons in parallel
-    const itemPromises = lessons.map(l => getItemsByLesson(l.id));
-    const itemArrays   = await Promise.all(itemPromises);
-
-    const result = lessons.map((lesson, idx) => ({
-      ...lesson,
-      items: itemArrays[idx] ?? [],
-    }));
-
-    return { lessons: result, centerId };
   } catch (err) {
     throw new Error(friendlyError(err));
   }
@@ -651,67 +592,53 @@ export async function getAssignedLessonsWithItems(
 // ─── Excel Bulk Import ────────────────────────────────────────────────────────
 
 export interface ImportResult {
-  created:  number;
-  skipped:  number;
-  errors:   string[];
+  created: number;
+  skipped: number;
+  errors:  string[];
 }
 
-/**
- * Bulk import lessons from validated Excel rows.
- * Schema: lessonNumber, lessonName, itemType, itemTitle, order
- *
- * Atomic per-lesson: if item creation fails, the lesson doc is deleted (rollback).
- * Scope: centerId OR studentId (exactly one must be non-null).
- */
 export async function bulkImportLessons(
   rows:          ExcelImportRow[],
   scope:         { centerId: string; studentId: null } | { centerId: null; studentId: string },
   initiatorId:   string,
   initiatorRole: Role,
+  overwrite:     boolean = false,
 ): Promise<ImportResult> {
   const result: ImportResult = { created: 0, skipped: 0, errors: [] };
 
-  // Group rows by lessonNumber
+  // Group rows by lessonNumber (preserving insertion order)
   const grouped = new Map<number, ExcelImportRow[]>();
   for (const row of rows) {
     if (!grouped.has(row.lessonNumber)) grouped.set(row.lessonNumber, []);
     grouped.get(row.lessonNumber)!.push(row);
   }
 
-  // Track lesson orders used in this import (prevent intra-batch duplicates)
-  const usedOrders = new Set<number>();
+  const sortedLessonNumbers = Array.from(grouped.keys()).sort((a, b) => a - b);
+  const lessonOrderMap = new Map<number, number>();
+  sortedLessonNumbers.forEach((num, idx) => lessonOrderMap.set(num, idx + 1));
+
+  const scopeField = scope.centerId ? "centerId" : "studentId";
+  const scopeValue = scope.centerId ?? scope.studentId;
 
   for (const [lessonNumber, lessonRows] of grouped) {
-    const firstRow = lessonRows[0];
-    const rowLabel = `Lesson ${lessonNumber}`;
+    const firstRow    = lessonRows[0];
+    const rowLabel    = `Lesson ${lessonNumber}`;
+    const lessonOrder = lessonOrderMap.get(lessonNumber)!;
 
-    // Validate lesson-level fields
     if (!firstRow.lessonName?.trim()) {
       result.errors.push(`${rowLabel}: lessonName is required`);
       result.skipped++;
       continue;
     }
-    if (isNaN(firstRow.order) || firstRow.order < 1) {
-      result.errors.push(`${rowLabel}: order must be a positive number (got "${firstRow.order}")`);
-      result.skipped++;
-      continue;
-    }
-    if (usedOrders.has(firstRow.order)) {
-      result.errors.push(`${rowLabel}: duplicate order ${firstRow.order} in this import batch`);
-      result.skipped++;
-      continue;
-    }
-    usedOrders.add(firstRow.order);
 
-    // Validate all item rows for this lesson
     const itemErrors: string[] = [];
     for (const row of lessonRows) {
       if (!row.itemTitle?.trim()) {
-        itemErrors.push(`${rowLabel} row: itemTitle is required`);
+        itemErrors.push(`${rowLabel}: itemTitle is required (found empty row)`);
       }
-      if (!VALID_ITEM_TYPES.includes(row.itemType?.trim() as LessonItemType)) {
+      if (!VALID_ITEM_TYPES.includes(row.itemType?.trim().toLowerCase() as LessonItemType)) {
         itemErrors.push(
-          `${rowLabel} row: invalid itemType "${row.itemType}". Must be one of: concept, exercise, songsheet`
+          `${rowLabel}: invalid itemType "${row.itemType}" — must be concept, exercise, or songsheet`
         );
       }
     }
@@ -722,67 +649,75 @@ export async function bulkImportLessons(
     }
 
     try {
-      // Check for existing lesson with same order in Firestore
-      const scopeField = scope.centerId ? "centerId" : "studentId";
-      const scopeValue = scope.centerId ?? scope.studentId;
       const dupSnap = await getDocs(
         query(
           collection(db, LESSONS),
           where(scopeField, "==", scopeValue),
-          where("order", "==", firstRow.order),
+          where("lessonNumber", "==", lessonNumber),
         )
       );
+
       if (!dupSnap.empty) {
-        result.errors.push(`Lesson order ${firstRow.order} already exists in Firestore — skipped`);
-        result.skipped++;
-        continue;
+        if (!overwrite) {
+          result.errors.push(`Lesson ${lessonNumber} ("${firstRow.lessonName.trim()}") already exists — skipped`);
+          result.skipped++;
+          continue;
+        }
+        // Overwrite: delete existing lesson + items
+        for (const existingDoc of dupSnap.docs) {
+          const existingItemsSnap = await getDocs(
+            query(collection(db, LESSON_ITEMS), where("lessonId", "==", existingDoc.id))
+          );
+          for (const itemDoc of existingItemsSnap.docs) {
+            await deleteDoc(doc(db, LESSON_ITEMS, itemDoc.id)).catch(() => null);
+          }
+          await deleteDoc(existingDoc.ref).catch(() => null);
+        }
       }
 
-      // Create lesson document
       const lessonRef = await addDoc(collection(db, LESSONS), {
         title:        firstRow.lessonName.trim(),
         lessonNumber,
-        order:        firstRow.order,
+        order:        lessonOrder,
         centerId:     scope.centerId  ?? null,
         studentId:    scope.studentId ?? null,
         createdAt:    serverTimestamp(),
         updatedAt:    serverTimestamp(),
       });
 
-      const lessonId = lessonRef.id;
-      let itemOrder  = 1;
+      const lessonId         = lessonRef.id;
+      let itemOrder          = 1;
       const createdItemRefs: string[] = [];
 
       try {
-        // Create all items — atomic: any failure rolls back the lesson
         for (const row of lessonRows) {
+          const itemType    = row.itemType.trim().toLowerCase() as LessonItemType;
+          const maxAttempts = MAX_ATTEMPTS_BY_TYPE[itemType];
           const itemRef = await addDoc(collection(db, LESSON_ITEMS), {
             lessonId,
-            type:        row.itemType.trim() as LessonItemType,
+            type:        itemType,
             title:       row.itemTitle.trim(),
-            maxAttempts: MAX_ATTEMPTS,
+            maxAttempts,
             order:       itemOrder++,
             createdAt:   serverTimestamp(),
             updatedAt:   serverTimestamp(),
           });
           createdItemRefs.push(itemRef.id);
         }
-
         result.created++;
       } catch (itemErr) {
-        // Rollback: delete created items + lesson document
-        for (const itemId of createdItemRefs) {
-          await deleteDoc(doc(db, LESSON_ITEMS, itemId)).catch(() => null);
+        // Rollback: delete created items + lesson
+        for (const id of createdItemRefs) {
+          await deleteDoc(doc(db, LESSON_ITEMS, id)).catch(() => null);
         }
         await deleteDoc(lessonRef).catch(() => null);
-
         const msg = itemErr instanceof Error ? itemErr.message : String(itemErr);
         result.errors.push(`${rowLabel}: item creation failed and was rolled back — ${msg}`);
         result.skipped++;
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      result.errors.push(`${rowLabel}: ${friendlyError(err) !== msg ? friendlyError(err) : msg}`);
+      result.errors.push(`${rowLabel}: ${msg}`);
       result.skipped++;
     }
   }
@@ -795,9 +730,9 @@ export async function bulkImportLessons(
     approverRole:  null,
     reason:        null,
     metadata:      {
-      created:   result.created,
-      skipped:   result.skipped,
-      scope:     scope.centerId ? `center:${scope.centerId}` : `student:${scope.studentId}`,
+      created: result.created,
+      skipped: result.skipped,
+      scope:   scope.centerId ? `center:${scope.centerId}` : `student:${scope.studentId}`,
     },
   });
 

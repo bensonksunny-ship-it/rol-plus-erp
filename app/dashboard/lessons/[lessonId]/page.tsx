@@ -107,7 +107,6 @@ function LessonDetailContent({
     setWorking(true);
     setActiveItemId(item.id);
     try {
-      const isAdmin = role === "admin" || role === "super_admin";
       await addAttempt(
         studentId,
         lessonId,
@@ -115,7 +114,6 @@ function LessonDetailContent({
         user.uid,
         role ?? "teacher",
         notesMap[item.id]?.trim() || null,
-        isAdmin ? user.uid : null,
       );
       toast(`Attempt logged for "${item.title}".`, "success");
       setNotesMap(prev => ({ ...prev, [item.id]: "" }));
@@ -137,14 +135,12 @@ function LessonDetailContent({
     setWorking(true);
     setActiveItemId(item.id);
     try {
-      const isAdmin = role === "admin" || role === "super_admin";
       await markItemCompleted(
         studentId,
         lessonId,
         item.id,
         user.uid,
         role ?? "teacher",
-        isAdmin ? user.uid : null,
       );
       toast(`"${item.title}" marked as completed.`, "success");
       await fetchData();
