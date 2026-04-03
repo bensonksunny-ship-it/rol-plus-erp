@@ -89,6 +89,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const redirectingRef    = useRef(false);
 
+  // Must be called unconditionally — before any early return — to satisfy Rules of Hooks.
+  // canSeeAlerts is derived from user which may be null; the hook itself handles that.
+  const canSeeAlerts = user?.role === ROLES.SUPER_ADMIN || user?.role === ROLES.ADMIN;
+  const alertCount   = useAlertCount(canSeeAlerts);
+
   // CRITICAL: Never call router.replace() during render — it triggers a
   // navigation on every render cycle, causing an infinite reload loop on mobile.
   // Always redirect inside useEffect which runs only once after paint.
@@ -154,10 +159,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     return prefixes.some(p => p !== "/dashboard" && pathname.startsWith(p));
   }
 
-  const pageTitle  = visibleNav.find(isActive)?.label ?? "Dashboard";
-  const initials   = user.displayName.charAt(0).toUpperCase();
-  const canSeeAlerts = user.role === ROLES.SUPER_ADMIN || user.role === ROLES.ADMIN;
-  const alertCount = useAlertCount(canSeeAlerts);
+  const pageTitle = visibleNav.find(isActive)?.label ?? "Dashboard";
+  const initials  = user.displayName.charAt(0).toUpperCase();
 
   const bottomNav = BOTTOM_NAV_LABELS
     .map(label => visibleNav.find(i => i.label === label))
