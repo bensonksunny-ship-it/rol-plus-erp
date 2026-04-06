@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/useAuth";
 import {
   getLessonsByCenter,
   getItemsByLesson,
+  getLessonsForStudent,
 } from "@/services/lesson/lesson.service";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -63,6 +64,8 @@ function SyllabusContent() {
 
   // Track tab state
   const [trackStudent, setTrackStudent]       = useState<string>("");
+  const [trackLessonCount, setTrackLessonCount] = useState<number | null>(null);
+  const [trackLoadingCount, setTrackLoadingCount] = useState(false);
 
   // Load centers + students on mount
   useEffect(() => {
@@ -119,6 +122,16 @@ function SyllabusContent() {
     setLessons([]);
     loadLessons(centerId);
   }
+
+  // Fetch lesson count for selected track student
+  useEffect(() => {
+    if (!trackStudent) { setTrackLessonCount(null); return; }
+    setTrackLoadingCount(true);
+    getLessonsForStudent(trackStudent)
+      .then(data => setTrackLessonCount(data.lessons.length))
+      .catch(() => setTrackLessonCount(null))
+      .finally(() => setTrackLoadingCount(false));
+  }, [trackStudent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isAdmin = role === "admin" || role === "super_admin";
 
@@ -257,24 +270,40 @@ function SyllabusContent() {
             </select>
           </div>
           {trackStudent ? (
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-              <button
-                onClick={() => router.push(`/dashboard/student-syllabus/${trackStudent}`)}
-                style={s.viewProgressBtn}
-              >
-                View Full Syllabus Progress →
-              </button>
-              {isAdmin && (
+            <>
+              {/* Lesson count status */}
+              <div style={s.trackStatus}>
+                {trackLoadingCount ? (
+                  <span style={s.trackStatusChecking}>Checking syllabus…</span>
+                ) : trackLessonCount === null ? null : trackLessonCount === 0 ? (
+                  <span style={s.trackStatusNone}>
+                    ⚠ No lessons assigned to this student yet — import one below
+                  </span>
+                ) : (
+                  <span style={s.trackStatusFound}>
+                    ✓ {trackLessonCount} lesson{trackLessonCount !== 1 ? "s" : ""} found for this student
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
                 <button
-                  onClick={() =>
-                    router.push(`/dashboard/lessons/import?scope=student&id=${trackStudent}`)
-                  }
-                  style={s.importBtn}
+                  onClick={() => router.push(`/dashboard/student-syllabus/${trackStudent}`)}
+                  style={s.viewProgressBtn}
                 >
-                  ↑ Import Custom Lessons
+                  View Full Syllabus Progress →
                 </button>
-              )}
-            </div>
+                {isAdmin && (
+                  <button
+                    onClick={() =>
+                      router.push(`/dashboard/lessons/import?scope=student&id=${trackStudent}`)
+                    }
+                    style={s.importBtn}
+                  >
+                    ↑ Import Custom Lessons
+                  </button>
+                )}
+              </div>
+            </>
           ) : (
             <div style={s.emptyInline}>Select a student above to view their progress.</div>
           )}
@@ -522,6 +551,10 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
   },
   trackTitle:  { fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 18 },
+  trackStatus: { marginTop: 10, fontSize: 12 },
+  trackStatusChecking: { color: "#9ca3af", fontStyle: "italic" as const },
+  trackStatusNone:     { color: "#d97706", fontWeight: 600 },
+  trackStatusFound:    { color: "#16a34a", fontWeight: 600 },
   viewProgressBtn: {
     background:   "#059669",
     color:        "#fff",

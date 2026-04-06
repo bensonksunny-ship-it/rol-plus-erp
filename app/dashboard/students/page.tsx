@@ -19,6 +19,11 @@ import { logAction } from "@/services/audit/audit.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import Link from "next/link";
+import {
+  clearStudentHistory,
+  deleteUser as deleteUserRecord,
+  type ClearHistoryOptions,
+} from "@/services/admin/delete.service";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -33,6 +38,12 @@ interface StudentRow {
   centerName:  string;
   instrument:  string;
   course:      string;
+  classType:   string;   // "group" | "personal"
+  billingMode: string;   // "postpay" | "prepay"
+  assignedTeacherUid:  string | null;
+  assignedTeacherName: string | null;
+  classDays:   string[];   // e.g. ["Mon","Wed"] — personal only
+  classTime:   string | null; // e.g. "17:00" — personal only
   feeCycle:    string;
   feePerClass: number;
   balance:     number;
@@ -44,21 +55,33 @@ interface StudentRow {
 type StudentTab = "active" | "requests" | "inactive";
 
 interface EditForm {
-  name:        string;
-  email:       string;
-  admissionNo: string;
-  phone:       string;
-  centerId:    string;
-  instrument:  string;
-  course:      string;
-  feeCycle:    string;
-  feePerClass: string;
-  status:      string;
+  name:               string;
+  email:              string;
+  admissionNo:        string;
+  phone:              string;
+  centerId:           string;
+  instrument:         string;
+  course:             string;
+  classType:          string;   // "group" | "personal"
+  billingMode:        string;   // "postpay" | "prepay"
+  assignedTeacherUid: string;
+  classDays:          string[];   // e.g. ["Mon","Wed"]
+  classTime:          string;     // e.g. "17:00"
+  feeCycle:           string;
+  feePerClass:        string;
+  status:             string;
 }
+
+const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const EMPTY_CREATE = {
   name: "", email: "", admissionNo: "", phone: "",
   centerId: "", instrument: "", course: "",
+  classType: "group",
+  billingMode: "postpay",
+  assignedTeacherUid: "",
+  classDays: [] as string[],
+  classTime: "",
   feeCycle: "monthly", feePerClass: "", status: "active",
 };
 
@@ -133,14 +156,18 @@ function StudentsContent() {
   const [students, setStudents]         = useState<StudentRow[]>([]);
   const [centerMap, setCenterMap]       = useState<Map<string, string>>(new Map());
   const [centerOptions, setCenterOpts]  = useState<{ id: string; name: string }[]>([]);
+  const [teacherOptions, setTeacherOpts] = useState<{ id: string; name: string }[]>([]);
+  const [teacherMap, setTeacherMap]     = useState<Map<string, string>>(new Map());
   const [loading, setLoading]           = useState(true);
   const [tab, setTab]                   = useState<StudentTab>("active");
   const [showForm, setShowForm]         = useState(false);
   const [form, setForm]                 = useState({ ...EMPTY_CREATE });
   const [saving, setSaving]             = useState(false);
-  const [editTarget, setEditTarget]     = useState<StudentRow | null>(null);
-  const debounceRef                     = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { toasts, toast, remove }       = useToast();
+  const [editTarget, setEditTarget]         = useState<StudentRow | null>(null);
+  const [clearHistoryTarget, setClearHistoryTarget] = useState<StudentRow | null>(null);
+  const [deleteTarget, setDeleteTarget]     = useState<StudentRow | null>(null);
+  const debounceRef                         = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { toasts, toast, remove }           = useToast();
 
   // Filters
   const [searchInput, setSearchInput]   = useState("");
@@ -149,15 +176,17 @@ function StudentsContent() {
   const [filterCourse, setFilterCourse] = useState("");
   const [filterInstrument, setFilterInstrument] = useState("");
   const [filterFeeStatus, setFilterFeeStatus]   = useState("all");
+  const [filterClassType, setFilterClassType]   = useState("all");
 
   const isAdmin = role === ROLES.ADMIN || role === ROLES.SUPER_ADMIN;
   const isTeacher = role === ROLES.TEACHER;
 
   async function fetchData() {
     try {
-      const [studentSnap, centerSnap] = await Promise.all([
+      const [studentSnap, centerSnap, teacherSnap] = await Promise.all([
         getDocs(query(collection(db, "users"), where("role", "==", "student"))),
         getDocs(collection(db, "centers")),
+        getDocs(query(collection(db, "users"), where("role", "==", "teacher"))),
       ]);
 
       const cMap = new Map<string, string>();
@@ -170,8 +199,19 @@ function StudentsContent() {
       // Teachers: show only their assigned centres in the filter dropdown
       setCenterOpts(filterCentres(cOptsAll));
 
+      const tMap = new Map<string, string>();
+      const tOptsAll: { id: string; name: string }[] = [];
+      teacherSnap.docs.forEach(d => {
+        const tName = ((d.data().displayName ?? d.data().name ?? "-") as string);
+        tMap.set(d.id, tName);
+        tOptsAll.push({ id: d.id, name: tName });
+      });
+      setTeacherMap(tMap);
+      setTeacherOpts(tOptsAll);
+
       const allStudentsRaw = studentSnap.docs.map(d => {
         const s = d.data();
+        const assignedTUid = (s.assignedTeacherUid ?? null) as string | null;
         return {
           id:          d.id,
           name:        (s.displayName ?? s.name ?? "-") as string,
@@ -183,6 +223,12 @@ function StudentsContent() {
           centerName:  cMap.get(s.centerId as string) ?? (s.centerId as string) ?? "-",
           instrument:  (s.instrument  ?? "-") as string,
           course:      (s.course      ?? "-") as string,
+          classType:   ((s.classType  as string) === "personal" ? "personal" : "group"),
+          billingMode: ((s.billingMode as string) === "prepay" ? "prepay" : "postpay"),
+          assignedTeacherUid:  assignedTUid,
+          assignedTeacherName: assignedTUid ? (tMap.get(assignedTUid) ?? null) : null,
+          classDays:   Array.isArray(s.classDays) ? (s.classDays as string[]) : [],
+          classTime:   (s.classTime ?? null) as string | null,
           feeCycle:    (s.feeCycle    ?? "-") as string,
           feePerClass: Number(s.feePerClass ?? 0),
           balance:     Number(s.currentBalance ?? 0),
@@ -221,7 +267,7 @@ function StudentsContent() {
 
   function resetFilters() {
     setSearchInput(""); setSearch(""); setFilterCenter("all");
-    setFilterCourse(""); setFilterInstrument(""); setFilterFeeStatus("all");
+    setFilterCourse(""); setFilterInstrument(""); setFilterFeeStatus("all"); setFilterClassType("all");
   }
 
   // ── Tab-split lists ─────────────────────────────────────────────────────────
@@ -248,6 +294,7 @@ function StudentsContent() {
       if (filterInstrument && s.instrument !== filterInstrument) return false;
       if (filterFeeStatus === "pending" && s.balance <= 0) return false;
       if (filterFeeStatus === "paid"    && s.balance > 0)  return false;
+      if (filterClassType !== "all" && s.classType !== filterClassType) return false;
       return true;
     });
   }, [baseList, search, filterCenter, filterCourse, filterInstrument, filterFeeStatus]);
@@ -292,6 +339,11 @@ function StudentsContent() {
         centerId:    form.centerId.trim(),
         instrument:  form.instrument.trim(),
         course:      form.course.trim(),
+        classType:          form.classType || "group",
+        billingMode:        form.billingMode || "postpay",
+        assignedTeacherUid: form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
+        classDays:          form.classType === "personal" ? form.classDays : [],
+        classTime:          form.classType === "personal" ? (form.classTime || null) : null,
         feeCycle:    form.feeCycle,
         feePerClass: form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
         status:        form.status,
@@ -390,7 +442,11 @@ function StudentsContent() {
       <div style={p.header}>
         <div>
           <h1 style={p.heading}>Students</h1>
-          <div style={p.subheading}>{students.length} total · {activeStudents.length} active</div>
+          <div style={p.subheading}>
+            {students.length} total · {activeStudents.length} active ·{" "}
+            {students.filter(s => s.classType === "group").length} group ·{" "}
+            {students.filter(s => s.classType === "personal").length} personal
+          </div>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {requestStudents.length > 0 && (
@@ -438,6 +494,51 @@ function StudentsContent() {
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
+              <Field label="Class Type *">
+                <select value={form.classType} onChange={e => setForm(f => ({ ...f, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))} style={p.input}>
+                  <option value="group">Group Class (batch at center)</option>
+                  <option value="personal">Personal Class (one-on-one / private)</option>
+                </select>
+              </Field>
+              <Field label="Billing Mode *">
+                <select value={form.billingMode} onChange={e => setForm(f => ({ ...f, billingMode: e.target.value }))} style={p.input}>
+                  <option value="postpay">Postpay — billed first, pays after</option>
+                  <option value="prepay">Prepay — deposits advance, fee deducted</option>
+                </select>
+              </Field>
+              {form.classType === "personal" && (
+                <Field label="Assign Teacher">
+                  <select value={form.assignedTeacherUid} onChange={e => setForm(f => ({ ...f, assignedTeacherUid: e.target.value }))} style={p.input}>
+                    <option value="">— Unassigned —</option>
+                    {teacherOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
+              )}
+              {form.classType === "personal" && (
+                <Field label="Class Days">
+                  <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8, paddingTop: 4 }}>
+                    {DAYS_OF_WEEK.map(day => (
+                      <label key={day} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, cursor: "pointer" }}>
+                        <input type="checkbox" checked={form.classDays.includes(day)}
+                          onChange={e => setForm(f => ({
+                            ...f,
+                            classDays: e.target.checked
+                              ? [...f.classDays, day]
+                              : f.classDays.filter(d => d !== day),
+                          }))} />
+                        {day}
+                      </label>
+                    ))}
+                  </div>
+                </Field>
+              )}
+              {form.classType === "personal" && (
+                <Field label="Class Time">
+                  <input type="time" value={form.classTime}
+                    onChange={e => setForm(f => ({ ...f, classTime: e.target.value }))}
+                    style={p.input} />
+                </Field>
+              )}
               <Field label="Instrument *">
                 <input name="instrument" value={form.instrument} onChange={e => setForm(f => ({ ...f, instrument: e.target.value }))}
                   required placeholder="e.g. Guitar" style={p.input} />
@@ -498,7 +599,12 @@ function StudentsContent() {
           <option value="paid">Paid (₹0 due)</option>
           <option value="pending">Pending balance</option>
         </select>
-        {(search || filterCenter !== "all" || filterCourse || filterInstrument || filterFeeStatus !== "all") && (
+        <select value={filterClassType} onChange={e => setFilterClassType(e.target.value)} style={p.filterSelect}>
+          <option value="all">All Class Types</option>
+          <option value="group">👥 Group</option>
+          <option value="personal">👤 Personal</option>
+        </select>
+        {(search || filterCenter !== "all" || filterCourse || filterInstrument || filterFeeStatus !== "all" || filterClassType !== "all") && (
           <button onClick={resetFilters} style={p.resetBtn}>✕ Reset</button>
         )}
       </div>
@@ -547,6 +653,7 @@ function StudentsContent() {
                 <th style={p.th}>Email</th>
                 <th style={p.th}>Adm. No.</th>
                 <th style={p.th}>Center</th>
+                <th style={p.th}>Class Type</th>
                 <th style={p.th}>Instrument / Course</th>
                 <th style={p.th}>Fee</th>
                 <th style={p.th}>Balance</th>
@@ -567,6 +674,8 @@ function StudentsContent() {
                     setEditTarget(s);
                   }}
                   onRequestDeactivation={() => requestDeactivation(s)}
+                  onClearHistory={isAdmin ? () => setClearHistoryTarget(s) : undefined}
+                  onDelete={isAdmin ? () => setDeleteTarget(s) : undefined}
                 />
               ))}
             </tbody>
@@ -579,6 +688,7 @@ function StudentsContent() {
         <EditModal
           student={editTarget}
           centerOptions={centerOptions}
+          teacherOptions={teacherOptions}
           onClose={() => setEditTarget(null)}
           onSaved={(updated) => {
             const newCenterId = updated.centerId ?? "";
@@ -593,15 +703,45 @@ function StudentsContent() {
           currentUserRole={role ?? "admin"}
         />
       )}
+
+      {/* ── Clear History Modal ── */}
+      {clearHistoryTarget && (
+        <ClearHistoryModal
+          student={clearHistoryTarget}
+          onClose={() => setClearHistoryTarget(null)}
+          onCleared={() => {
+            setClearHistoryTarget(null);
+            toast("History cleared successfully.", "success");
+          }}
+          currentUserUid={user?.uid ?? ""}
+          currentUserRole={role ?? "admin"}
+        />
+      )}
+
+      {/* ── Delete Student Modal ── */}
+      {deleteTarget && (
+        <DeleteStudentModal
+          student={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={() => {
+            setStudents(prev => prev.filter(s => s.id !== deleteTarget.id));
+            setDeleteTarget(null);
+            toast(`Student "${deleteTarget.name}" deleted.`, "success");
+          }}
+          currentUserUid={user?.uid ?? ""}
+          currentUserRole={role ?? "admin"}
+        />
+      )}
     </div>
   );
 }
 
 // ─── Student Row ───────────────────────────────────────────────────────────────
 
-function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDeactivation }: {
+function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDeactivation, onClearHistory, onDelete }: {
   student: StudentRow; index: number; isAdmin: boolean; isTeacher: boolean;
   onEdit: () => void; onRequestDeactivation: () => void;
+  onClearHistory?: () => void; onDelete?: () => void;
 }) {
   const [hover, setHover] = useState(false);
   const rowBg = hover ? "#f0f4ff" : index % 2 === 0 ? "#fff" : "#fafafa";
@@ -613,6 +753,26 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
       <td style={{ ...p.td, fontSize: 12, color: "#6b7280", minWidth: 160 }}>{s.email}</td>
       <td style={p.td}><span style={p.admChip}>{s.admissionNo}</span></td>
       <td style={{ ...p.td, minWidth: 110 }}>{s.centerName}</td>
+      <td style={p.td}>
+        <span style={{
+          ...p.badge,
+          ...(s.classType === "personal"
+            ? { background: "#fef9c3", color: "#92400e" }
+            : { background: "#dcfce7", color: "#166534" }),
+        }}>
+          {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+        </span>
+        {s.classType === "personal" && (
+          <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3, lineHeight: 1.6 }}>
+            {s.assignedTeacherName
+              ? `🎓 ${s.assignedTeacherName}`
+              : <span style={{ color: "#d97706" }}>⚠ Unassigned</span>}
+            {s.classDays.length > 0 && (
+              <div>{s.classDays.join(", ")}{s.classTime ? ` · ${s.classTime}` : ""}</div>
+            )}
+          </div>
+        )}
+      </td>
       <td style={p.td}>
         <div style={{ fontSize: 12, fontWeight: 600, color: "#111827" }}>{s.instrument}</div>
         <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{s.course}</div>
@@ -626,6 +786,17 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
         }}>
           {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}
         </span>
+        <div style={{ marginTop: 3 }}>
+          <span style={{
+            ...p.badge,
+            fontSize: 10,
+            ...(s.billingMode === "prepay"
+              ? { background: "#fef3c7", color: "#92400e" }
+              : { background: "#f3f4f6", color: "#374151" }),
+          }}>
+            {s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}
+          </span>
+        </div>
       </td>
       <td style={{ ...p.td, fontWeight: 700, color: s.balance > 0 ? "#d97706" : "#16a34a" }}>
         {fmtINR(s.balance)}
@@ -635,7 +806,7 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
           {s.status.replace(/_/g, " ")}
         </span>
       </td>
-      <td style={{ ...p.td, minWidth: 200 }}>
+      <td style={{ ...p.td, minWidth: 240 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
           {(isAdmin || isTeacher) && (
             <button onClick={onEdit} style={p.editBtn}>✏ Edit</button>
@@ -646,6 +817,16 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
           <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.syllabusBtn}>
             Syllabus
           </Link>
+          {onClearHistory && (
+            <button onClick={onClearHistory} style={p.clearBtn} title="Clear student history">
+              🗑 History
+            </button>
+          )}
+          {onDelete && (
+            <button onClick={onDelete} style={p.deleteBtn} title="Delete student permanently">
+              ✕ Delete
+            </button>
+          )}
         </div>
       </td>
     </tr>
@@ -705,25 +886,31 @@ function RequestsPanel({ requests, centerMap, onApprove, onReject }: {
 
 // ─── Edit Modal ────────────────────────────────────────────────────────────────
 
-function EditModal({ student, centerOptions, onClose, onSaved, currentUserUid, currentUserRole }: {
+function EditModal({ student, centerOptions, teacherOptions, onClose, onSaved, currentUserUid, currentUserRole }: {
   student:         StudentRow;
   centerOptions:   { id: string; name: string }[];
+  teacherOptions:  { id: string; name: string }[];
   onClose:         () => void;
   onSaved:         (updated: Partial<StudentRow> & { id: string }) => void;
   currentUserUid:  string;
   currentUserRole: string;
 }) {
   const [form, setForm]     = useState<EditForm>({
-    name:        student.name,
-    email:       student.email,
-    admissionNo: student.admissionNo,
-    phone:       student.phone,
-    centerId:    student.centerId,
-    instrument:  student.instrument,
-    course:      student.course,
-    feeCycle:    student.feeCycle,
-    feePerClass: String(student.feePerClass),
-    status:      student.status,
+    name:               student.name,
+    email:              student.email,
+    admissionNo:        student.admissionNo,
+    phone:              student.phone,
+    centerId:           student.centerId,
+    instrument:         student.instrument,
+    course:             student.course,
+    classType:          student.classType || "group",
+    billingMode:        student.billingMode || "postpay",
+    assignedTeacherUid: student.assignedTeacherUid ?? "",
+    classDays:          student.classDays ?? [],
+    classTime:          student.classTime ?? "",
+    feeCycle:           student.feeCycle,
+    feePerClass:        String(student.feePerClass),
+    status:             student.status,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
@@ -744,19 +931,24 @@ function EditModal({ student, centerOptions, onClose, onSaved, currentUserUid, c
     try {
       // Update Firestore
       const payload: Record<string, unknown> = {
-        name:          form.name.trim(),
-        displayName:   form.name.trim(),
-        email:         form.email.trim().toLowerCase(),
-        admissionNo:   form.admissionNo.trim(),
-        phone:         form.phone.trim(),
-        centerId:      form.centerId,
-        instrument:    form.instrument.trim(),
-        course:        form.course.trim(),
-        feeCycle:      form.feeCycle,
-        feePerClass:   form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
-        status:        form.status,
-        studentStatus: form.status,   // mirror for type-system compatibility
-        updatedAt:     serverTimestamp(),
+        name:               form.name.trim(),
+        displayName:        form.name.trim(),
+        email:              form.email.trim().toLowerCase(),
+        admissionNo:        form.admissionNo.trim(),
+        phone:              form.phone.trim(),
+        centerId:           form.centerId,
+        instrument:         form.instrument.trim(),
+        course:             form.course.trim(),
+        classType:          form.classType || "group",
+        billingMode:        form.billingMode || "postpay",
+        assignedTeacherUid: form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
+        classDays:          form.classType === "personal" ? form.classDays : [],
+        classTime:          form.classType === "personal" ? (form.classTime || null) : null,
+        feeCycle:           form.feeCycle,
+        feePerClass:        form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        status:             form.status,
+        studentStatus:      form.status,   // mirror for type-system compatibility
+        updatedAt:          serverTimestamp(),
       };
 
       await updateDoc(doc(db, "users", student.id), payload);
@@ -778,17 +970,22 @@ function EditModal({ student, centerOptions, onClose, onSaved, currentUserUid, c
       });
 
       onSaved({
-        id:          student.id,
-        name:        form.name.trim(),
-        email:       form.email.trim().toLowerCase(),
-        admissionNo: form.admissionNo.trim(),
-        phone:       form.phone.trim(),
-        centerId:    form.centerId,
-        instrument:  form.instrument.trim(),
-        course:      form.course.trim(),
-        feeCycle:    form.feeCycle,
-        feePerClass: form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
-        status:      form.status,
+        id:                  student.id,
+        name:                form.name.trim(),
+        email:               form.email.trim().toLowerCase(),
+        admissionNo:         form.admissionNo.trim(),
+        phone:               form.phone.trim(),
+        centerId:            form.centerId,
+        instrument:          form.instrument.trim(),
+        course:              form.course.trim(),
+        classType:           form.classType || "group",
+        billingMode:         form.billingMode || "postpay",
+        assignedTeacherUid:  form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
+        classDays:           form.classType === "personal" ? form.classDays : [],
+        classTime:           form.classType === "personal" ? (form.classTime || null) : null,
+        feeCycle:            form.feeCycle,
+        feePerClass:         form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        status:              form.status,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -838,6 +1035,51 @@ function EditModal({ student, centerOptions, onClose, onSaved, currentUserUid, c
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
+              <Field label="Class Type *">
+                <select name="classType" value={form.classType}
+                  onChange={e => setForm(prev => ({ ...prev, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))}
+                  style={p.input}>
+                  <option value="group">Group Class (batch at center)</option>
+                  <option value="personal">Personal Class (one-on-one / private)</option>
+                </select>
+              </Field>
+              <Field label="Billing Mode *">
+                <select name="billingMode" value={form.billingMode} onChange={f} style={p.input}>
+                  <option value="postpay">Postpay — billed first, pays after</option>
+                  <option value="prepay">Prepay — deposits advance, fee deducted</option>
+                </select>
+              </Field>
+              {form.classType === "personal" && (
+                <Field label="Assign Teacher">
+                  <select name="assignedTeacherUid" value={form.assignedTeacherUid} onChange={f} style={p.input}>
+                    <option value="">— Unassigned —</option>
+                    {teacherOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
+              )}
+              {form.classType === "personal" && (
+                <Field label="Class Days">
+                  <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8, paddingTop: 4 }}>
+                    {DAYS_OF_WEEK.map(day => (
+                      <label key={day} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, cursor: "pointer" }}>
+                        <input type="checkbox" checked={form.classDays.includes(day)}
+                          onChange={e => setForm(prev => ({
+                            ...prev,
+                            classDays: e.target.checked
+                              ? [...prev.classDays, day]
+                              : prev.classDays.filter(d => d !== day),
+                          }))} />
+                        {day}
+                      </label>
+                    ))}
+                  </div>
+                </Field>
+              )}
+              {form.classType === "personal" && (
+                <Field label="Class Time">
+                  <input type="time" name="classTime" value={form.classTime} onChange={f} style={p.input} />
+                </Field>
+              )}
               <Field label="Instrument">
                 <input name="instrument" value={form.instrument} onChange={f} style={p.input} />
               </Field>
@@ -874,6 +1116,193 @@ function EditModal({ student, centerOptions, onClose, onSaved, currentUserUid, c
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Clear History Modal ───────────────────────────────────────────────────────
+
+function ClearHistoryModal({ student, onClose, onCleared, currentUserUid, currentUserRole }: {
+  student:         StudentRow;
+  onClose:         () => void;
+  onCleared:       () => void;
+  currentUserUid:  string;
+  currentUserRole: string;
+}) {
+  const [opts, setOpts] = useState<ClearHistoryOptions>({ syllabus: false, payments: false, attendance: false });
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ cleared: string[]; errors: string[] } | null>(null);
+  const [confirmed, setConfirmed] = useState("");
+
+  const noneSelected = !opts.syllabus && !opts.payments && !opts.attendance;
+  const confirmPhrase = "CLEAR";
+  const canProceed = !noneSelected && confirmed === confirmPhrase;
+
+  async function handleClear() {
+    if (!canProceed) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await clearStudentHistory(student.id, opts, currentUserUid, currentUserRole as never);
+      setResult(res);
+      if (res.errors.length === 0) {
+        setTimeout(onCleared, 1200);
+      }
+    } catch (err) {
+      setResult({ cleared: [], errors: [err instanceof Error ? err.message : String(err)] });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={modal.overlay} onClick={onClose}>
+      <div style={{ ...modal.box, maxWidth: 520 }} onClick={e => e.stopPropagation()}>
+        <div style={modal.header}>
+          <div>
+            <div style={{ ...modal.title, color: "#c2410c" }}>🗑 Clear Student History</div>
+            <div style={modal.subtitle}><span style={p.idChip}>{student.studentID}</span> · {student.name}</div>
+          </div>
+          <button onClick={onClose} style={modal.closeBtn}>✕</button>
+        </div>
+        <div style={modal.body}>
+          <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 12, color: "#c2410c" }}>
+            ⚠ This action is <strong>irreversible</strong>. Selected history will be permanently deleted.
+          </div>
+
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
+            Select what to clear:
+          </div>
+
+          {([
+            { key: "syllabus",   label: "Syllabus Progress", desc: "Clears imported syllabus, lesson progress records, and custom lessons" },
+            { key: "payments",   label: "Payment / Transaction History", desc: "Deletes all transactions, fee records, and resets balance to ₹0" },
+            { key: "attendance", label: "Attendance Records", desc: "Removes all attendance entries for this student" },
+          ] as { key: keyof ClearHistoryOptions; label: string; desc: string }[]).map(({ key, label, desc }) => (
+            <label key={key} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 12px", background: opts[key] ? "#fef2f2" : "#f9fafb", border: `1px solid ${opts[key] ? "#fca5a5" : "#e5e7eb"}`, borderRadius: 8, marginBottom: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={opts[key]} onChange={e => setOpts(o => ({ ...o, [key]: e.target.checked }))}
+                style={{ marginTop: 2, accentColor: "#dc2626" }} />
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#111827" }}>{label}</div>
+                <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{desc}</div>
+              </div>
+            </label>
+          ))}
+
+          {!noneSelected && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 12, color: "#374151", marginBottom: 6 }}>
+                Type <strong style={{ color: "#dc2626" }}>{confirmPhrase}</strong> to confirm:
+              </div>
+              <input
+                value={confirmed}
+                onChange={e => setConfirmed(e.target.value)}
+                placeholder={`Type ${confirmPhrase}`}
+                style={{ ...p.input, borderColor: confirmed === confirmPhrase ? "#86efac" : "#d1d5db" }}
+              />
+            </div>
+          )}
+
+          {result && (
+            <div style={{ marginTop: 14 }}>
+              {result.cleared.map((c, i) => (
+                <div key={i} style={{ fontSize: 12, color: "#16a34a", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 6, padding: "6px 10px", marginBottom: 5 }}>✓ {c}</div>
+              ))}
+              {result.errors.map((e, i) => (
+                <div key={i} style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, padding: "6px 10px", marginBottom: 5 }}>✕ {e}</div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={modal.footer}>
+          <button onClick={onClose} style={modal.cancelBtn}>Cancel</button>
+          <button
+            onClick={handleClear}
+            disabled={!canProceed || busy}
+            style={{ background: canProceed && !busy ? "#dc2626" : "#f3f4f6", color: canProceed && !busy ? "#fff" : "#9ca3af", border: "none", padding: "8px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: canProceed && !busy ? "pointer" : "not-allowed" }}
+          >
+            {busy ? "Clearing…" : "Clear Selected History"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Delete Student Modal ──────────────────────────────────────────────────────
+
+function DeleteStudentModal({ student, onClose, onDeleted, currentUserUid, currentUserRole }: {
+  student:         StudentRow;
+  onClose:         () => void;
+  onDeleted:       () => void;
+  currentUserUid:  string;
+  currentUserRole: string;
+}) {
+  const [confirmed, setConfirmed] = useState("");
+  const [busy, setBusy]           = useState(false);
+  const [error, setError]         = useState("");
+
+  const confirmPhrase = student.name.split(" ")[0] ?? "DELETE";
+  const canDelete = confirmed === confirmPhrase;
+
+  async function handleDelete() {
+    if (!canDelete) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await deleteUserRecord(student.id, "student", currentUserUid, currentUserRole as never);
+      if (res.success) {
+        onDeleted();
+      } else {
+        setError(res.error ?? "Delete failed.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={modal.overlay} onClick={onClose}>
+      <div style={{ ...modal.box, maxWidth: 460 }} onClick={e => e.stopPropagation()}>
+        <div style={modal.header}>
+          <div>
+            <div style={{ ...modal.title, color: "#991b1b" }}>✕ Delete Student</div>
+            <div style={modal.subtitle}><span style={p.idChip}>{student.studentID}</span> · {student.name}</div>
+          </div>
+          <button onClick={onClose} style={modal.closeBtn}>✕</button>
+        </div>
+        <div style={modal.body}>
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "12px 14px", marginBottom: 16, fontSize: 13, color: "#991b1b" }}>
+            <strong>This will permanently delete this student.</strong> All syllabus progress, payment history, and attendance records will also be cleared. The login account will be disabled.
+          </div>
+          <div style={{ fontSize: 12, color: "#374151", marginBottom: 6 }}>
+            Type the student&apos;s first name <strong style={{ color: "#dc2626" }}>{confirmPhrase}</strong> to confirm:
+          </div>
+          <input
+            value={confirmed}
+            onChange={e => { setConfirmed(e.target.value); setError(""); }}
+            placeholder={`Type "${confirmPhrase}"`}
+            style={{ ...p.input, borderColor: canDelete ? "#86efac" : "#d1d5db" }}
+          />
+          {error && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, padding: "7px 10px" }}>
+              ✕ {error}
+            </div>
+          )}
+        </div>
+        <div style={modal.footer}>
+          <button onClick={onClose} style={modal.cancelBtn}>Cancel</button>
+          <button
+            onClick={handleDelete}
+            disabled={!canDelete || busy}
+            style={{ background: canDelete && !busy ? "#dc2626" : "#f3f4f6", color: canDelete && !busy ? "#fff" : "#9ca3af", border: "none", padding: "8px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: canDelete && !busy ? "pointer" : "not-allowed" }}
+          >
+            {busy ? "Deleting…" : "Delete Student"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -944,6 +1373,8 @@ const p: Record<string, React.CSSProperties> = {
   editBtn:     { background: "#fef3c7", color: "#92400e", border: "1px solid #fde68a", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
   deactBtn:    { background: "#fee2e2", color: "#dc2626", border: "1px solid #fca5a5", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
   syllabusBtn: { background: "#ede9fe", color: "#6d28d9", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, textDecoration: "none", display: "inline-block" },
+  clearBtn:    { background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
+  deleteBtn:   { background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
 };
 
 // ─── Modal styles ──────────────────────────────────────────────────────────────

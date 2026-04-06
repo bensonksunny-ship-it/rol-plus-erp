@@ -215,7 +215,8 @@ function getUniqueLessonNumbers(rows: ExcelImportRow[]): number[] {
 
 // ─── Content ───────────────────────────────────────────────────────────────────
 
-interface CenterOption { id: string; name: string; centerCode: string; }
+interface CenterOption  { id: string; name: string; centerCode: string; }
+interface StudentOption { uid: string; displayName: string; studentID: string; admissionNo: string; centerId: string; }
 
 function LessonImportContent() {
   const { user, role }              = useAuth();
@@ -233,6 +234,8 @@ function LessonImportContent() {
   const [scopeId, setScopeId]       = useState(searchParams.get("id") ?? "");
   const [centers, setCenters]       = useState<CenterOption[]>([]);
   const [centersLoading, setCentersLoading] = useState(true);
+  const [students, setStudents]     = useState<StudentOption[]>([]);
+  const [studentsLoading, setStudentsLoading] = useState(true);
 
   // Overwrite toggle
   const [overwrite, setOverwrite]   = useState(false);
@@ -244,7 +247,7 @@ function LessonImportContent() {
   const fileRef                     = useRef<HTMLInputElement>(null);
   const { toasts, toast, remove }   = useToast();
 
-  // Load centers on mount
+  // Load centers + students on mount
   useEffect(() => {
     getDocs(collection(db, "centers"))
       .then(snap => setCenters(snap.docs.map(d => ({
@@ -254,6 +257,20 @@ function LessonImportContent() {
       }))))
       .catch(() => {})
       .finally(() => setCentersLoading(false));
+
+    getDocs(query(collection(db, "users"), where("role", "==", "student")))
+      .then(snap => setStudents(snap.docs.map(d => {
+        const dt = d.data();
+        return {
+          uid:         d.id,
+          displayName: (dt.displayName as string) ?? (dt.name as string) ?? "",
+          studentID:   (dt.studentID  as string) ?? "",
+          admissionNo: (dt.admissionNo as string) ?? (dt.admissionNumber as string) ?? "",
+          centerId:    (dt.centerId   as string) ?? "",
+        };
+      })))
+      .catch(() => {})
+      .finally(() => setStudentsLoading(false));
   }, []);
 
   // When scope changes + file loaded, check existing lesson count
@@ -404,8 +421,26 @@ function LessonImportContent() {
             </select>
           )
         ) : (
-          <input value={scopeId} onChange={e => setScopeId(e.target.value)}
-            placeholder="Enter Student UID (Firebase Auth UID)…" style={s.input} />
+          studentsLoading ? (
+            <div style={s.loadingText}>Loading students…</div>
+          ) : students.length === 0 ? (
+            <input value={scopeId} onChange={e => setScopeId(e.target.value)}
+              placeholder="No students found — enter Student UID manually" style={s.input} />
+          ) : (
+            <select value={scopeId} onChange={e => setScopeId(e.target.value)} style={s.select}>
+              <option value="">— Select student —</option>
+              {students.map(st => {
+                const label = st.studentID
+                  ? `[${st.studentID}] ${st.displayName || st.uid}`
+                  : st.admissionNo
+                    ? `[${st.admissionNo}] ${st.displayName || st.uid}`
+                    : st.displayName || st.uid;
+                return (
+                  <option key={st.uid} value={st.uid}>{label}</option>
+                );
+              })}
+            </select>
+          )
         )}
 
         {/* Existing lesson status */}

@@ -13,6 +13,12 @@ import {
   addAttempt,
   markItemCompleted,
 } from "@/services/lesson/lesson.service";
+import {
+  updateLessonTitle,
+  updateLessonItem,
+  deleteLessonItem,
+  deleteLesson,
+} from "@/services/admin/delete.service";
 import type { Lesson, LessonItem, StudentLessonProgress, Attempt } from "@/types/lesson";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
@@ -53,6 +59,10 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
   const [loading, setLoading]               = useState(true);
   const [error, setError]                   = useState<string | null>(null);
   const [activeLessonId, setActiveLessonId] = useState<string | null>(null);
+
+  // Edit state
+  const [editLessonTarget, setEditLessonTarget] = useState<LessonWithItems | null>(null);
+  const [editItemTarget, setEditItemTarget]     = useState<{ item: LessonItem; lessonId: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,13 +110,19 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
         <div style={s.emptyIcon}>📋</div>
         <div style={s.emptyTitle}>No syllabus assigned yet</div>
         <div style={s.emptySub}>
-          No lessons are available for this student yet. Lessons are shown automatically once
-          they have been imported for the student&apos;s center via{" "}
-          <strong>Syllabus → Import from Excel</strong>. Student-specific lessons can also be
-          imported directly for this student.
+          No lessons are available for this student yet. You can import lessons two ways:
+          <br /><br />
+          <strong>1. Center-wide</strong> — Import lessons for the student&apos;s center (all students
+          in that center will see them) via <strong>Syllabus → Import from Excel</strong>.<br />
+          <strong>2. Student-specific</strong> — Import lessons directly for this student only.
         </div>
         <div style={{ marginTop: 16, display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-          <a href="/dashboard/lessons/import" style={s.importLink}>Import from Excel →</a>
+          <a href={`/dashboard/lessons/import?scope=student&id=${studentId}`} style={s.importLink}>
+            Import for this student →
+          </a>
+          <a href="/dashboard/lessons/import?scope=center" style={{ ...s.importLink, background: "#6b7280" }}>
+            Import for center →
+          </a>
         </div>
       </div>
     );
@@ -126,6 +142,26 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
 
   return (
     <div>
+      {/* Edit Lesson Modal */}
+      {editLessonTarget && (
+        <EditLessonModal
+          lesson={editLessonTarget}
+          onClose={() => setEditLessonTarget(null)}
+          onSaved={() => { setEditLessonTarget(null); load(); }}
+        />
+      )}
+      {/* Edit Item Modal */}
+      {editItemTarget && (
+        <EditItemModal
+          item={editItemTarget.item}
+          lessonId={editItemTarget.lessonId}
+          teacherId={user?.uid ?? ""}
+          teacherRole={role ?? "admin"}
+          onClose={() => setEditItemTarget(null)}
+          onSaved={() => { setEditItemTarget(null); load(); }}
+        />
+      )}
+
       {/* Student header */}
       <div style={s.header}>
         <div>
@@ -196,7 +232,23 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
         <div style={s.panel}>
           <div style={s.panelHeader}>
             <div style={s.panelTitle}>{activeLesson.title}</div>
-            <div style={s.panelCount}>{activeLesson.items.length} items</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={s.panelCount}>{activeLesson.items.length} items</span>
+              {canModify && (
+                <>
+                  <button onClick={() => setEditLessonTarget(activeLesson)} style={s.editIconBtn} title="Edit lesson title">
+                    ✏
+                  </button>
+                  <button onClick={async () => {
+                    if (!confirm(`Delete lesson "${activeLesson.title}" and all its items?`)) return;
+                    const res = await deleteLesson(activeLesson.id, user?.uid ?? "", role as import("@/types").Role ?? "admin");
+                    if (res.success) { load(); } else { alert(res.error); }
+                  }} style={s.deleteIconBtn} title="Delete lesson">
+                    🗑
+                  </button>
+                </>
+              )}
+            </div>
           </div>
           <div style={s.itemList}>
             {activeLesson.items.map(item => (
@@ -210,6 +262,12 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
                 teacherId={user?.uid ?? ""}
                 teacherRole={role ?? "teacher"}
                 onUpdated={load}
+                onEdit={canModify ? () => setEditItemTarget({ item, lessonId: activeLesson.id }) : undefined}
+                onDelete={canModify ? async () => {
+                  if (!confirm(`Delete item "${item.title}"?`)) return;
+                  const res = await deleteLessonItem(item.id, user?.uid ?? "", role as import("@/types").Role ?? "admin");
+                  if (res.success) load(); else alert(res.error);
+                } : undefined}
               />
             ))}
           </div>
@@ -230,6 +288,8 @@ function ItemCard({
   teacherId,
   teacherRole,
   onUpdated,
+  onEdit,
+  onDelete,
 }: {
   item:         LessonItem;
   progress:     StudentLessonProgress | null;
@@ -239,6 +299,8 @@ function ItemCard({
   teacherId:    string;
   teacherRole:  string;
   onUpdated:    () => void;
+  onEdit?:      () => void;
+  onDelete?:    () => void;
 }) {
   const [busy, setBusy]     = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
@@ -308,6 +370,14 @@ function ItemCard({
         </span>
         <span style={s.orderBadge}>#{item.order}</span>
         {isCompleted && <span style={s.completedBadge}>✓ Completed</span>}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
+          {onEdit && (
+            <button onClick={onEdit} style={s.editIconBtn} title="Edit item">✏</button>
+          )}
+          {onDelete && (
+            <button onClick={onDelete} style={s.deleteIconBtn} title="Delete item">🗑</button>
+          )}
+        </div>
       </div>
 
       {/* Title */}
@@ -395,6 +465,104 @@ function ItemCard({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Edit Lesson Modal ────────────────────────────────────────────────────────
+
+function EditLessonModal({ lesson, onClose, onSaved }: {
+  lesson:  { id: string; title: string };
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [title, setTitle] = useState(lesson.title);
+  const [busy, setBusy]   = useState(false);
+  const [err, setErr]     = useState("");
+
+  async function handleSave() {
+    if (!title.trim()) { setErr("Title cannot be empty."); return; }
+    setBusy(true);
+    const res = await updateLessonTitle(lesson.id, title);
+    if (res.success) onSaved();
+    else { setErr(res.error ?? "Failed to save."); setBusy(false); }
+  }
+
+  return (
+    <div style={s.modalOverlay} onClick={onClose}>
+      <div style={s.modalBox} onClick={e => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <div style={s.heading}>Edit Lesson Title</div>
+          <button onClick={onClose} style={s.modalCloseBtn}>✕</button>
+        </div>
+        <div style={{ padding: "16px 20px" }}>
+          <label style={s.modalLabel}>Lesson Title</label>
+          <input value={title} onChange={e => { setTitle(e.target.value); setErr(""); }}
+            style={{ ...s.modalInput, borderColor: err ? "#fca5a5" : "#d1d5db" }} />
+          {err && <div style={s.modalErr}>{err}</div>}
+          <div style={s.modalFooter}>
+            <button onClick={onClose} style={s.modalCancelBtn}>Cancel</button>
+            <button onClick={handleSave} disabled={busy}
+              style={{ ...s.modalSaveBtn, opacity: busy ? 0.6 : 1 }}>
+              {busy ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Edit Item Modal ──────────────────────────────────────────────────────────
+
+function EditItemModal({ item, lessonId, teacherId, teacherRole, onClose, onSaved }: {
+  item:        LessonItem;
+  lessonId:    string;
+  teacherId:   string;
+  teacherRole: string;
+  onClose:     () => void;
+  onSaved:     () => void;
+}) {
+  const [title, setTitle] = useState(item.title);
+  const [type, setType]   = useState<"concept" | "exercise" | "songsheet">(item.type as "concept" | "exercise" | "songsheet");
+  const [busy, setBusy]   = useState(false);
+  const [err, setErr]     = useState("");
+
+  async function handleSave() {
+    if (!title.trim()) { setErr("Title cannot be empty."); return; }
+    setBusy(true);
+    const res = await updateLessonItem(item.id, { title, type });
+    if (res.success) onSaved();
+    else { setErr(res.error ?? "Failed to save."); setBusy(false); }
+  }
+
+  return (
+    <div style={s.modalOverlay} onClick={onClose}>
+      <div style={s.modalBox} onClick={e => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <div style={s.heading}>Edit Item</div>
+          <button onClick={onClose} style={s.modalCloseBtn}>✕</button>
+        </div>
+        <div style={{ padding: "16px 20px" }}>
+          <label style={s.modalLabel}>Item Title</label>
+          <input value={title} onChange={e => { setTitle(e.target.value); setErr(""); }}
+            style={{ ...s.modalInput, borderColor: err ? "#fca5a5" : "#d1d5db" }} />
+          <label style={{ ...s.modalLabel, marginTop: 12 }}>Type</label>
+          <select value={type} onChange={e => setType(e.target.value as "concept" | "exercise" | "songsheet")} style={s.modalInput}>
+            <option value="concept">Concept</option>
+            <option value="exercise">Exercise</option>
+            <option value="songsheet">Songsheet</option>
+          </select>
+          {err && <div style={s.modalErr}>{err}</div>}
+          <div style={s.modalFooter}>
+            <button onClick={onClose} style={s.modalCancelBtn}>Cancel</button>
+            <button onClick={handleSave} disabled={busy}
+              style={{ ...s.modalSaveBtn, opacity: busy ? 0.6 : 1 }}>
+              {busy ? "Saving…" : "Save Changes"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -613,6 +781,22 @@ const s: Record<string, React.CSSProperties> = {
   },
 
   errMsg: { fontSize: 12, color: "#dc2626", marginBottom: 8, padding: "6px 10px", background: "#fef2f2", borderRadius: 6, border: "1px solid #fecaca" },
+
+  // Edit / delete icon buttons
+  editIconBtn:   { background: "#fef9c3", color: "#92400e", border: "1px solid #fde68a", borderRadius: 5, padding: "3px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" },
+  deleteIconBtn: { background: "#fee2e2", color: "#dc2626", border: "1px solid #fca5a5", borderRadius: 5, padding: "3px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" },
+
+  // Edit modal
+  modalOverlay:    { position: "fixed" as const, inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
+  modalBox:        { background: "#fff", borderRadius: 12, width: "100%", maxWidth: 420, boxShadow: "0 16px 48px rgba(0,0,0,0.18)", overflow: "hidden" },
+  modalHeader:     { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: "1px solid #e5e7eb" },
+  modalCloseBtn:   { background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "#9ca3af", padding: 4 },
+  modalLabel:      { display: "block", fontSize: 11, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.04em", marginBottom: 6 },
+  modalInput:      { width: "100%", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, outline: "none", background: "#fff", color: "#111", boxSizing: "border-box" as const },
+  modalErr:        { fontSize: 12, color: "#dc2626", marginTop: 6 },
+  modalFooter:     { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 },
+  modalCancelBtn:  { background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", padding: "7px 16px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  modalSaveBtn:    { background: "#4f46e5", color: "#fff", border: "none", padding: "7px 18px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer" },
 
   // Item actions
   itemActions: {

@@ -40,7 +40,11 @@ interface StudentRow {
   instrument: string;
   status:     string;
   centerId:   string;
+  classType?: string;  // "group" | "personal" — present on personal student rows
 }
+
+// Sentinel value used as selectedCenter when the teacher is viewing personal students
+const PERSONAL_TAB_ID = "__personal__";
 
 interface AttendanceState {
   [studentUid: string]: "present" | "absent";
@@ -114,6 +118,10 @@ function TeacherDashboardContent() {
   const [lowProgressCount, setLowProgressCount] = useState<number | null>(null);
   const [centerDataLoading, setCenterDataLoading] = useState(false);
   const [insights, setInsights]             = useState<DashboardInsights | null>(null);
+
+  // Personal students assigned directly to this teacher (classType === "personal")
+  const [personalStudents, setPersonalStudents] = useState<StudentRow[]>([]);
+  const [personalLoading, setPersonalLoading]   = useState(false);
 
   // Stable date string — computed once on mount, never changes reference
   const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -326,8 +334,42 @@ function TeacherDashboardContent() {
   }, [user?.uid, today]);
 
   useEffect(() => {
-    if (selectedCenter) loadCenterData(selectedCenter);
+    if (selectedCenter && selectedCenter !== PERSONAL_TAB_ID) loadCenterData(selectedCenter);
   }, [selectedCenter, loadCenterData]);
+
+  // ── Load personal students assigned to this teacher ───────────────────────
+  useEffect(() => {
+    if (!user?.uid || !isTeacherRole) return;
+    setPersonalLoading(true);
+    getDocs(query(
+      collection(db, "users"),
+      where("role",               "==", "student"),
+      where("assignedTeacherUid", "==", user.uid),
+    )).then(snap => {
+      const rows: StudentRow[] = snap.docs
+        .filter(d => {
+          const u = d.data();
+          const status = (u.status ?? u.studentStatus ?? "active") as string;
+          return status === "active";
+        })
+        .map(d => {
+          const u = d.data();
+          return {
+            uid:        d.id,
+            name:       (u.displayName ?? u.name ?? "—") as string,
+            instrument: (u.instrument ?? "—") as string,
+            status:     ((u.status ?? u.studentStatus ?? "active") as string),
+            centerId:   (u.centerId ?? "") as string,
+            classType:  "personal",
+          };
+        });
+      setPersonalStudents(rows);
+    }).catch(err => {
+      console.error("[Faculty Suite] Failed to load personal students:", err);
+    }).finally(() => {
+      setPersonalLoading(false);
+    });
+  }, [user?.uid, isTeacherRole]);
 
   // ── Guards ────────────────────────────────────────────────────────────────
 
@@ -400,17 +442,62 @@ function TeacherDashboardContent() {
             )}
           </button>
         ))}
+        {/* Personal students tab — always shown for teachers */}
+        {isTeacherRole && (
+          <button
+            style={{
+              ...s.tab,
+              ...(selectedCenter === PERSONAL_TAB_ID ? s.tabActive : {}),
+            }}
+            onClick={() => {
+              if (selectedCenter !== PERSONAL_TAB_ID) {
+                setSelectedCenter(PERSONAL_TAB_ID);
+                setView({ type: "students" });
+              }
+            }}
+          >
+            👤 Personal
+            {personalLoading
+              ? <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.6 }}>…</span>
+              : personalStudents.length > 0
+                ? <span style={{ marginLeft: 6, fontSize: 11, background: "var(--color-accent,#6366f1)", color: "#fff", borderRadius: 10, padding: "1px 6px" }}>{personalStudents.length}</span>
+                : null}
+          </button>
+        )}
       </div>
 
       {/* ── Back button ── */}
-      {view.type !== "overview" && (
+      {view.type !== "overview" && selectedCenter !== PERSONAL_TAB_ID && (
         <button style={s.backBtn} onClick={() => setView({ type: "overview" })}>
           ← Back to Overview
         </button>
       )}
+      {view.type === "progress" && selectedCenter === PERSONAL_TAB_ID && (
+        <button style={s.backBtn} onClick={() => setView({ type: "students" })}>
+          ← Back to Personal Students
+        </button>
+      )}
 
-      {/* ── Views ── */}
-      {view.type === "overview" && (
+      {/* ── Personal Tab: show personal students list or progress ── */}
+      {selectedCenter === PERSONAL_TAB_ID && (
+        personalLoading
+          ? <div style={{ ...s.center, paddingTop: 64 }}>Loading personal students…</div>
+          : view.type === "progress"
+            ? <ProgressView
+                student={view.student}
+                teacherUid={user?.uid ?? ""}
+                teacherRole={(user?.role ?? ROLES.TEACHER) as Role}
+              />
+            : personalStudents.length === 0
+              ? <div style={s.emptyState}>No personal students assigned to you yet.</div>
+              : <StudentsView
+                  students={personalStudents}
+                  onViewProgress={st => setView({ type: "progress", student: st })}
+                />
+      )}
+
+      {/* ── Centre Views ── */}
+      {selectedCenter !== PERSONAL_TAB_ID && view.type === "overview" && (
         centerDataLoading
           ? <div style={{ ...s.center, paddingTop: 64 }}>Loading centre data…</div>
           : <OverviewView
@@ -429,7 +516,7 @@ function TeacherDashboardContent() {
             />
       )}
 
-      {view.type === "attendance" && (
+      {selectedCenter !== PERSONAL_TAB_ID && view.type === "attendance" && (
         <AttendanceView
           centerId={selectedCenter}
           date={today}
@@ -439,14 +526,14 @@ function TeacherDashboardContent() {
         />
       )}
 
-      {view.type === "students" && (
+      {selectedCenter !== PERSONAL_TAB_ID && view.type === "students" && (
         <StudentsView
           students={students}
           onViewProgress={st => setView({ type: "progress", student: st })}
         />
       )}
 
-      {view.type === "progress" && (
+      {selectedCenter !== PERSONAL_TAB_ID && view.type === "progress" && (
         <ProgressView
           student={view.student}
           teacherUid={user?.uid ?? ""}

@@ -421,15 +421,27 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
 
       {/* ── 1. GLOBAL METRICS ── */}
       <div style={s.metricsGrid}>
-        <MetricCard label="Total Students"   value={totalStudents}   sub={`${activeStudents} active · ${inactiveStudents} inactive`}       accent="#4f46e5" icon="👥" />
+        {/* Total Students — with 30-day growth trend */}
+        <StudentMetricCard
+          totalStudents={totalStudents}
+          activeStudents={activeStudents}
+          inactiveStudents={inactiveStudents}
+          data={data}
+          days30ago={days30ago}
+        />
         <MetricCard label="Teachers"         value={totalTeachers}   sub={`${activeTeachers} active · ${totalTeachers - activeTeachers} inactive`} accent="#0891b2" icon="🎓" />
         <MetricCard label="Centres"          value={totalCenters}    sub={`${activeCenters} active`}                                        accent="#7c3aed" icon="🏫" />
-        <MetricCard label="Attendance Today" value={todayPct !== null ? `${todayPct}%` : "—"} sub={`${todayPresent}/${todayTotal} present`} accent={todayPct !== null && todayPct < 60 ? "#dc2626" : "#16a34a"} icon="✓" />
+        {/* Attendance Today — present / total | pct%, color-coded */}
+        <AttendanceMetricCard present={todayPresent} total={todayTotal} pct={todayPct} />
         <MetricCard label="Revenue (Month)"  value={`₹${revThisMonth.toLocaleString("en-IN")}`} sub={revGrowthPct !== null ? `${revGrowthPct >= 0 ? "▲" : "▼"} ${Math.abs(revGrowthPct)}% vs last month` : "No prior data"} accent={revGrowthPct !== null && revGrowthPct < 0 ? "#dc2626" : "#16a34a"} icon="₹" />
-        <MetricCard label="Pending Fees"     value={`₹${totalPendingFees.toLocaleString("en-IN")}`} sub={`${pendingFeeStudents} students`}  accent="#d97706" icon="⚠" />
+        {/* Pending Fees — All Clear when 0, subtle red when > 0 */}
+        <PendingFeesCard totalPendingFees={totalPendingFees} pendingFeeStudents={pendingFeeStudents} />
       </div>
 
-      {/* ── 2. SMART INSIGHTS ── */}
+      {/* ── 2. PRIORITY ACTIONS ── */}
+      <PriorityActions insights={insights} />
+
+      {/* ── 3. SMART INSIGHTS ── */}
       {insights.length > 0 && (
         <Section title="🧠 Smart Insights">
           <div style={s.insightList}>
@@ -444,7 +456,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
         </Section>
       )}
 
-      {/* ── 3. WEEKLY TRENDS ── */}
+      {/* ── 4. WEEKLY TRENDS ── */}
       <div style={s.twoCol}>
 
         <Section title="📈 Attendance Trend (7 days)">
@@ -491,7 +503,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
 
       </div>
 
-      {/* ── 4. CENTRE PERFORMANCE ── */}
+      {/* ── 5. CENTRE PERFORMANCE ── */}
       <Section title="🏫 Centre Performance" sub="Ranked by 7-day attendance">
         <table style={s.table}>
           <thead>
@@ -555,7 +567,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
         )}
       </Section>
 
-      {/* ── 5. TEACHER PERFORMANCE ── */}
+      {/* ── 6. TEACHER PERFORMANCE ── */}
       <div style={s.twoCol}>
 
         <Section title="🏆 Top Performers">
@@ -578,7 +590,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
 
       </div>
 
-      {/* ── 6. STUDENT ENGAGEMENT ── */}
+      {/* ── 7. STUDENT ENGAGEMENT ── */}
       <Section title="👥 Student Engagement">
         <div style={s.metricsGrid}>
           <EngagementCard label="Active Students"    value={activeStudents}  total={totalStudents} color="#16a34a" />
@@ -597,7 +609,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
         </div>
       </Section>
 
-      {/* ── 7. REVENUE INSIGHTS ── */}
+      {/* ── 8. REVENUE INSIGHTS ── */}
       <Section title="₹ Revenue Insights">
         <div style={s.revenueGrid}>
           <RevCard label="This Month" amount={revThisMonth} growth={revGrowthPct} />
@@ -607,7 +619,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
         </div>
       </Section>
 
-      {/* ── 8. ALERTS ── */}
+      {/* ── 9. ALERTS ── */}
       <Section title="🔔 Alerts">
         <div style={s.alertGrid}>
           <AlertBox
@@ -783,6 +795,173 @@ function EmptyCard({ msg }: { msg: string }) {
   return <div style={s.empty}>{msg}</div>;
 }
 
+// ─── StudentMetricCard — Total Students with 30-day growth trend ──────────────
+
+function StudentMetricCard({
+  totalStudents, activeStudents, inactiveStudents, data, days30ago,
+}: {
+  totalStudents: number;
+  activeStudents: number;
+  inactiveStudents: number;
+  data: SystemData;
+  days30ago: string;
+}) {
+  const days60ago = isoDaysAgo(60);
+  const studentsWithDate = data.students.filter(s => !!s.createdAt);
+  const newLast30  = studentsWithDate.filter(s => s.createdAt >= days30ago).length;
+  const newPrev30  = studentsWithDate.filter(s => s.createdAt >= days60ago && s.createdAt < days30ago).length;
+
+  let trendLabel = "—";
+  let trendColor = "#9ca3af";
+  if (studentsWithDate.length > 0) {
+    if (newPrev30 === 0 && newLast30 > 0) {
+      trendLabel = `+${newLast30} new`;
+      trendColor = "#16a34a";
+    } else if (newPrev30 > 0) {
+      const pct = Math.round(((newLast30 - newPrev30) / newPrev30) * 100);
+      trendLabel = pct >= 0 ? `▲ ${pct}% vs prev 30d` : `▼ ${Math.abs(pct)}% vs prev 30d`;
+      trendColor = pct >= 0 ? "#16a34a" : "#dc2626";
+    }
+  }
+
+  return (
+    <div style={s.metricCard}>
+      <div style={{ ...s.metricAccent, background: "#4f46e5" }} />
+      <div style={s.metricBody}>
+        <div style={s.metricIcon}>👥</div>
+        <div style={s.metricLabel}>Total Students</div>
+        <div style={{ ...s.metricValue, color: "#4f46e5" }}>{totalStudents}</div>
+        <div style={s.metricSub}>{activeStudents} active · {inactiveStudents} inactive</div>
+        {trendLabel !== "—" && (
+          <div style={{ fontSize: 11, fontWeight: 600, color: trendColor, marginTop: 4 }}>
+            {trendLabel}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── AttendanceMetricCard — present / total | pct%, color-coded ───────────────
+
+function AttendanceMetricCard({
+  present, total, pct,
+}: {
+  present: number;
+  total: number;
+  pct: number | null;
+}) {
+  const isZero    = pct === 0;
+  const isLow     = pct !== null && pct > 0 && pct < 60;
+  const isGood    = pct !== null && pct >= 60;
+
+  const accent    = isZero ? "#dc2626" : isLow ? "#d97706" : "#16a34a";
+  const bgCard    = isZero ? "#fef2f2" : isLow ? "#fffbeb" : "#fff";
+  const borderTop = isZero ? "#dc2626" : isLow ? "#d97706" : "#e5e7eb";
+
+  const displayValue = total === 0
+    ? "—"
+    : `${present} / ${total}`;
+
+  const displaySub = pct !== null && total > 0
+    ? isZero
+      ? "0% — Critical: no attendance recorded"
+      : isLow
+        ? `${pct}% — Low attendance`
+        : `${pct}% attendance rate`
+    : "No records today";
+
+  return (
+    <div style={{ ...s.metricCard, background: bgCard, borderTop: `4px solid ${borderTop}` }}>
+      <div style={s.metricBody}>
+        <div style={s.metricIcon}>✓</div>
+        <div style={s.metricLabel}>Attendance Today</div>
+        <div style={{ ...s.metricValue, color: accent, fontSize: 20 }}>{displayValue}</div>
+        <div style={{ ...s.metricSub, color: accent, fontWeight: isZero || isLow ? 600 : 400 }}>
+          {displaySub}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PendingFeesCard — All Clear when 0, subtle red when > 0 ─────────────────
+
+function PendingFeesCard({
+  totalPendingFees, pendingFeeStudents,
+}: {
+  totalPendingFees: number;
+  pendingFeeStudents: number;
+}) {
+  const allClear  = totalPendingFees === 0;
+  const accent    = allClear ? "#16a34a" : "#d97706";
+  const bgCard    = allClear ? "#f0fdf4" : "#fff8f0";
+  const borderTop = allClear ? "#16a34a" : "#fed7aa";
+
+  return (
+    <div style={{ ...s.metricCard, background: bgCard, borderTop: `4px solid ${borderTop}` }}>
+      <div style={s.metricBody}>
+        <div style={s.metricIcon}>⚠</div>
+        <div style={s.metricLabel}>Pending Fees</div>
+        <div style={{ ...s.metricValue, color: accent, fontSize: allClear ? 18 : 24 }}>
+          {allClear ? "All Clear" : `₹${totalPendingFees.toLocaleString("en-IN")}`}
+        </div>
+        <div style={{ ...s.metricSub, color: accent, fontWeight: allClear ? 600 : 400 }}>
+          {allClear ? "All fees collected" : `${pendingFeeStudents} student${pendingFeeStudents !== 1 ? "s" : ""} with outstanding balance`}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PriorityActions — top 3–4 actionable items from existing insights ────────
+
+function PriorityActions({
+  insights,
+}: {
+  insights: { icon: string; msg: string; severity: "critical" | "warning" | "info" }[];
+}) {
+  const actionable = insights
+    .filter(i => i.severity === "critical" || i.severity === "warning")
+    .slice(0, 4);
+
+  return (
+    <div style={s.prioritySection}>
+      <div style={s.priorityHeader}>
+        <span style={s.priorityTitle}>Priority Actions</span>
+        <span style={s.priorityBadge}>Needs Attention</span>
+      </div>
+
+      {actionable.length === 0 ? (
+        <div style={s.priorityAllClear}>
+          ✓ No critical items right now — system looks healthy.
+        </div>
+      ) : (
+        <div style={s.priorityList}>
+          {actionable.map((item, i) => (
+            <div key={i} style={s.priorityRow}>
+              <span style={{
+                ...s.priorityDot,
+                background: item.severity === "critical" ? "#dc2626" : "#d97706",
+              }} />
+              <span style={s.priorityIcon}>{item.icon}</span>
+              <span style={s.priorityMsg}>{item.msg}</span>
+              <span style={{
+                ...s.priorityChip,
+                color:      item.severity === "critical" ? "#dc2626" : "#d97706",
+                background: item.severity === "critical" ? "#fef2f2" : "#fffbeb",
+                border:     `1px solid ${item.severity === "critical" ? "#fecaca" : "#fed7aa"}`,
+              }}>
+                {item.severity}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // STYLES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -869,4 +1048,17 @@ const s: Record<string, React.CSSProperties> = {
 
   // Misc
   empty:        { padding: "24px", textAlign: "center", fontSize: 13, color: "#9ca3af" },
+
+  // Priority Actions
+  prioritySection:  { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 16, overflow: "hidden" },
+  priorityHeader:   { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: "1px solid #f3f4f6" },
+  priorityTitle:    { fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.05em" },
+  priorityBadge:    { fontSize: 11, fontWeight: 600, color: "#d97706", background: "#fffbeb", border: "1px solid #fed7aa", borderRadius: 99, padding: "2px 10px" },
+  priorityList:     { display: "flex", flexDirection: "column" as const },
+  priorityRow:      { display: "flex", alignItems: "center", gap: 10, padding: "12px 18px", borderBottom: "1px solid #f9fafb" },
+  priorityDot:      { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
+  priorityIcon:     { fontSize: 15, flexShrink: 0 },
+  priorityMsg:      { flex: 1, fontSize: 13, color: "#374151", lineHeight: 1.4 },
+  priorityChip:     { fontSize: 11, fontWeight: 600, borderRadius: 99, padding: "2px 9px", whiteSpace: "nowrap" as const, flexShrink: 0 },
+  priorityAllClear: { padding: "16px 18px", fontSize: 13, color: "#16a34a", fontWeight: 500 },
 };

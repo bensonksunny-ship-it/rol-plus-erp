@@ -606,6 +606,23 @@ export async function bulkImportLessons(
 ): Promise<ImportResult> {
   const result: ImportResult = { created: 0, skipped: 0, errors: [] };
 
+  // Validate scope target exists before importing
+  if (scope.studentId) {
+    const studentSnap = await getDocFromServer(doc(db, "users", scope.studentId)).catch(() => null);
+    if (!studentSnap?.exists()) {
+      throw new Error(`STUDENT_NOT_FOUND: No student found with UID "${scope.studentId}". Verify the student ID and try again.`);
+    }
+    const studentRole = studentSnap.data().role as string | undefined;
+    if (studentRole !== "student") {
+      throw new Error(`ROLE_MISMATCH: User "${scope.studentId}" is not a student (role: "${studentRole}").`);
+    }
+  } else if (scope.centerId) {
+    const centerSnap = await getDocFromServer(doc(db, "centers", scope.centerId)).catch(() => null);
+    if (!centerSnap?.exists()) {
+      throw new Error(`CENTER_NOT_FOUND: No center found with ID "${scope.centerId}".`);
+    }
+  }
+
   // Group rows by lessonNumber (preserving insertion order)
   const grouped = new Map<number, ExcelImportRow[]>();
   for (const row of rows) {

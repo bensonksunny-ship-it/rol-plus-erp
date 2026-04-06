@@ -13,6 +13,7 @@ import {
 } from "@/services/teacher/teacher.service";
 import type { TeacherUser } from "@/types";
 import type { Center } from "@/types";
+import { deleteUser as deleteUserRecord } from "@/services/admin/delete.service";
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ function TeachersContent() {
 
   // Edit form
   const [editCenters, setEditCenters] = useState<string[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<TeacherUser | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -234,6 +236,24 @@ function TeachersContent() {
         </div>
       )}
 
+      {/* ── Delete Teacher Modal ── */}
+      {deleteTarget && (
+        <DeleteUserModal
+          name={deleteTarget.displayName}
+          role="teacher"
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={() => {
+            setTeachers(prev => prev.filter(t => t.uid !== deleteTarget.uid));
+            setDeleteTarget(null);
+            setSuccessMsg(`Teacher "${deleteTarget.displayName}" deleted.`);
+          }}
+          onError={msg => setErrorMsg(msg)}
+          uid={deleteTarget.uid}
+          currentUserUid={user?.uid ?? ""}
+          currentUserRole={(user?.role ?? ROLES.ADMIN) as string}
+        />
+      )}
+
       {/* ── Edit Centers Modal ── */}
       {editTarget && (
         <div style={s.overlay} onClick={() => setEditTarget(null)}>
@@ -309,9 +329,14 @@ function TeachersContent() {
                       )}
                     </td>
                     <td style={s.td}>
-                      <button style={s.editBtn} onClick={() => openEdit(t)}>
-                        Edit Centers
-                      </button>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <button style={s.editBtn} onClick={() => openEdit(t)}>
+                          Edit Centers
+                        </button>
+                        <button style={s.deleteBtn} onClick={() => setDeleteTarget(t)}>
+                          ✕ Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -381,6 +406,67 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+// ─── Delete User Modal (shared) ────────────────────────────────────────────────
+
+function DeleteUserModal({ name, role, uid, onClose, onDeleted, onError, currentUserUid, currentUserRole }: {
+  name: string; role: "teacher" | "admin"; uid: string;
+  onClose: () => void; onDeleted: () => void; onError: (msg: string) => void;
+  currentUserUid: string; currentUserRole: string;
+}) {
+  const [confirmed, setConfirmed] = useState("");
+  const [busy, setBusy]           = useState(false);
+
+  const confirmWord = name.split(" ")[0] ?? "DELETE";
+  const canDelete   = confirmed === confirmWord;
+
+  async function handleDelete() {
+    if (!canDelete) return;
+    setBusy(true);
+    try {
+      const res = await deleteUserRecord(uid, role, currentUserUid, currentUserRole as never);
+      if (res.success) { onDeleted(); }
+      else { onError(res.error ?? "Delete failed."); onClose(); }
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={s.overlay} onClick={onClose}>
+      <div style={{ ...s.modal, maxWidth: 440 }} onClick={e => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <span style={{ ...s.modalTitle, color: "#991b1b" }}>✕ Delete {role === "teacher" ? "Teacher" : "Admin"}</span>
+          <button onClick={onClose} style={s.closeBtn}>×</button>
+        </div>
+        <div style={s.modalBody}>
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "12px 14px", fontSize: 13, color: "#991b1b", marginBottom: 14 }}>
+            <strong>This will permanently delete &ldquo;{name}&rdquo;</strong>. Their login account will be disabled. This action cannot be undone.
+          </div>
+          <label style={{ fontSize: 12, color: "#374151", display: "block", marginBottom: 6 }}>
+            Type <strong style={{ color: "#dc2626" }}>{confirmWord}</strong> to confirm:
+          </label>
+          <input
+            value={confirmed}
+            onChange={e => setConfirmed(e.target.value)}
+            placeholder={`Type "${confirmWord}"`}
+            style={{ padding: "8px 10px", border: `1px solid ${canDelete ? "#86efac" : "#d1d5db"}`, borderRadius: 6, fontSize: 13, outline: "none", background: "#fff", color: "#111827", width: "100%", boxSizing: "border-box" as const }}
+          />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+            <button onClick={onClose} style={s.btnGhost}>Cancel</button>
+            <button onClick={handleDelete} disabled={!canDelete || busy}
+              style={{ ...s.btnPrimary, background: canDelete && !busy ? "#dc2626" : "#f3f4f6", color: canDelete && !busy ? "#fff" : "#9ca3af", cursor: canDelete && !busy ? "pointer" : "not-allowed" }}>
+              {busy ? "Deleting…" : `Delete ${role === "teacher" ? "Teacher" : "Admin"}`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
@@ -418,6 +504,7 @@ const s: Record<string, React.CSSProperties> = {
   centerTag:    { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 500, background: "#e0e7ff", color: "#4338ca" },
 
   editBtn:      { padding: "5px 12px", background: "#ede9fe", color: "#4f46e5", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  deleteBtn:    { padding: "5px 12px", background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" },
   empty:        { textAlign: "center", padding: "40px 0", color: "var(--color-text-secondary)", fontSize: 14 },
 
   // Modal

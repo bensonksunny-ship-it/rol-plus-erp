@@ -9,6 +9,8 @@ import type { Center } from "@/types";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
+import { useAuth } from "@/hooks/useAuth";
+import { deleteCenter } from "@/services/admin/delete.service";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -126,12 +128,14 @@ export default function CentersPage() {
 }
 
 function CentersContent() {
+  const { user, role }              = useAuth();
   const [centers, setCenters]       = useState<Center[]>([]);
   const [teachers, setTeachers]     = useState<TeacherUser[]>([]);
   const [loading, setLoading]       = useState(true);
   const [showForm, setShowForm]     = useState(false);
   const [editTarget, setEditTarget] = useState<Center | null>(null);
   const [viewTarget, setViewTarget] = useState<Center | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Center | null>(null);
   const [form, setForm]             = useState({ ...EMPTY_FORM });
   const [saving, setSaving]         = useState(false);
   const [dayError, setDayError]     = useState("");
@@ -244,6 +248,19 @@ function CentersContent() {
     <div>
       <ToastContainer toasts={toasts} onRemove={remove} />
       {viewTarget && <ViewModal center={viewTarget} onClose={() => setViewTarget(null)} teachers={teachers} />}
+      {deleteTarget && (
+        <DeleteCenterModal
+          center={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onDeleted={() => {
+            setCenters(prev => prev.filter(c => c.id !== deleteTarget.id));
+            setDeleteTarget(null);
+            toast(`Center "${deleteTarget.name}" deleted.`, "success");
+          }}
+          currentUserUid={user?.uid ?? ""}
+          currentUserRole={role ?? "admin"}
+        />
+      )}
 
       {/* Header */}
       <div style={styles.header}>
@@ -334,7 +351,8 @@ function CentersContent() {
                 <CenterRow key={center.id} center={center} index={i}
                   teachers={teachers}
                   onView={() => setViewTarget(center)}
-                  onEdit={() => openEdit(center)} />
+                  onEdit={() => openEdit(center)}
+                  onDelete={() => setDeleteTarget(center)} />
               ))}
             </tbody>
           </table>
@@ -346,8 +364,9 @@ function CentersContent() {
 
 // ─── Row ───────────────────────────────────────────────────────────────────────
 
-function CenterRow({ center, index, teachers, onView, onEdit }: {
-  center: Center; index: number; teachers: TeacherUser[]; onView: () => void; onEdit: () => void;
+function CenterRow({ center, index, teachers, onView, onEdit, onDelete }: {
+  center: Center; index: number; teachers: TeacherUser[];
+  onView: () => void; onEdit: () => void; onDelete: () => void;
 }) {
   const [hover, setHover] = useState(false);
   const raw = center as Center & { centerCode?: string };
@@ -370,9 +389,86 @@ function CenterRow({ center, index, teachers, onView, onEdit }: {
         <div style={actionStyles.row}>
           <ActionButton label="View" variant="ghost"   onClick={onView} />
           <ActionButton label="Edit" variant="primary" onClick={onEdit} />
+          <button onClick={onDelete} style={actionStyles.deleteBtn} title="Delete center">
+            ✕ Delete
+          </button>
         </div>
       </td>
     </tr>
+  );
+}
+
+// ─── Delete Center Modal ───────────────────────────────────────────────────────
+
+function DeleteCenterModal({ center, onClose, onDeleted, currentUserUid, currentUserRole }: {
+  center:          Center;
+  onClose:         () => void;
+  onDeleted:       () => void;
+  currentUserUid:  string;
+  currentUserRole: string;
+}) {
+  const [confirmed, setConfirmed] = useState("");
+  const [busy, setBusy]           = useState(false);
+  const [error, setError]         = useState("");
+
+  const confirmWord = center.name.split(" ")[0] ?? "DELETE";
+  const canDelete   = confirmed === confirmWord;
+
+  async function handleDelete() {
+    if (!canDelete) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await deleteCenter(center.id, currentUserUid, currentUserRole as never);
+      if (res.success) {
+        onDeleted();
+      } else {
+        setError(res.error ?? "Delete failed.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={modalStyles.overlay} onClick={onClose}>
+      <div style={{ ...modalStyles.box, maxWidth: 460 }} onClick={e => e.stopPropagation()}>
+        <div style={modalStyles.header}>
+          <span style={{ ...modalStyles.title, color: "#991b1b" }}>✕ Delete Center</span>
+          <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
+        </div>
+        <div style={modalStyles.body}>
+          <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "12px 14px", fontSize: 13, color: "#991b1b" }}>
+            <strong>This will permanently delete &ldquo;{center.name}&rdquo;</strong> and all its center-wide lessons. Students and teachers must be reassigned before deletion.
+          </div>
+          <div style={{ fontSize: 12, color: "#374151" }}>
+            Type <strong style={{ color: "#dc2626" }}>{confirmWord}</strong> to confirm:
+          </div>
+          <input
+            value={confirmed}
+            onChange={e => { setConfirmed(e.target.value); setError(""); }}
+            placeholder={`Type "${confirmWord}"`}
+            style={{ padding: "8px 10px", border: `1px solid ${canDelete ? "#86efac" : "#d1d5db"}`, borderRadius: 6, fontSize: 13, outline: "none", background: "#fff", color: "#111827", width: "100%", boxSizing: "border-box" }}
+          />
+          {error && (
+            <div style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, padding: "7px 10px" }}>
+              ✕ {error}
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 4 }}>
+            <button onClick={onClose} style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", padding: "8px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+              Cancel
+            </button>
+            <button onClick={handleDelete} disabled={!canDelete || busy}
+              style={{ background: canDelete && !busy ? "#dc2626" : "#f3f4f6", color: canDelete && !busy ? "#fff" : "#9ca3af", border: "none", padding: "8px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: canDelete && !busy ? "pointer" : "not-allowed" }}>
+              {busy ? "Deleting…" : "Delete Center"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -424,6 +520,7 @@ const actionStyles: Record<string, React.CSSProperties> = {
   ghostHover:   { background: "#e5e7eb" },
   primary:      { background: "#ede9fe", color: "#4f46e5" },
   primaryHover: { background: "#ddd6fe" },
+  deleteBtn:    { border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b", borderRadius: 5, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
 };
 
 const modalStyles: Record<string, React.CSSProperties> = {

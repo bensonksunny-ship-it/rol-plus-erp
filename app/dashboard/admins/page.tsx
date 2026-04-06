@@ -23,6 +23,7 @@ import { deleteApp } from "firebase/app";
 import { db } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
 import type { Center } from "@/types";
+import { deleteUser as deleteUserRecord } from "@/services/admin/delete.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,10 +66,11 @@ export default function AdminsPage() {
 function AdminsContent() {
   const { user } = useAuth();
 
-  const [admins, setAdmins]     = useState<AdminRow[]>([]);
-  const [centers, setCenters]   = useState<Center[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [showForm, setShowForm] = useState(false);
+  const [admins, setAdmins]         = useState<AdminRow[]>([]);
+  const [centers, setCenters]       = useState<Center[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [showForm, setShowForm]     = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AdminRow | null>(null);
 
   // Form fields
   const [name, setName]           = useState("");
@@ -225,6 +227,36 @@ function AdminsContent() {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div>
+      {/* ── Delete Admin Modal ── */}
+      {deleteTarget && (
+        <div style={s.overlay} onClick={() => setDeleteTarget(null)}>
+          <div style={s.modal} onClick={e => e.stopPropagation()}>
+            <div style={s.modalHeader}>
+              <span style={{ ...s.modalTitle, color: "#991b1b" }}>✕ Delete Admin</span>
+              <button onClick={() => setDeleteTarget(null)} style={s.closeBtn}>×</button>
+            </div>
+            <div style={s.modalBody}>
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "12px 14px", fontSize: 13, color: "#991b1b", marginBottom: 14 }}>
+                <strong>Delete &ldquo;{deleteTarget.displayName}&rdquo;?</strong> Their login will be disabled and they will lose access. This cannot be undone.
+              </div>
+              <DeleteConfirm
+                name={deleteTarget.displayName}
+                uid={deleteTarget.uid}
+                role="admin"
+                currentUserUid={user?.uid ?? ""}
+                onDeleted={() => {
+                  setAdmins(prev => prev.filter(a => a.uid !== deleteTarget.uid));
+                  setDeleteTarget(null);
+                  setSuccessMsg(`Admin "${deleteTarget.displayName}" deleted.`);
+                }}
+                onError={msg => { setErrorMsg(msg); setDeleteTarget(null); }}
+                onClose={() => setDeleteTarget(null)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header row */}
       <div style={s.headerRow}>
         <div>
@@ -336,7 +368,7 @@ function AdminsContent() {
             <table style={s.table}>
               <thead>
                 <tr>
-                  {["Name", "Email", "Code", "Status"].map(h => (
+                  {["Name", "Email", "Code", "Status", ""].map(h => (
                     <th key={h} style={s.th}>{h}</th>
                   ))}
                 </tr>
@@ -356,6 +388,13 @@ function AdminsContent() {
                         {a.status}
                       </span>
                     </td>
+                    <td style={s.td}>
+                      {a.uid !== user?.uid && (
+                        <button style={s.deleteBtn} onClick={() => setDeleteTarget(a)}>
+                          ✕ Delete
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -364,6 +403,53 @@ function AdminsContent() {
         )}
       </div>
     </div>
+  );
+}
+
+// ─── Delete Confirm inline ────────────────────────────────────────────────────
+
+function DeleteConfirm({ name, uid, role, currentUserUid, onDeleted, onError, onClose }: {
+  name: string; uid: string; role: "admin"; currentUserUid: string;
+  onDeleted: () => void; onError: (m: string) => void; onClose: () => void;
+}) {
+  const [confirmed, setConfirmed] = useState("");
+  const [busy, setBusy]           = useState(false);
+  const confirmWord = name.split(" ")[0] ?? "DELETE";
+  const canDelete   = confirmed === confirmWord;
+
+  async function doDelete() {
+    if (!canDelete) return;
+    setBusy(true);
+    try {
+      const res = await deleteUserRecord(uid, role, currentUserUid, "super_admin");
+      if (res.success) onDeleted();
+      else { onError(res.error ?? "Delete failed."); onClose(); }
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <label style={{ fontSize: 12, color: "#374151", display: "block", marginBottom: 6 }}>
+        Type <strong style={{ color: "#dc2626" }}>{confirmWord}</strong> to confirm:
+      </label>
+      <input
+        value={confirmed} onChange={e => setConfirmed(e.target.value)}
+        placeholder={`Type "${confirmWord}"`}
+        style={{ padding: "8px 10px", border: `1px solid ${canDelete ? "#86efac" : "#d1d5db"}`, borderRadius: 6, fontSize: 13, outline: "none", background: "#fff", color: "#111827", width: "100%", boxSizing: "border-box" as const }}
+      />
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+        <button onClick={onClose} style={s.btnGhost}>Cancel</button>
+        <button onClick={doDelete} disabled={!canDelete || busy}
+          style={{ ...s.btnPrimary, background: canDelete && !busy ? "#dc2626" : "#f3f4f6", color: canDelete && !busy ? "#fff" : "#9ca3af", border: "none", cursor: canDelete && !busy ? "pointer" : "not-allowed" }}>
+          {busy ? "Deleting…" : "Delete Admin"}
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -399,4 +485,13 @@ const s: Record<string, React.CSSProperties> = {
   badgeInactive: { display: "inline-block", padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 600, background: "#f3f4f6", color: "#6b7280" },
 
   emptyState:    { textAlign: "center", padding: "40px 0", color: "var(--color-text-secondary)", fontSize: 14 },
+  deleteBtn:     { padding: "5px 12px", background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" },
+
+  // Modal
+  overlay:       { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" },
+  modal:         { background: "#fff", borderRadius: 12, width: "100%", maxWidth: 440, boxShadow: "0 8px 32px rgba(0,0,0,0.16)", overflow: "hidden" },
+  modalHeader:   { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #e5e7eb" },
+  modalTitle:    { fontSize: 15, fontWeight: 600, color: "#111" },
+  closeBtn:      { background: "none", border: "none", fontSize: 22, cursor: "pointer", color: "#6b7280", lineHeight: 1 },
+  modalBody:     { padding: "20px" },
 };

@@ -24,6 +24,7 @@ interface StudentRow {
   uid:        string;
   name:       string;
   instrument: string;
+  classType:  string;  // "group" | "personal"
 }
 
 type MarkStatus = "present" | "absent";
@@ -108,9 +109,14 @@ function AttendanceContent() {
             uid:        d.id,
             name:       (data.displayName as string) || (data.name as string) || d.id,
             instrument: (data.instrument  as string) || "",
+            classType:  (data.classType   as string) === "personal" ? "personal" : "group",
           };
         });
-        rows.sort((a, b) => a.name.localeCompare(b.name));
+        // Sort: group first, then by name within each group
+        rows.sort((a, b) => {
+          if (a.classType !== b.classType) return a.classType === "group" ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
 
         // Existing attendance for this centre + date
         const existing = await getAttendanceByCentreDate(selectedCentre, date);
@@ -142,9 +148,11 @@ function AttendanceContent() {
 
   // ── Summary ────────────────────────────────────────────────────────────────
   const summary = useMemo(() => {
-    const total   = students.length;
-    const present = Object.values(marks).filter(m => m === "present").length;
-    return { total, present, absent: total - present };
+    const total       = students.length;
+    const present     = Object.values(marks).filter(m => m === "present").length;
+    const groupCount  = students.filter(s => s.classType === "group").length;
+    const personalCount = students.filter(s => s.classType === "personal").length;
+    return { total, present, absent: total - present, groupCount, personalCount };
   }, [students, marks]);
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -292,9 +300,11 @@ function AttendanceContent() {
           </div>
 
           <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-            <Chip label="Total"   value={summary.total}   color="#4f46e5" />
-            <Chip label="Present" value={summary.present} color="#16a34a" />
-            <Chip label="Absent"  value={summary.absent}  color="#dc2626" />
+            <Chip label="Total"    value={summary.total}        color="#4f46e5" />
+            <Chip label="Present"  value={summary.present}      color="#16a34a" />
+            <Chip label="Absent"   value={summary.absent}       color="#dc2626" />
+            <Chip label="Group"    value={summary.groupCount}   color="#166534" />
+            <Chip label="Personal" value={summary.personalCount} color="#92400e" />
 
             <button
               onClick={handleSave}
@@ -379,7 +389,7 @@ function AttendanceContent() {
                     : "0 0 0 3px rgba(239,68,68,0.18)",
                 }} />
 
-                {/* Name + instrument */}
+                {/* Name + instrument + class type */}
                 <div style={{ flex: 1 }}>
                   <span style={{ fontWeight: 600, fontSize: 14, color: "#111827" }}>
                     {s.name}
@@ -389,6 +399,13 @@ function AttendanceContent() {
                       {s.instrument}
                     </span>
                   )}
+                  <span style={{
+                    marginLeft: 8, fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 99,
+                    background: s.classType === "personal" ? "#fef9c3" : "#dcfce7",
+                    color:      s.classType === "personal" ? "#92400e" : "#166534",
+                  }}>
+                    {s.classType === "personal" ? "Personal" : "Group"}
+                  </span>
                 </div>
 
                 {/* Saved indicator */}

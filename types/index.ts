@@ -7,6 +7,27 @@ import type {
   ATTENDANCE_MODE,
 } from "@/config/constants";
 
+// ─── Class Type ───────────────────────────────────────────────────────────────
+
+/**
+ * Distinguishes how a student attends classes at a center.
+ *  - "group"    : student is part of a batch/group class at the center
+ *  - "personal" : student has one-on-one / private classes (at the center or elsewhere)
+ */
+export type ClassType = "group" | "personal";
+
+// ─── Billing Mode ─────────────────────────────────────────────────────────────
+
+/**
+ * billingMode — controls how fee collection flows for a student.
+ *  - "postpay" : billed first, pays after.
+ *                currentBalance > 0  → student owes money.
+ *  - "prepay"  : student deposits advance; fee is deducted from that credit.
+ *                currentBalance < 0  → credit remaining (shown as advance).
+ *                currentBalance > 0  → advance exhausted, now owes.
+ */
+export type BillingMode = "postpay" | "prepay";
+
 // ─── Primitives ───────────────────────────────────────────────────────────────
 
 export type Role = (typeof ROLES)[keyof typeof ROLES];
@@ -49,6 +70,31 @@ export interface StudentUser extends UserBase {
   studentID: string;             // auto-generated: ROL20260001 — system identifier
   admissionNo: string | null;    // optional external/legacy admission number
   studentStatus: StudentStatus;
+  /**
+   * classType — how the student attends:
+   *   "group"    → part of a batch/group class at the center
+   *   "personal" → private / one-on-one class (teacher-to-student directly)
+   * Both group and personal students can use "monthly" or "per_class" billing.
+   */
+  classType: ClassType;
+  /**
+   * billingMode — how fees are collected for this student.
+   * Defaults to "postpay" for existing students without this field.
+   */
+  billingMode: BillingMode;
+  /**
+   * assignedTeacherUid — only relevant when classType === "personal".
+   * Points to the TeacherUser.uid responsible for this student's one-on-one sessions.
+   * Null for group students (or when unassigned).
+   */
+  assignedTeacherUid: string | null;
+  /**
+   * classDays / classTime — scheduling for personal one-on-one sessions.
+   * e.g. classDays: ["Mon","Wed"], classTime: "17:00"
+   * Empty array / null for group students.
+   */
+  classDays: string[];
+  classTime: string | null;
   deactivationReason: string | null;
   deactivationRequestedBy: string | null;  // uid of requesting teacher
   deactivationApprovalStatus: ApprovalStatus | null;
