@@ -35,39 +35,69 @@ function clearSessionCookie() {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const resolvedRef           = useRef(false);
+  // resolvedWithUser: set to true once we receive a real (non-null) user.
+  // After that we ignore further callbacks to prevent re-render loops on mobile.
+  // We do NOT use this to block the null→real-user transition — Firebase always
+  // fires null first when reading from localStorage, then fires the real user.
+  const resolvedWithUserRef = useRef(false);
+  // resolvedDefinitiveNull: set true when we receive null AND have waited enough
+  // time to confirm there is no session (safety timeout or cookie-less null).
+  const resolvedDefinitiveNullRef = useRef(false);
 
   useEffect(() => {
-    // Safety timeout: unblocks the UI if Firebase never fires.
-    // Does NOT clear the session cookie — if we can't confirm auth state,
-    // it's safer to let ProtectedRoute/layout handle the redirect rather
-    // than proactively wiping a potentially valid cookie.
+    // Safety timeout: if Firebase never resolves a real user within AUTH_TIMEOUT_MS,
+    // treat as definitively signed out.
     const safetyTimer = setTimeout(() => {
-      if (!resolvedRef.current) {
-        resolvedRef.current = true;
+      if (!resolvedWithUserRef.current && !resolvedDefinitiveNullRef.current) {
+        resolvedDefinitiveNullRef.current = true;
+        clearSessionCookie();
         setUser(null);
         setLoading(false);
       }
     }, AUTH_TIMEOUT_MS);
 
     const unsubscribe = subscribeToAuthState((resolvedUser) => {
-      // Only process the first resolution. Firebase's onAuthStateChanged can
-      // fire multiple times on mobile (token refresh, network recovery), but
-      // we must not flip loading back to true after it was set to false —
-      // that causes re-render loops in the dashboard layout.
-      if (resolvedRef.current) return;
+      if (resolvedUser) {
+        // Real user resolved — lock in this state, ignore further callbacks.
+        if (resolvedWithUserRef.current) return;
+        clearTimeout(safetyTimer);
+        resolvedWithUserRef.current = true;
+        resolvedDefinitiveNullRef.current = false;
+        setUser(resolvedUser);
+        setLoading(false);
+      } else {
+        // Null callback — Firebase fires this first before reading localStorage.
+        // Only treat as definitive sign-out if:
+        //   (a) we already had a real user (genuine sign-out), OR
+        //   (b) there is no session cookie (no persisted session to wait for).
+        if (resolvedWithUserRef.current) {
+          // Genuine sign-out after having been logged in.
+          resolvedWithUserRef.current = false;
+          resolvedDefinitiveNullRef.current = true;
+          clearSessionCookie();
+          setUser(null);
+          // Keep loading=false (already false from prior real-user resolve).
+          return;
+        }
 
-      clearTimeout(safetyTimer);
-      resolvedRef.current = true;
+        const hasSessionCookie =
+          typeof document !== "undefined" &&
+          document.cookie.includes("rol_session=");
 
-      if (!resolvedUser) {
-        // Definitive sign-out — clear the cookie so middleware stops
-        // redirecting back to protected routes.
-        clearSessionCookie();
+        if (!hasSessionCookie) {
+          // No cookie → definitively not logged in; no need to wait.
+          if (!resolvedDefinitiveNullRef.current) {
+            clearTimeout(safetyTimer);
+            resolvedDefinitiveNullRef.current = true;
+            clearSessionCookie();
+            setUser(null);
+            setLoading(false);
+          }
+        }
+        // If cookie IS present: Firebase is still reading from localStorage.
+        // Keep loading=true and wait — the real user callback will come shortly.
+        // The safety timer will unblock if it never arrives.
       }
-
-      setUser(resolvedUser);
-      setLoading(false);
     });
 
     return () => {

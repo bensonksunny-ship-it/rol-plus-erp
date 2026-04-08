@@ -68,6 +68,8 @@ const NAV_ITEMS: NavItem[] = [
     matchPrefix: "/dashboard/syllabus,/dashboard/student-syllabus",
     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT],
   },
+  { label: "History",      icon: "🕐", href: "/dashboard/history",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Analytics",   icon: "📊", href: "/dashboard/analytics",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Alerts",       icon: "🔔", href: "/dashboard/alerts",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Audit Logs",   icon: "📋", href: "/dashboard/audit-logs",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },

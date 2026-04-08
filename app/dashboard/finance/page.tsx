@@ -71,6 +71,19 @@ function currentMonth(): string {
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
+/** "2025-04" → "April 2025" */
+function fmtMonth(ym: string): string {
+  const [y, m] = ym.split("-");
+  const names = ["January","February","March","April","May","June",
+                  "July","August","September","October","November","December"];
+  return `${names[parseInt(m, 10) - 1] ?? m} ${y}`;
+}
+/** Earliest selectable month — 3 years back */
+function minMonth(): string {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - 3);
+  return d.toISOString().slice(0, 7);
+}
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
@@ -93,6 +106,9 @@ function FinanceContent() {
   const [loading, setLoading]                = useState(true);
   const [billing, setBilling]                = useState(false);
   const { toasts, toast, remove }            = useToast();
+  // ── Month selector ───────────────────────────────────────────────────────────
+  const [selectedMonth, setSelectedMonth]    = useState<string>(currentMonth());
+  const isCurrentMonth                       = selectedMonth === currentMonth();
 
   // ── Inline row panel state ───────────────────────────────────────────────────
   const [activeUid, setActiveUid]            = useState<string | null>(null);
@@ -131,9 +147,8 @@ function FinanceContent() {
   const [filterBillingMode, setFilterBillingMode] = useState<string>("all"); // "all" | "prepay" | "postpay"
 
   // ── Fetch ────────────────────────────────────────────────────────────────────
-  async function fetchAll() {
+  async function fetchAll(month: string = selectedMonth) {
     try {
-      const month = currentMonth();
       const [txData, studentSnap, centerSnap, attSnap] = await Promise.all([
         getTransactions(),
         getDocs(query(collection(db, "users"), where("role", "==", "student"))),
@@ -152,8 +167,11 @@ function FinanceContent() {
         centerCode: (d.data().centerCode as string) ?? "—",
       })));
 
-      setTransactions(txData.sort((a, b) => (b.date ?? "").localeCompare(a.date ?? "")));
+      // Store ALL transactions (month filtering happens in useMemo/render)
+      const sortedTx = txData.sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
+      setTransactions(sortedTx);
 
+      // ── Attendance count for the selected month ────────────────────────────
       const monthAttMap = new Map<string, number>();
       attSnap.docs.forEach(d => {
         const data = d.data();
@@ -164,6 +182,73 @@ function FinanceContent() {
         monthAttMap.set(uid, (monthAttMap.get(uid) ?? 0) + 1);
       });
 
+      // ── Historical balance reconstruction for past months ─────────────────
+      // For the current month we trust the live `currentBalance` on the student doc.
+      // For past months we replay all transactions up to end-of-that-month to
+      // reconstruct what the balance was at that point in time.
+      //
+      // Sign convention (same as Firestore writes):
+      //   Payment received  → increment(-net)  → reduces balance (good for student)
+      //   Billing charge    → increment(+amt)  → increases balance (student owes more)
+      //   Deposit (prepay)  → increment(-amt)  → reduces balance (credit added)
+      //
+      // Transaction type detection (fields written by this page):
+      //   method === "auto-monthly"  → monthly billing charge  (+balance)
+      //   method === "auto"          → per-class charge         (+balance)
+      //   type   === "deposit"       → prepay deposit           (-balance)
+      //   everything else            → payment received         (-balance)
+
+      const isCurrent = month === currentMonth();
+      // Last day of the selected month (e.g. "2025-04-30")
+      const [yr, mo] = month.split("-").map(Number);
+      const lastDayOfMonth = new Date(yr, mo, 0).getDate(); // day 0 of next month = last day of this month
+      const monthEnd = `${month}-${String(lastDayOfMonth).padStart(2, "0")}`;
+
+      // Per-student balance as of end of selected month (only needed for past months)
+      const historicalBalanceMap = new Map<string, number>();
+      // Per-student: was a billing charge recorded IN the selected month?
+      const billedThisMonthSet  = new Set<string>();
+
+      if (!isCurrent) {
+        // We need to replay ALL transactions up to monthEnd
+        txData.forEach(tx => {
+          if (tx.status !== "completed") return;
+          const txDate = (tx.date ?? "").slice(0, 10);
+          if (!tx.studentUid || txDate > monthEnd) return; // skip future tx
+
+          const raw = tx as unknown as Record<string, unknown>;
+          const method = (raw.method ?? "") as string;
+          const type   = (raw.type   ?? "") as string;
+          const amt    = Number(tx.amount ?? 0);
+          const uid    = tx.studentUid;
+
+          const prev = historicalBalanceMap.get(uid) ?? 0;
+
+          if (method === "auto-monthly" || method === "auto") {
+            // Billing charge — adds to balance (student owes)
+            historicalBalanceMap.set(uid, prev + amt);
+            // Mark billed for THIS month specifically
+            if (txDate.startsWith(month)) billedThisMonthSet.add(uid);
+          } else if (type === "deposit") {
+            // Prepay deposit — reduces balance (adds credit)
+            historicalBalanceMap.set(uid, prev - amt);
+          } else {
+            // Payment received — reduces balance
+            historicalBalanceMap.set(uid, prev - amt);
+          }
+        });
+      } else {
+        // Current month: check transactions for billing in this month
+        txData.forEach(tx => {
+          if (tx.status !== "completed" || !tx.studentUid) return;
+          const txDate = (tx.date ?? "").slice(0, 10);
+          if (!txDate.startsWith(month)) return;
+          const raw    = tx as unknown as Record<string, unknown>;
+          const method = (raw.method ?? "") as string;
+          if (method === "auto-monthly") billedThisMonthSet.add(tx.studentUid);
+        });
+      }
+
       setStudents(studentSnap.docs.map(d => {
         const s           = d.data();
         const c           = cMap.get(s.centerId as string);
@@ -171,6 +256,20 @@ function FinanceContent() {
         const monthlyFee  = Number(s.monthlyFee  ?? s.feePerClass ?? 0);
         const attCount    = monthAttMap.get(d.id) ?? 0;
         const estimatedFee = feePerClass > 0 ? attCount * feePerClass : 0;
+
+        // Balance: live for current month, reconstructed for past months
+        const liveBalance = Number(s.currentBalance ?? 0);
+        const balance = isCurrent
+          ? liveBalance
+          : (historicalBalanceMap.get(d.id) ?? 0);
+
+        // lastBilledMonth: for current month use student doc field;
+        // for past months derive from transaction history
+        const liveLastBilled = (s.lastBilledMonth as string | null) ?? null;
+        const lastBilledMonth = isCurrent
+          ? liveLastBilled
+          : (billedThisMonthSet.has(d.id) ? month : liveLastBilled);
+
         return {
           uid:             d.id,
           name:            (s.displayName ?? s.name ?? "—") as string,
@@ -183,11 +282,11 @@ function FinanceContent() {
           feeCycle:        (s.feeCycle   ?? "—") as string,
           feePerClass,
           monthlyFee,
-          balance:         Number(s.currentBalance ?? 0),
+          balance,
           status:          (s.status ?? "active") as string,
           attendanceCount: attCount,
           estimatedFee,
-          lastBilledMonth: (s.lastBilledMonth as string | null) ?? null,
+          lastBilledMonth,
         };
       }));
     } catch (err) {
@@ -197,48 +296,60 @@ function FinanceContent() {
     }
   }
 
+  // Re-fetch whenever selected month changes
   useEffect(() => {
-    fetchAll();
-    const interval = setInterval(fetchAll, 30_000);
+    setLoading(true);
+    fetchAll(selectedMonth);
+    // Auto-refresh only for current month (historical data is immutable)
+    if (selectedMonth !== currentMonth()) return;
+    const interval = setInterval(() => fetchAll(selectedMonth), 30_000);
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [selectedMonth]);
 
   // ── Summary ──────────────────────────────────────────────────────────────────
   const summary = useMemo(() => {
-    const today           = todayStr();
-    const total           = transactions.filter(t => t.status === "completed").reduce((s, t) => s + (t.amount ?? 0), 0);
-    const todayAmt        = transactions.filter(t =>
-      t.status === "completed" && t.date?.startsWith(today)
-    ).reduce((s, t) => s + (t.amount ?? 0), 0);
+    const today      = todayStr();
+    // Filter transactions to the selected month
+    const monthTx    = transactions.filter(t =>
+      t.status === "completed" && (t.date ?? "").startsWith(selectedMonth)
+    );
+    const total      = monthTx.reduce((s, t) => s + (t.amount ?? 0), 0);
+    // "Today" only meaningful if viewing current month
+    const todayAmt   = isCurrentMonth
+      ? transactions.filter(t => t.status === "completed" && t.date?.startsWith(today))
+          .reduce((s, t) => s + (t.amount ?? 0), 0)
+      : 0;
     const overdueStudents = students.filter(s => s.balance > 0);
     const pendingBal      = overdueStudents.reduce((acc, s) => acc + s.balance, 0);
     const activeCount     = students.filter(s => s.status === "active").length;
     const totalEstFee     = students.reduce((acc, s) => acc + s.estimatedFee, 0);
     const groupCount      = students.filter(s => s.classType === "group").length;
     const personalCount   = students.filter(s => s.classType === "personal").length;
-    // Prepay credit
+    // Prepay credit (live balance, not month-specific)
     const prepayStudents  = students.filter(s => s.billingMode === "prepay");
     const prepayCredit    = prepayStudents.filter(s => s.balance < 0).reduce((acc, s) => acc + Math.abs(s.balance), 0);
     const prepayCount     = prepayStudents.length;
     const lowCreditCount  = prepayStudents.filter(s => {
-      // Low if credit < one month's fee
       const fee = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
-      return s.balance >= -fee;  // balance >= -fee means credit <= fee
+      return s.balance >= -fee;
     }).length;
     return { total, todayAmt, pendingBal, activeCount, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCredit, prepayCount, lowCreditCount };
-  }, [transactions, students]);
+  }, [transactions, students, selectedMonth, isCurrentMonth]);
 
-  // ── Last tx per student ──────────────────────────────────────────────────────
+  // ── Last tx per student (scoped to selected month) ───────────────────────────
   const lastTxMap = useMemo(() => {
     const m = new Map<string, Transaction>();
+    // transactions are sorted newest-first; find the newest one in selected month per student
     transactions.forEach(tx => {
       if (tx.status === "completed" && tx.studentUid && !m.has(tx.studentUid)) {
-        m.set(tx.studentUid, tx);
+        if ((tx.date ?? "").startsWith(selectedMonth)) {
+          m.set(tx.studentUid, tx);
+        }
       }
     });
     return m;
-  }, [transactions]);
+  }, [transactions, selectedMonth]);
 
   // ── Derived: net pay amount after discount ───────────────────────────────────
   function computeNetAmount(raw: string, dType: DiscountType, dVal: string): number {
@@ -324,7 +435,7 @@ function FinanceContent() {
         updatedAt:      new Date().toISOString(),
       });
       closePanel();
-      await fetchAll();
+      await fetchAll(selectedMonth);
       const discMsg = discountAmt > 0
         ? ` (discount ${fmtINR(discountAmt)} applied)`
         : "";
@@ -352,7 +463,7 @@ function FinanceContent() {
         updatedAt: new Date().toISOString(),
       });
       closePanel();
-      await fetchAll();
+      await fetchAll(selectedMonth);
       toast(
         `Fee updated for ${student.name} — ${isMonthly ? "Monthly" : "Per Class"}: ${fmtINR(newFee)}`,
         "success"
@@ -367,9 +478,8 @@ function FinanceContent() {
 
   // ── Submit: per-student monthly billing ─────────────────────────────────────
   async function submitBillStudent(student: StudentFeeRow) {
-    const month = currentMonth();
-    if (student.lastBilledMonth === month) {
-      toast(`${student.name} has already been billed for ${month}`, "error");
+    if (student.lastBilledMonth === selectedMonth) {
+      toast(`${student.name} has already been billed for ${fmtMonth(selectedMonth)}`, "error");
       return;
     }
     if (student.feeCycle !== "monthly") {
@@ -381,26 +491,29 @@ function FinanceContent() {
       toast(`No monthly fee set for ${student.name}`, "error");
       return;
     }
+    // For past months, use the last day of that month as the billing date
+    const billingDate = isCurrentMonth ? todayStr() : `${selectedMonth}-01`;
     setBillSubmitting(true);
     try {
       await addDoc(collection(db, "transactions"), {
-        studentUid: student.uid,
-        centerId:   student.centerId,
+        studentUid:    student.uid,
+        centerId:      student.centerId,
         amount,
-        method:     "auto-monthly",
-        receivedBy: user?.displayName ?? user?.email ?? "system",
-        date:       todayStr(),
-        status:     "completed",
-        createdAt:  serverTimestamp(),
+        method:        "auto-monthly",
+        receivedBy:    user?.displayName ?? user?.email ?? "system",
+        date:          billingDate,
+        billingMonth:  selectedMonth,
+        status:        "completed",
+        createdAt:     serverTimestamp(),
       });
       await updateDoc(doc(db, "users", student.uid), {
         currentBalance:  increment(amount),
-        lastBilledMonth: month,
+        lastBilledMonth: selectedMonth,
         updatedAt:       new Date().toISOString(),
       });
       closePanel();
-      await fetchAll();
-      toast(`Monthly fee ${fmtINR(amount)} billed to ${student.name}`, "success");
+      await fetchAll(selectedMonth);
+      toast(`Monthly fee ${fmtINR(amount)} billed to ${student.name} for ${fmtMonth(selectedMonth)}`, "success");
     } catch (err) {
       console.error("Per-student billing failed:", err);
       toast("Billing failed. Try again.", "error");
@@ -436,7 +549,7 @@ function FinanceContent() {
         updatedAt:      new Date().toISOString(),
       });
       closePanel();
-      await fetchAll();
+      await fetchAll(selectedMonth);
       toast(`✓ Advance deposit ${fmtINR(amt)} recorded for ${student.name} via ${depositMethod}`, "success");
     } catch (err) {
       console.error("Deposit failed:", err);
@@ -448,9 +561,10 @@ function FinanceContent() {
 
   // ── Bulk monthly billing ─────────────────────────────────────────────────────
   async function runMonthlyBilling() {
+    const month = selectedMonth;
     setBilling(true);
-    const month = currentMonth();
     let charged = 0; let skipped = 0;
+    const billingDate = isCurrentMonth ? todayStr() : `${month}-01`;
     try {
       const snap    = await getDocs(query(collection(db, "users"), where("role", "==", "student")));
       const monthly = snap.docs
@@ -462,14 +576,15 @@ function FinanceContent() {
         const amount = Number(student.monthlyFee ?? student.feePerClass ?? 0);
         if (amount <= 0) { skipped++; return; }
         await addDoc(collection(db, "transactions"), {
-          studentUid: student.id,
-          centerId:   (student.centerId as string) ?? "",
+          studentUid:   student.id,
+          centerId:     (student.centerId as string) ?? "",
           amount,
-          method:     "auto-monthly",
-          receivedBy: "system",
-          date:       todayStr(),
-          status:     "completed",
-          createdAt:  serverTimestamp(),
+          method:       "auto-monthly",
+          receivedBy:   "system",
+          date:         billingDate,
+          billingMonth: month,
+          status:       "completed",
+          createdAt:    serverTimestamp(),
         });
         await updateDoc(doc(db, "users", student.id), {
           currentBalance:  increment(amount),
@@ -479,9 +594,9 @@ function FinanceContent() {
         charged++;
       }));
 
-      await fetchAll();
+      await fetchAll(month);
       toast(
-        `Monthly billing complete — ${charged} student${charged !== 1 ? "s" : ""} charged, ${skipped} already billed`,
+        `Billing for ${fmtMonth(month)} complete — ${charged} student${charged !== 1 ? "s" : ""} charged, ${skipped} already billed`,
         "success"
       );
     } catch (err) {
@@ -495,15 +610,18 @@ function FinanceContent() {
   // ── Filters ──────────────────────────────────────────────────────────────────
   const filteredTx = useMemo(() => {
     return transactions.filter(tx => {
-      if (filterCenter !== "all" && tx.centerId !== filterCenter) return false;
-      if (filterStatus !== "all" && tx.status  !== filterStatus)  return false;
+      // Always scope to selected month (override-able by specific date filter)
       if (filterDate) {
         const txDate = (tx.date ?? "").slice(0, 10);
         if (txDate !== filterDate) return false;
+      } else {
+        if (!(tx.date ?? "").startsWith(selectedMonth)) return false;
       }
+      if (filterCenter !== "all" && tx.centerId !== filterCenter) return false;
+      if (filterStatus !== "all" && tx.status  !== filterStatus)  return false;
       return true;
     });
-  }, [transactions, filterCenter, filterStatus, filterDate]);
+  }, [transactions, filterCenter, filterStatus, filterDate, selectedMonth]);
 
   const filteredStudents = useMemo(() => {
     let list = filterCenter === "all" ? students : students.filter(s => s.centerId === filterCenter);
@@ -541,7 +659,53 @@ function FinanceContent() {
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div style={st.header}>
         <div>
-          <h1 style={st.heading}>Finance</h1>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" as const }}>
+            <h1 style={st.heading}>Finance</h1>
+            {/* Month selector */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="month"
+                value={selectedMonth}
+                min={minMonth()}
+                max={currentMonth()}
+                onChange={e => {
+                  if (e.target.value) setSelectedMonth(e.target.value);
+                }}
+                style={{
+                  padding: "5px 10px",
+                  border: "1.5px solid var(--color-border, #e5e7eb)",
+                  borderRadius: 8,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  background: isCurrentMonth ? "var(--color-surface)" : "#fffbeb",
+                  color: isCurrentMonth ? "var(--color-text-primary)" : "#92400e",
+                  cursor: "pointer",
+                }}
+              />
+              {!isCurrentMonth && (
+                <button
+                  onClick={() => setSelectedMonth(currentMonth())}
+                  style={{
+                    padding: "5px 10px", border: "none", borderRadius: 6,
+                    fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    background: "#fef3c7", color: "#92400e",
+                  }}
+                  title="Jump back to current month"
+                >
+                  ← Current
+                </button>
+              )}
+            </div>
+            {!isCurrentMonth && (
+              <span style={{
+                fontSize: 12, fontWeight: 700, padding: "3px 10px",
+                background: "#fef9c3", color: "#b45309",
+                border: "1px solid #fde68a", borderRadius: 6,
+              }}>
+                📅 Viewing: {fmtMonth(selectedMonth)}
+              </span>
+            )}
+          </div>
           {summary.overdueCount > 0 && !loading && (
             <div style={st.overdueAlert}>
               ⚠ {summary.overdueCount} student{summary.overdueCount !== 1 ? "s" : ""} with outstanding balance
@@ -550,14 +714,17 @@ function FinanceContent() {
         </div>
         <button onClick={runMonthlyBilling} disabled={billing}
           style={{ ...st.billingBtn, opacity: billing ? 0.6 : 1, cursor: billing ? "not-allowed" : "pointer" }}>
-          {billing ? "⏳ Processing…" : "⚡ Run Monthly Billing (All)"}
+          {billing ? "⏳ Processing…" : `⚡ Run Billing — ${fmtMonth(selectedMonth)}`}
         </button>
       </div>
 
       {/* ── Summary Cards ────────────────────────────────────────────────────── */}
       <div style={st.cardGrid}>
-        <SummaryCard label="Total Collected"   value={loading ? "…" : fmtINR(summary.total)}        accent="#16a34a" icon="💰" />
-        <SummaryCard label="Collected Today"   value={loading ? "…" : fmtINR(summary.todayAmt)}      accent="#4f46e5" icon="📅" />
+        <SummaryCard label={`Collected — ${fmtMonth(selectedMonth)}`} value={loading ? "…" : fmtINR(summary.total)} accent="#16a34a" icon="💰" />
+        {isCurrentMonth
+          ? <SummaryCard label="Collected Today"  value={loading ? "…" : fmtINR(summary.todayAmt)}  accent="#4f46e5" icon="📅" />
+          : <SummaryCard label="Month (Past)"     value={fmtMonth(selectedMonth)}                   accent="#b45309" icon="🕐" hint="Historical view" />
+        }
         <SummaryCard label="Pending Balance"   value={loading ? "…" : fmtINR(summary.pendingBal)}    accent="#d97706" icon="⏳" />
         <SummaryCard label="Overdue Students"  value={loading ? "…" : String(summary.overdueCount)}  accent="#dc2626" icon="🚨"
           urgent={summary.overdueCount > 0} />
@@ -567,8 +734,8 @@ function FinanceContent() {
           urgent={summary.lowCreditCount > 0}
           hint="Credit < 1 month fee" />
         <SummaryCard label="Active Students"   value={loading ? "…" : String(summary.activeCount)}   accent="#059669" icon="🎓" />
-        <SummaryCard label="Est. Fees (Month)" value={loading ? "…" : fmtINR(summary.totalEstFee)}   accent="#7c3aed" icon="📊"
-          hint="Attendance × fee/class. Not stored." />
+        <SummaryCard label={`Est. Fees — ${fmtMonth(selectedMonth)}`} value={loading ? "…" : fmtINR(summary.totalEstFee)} accent="#7c3aed" icon="📊"
+          hint="Attendance × fee/class" />
       </div>
 
       {/* ── Tabs ─────────────────────────────────────────────────────────────── */}
@@ -658,14 +825,19 @@ function FinanceContent() {
       {/* ══ OVERVIEW TAB ═══════════════════════════════════════════════════════ */}
       {tab === "overview" && (
         <div>
-          <div style={st.sectionTitle}>Recent Transactions</div>
-          <TxTable transactions={transactions.slice(0, 10)} students={students}
+          <div style={st.sectionTitle}>
+            Transactions — {fmtMonth(selectedMonth)}
+          </div>
+          <TxTable transactions={filteredTx.slice(0, 15)} students={students}
             centers={centers} loading={loading} formatDate={formatDate} />
-          {transactions.length > 10 && (
+          {filteredTx.length > 15 && (
             <div style={st.moreHint}>
-              Showing 10 of {transactions.length}.{" "}
+              Showing 15 of {filteredTx.length}.{" "}
               <button onClick={() => setTab("transactions")} style={st.linkBtn}>View all →</button>
             </div>
+          )}
+          {!loading && filteredTx.length === 0 && (
+            <div style={st.stateRow}>No transactions for {fmtMonth(selectedMonth)}.</div>
           )}
         </div>
       )}
@@ -679,6 +851,23 @@ function FinanceContent() {
               <span>
                 <strong>{summary.overdueCount} student{summary.overdueCount !== 1 ? "s" : ""} </strong>
                 have outstanding balances totalling <strong>{fmtINR(summary.pendingBal)}</strong>.
+              </span>
+            </div>
+          )}
+
+          {/* Past month notice */}
+          {!isCurrentMonth && !loading && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10,
+              background: "#fffbeb", border: "1px solid #fde68a",
+              borderRadius: 8, padding: "10px 14px", marginBottom: 10,
+              fontSize: 13, color: "#92400e",
+            }}>
+              <span style={{ fontSize: 16 }}>📅</span>
+              <span>
+                Showing historical data for <strong>{fmtMonth(selectedMonth)}</strong>.
+                Attendance, balance, and billing status reflect that month.
+                Any actions (pay/bill/deposit) will update the <strong>live balance</strong>.
               </span>
             </div>
           )}
@@ -697,9 +886,21 @@ function FinanceContent() {
                     <th style={st.th}>Center</th>
                     <th style={st.th}>Cycle</th>
                     <th style={st.th}>Fee</th>
-                    <th style={st.th}>Att.</th>
+                    <th style={st.th}>
+                      Att.{" "}
+                      <span style={{ fontSize: 10, fontWeight: 400, color: "#9ca3af" }}>
+                        {fmtMonth(selectedMonth).split(" ")[0].slice(0,3)}
+                      </span>
+                    </th>
                     <th style={st.th}>Est. Fee</th>
-                    <th style={st.th}>Balance</th>
+                    <th style={st.th}>
+                      Balance
+                      {!isCurrentMonth && (
+                        <span style={{ fontSize: 10, fontWeight: 400, color: "#b45309", display: "block" }}>
+                          as of {fmtMonth(selectedMonth)}
+                        </span>
+                      )}
+                    </th>
                     <th style={st.th}>Actions</th>
                   </tr>
                 </thead>
@@ -709,7 +910,7 @@ function FinanceContent() {
                     const overdue    = s.balance > 0;   // owes money
                     const hasCredit  = isPrepay && s.balance < 0; // prepay credit remaining
                     const isOpen     = activeUid === s.uid;
-                    const month      = currentMonth();
+                    const month      = selectedMonth;
                     const alreadyBilled = s.lastBilledMonth === month;
                     const canBill    = s.feeCycle === "monthly" && !alreadyBilled;
                     const creditAmt  = hasCredit ? Math.abs(s.balance) : 0;
@@ -875,7 +1076,7 @@ function FinanceContent() {
                                     ...(isOpen && activeAction === "bill" ? st.actionBtnActive : {}),
                                     ...(alreadyBilled ? { opacity: 0.4, cursor: "not-allowed" } : {}),
                                   }}
-                                  title={alreadyBilled ? `Already billed for ${month}` : "Raise monthly fee invoice"}
+                                  title={alreadyBilled ? `Already billed for ${fmtMonth(month)}` : `Bill for ${fmtMonth(month)}`}
                                 >
                                   🗓 Bill
                                 </button>
@@ -899,6 +1100,79 @@ function FinanceContent() {
                                 <div style={st.panel}>
                                   <div style={st.panelTitle}>💳 Record Payment — {s.name}</div>
 
+                                  {/* Past month notice */}
+                                  {!isCurrentMonth && (
+                                    <div style={{ fontSize: 12, color: "#92400e", background: "#fef9c3", border: "1px solid #fde68a", borderRadius: 6, padding: "6px 10px", marginBottom: 10 }}>
+                                      📅 Viewing <strong>{fmtMonth(selectedMonth)}</strong>. Balance shown is historical. Payment will update the live balance.
+                                    </div>
+                                  )}
+
+                                  {/* ── Attendance × Fee breakdown card ─────────── */}
+                                  <div style={{
+                                    background: s.feeCycle === "per_class" ? "#f5f3ff" : "#eff6ff",
+                                    border: `1px solid ${s.feeCycle === "per_class" ? "#ddd6fe" : "#bfdbfe"}`,
+                                    borderRadius: 10,
+                                    padding: "12px 16px",
+                                    marginBottom: 12,
+                                    display: "flex",
+                                    flexWrap: "wrap" as const,
+                                    gap: 16,
+                                    alignItems: "center",
+                                  }}>
+                                    {s.feeCycle === "per_class" ? (
+                                      <>
+                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Classes — {fmtMonth(selectedMonth)}</span>
+                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#7c3aed", lineHeight: 1 }}>{s.attendanceCount}</span>
+                                          <span style={{ fontSize: 11, color: "#7c3aed" }}>classes attended</span>
+                                        </div>
+                                        <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>×</div>
+                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Fee Per Class</span>
+                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#374151", lineHeight: 1 }}>{fmtINR(s.feePerClass)}</span>
+                                          <span style={{ fontSize: 11, color: "#6b7280" }}>per class</span>
+                                        </div>
+                                        <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>=</div>
+                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Total Due</span>
+                                          <span style={{ fontSize: 22, fontWeight: 800, color: s.estimatedFee > 0 ? "#7c3aed" : "#9ca3af", lineHeight: 1 }}>{fmtINR(s.estimatedFee)}</span>
+                                          <span style={{ fontSize: 11, color: "#7c3aed" }}>estimated this month</span>
+                                        </div>
+                                        {s.attendanceCount === 0 && (
+                                          <span style={{ fontSize: 12, color: "#b45309", background: "#fef3c7", padding: "4px 10px", borderRadius: 6, marginLeft: "auto" }}>
+                                            ⚠ No attendance recorded yet
+                                          </span>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <>
+                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Monthly Fee</span>
+                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#1d4ed8", lineHeight: 1 }}>{fmtINR(s.monthlyFee)}</span>
+                                          <span style={{ fontSize: 11, color: "#1d4ed8" }}>fixed monthly</span>
+                                        </div>
+                                        <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>·</div>
+                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Classes — {fmtMonth(selectedMonth)}</span>
+                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#374151", lineHeight: 1 }}>{s.attendanceCount}</span>
+                                          <span style={{ fontSize: 11, color: "#6b7280" }}>attended</span>
+                                        </div>
+                                        {s.balance > 0 && (
+                                          <>
+                                            <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>→</div>
+                                            <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                              <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>
+                                                {isCurrentMonth ? "Outstanding" : `Balance — ${fmtMonth(selectedMonth)}`}
+                                              </span>
+                                              <span style={{ fontSize: 22, fontWeight: 800, color: "#dc2626", lineHeight: 1 }}>{fmtINR(s.balance)}</span>
+                                              <span style={{ fontSize: 11, color: "#dc2626" }}>{isCurrentMonth ? "due now" : "as of that month"}</span>
+                                            </div>
+                                          </>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+
                                   {/* Context info */}
                                   <div style={st.panelInfo}>
                                     {s.balance > 0 && (
@@ -908,7 +1182,7 @@ function FinanceContent() {
                                     )}
                                     {lastTxMap.get(s.uid) && (
                                       <span style={st.infoChip}>
-                                        Last pay: {fmtINR(lastTxMap.get(s.uid)!.amount)} on {formatDate(lastTxMap.get(s.uid)!.date ?? lastTxMap.get(s.uid)!.createdAt)}
+                                        {isCurrentMonth ? "Last pay" : `Pay in ${fmtMonth(selectedMonth)}`}: {fmtINR(lastTxMap.get(s.uid)!.amount)} on {formatDate(lastTxMap.get(s.uid)!.date ?? lastTxMap.get(s.uid)!.createdAt)}
                                       </span>
                                     )}
                                   </div>
@@ -1069,19 +1343,43 @@ function FinanceContent() {
                                 <div style={st.panel}>
                                   <div style={st.panelTitle}>🗓 Monthly Billing — {s.name}</div>
 
+                                  {/* Attendance context for monthly billing */}
+                                  <div style={{
+                                    background: "#eff6ff",
+                                    border: "1px solid #bfdbfe",
+                                    borderRadius: 10,
+                                    padding: "12px 16px",
+                                    marginBottom: 12,
+                                    display: "flex",
+                                    gap: 20,
+                                    alignItems: "center",
+                                    flexWrap: "wrap" as const,
+                                  }}>
+                                    <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                      <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Monthly Fee</span>
+                                      <span style={{ fontSize: 22, fontWeight: 800, color: "#1d4ed8", lineHeight: 1 }}>{fmtINR(s.monthlyFee)}</span>
+                                    </div>
+                                    <div style={{ fontSize: 20, color: "#9ca3af" }}>·</div>
+                                    <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+                                      <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Classes — {fmtMonth(selectedMonth)}</span>
+                                      <span style={{ fontSize: 22, fontWeight: 800, color: "#374151", lineHeight: 1 }}>{s.attendanceCount}</span>
+                                      <span style={{ fontSize: 11, color: "#6b7280" }}>attended</span>
+                                    </div>
+                                  </div>
+
                                   <div style={st.panelInfo}>
                                     <span style={st.infoChip}>
                                       Monthly fee: <strong>{fmtINR(s.monthlyFee)}</strong>
                                     </span>
                                     <span style={alreadyBilled ? st.infoChipGreen : st.infoChipRed}>
-                                      {alreadyBilled ? `✓ Already billed for ${month}` : `Not yet billed for ${month}`}
+                                      {alreadyBilled ? `✓ Already billed for ${fmtMonth(month)}` : `Not yet billed for ${fmtMonth(month)}`}
                                     </span>
                                   </div>
 
                                   {!canBill ? (
                                     <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
                                       {alreadyBilled
-                                        ? `${s.name} has already been billed for ${month}. No action needed.`
+                                        ? `${s.name} has already been billed for ${fmtMonth(month)}. No action needed.`
                                         : `Per-class students are billed automatically on attendance. Manual monthly billing does not apply.`}
                                     </div>
                                   ) : (
@@ -1089,7 +1387,7 @@ function FinanceContent() {
                                       <div style={{ fontSize: 13, color: "#374151", padding: "8px 0" }}>
                                         {isPrepay ? (
                                           <>
-                                            This will deduct <strong>{fmtINR(s.monthlyFee)}</strong> from <strong>{s.name}</strong>{"'s"} prepay credit for {month}.{" "}
+                                            This will deduct <strong>{fmtINR(s.monthlyFee)}</strong> from <strong>{s.name}</strong>{"'s"} prepay credit for {fmtMonth(month)}.{" "}
                                             {hasCredit
                                               ? <>Remaining credit after billing: <strong style={{ color: creditAmt >= s.monthlyFee ? "#16a34a" : "#dc2626" }}>{fmtINR(creditAmt - s.monthlyFee)}</strong></>
                                               : <span style={{ color: "#dc2626" }}>No credit — balance will go further into due.</span>
@@ -1098,7 +1396,7 @@ function FinanceContent() {
                                         ) : (
                                           <>
                                             This will raise a monthly fee invoice of <strong>{fmtINR(s.monthlyFee)}</strong> for{" "}
-                                            <strong>{s.name}</strong> and add it to their balance for {month}.
+                                            <strong>{s.name}</strong> and add it to their balance for {fmtMonth(month)}.
                                           </>
                                         )}
                                       </div>
@@ -1111,7 +1409,7 @@ function FinanceContent() {
                                             opacity: billSubmitting ? 0.6 : 1,
                                             cursor: billSubmitting ? "not-allowed" : "pointer",
                                           }}>
-                                          {billSubmitting ? "Billing…" : `⚡ Bill ${fmtINR(s.monthlyFee)} for ${month}`}
+                                          {billSubmitting ? "Billing…" : `⚡ Bill ${fmtINR(s.monthlyFee)} — ${fmtMonth(month)}`}
                                         </button>
                                         <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
                                       </div>
@@ -1242,11 +1540,10 @@ function FinanceContent() {
       {/* ══ TRANSACTIONS TAB ═══════════════════════════════════════════════════ */}
       {tab === "transactions" && (
         <div>
-          {(filterDate || filterCenter !== "all" || filterStatus !== "all") && (
-            <div style={st.filterSummary}>
-              Showing {filteredTx.length} of {transactions.length} transactions
-            </div>
-          )}
+          <div style={st.filterSummary}>
+            {fmtMonth(selectedMonth)} — {filteredTx.length} transaction{filteredTx.length !== 1 ? "s" : ""}
+            {(filterDate || filterCenter !== "all" || filterStatus !== "all") && " (filtered)"}
+          </div>
           <TxTable transactions={filteredTx} students={students}
             centers={centers} loading={loading} formatDate={formatDate} />
         </div>
