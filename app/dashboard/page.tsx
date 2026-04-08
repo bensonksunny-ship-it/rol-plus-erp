@@ -136,11 +136,16 @@ function CommandCenter() {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
-  const today     = isoToday();
-  const days7ago  = isoDaysAgo(7);
-  const days30ago = isoDaysAgo(30);
-  const thisMonth = isoMonthStart(0);
-  const lastMonth = isoMonthStart(1);
+  // Stabilise date strings inside useMemo so they never change reference mid-render.
+  // Plain const declarations like `const today = isoToday()` return a new string
+  // instance on every render — even though the VALUE is the same, some useMemo
+  // dependencies compare with Object.is() and would see a change, triggering
+  // unnecessary recomputation that cascades into extra re-renders.
+  const today     = useMemo(() => isoToday(),       []);
+  const days7ago  = useMemo(() => isoDaysAgo(7),    []);
+  const days30ago = useMemo(() => isoDaysAgo(30),   []);
+  const thisMonth = useMemo(() => isoMonthStart(0), []);
+  const lastMonth = useMemo(() => isoMonthStart(1), []);
 
   useEffect(() => {
     async function load() {

@@ -4,6 +4,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -75,8 +76,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Memoize the context value so that every consumer (useAuth, useAuthContext)
+  // only re-renders when user or loading actually changes — not on every AuthProvider
+  // render caused by parent re-renders or unrelated state updates.
+  const value = useMemo(() => ({ user, loading }), [user, loading]);
+
   return (
-    <AuthContext.Provider value={{ user, loading }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

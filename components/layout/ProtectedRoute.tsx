@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
 import { validateUserAccess, isRoleAllowed } from "@/lib/validators/auth.validators";
@@ -15,26 +15,37 @@ export default function ProtectedRoute({ children, allowedRoles }: ProtectedRout
   const { user, loading } = useAuth();
   const router = useRouter();
 
+  // Stabilise the roles array so its reference doesn't change on every render.
+  // Callers pass inline literals like [ROLES.ADMIN, ROLES.SUPER_ADMIN] which
+  // would be a new array instance each render and cause the useEffect below to
+  // fire in a tight loop, re-rendering the page 2× per second.
+  const rolesKey = allowedRoles.slice().sort().join(",");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stableRoles = useMemo(() => allowedRoles, [rolesKey]);
+
+  // Guard against triggering router.replace more than once per mount.
+  const redirectedRef = useRef(false);
+
   useEffect(() => {
     if (loading) return;
 
     // Not logged in → login
     if (!user) {
-      router.replace("/login");
+      if (!redirectedRef.current) { redirectedRef.current = true; router.replace("/login"); }
       return;
     }
 
     // Logged in but inactive/pending → login (blocked)
     if (!validateUserAccess(user)) {
-      router.replace("/login");
+      if (!redirectedRef.current) { redirectedRef.current = true; router.replace("/login"); }
       return;
     }
 
     // Logged in, active, but wrong role → login
-    if (!isRoleAllowed(user, allowedRoles)) {
-      router.replace("/login");
+    if (!isRoleAllowed(user, stableRoles)) {
+      if (!redirectedRef.current) { redirectedRef.current = true; router.replace("/login"); }
     }
-  }, [user, loading, allowedRoles, router]);
+  }, [user, loading, stableRoles, router]);
 
   // Show a neutral background while auth resolves — never return null which
   // would cause a hydration mismatch and a blank flash on SSR.
@@ -51,7 +62,7 @@ export default function ProtectedRoute({ children, allowedRoles }: ProtectedRout
   if (!user) return null;
 
   // Block render if status or role fails — redirect already triggered above
-  if (!validateUserAccess(user) || !isRoleAllowed(user, allowedRoles)) return null;
+  if (!validateUserAccess(user) || !isRoleAllowed(user, stableRoles)) return null;
 
   return <>{children}</>;
 }

@@ -1,5 +1,6 @@
 import "./globals.css";
 import { AuthProvider } from "@/features/auth/AuthContext";
+import ChunkErrorBoundary from "@/components/ChunkErrorBoundary";
 
 export default function RootLayout({
   children,
@@ -17,7 +18,9 @@ export default function RootLayout({
         />
       </head>
       <body>
-        <AuthProvider>{children}</AuthProvider>
+        <ChunkErrorBoundary>
+          <AuthProvider>{children}</AuthProvider>
+        </ChunkErrorBoundary>
       </body>
     </html>
   );

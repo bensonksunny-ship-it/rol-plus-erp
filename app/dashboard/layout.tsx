@@ -17,9 +17,16 @@ import { ROLES } from "@/config/constants";
 // ─── Alert count hook ──────────────────────────────────────────────────────────
 function useAlertCount(enabled: boolean): number {
   const [count, setCount] = useState(0);
+  // Capture enabled in a ref so the interval callback always uses the latest
+  // value without being listed as an effect dependency — prevents re-subscribing
+  // the interval every time the admin/super_admin role check changes.
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+
   useEffect(() => {
-    if (!enabled) return;
-    async function fetch() {
+    // Only start the polling loop once (on mount). The ref keeps it current.
+    async function fetchAlerts() {
+      if (!enabledRef.current) { setCount(0); return; }
       try {
         const snap = await getDocs(
           query(collection(db, "alerts"), where("status", "==", "active"))
@@ -27,10 +34,11 @@ function useAlertCount(enabled: boolean): number {
         setCount(snap.size);
       } catch { /* silent */ }
     }
-    fetch();
-    const id = setInterval(fetch, 60_000);
+    fetchAlerts();
+    const id = setInterval(fetchAlerts, 60_000);
     return () => clearInterval(id);
-  }, [enabled]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);   // ← intentionally empty: interval starts once, ref tracks enabled
   return count;
 }
 
@@ -67,7 +75,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Faculty Suite",icon: "🎓", href: "/dashboard/teacher",        roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
 ];
 
-const BOTTOM_NAV_LABELS = ["Dashboard", "Attendance", "Syllabus", "Students", "Faculty Suite"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Attendance", "Syllabus", "Students", "Faculty Suite"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
