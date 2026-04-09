@@ -492,6 +492,7 @@ function TeacherDashboardContent() {
               ? <div style={s.emptyState}>No personal students assigned to you yet.</div>
               : <StudentsView
                   students={personalStudents}
+                  teacherUid={user?.uid ?? ""}
                   onViewProgress={st => setView({ type: "progress", student: st })}
                 />
       )}
@@ -529,6 +530,7 @@ function TeacherDashboardContent() {
       {selectedCenter !== PERSONAL_TAB_ID && view.type === "students" && (
         <StudentsView
           students={students}
+          teacherUid={user?.uid ?? ""}
           onViewProgress={st => setView({ type: "progress", student: st })}
         />
       )}
@@ -900,11 +902,17 @@ function AttendanceView({ centerId, date, students, markedBy, onDone }: {
 // STUDENTS VIEW
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function StudentsView({ students, onViewProgress }: {
+function StudentsView({ students, teacherUid, onViewProgress }: {
   students:       StudentRow[];
+  teacherUid:     string;
   onViewProgress: (s: StudentRow) => void;
 }) {
   const [progressMap, setProgressMap] = useState<Record<string, number>>({});
+  const [breakTarget, setBreakTarget] = useState<StudentRow | null>(null);
+  const [breakReason, setBreakReason] = useState("");
+  const [breakSaving, setBreakSaving] = useState(false);
+  const [breakError, setBreakError]   = useState("");
+  const [successMsg, setSuccessMsg]   = useState("");
 
   useEffect(() => {
     (async () => {
@@ -927,12 +935,53 @@ function StudentsView({ students, onViewProgress }: {
     })();
   }, [students]);
 
+  async function submitBreakRequest() {
+    if (!breakTarget || !breakReason.trim()) { setBreakError("Please provide a reason."); return; }
+    setBreakError("");
+    setBreakSaving(true);
+    try {
+      const { updateDoc: ud, doc: fd, serverTimestamp: sts } = await import("firebase/firestore");
+      const { db: fdb } = await import("@/services/firebase/firebase");
+      const { logAction: la } = await import("@/services/audit/audit.service");
+
+      await ud(fd(fdb, "users", breakTarget.uid), {
+        status:              "break_requested",
+        studentStatus:       "break_requested",
+        breakApprovalStatus: "pending",
+        breakRequestedBy:    teacherUid,
+        breakRequestedAt:    new Date().toISOString(),
+        breakReason:         breakReason.trim(),
+        updatedAt:           sts(),
+      });
+
+      la({
+        action: "BREAK_REQUESTED", initiatorId: teacherUid, initiatorRole: "teacher",
+        approverId: null, approverRole: null, reason: breakReason.trim(),
+        metadata: { studentId: breakTarget.uid, studentName: breakTarget.name },
+      });
+
+      setSuccessMsg(`Break request submitted for ${breakTarget.name}. Awaiting admin approval.`);
+      setBreakTarget(null);
+      setBreakReason("");
+    } catch (err) {
+      setBreakError(err instanceof Error ? err.message : "Failed to submit.");
+    } finally {
+      setBreakSaving(false);
+    }
+  }
+
   if (students.length === 0) {
     return <div style={s.emptyCard}>No students enrolled in this centre.</div>;
   }
 
   return (
     <div>
+      {successMsg && (
+        <div style={{ background: "#f0f9ff", border: "1px solid #7dd3fc", borderRadius: 8, padding: "10px 16px", fontSize: 13, color: "#0369a1", marginBottom: 14, display: "flex", justifyContent: "space-between" }}>
+          {successMsg}
+          <button onClick={() => setSuccessMsg("")} style={{ background: "none", border: "none", cursor: "pointer", color: "#0369a1", fontWeight: 700 }}>✕</button>
+        </div>
+      )}
       <div style={s.sectionTitle}>Students ({students.length})</div>
       <div style={s.card}>
         <table style={s.table}>
@@ -954,10 +1003,27 @@ function StudentsView({ students, onViewProgress }: {
                     {pct === null ? <span style={{ color: "#9ca3af" }}>—</span> : <ProgressBar pct={pct} />}
                   </td>
                   <td style={s.td}><StatusBadge status={st.status} /></td>
-                  <td style={s.td}>
+                  <td style={{ ...s.td, display: "flex", gap: 6, flexWrap: "wrap" as const }}>
                     <button style={s.linkBtn} onClick={() => onViewProgress(st)}>
                       View Progress →
                     </button>
+                    {st.status === "active" && (
+                      <button
+                        onClick={() => { setBreakTarget(st); setBreakReason(""); setBreakError(""); }}
+                        style={{ background: "#e0f2fe", color: "#0369a1", border: "1px solid #7dd3fc", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                        ☕ Break
+                      </button>
+                    )}
+                    {st.status === "break_requested" && (
+                      <span style={{ background: "#e0f2fe", color: "#0369a1", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 600 }}>
+                        ⏳ Break Pending
+                      </span>
+                    )}
+                    {st.status === "on_break" && (
+                      <span style={{ background: "#f0f9ff", color: "#0284c7", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 600 }}>
+                        ☕ On Break
+                      </span>
+                    )}
                   </td>
                 </tr>
               );
@@ -965,6 +1031,37 @@ function StudentsView({ students, onViewProgress }: {
           </tbody>
         </table>
       </div>
+
+      {/* Break Request Modal */}
+      {breakTarget && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "#fff", borderRadius: 14, padding: 28, width: "100%", maxWidth: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
+            <div style={{ fontWeight: 700, fontSize: 17, color: "#111827", marginBottom: 4 }}>☕ Request Break</div>
+            <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>
+              Submitting break request for <strong>{breakTarget.name}</strong>. An admin will confirm.
+            </div>
+            <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>Reason *</label>
+            <textarea
+              value={breakReason}
+              onChange={e => setBreakReason(e.target.value)}
+              rows={3}
+              placeholder="e.g. Medical leave, travelling, personal reasons…"
+              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, resize: "vertical", outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
+            />
+            {breakError && <div style={{ fontSize: 13, color: "#dc2626", marginTop: 8 }}>{breakError}</div>}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 }}>
+              <button type="button" onClick={() => setBreakTarget(null)}
+                style={{ padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#f9fafb", fontSize: 14, cursor: "pointer", color: "#374151" }}>
+                Cancel
+              </button>
+              <button type="button" disabled={breakSaving} onClick={submitBreakRequest}
+                style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: breakSaving ? "#93c5fd" : "#0369a1", color: "#fff", fontSize: 14, fontWeight: 600, cursor: breakSaving ? "not-allowed" : "pointer" }}>
+                {breakSaving ? "Submitting…" : "Submit Request"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1174,6 +1271,8 @@ function StatusBadge({ status }: { status: string }) {
     ghost:                  { background: "#fef2f2", color: "#dc2626" },
     inactive:               { background: "#f3f4f6", color: "#6b7280" },
     deactivation_requested: { background: "#fef9c3", color: "#b45309" },
+    break_requested:        { background: "#e0f2fe", color: "#0369a1" },
+    on_break:               { background: "#f0f9ff", color: "#0284c7" },
   };
   return (
     <span style={{ ...s.badge, ...(map[status] ?? map.inactive) }}>

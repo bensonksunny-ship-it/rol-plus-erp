@@ -15,6 +15,8 @@ export const STUDENT_STATUS = {
   ACTIVE: "active",
   INACTIVE: "inactive",
   DEACTIVATION_REQUESTED: "deactivation_requested",
+  ON_BREAK: "on_break",
+  BREAK_REQUESTED: "break_requested",
 } as const;
 
 export const CENTER_STATUS = {

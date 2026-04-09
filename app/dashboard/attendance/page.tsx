@@ -170,15 +170,23 @@ function AttendanceContent() {
           where("centerId", "==", selectedCentre),
         );
         const snap = await getDocs(q);
-        const rows: StudentRow[] = snap.docs.map(d => {
-          const data = d.data() as Record<string, unknown>;
-          return {
-            uid:        d.id,
-            name:       (data.displayName as string) || (data.name as string) || d.id,
-            instrument: (data.instrument  as string) || "",
-            classType:  (data.classType   as string) === "personal" ? "personal" : "group",
-          };
-        });
+        const rows: StudentRow[] = snap.docs
+          .filter(d => {
+            const data = d.data() as Record<string, unknown>;
+            const effectiveStatus = ((data.status ?? data.studentStatus ?? "active") as string);
+            // Exclude students who are on break or have a break requested
+            return effectiveStatus !== "on_break" && effectiveStatus !== "break_requested"
+              && effectiveStatus !== "inactive" && effectiveStatus !== "deactivation_requested";
+          })
+          .map(d => {
+            const data = d.data() as Record<string, unknown>;
+            return {
+              uid:        d.id,
+              name:       (data.displayName as string) || (data.name as string) || d.id,
+              instrument: (data.instrument  as string) || "",
+              classType:  (data.classType   as string) === "personal" ? "personal" : "group",
+            };
+          });
         rows.sort((a, b) => {
           if (a.classType !== b.classType) return a.classType === "group" ? -1 : 1;
           return a.name.localeCompare(b.name);
@@ -220,15 +228,21 @@ function AttendanceContent() {
           status:     (r.status    as "present" | "absent") ?? "absent",
         };
       }).filter(r => r.date));
-      setAllStudents(stuSnap.docs.map(d => {
-        const data = d.data() as Record<string, unknown>;
-        return {
-          uid:        d.id,
-          name:       (data.displayName as string) || (data.name as string) || d.id,
-          instrument: (data.instrument  as string) || "",
-          classType:  (data.classType   as string) === "personal" ? "personal" : "group",
-        };
-      }));
+      setAllStudents(stuSnap.docs
+        .filter(d => {
+          const data = d.data() as Record<string, unknown>;
+          const st = ((data.status ?? data.studentStatus ?? "active") as string);
+          return st !== "on_break" && st !== "break_requested" && st !== "inactive" && st !== "deactivation_requested";
+        })
+        .map(d => {
+          const data = d.data() as Record<string, unknown>;
+          return {
+            uid:        d.id,
+            name:       (data.displayName as string) || (data.name as string) || d.id,
+            instrument: (data.instrument  as string) || "",
+            classType:  (data.classType   as string) === "personal" ? "personal" : "group",
+          };
+        }));
     } finally {
       setLoadingTrends(false);
     }

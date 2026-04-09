@@ -50,9 +50,12 @@ interface StudentRow {
   status:      string;
   deactivationRequestedBy: string | null;
   deactivationRequestedAt: string | null;
+  breakRequestedBy: string | null;
+  breakRequestedAt: string | null;
+  breakReason: string | null;
 }
 
-type StudentTab = "active" | "requests" | "inactive";
+type StudentTab = "active" | "requests" | "break_requests" | "on_break" | "inactive";
 
 interface EditForm {
   name:               string;
@@ -110,6 +113,8 @@ const STATUS_BADGE: Record<string, React.CSSProperties> = {
   active:                 { background: "#dcfce7", color: "#16a34a" },
   inactive:               { background: "#f3f4f6", color: "#6b7280" },
   deactivation_requested: { background: "#fef3c7", color: "#d97706" },
+  break_requested:        { background: "#e0f2fe", color: "#0369a1" },
+  on_break:               { background: "#f0f9ff", color: "#0284c7" },
 };
 
 // ─── Spinner ───────────────────────────────────────────────────────────────────
@@ -166,6 +171,7 @@ function StudentsContent() {
   const [editTarget, setEditTarget]         = useState<StudentRow | null>(null);
   const [clearHistoryTarget, setClearHistoryTarget] = useState<StudentRow | null>(null);
   const [deleteTarget, setDeleteTarget]     = useState<StudentRow | null>(null);
+  const [breakTarget, setBreakTarget]       = useState<StudentRow | null>(null);
   const debounceRef                         = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { toasts, toast, remove }           = useToast();
 
@@ -235,6 +241,9 @@ function StudentsContent() {
           status:      (s.status ?? s.studentStatus ?? "active") as string,
           deactivationRequestedBy: (s.deactivationRequestedBy ?? null) as string | null,
           deactivationRequestedAt: (s.deactivationRequestedAt ?? null) as string | null,
+          breakRequestedBy: (s.breakRequestedBy ?? null) as string | null,
+          breakRequestedAt: (s.breakRequestedAt ?? null) as string | null,
+          breakReason:      (s.breakReason ?? null) as string | null,
         };
       });
       // Teachers: restrict to their assigned centres only
@@ -271,12 +280,16 @@ function StudentsContent() {
   }
 
   // ── Tab-split lists ─────────────────────────────────────────────────────────
-  const activeStudents   = students.filter(s => s.status === "active");
-  const requestStudents  = students.filter(s => s.status === "deactivation_requested");
-  const inactiveStudents = students.filter(s => s.status === "inactive");
+  const activeStudents       = students.filter(s => s.status === "active");
+  const requestStudents      = students.filter(s => s.status === "deactivation_requested");
+  const breakRequestStudents = students.filter(s => s.status === "break_requested");
+  const onBreakStudents      = students.filter(s => s.status === "on_break");
+  const inactiveStudents     = students.filter(s => s.status === "inactive");
 
   const baseList = tab === "active" ? activeStudents
     : tab === "requests" ? requestStudents
+    : tab === "break_requests" ? breakRequestStudents
+    : tab === "on_break" ? onBreakStudents
     : inactiveStudents;
 
   // Unique courses + instruments for filter dropdowns
@@ -354,6 +367,10 @@ function StudentsContent() {
         deactivationRequestedBy: null,
         deactivationRequestedAt: null,
         deactivationApprovalStatus: null,
+        breakRequestedBy:    null,
+        breakRequestedAt:    null,
+        breakReason:         null,
+        breakApprovalStatus: null,
         createdBy:   user?.uid ?? "unknown",
         createdAt:   serverTimestamp(),
         updatedAt:   serverTimestamp(),
@@ -434,6 +451,65 @@ function StudentsContent() {
     } catch { toast("Failed to reject.", "error"); }
   }
 
+  // ── Break actions ──────────────────────────────────────────────────────────
+  async function approveBreak(student: StudentRow) {
+    if (!user) return;
+    try {
+      await updateDoc(doc(db, "users", student.id), {
+        status:              "on_break",
+        studentStatus:       "on_break",
+        breakApprovalStatus: "approved",
+        updatedAt:           serverTimestamp(),
+      });
+      logAction({ action: "BREAK_APPROVED", initiatorId: user.uid, initiatorRole: role ?? "admin",
+        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
+      setStudents(prev => prev.map(s => s.id !== student.id ? s : { ...s, status: "on_break" }));
+      toast("Student is now on break.", "success");
+    } catch { toast("Failed to approve break.", "error"); }
+  }
+
+  async function rejectBreak(student: StudentRow) {
+    if (!user) return;
+    try {
+      await updateDoc(doc(db, "users", student.id), {
+        status:              "active",
+        studentStatus:       "active",
+        breakApprovalStatus: "rejected",
+        breakRequestedBy:    null,
+        breakRequestedAt:    null,
+        breakReason:         null,
+        updatedAt:           serverTimestamp(),
+      });
+      logAction({ action: "BREAK_REJECTED", initiatorId: user.uid, initiatorRole: role ?? "admin",
+        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
+      setStudents(prev => prev.map(s => s.id !== student.id ? s : {
+        ...s, status: "active", breakRequestedBy: null, breakRequestedAt: null, breakReason: null,
+      }));
+      toast("Break request rejected. Student is active.", "success");
+    } catch { toast("Failed to reject break.", "error"); }
+  }
+
+  async function endBreak(student: StudentRow) {
+    if (!user) return;
+    try {
+      await updateDoc(doc(db, "users", student.id), {
+        status:              "active",
+        studentStatus:       "active",
+        breakApprovalStatus: null,
+        breakRequestedBy:    null,
+        breakRequestedAt:    null,
+        breakReason:         null,
+        updatedAt:           serverTimestamp(),
+      });
+      logAction({ action: "BREAK_ENDED", initiatorId: user.uid, initiatorRole: role ?? "admin",
+        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
+      setStudents(prev => prev.map(s => s.id !== student.id ? s : {
+        ...s, status: "active", breakRequestedBy: null, breakRequestedAt: null, breakReason: null,
+      }));
+      toast("Break ended. Student is active.", "success");
+    } catch { toast("Failed to end break.", "error"); }
+  }
+
   return (
     <div style={p.page}>
       <ToastContainer toasts={toasts} onRemove={remove} />
@@ -452,6 +528,12 @@ function StudentsContent() {
           {requestStudents.length > 0 && (
             <div style={p.deactivationBadge} onClick={() => setTab("requests")}>
               ⚠ Deactivation Requests ({requestStudents.length})
+            </div>
+          )}
+          {breakRequestStudents.length > 0 && (
+            <div style={{ ...p.deactivationBadge, background: "#e0f2fe", color: "#0369a1", borderColor: "#7dd3fc" }}
+              onClick={() => setTab("break_requests")}>
+              ☕ Break Requests ({breakRequestStudents.length})
             </div>
           )}
           {(isAdmin || isTeacher) && (
@@ -611,18 +693,27 @@ function StudentsContent() {
 
       {/* ── Tabs ── */}
       <div style={p.tabs}>
-        {(["active", "requests", "inactive"] as StudentTab[]).map(t => (
+        {(["active", "requests", "break_requests", "on_break", "inactive"] as StudentTab[]).map(t => (
           <button key={t} onClick={() => setTab(t)}
             style={{ ...p.tab, ...(tab === t ? p.tabActive : {}) }}>
             {t === "active" ? `Active (${activeStudents.length})`
               : t === "requests" ? (
                 <span>
-                  Requests
+                  Deactivation
                   {requestStudents.length > 0 && (
                     <span style={p.tabBadge}>{requestStudents.length}</span>
                   )}
                 </span>
               )
+              : t === "break_requests" ? (
+                <span>
+                  Break Requests
+                  {breakRequestStudents.length > 0 && (
+                    <span style={{ ...p.tabBadge, background: "#0369a1" }}>{breakRequestStudents.length}</span>
+                  )}
+                </span>
+              )
+              : t === "on_break" ? `On Break (${onBreakStudents.length})`
               : `Inactive (${inactiveStudents.length})`}
           </button>
         ))}
@@ -642,6 +733,20 @@ function StudentsContent() {
           centerMap={centerMap}
           onApprove={approveDeactivation}
           onReject={rejectDeactivation}
+        />
+      ) : tab === "break_requests" ? (
+        <BreakRequestsPanel
+          requests={filtered}
+          centerMap={centerMap}
+          onApprove={approveBreak}
+          onReject={rejectBreak}
+        />
+      ) : tab === "on_break" ? (
+        <OnBreakPanel
+          students={filtered}
+          centerMap={centerMap}
+          onEndBreak={endBreak}
+          isAdmin={isAdmin}
         />
       ) : (
         <div style={p.tableWrap}>
@@ -674,6 +779,7 @@ function StudentsContent() {
                     setEditTarget(s);
                   }}
                   onRequestDeactivation={() => requestDeactivation(s)}
+                  onRequestBreak={() => setBreakTarget(s)}
                   onClearHistory={isAdmin ? () => setClearHistoryTarget(s) : undefined}
                   onDelete={isAdmin ? () => setDeleteTarget(s) : undefined}
                 />
@@ -732,15 +838,38 @@ function StudentsContent() {
           currentUserRole={role ?? "admin"}
         />
       )}
+
+      {/* ── Break Request Modal ── */}
+      {breakTarget && (
+        <BreakRequestModal
+          student={breakTarget}
+          onClose={() => setBreakTarget(null)}
+          onRequested={(reason) => {
+            if (!user) return;
+            setStudents(prev => prev.map(s => s.id !== breakTarget.id ? s : {
+              ...s,
+              status: "break_requested",
+              breakRequestedBy: user.uid,
+              breakRequestedAt: new Date().toISOString(),
+              breakReason: reason,
+            }));
+            setBreakTarget(null);
+            toast("Break request submitted for admin approval.", "success");
+          }}
+          currentUserUid={user?.uid ?? ""}
+          currentUserRole={role ?? "teacher"}
+          isAdmin={isAdmin}
+        />
+      )}
     </div>
   );
 }
 
 // ─── Student Row ───────────────────────────────────────────────────────────────
 
-function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDeactivation, onClearHistory, onDelete }: {
+function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
   student: StudentRow; index: number; isAdmin: boolean; isTeacher: boolean;
-  onEdit: () => void; onRequestDeactivation: () => void;
+  onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
   onClearHistory?: () => void; onDelete?: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -814,6 +943,12 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
           {(isAdmin || isTeacher) && s.status === "active" && (
             <button onClick={onRequestDeactivation} style={p.deactBtn}>Deactivate</button>
           )}
+          {(isAdmin || isTeacher) && s.status === "active" && (
+            <button onClick={onRequestBreak}
+              style={{ ...p.editBtn, background: "#e0f2fe", color: "#0369a1", borderColor: "#7dd3fc" }}>
+              ☕ Break
+            </button>
+          )}
           <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.syllabusBtn}>
             Syllabus
           </Link>
@@ -880,6 +1015,200 @@ function RequestsPanel({ requests, centerMap, onApprove, onReject }: {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─── Break Requests Panel ─────────────────────────────────────────────────────
+
+function BreakRequestsPanel({ requests, centerMap, onApprove, onReject }: {
+  requests: StudentRow[]; centerMap: Map<string, string>;
+  onApprove: (s: StudentRow) => void; onReject: (s: StudentRow) => void;
+}) {
+  if (requests.length === 0) {
+    return (
+      <div style={p.card}>
+        <EmptyState icon="☕" title="No pending break requests" hint="All students are active or already on break." />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
+      {requests.map(s => (
+        <div key={s.id} style={{ ...p.card, borderLeft: "4px solid #0369a1" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 12 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{s.name}</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
+                <span style={p.idChip}>{s.studentID}</span>
+                {" · "}
+                {centerMap.get(s.centerId) ?? s.centerId}
+                {" · "}
+                {s.course}
+              </div>
+              {s.breakReason && (
+                <div style={{ fontSize: 12, color: "#0369a1", marginTop: 6, background: "#f0f9ff", padding: "5px 10px", borderRadius: 6 }}>
+                  <strong>Reason:</strong> {s.breakReason}
+                </div>
+              )}
+              {s.breakRequestedAt && (
+                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
+                  Requested: {s.breakRequestedAt.slice(0, 10)}
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => onApprove(s)}
+                style={{ background: "#0369a1", color: "#fff", border: "none", padding: "7px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                ✓ Approve (Put on Break)
+              </button>
+              <button onClick={() => onReject(s)}
+                style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", padding: "7px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                ✕ Reject (Keep Active)
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── On Break Panel ────────────────────────────────────────────────────────────
+
+function OnBreakPanel({ students, centerMap, onEndBreak, isAdmin }: {
+  students: StudentRow[]; centerMap: Map<string, string>;
+  onEndBreak: (s: StudentRow) => void; isAdmin: boolean;
+}) {
+  if (students.length === 0) {
+    return (
+      <div style={p.card}>
+        <EmptyState icon="☕" title="No students on break" hint="No students are currently on break." />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
+      {students.map(s => (
+        <div key={s.id} style={{ ...p.card, borderLeft: "4px solid #7dd3fc" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 12 }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{s.name}</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
+                <span style={p.idChip}>{s.studentID}</span>
+                {" · "}
+                {centerMap.get(s.centerId) ?? s.centerId}
+                {" · "}
+                {s.course}
+              </div>
+              {s.breakReason && (
+                <div style={{ fontSize: 12, color: "#0369a1", marginTop: 6, background: "#f0f9ff", padding: "5px 10px", borderRadius: 6 }}>
+                  <strong>Break reason:</strong> {s.breakReason}
+                </div>
+              )}
+              {s.breakRequestedAt && (
+                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
+                  On break since: {s.breakRequestedAt.slice(0, 10)}
+                </div>
+              )}
+            </div>
+            {isAdmin && (
+              <button onClick={() => onEndBreak(s)}
+                style={{ background: "#16a34a", color: "#fff", border: "none", padding: "7px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                ▶ End Break (Reactivate)
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Break Request Modal ───────────────────────────────────────────────────────
+
+function BreakRequestModal({ student, onClose, onRequested, currentUserUid, currentUserRole, isAdmin }: {
+  student: StudentRow;
+  onClose: () => void;
+  onRequested: (reason: string) => void;
+  currentUserUid: string;
+  currentUserRole: string;
+  isAdmin: boolean;
+}) {
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError]   = useState("");
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!reason.trim()) { setError("Please provide a reason for the break."); return; }
+    setError("");
+    setSaving(true);
+    try {
+      const { updateDoc, doc, serverTimestamp: sts } = await import("firebase/firestore");
+      const { db: fdb } = await import("@/config/firebase");
+      const { logAction: la } = await import("@/services/audit/audit.service");
+
+      await updateDoc(doc(fdb, "users", student.id), {
+        status:              "break_requested",
+        studentStatus:       "break_requested",
+        breakApprovalStatus: "pending",
+        breakRequestedBy:    currentUserUid,
+        breakRequestedAt:    new Date().toISOString(),
+        breakReason:         reason.trim(),
+        updatedAt:           sts(),
+      });
+
+      la({
+        action: "BREAK_REQUESTED", initiatorId: currentUserUid, initiatorRole: currentUserRole as import("@/types").Role,
+        approverId: null, approverRole: null, reason: reason.trim(),
+        metadata: { studentId: student.id, studentName: student.name },
+      });
+
+      onRequested(reason.trim());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to submit break request.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+    }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 28, width: "100%", maxWidth: 440, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
+        <div style={{ fontWeight: 700, fontSize: 17, color: "#111827", marginBottom: 4 }}>☕ Request Break</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>
+          Marking <strong>{student.name}</strong> as on break. An admin will confirm this request.
+        </div>
+        <form onSubmit={handleSubmit}>
+          <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
+            Reason for break *
+          </label>
+          <textarea
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            rows={3}
+            placeholder="e.g. Medical leave, out of town, personal reasons…"
+            style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, resize: "vertical", outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
+          />
+          {error && <div style={{ fontSize: 13, color: "#dc2626", marginTop: 8 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+            <button type="button" onClick={onClose}
+              style={{ padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#f9fafb", fontSize: 14, cursor: "pointer", color: "#374151" }}>
+              Cancel
+            </button>
+            <button type="submit" disabled={saving}
+              style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: saving ? "#93c5fd" : "#0369a1", color: "#fff", fontSize: 14, fontWeight: 600, cursor: saving ? "not-allowed" : "pointer" }}>
+              {saving ? "Submitting…" : "Submit Request"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

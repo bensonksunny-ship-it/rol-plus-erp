@@ -98,6 +98,11 @@ export interface StudentUser extends UserBase {
   deactivationReason: string | null;
   deactivationRequestedBy: string | null;  // uid of requesting teacher
   deactivationApprovalStatus: ApprovalStatus | null;
+  // Break fields — mirrors deactivation pattern
+  breakRequestedBy: string | null;        // uid of requesting teacher
+  breakRequestedAt: string | null;        // ISO timestamp
+  breakReason: string | null;
+  breakApprovalStatus: ApprovalStatus | null;
   // Teacher-specific fields excluded entirely
   centerIds?: never;
 }
@@ -115,6 +120,10 @@ export interface TeacherUser extends UserBase {
   deactivationReason?: never;
   deactivationRequestedBy?: never;
   deactivationApprovalStatus?: never;
+  breakRequestedBy?: never;
+  breakRequestedAt?: never;
+  breakReason?: never;
+  breakApprovalStatus?: never;
 }
 
 /**
@@ -128,6 +137,10 @@ export interface AdminUser extends UserBase {
   deactivationReason?: never;
   deactivationRequestedBy?: never;
   deactivationApprovalStatus?: never;
+  breakRequestedBy?: never;
+  breakRequestedAt?: never;
+  breakReason?: never;
+  breakApprovalStatus?: never;
   centerIds?: never;
 }
 
