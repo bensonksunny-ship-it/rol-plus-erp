@@ -35,7 +35,13 @@ type PageTab    = "mark" | "trends";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function todayISO():   string { return new Date().toISOString().slice(0, 10); }
+function todayISO(): string {
+  const d  = new Date();
+  const y  = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const dy = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${dy}`;
+}
 function currentWeekKey(d = new Date()): string {
   const jan1  = new Date(d.getFullYear(), 0, 1);
   const week  = Math.ceil((((d.getTime() - jan1.getTime()) / 86400000) + jan1.getDay() + 1) / 7);
@@ -65,7 +71,10 @@ function lastNDays(n: number): string[] {
   for (let i = n - 1; i >= 0; i--) {
     const d = new Date();
     d.setDate(d.getDate() - i);
-    days.push(d.toISOString().slice(0, 10));
+    const y  = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, "0");
+    const dy = String(d.getDate()).padStart(2, "0");
+    days.push(`${y}-${mo}-${dy}`);
   }
   return days;
 }
@@ -84,7 +93,10 @@ function lastNMonths(n: number): string[] {
   const d = new Date();
   for (let i = n - 1; i >= 0; i--) {
     const t = new Date(d.getFullYear(), d.getMonth() - i, 1);
-    months.push(t.toISOString().slice(0, 7));
+    // Use local year/month to avoid UTC shift issues
+    const y = t.getFullYear();
+    const m = String(t.getMonth() + 1).padStart(2, "0");
+    months.push(`${y}-${m}`);
   }
   return months;
 }
@@ -262,11 +274,11 @@ function AttendanceContent() {
     // ── Daily: last 30 days ───────────────────────────────────────────────
     const days30    = lastNDays(30);
     const dailyData = days30.map(d => {
-      const rec = byDate.get(d);
+      const rec     = byDate.get(d);
       const present = rec?.present ?? 0;
-      // Use actual total for days with records, otherwise allStudents total
       const total   = rec ? (rec.present + rec.absent) : 0;
-      return { date: d, present, total, pct: pct(present, total || totalStudents) };
+      // pct is only meaningful when there are records; 0 total → empty bar
+      return { date: d, present, total, pct: total > 0 ? pct(present, total) : 0 };
     });
 
     // ── Weekly: last 12 weeks ─────────────────────────────────────────────
@@ -520,7 +532,7 @@ function AttendanceContent() {
                   <div key={st.uid} onClick={() => toggle(st.uid)} style={{
                     display: "flex", alignItems: "center", padding: "14px 20px", cursor: "pointer",
                     borderBottom: i < students.length - 1 ? "1px solid #f3f4f6" : "none",
-                    background: isPresent ? "#f0fdf4" : "#fff1f2", userSelect: "none",
+                    background: isPresent ? "#f0fdf4" : "#fff1f2", userSelect: "none" as const,
                   }}>
                     <div style={{ width: 12, height: 12, borderRadius: "50%", background: isPresent ? "#22c55e" : "#ef4444", marginRight: 14, flexShrink: 0, boxShadow: isPresent ? "0 0 0 3px rgba(34,197,94,0.18)" : "0 0 0 3px rgba(239,68,68,0.18)" }} />
                     <div style={{ flex: 1 }}>
@@ -768,18 +780,22 @@ function BarChart({ data, height = 140 }: {
           const y     = chartH - barH;
           const color = d.empty ? "#e5e7eb" : pctColor(d.value);
           return (
-            <g key={i}>
+            <g key={i} style={{ cursor: "default" }}>
+              {/* Hover target (full column height) */}
+              <rect x={x} y={0} width={barW} height={chartH} fill="transparent">
+                <title>{d.empty ? `${d.label}: No data` : `${d.label}: ${d.value}% (${d.sub})`}</title>
+              </rect>
               {/* Bar */}
-              <rect x={x} y={y} width={barW} height={barH} rx={3} fill={color} opacity={d.isToday ? 1 : 0.82} />
+              <rect x={x} y={y} width={barW} height={d.empty ? 3 : barH} rx={3} fill={color} opacity={d.isToday ? 1 : 0.82} />
               {/* Today highlight ring */}
               {d.isToday && <rect x={x - 1} y={0} width={barW + 2} height={chartH} rx={3} fill="none" stroke="#f59e0b" strokeWidth={1.5} />}
-              {/* Value on top */}
+              {/* Value on top of bar */}
               {!d.empty && barH > 16 && (
                 <text x={x + barW / 2} y={y + 11} textAnchor="middle" fontSize={9} fontWeight={700} fill="#fff">
                   {d.value}%
                 </text>
               )}
-              {/* Label below */}
+              {/* Label below baseline */}
               <text x={x + barW / 2} y={chartH + 14} textAnchor="middle" fontSize={9} fill={d.isToday ? "#f59e0b" : "#9ca3af"} fontWeight={d.isToday ? 700 : 400}>
                 {d.label}
               </text>
@@ -799,7 +815,7 @@ function StatCard({ label, value, sub, color, icon }: { label: string; value: st
   return (
     <div style={{ ...s.card, marginBottom: 0, display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
       <div style={{ fontSize: 18 }}>{icon}</div>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: 0.5 }}>{label}</div>
       <div style={{ fontSize: 26, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
       <div style={{ fontSize: 11, color: "#9ca3af" }}>{sub}</div>
     </div>
@@ -873,5 +889,3 @@ const s = {
 function btn(bg: string, fg: string): React.CSSProperties {
   return { background: bg, color: fg, border: "none", padding: "8px 16px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" };
 }
-
-function todayISO(): string { return new Date().toISOString().slice(0, 10); }
