@@ -17,10 +17,11 @@ import {
 interface CentreOption { id: string; name: string; code: string; }
 
 interface StudentRow {
-  uid:        string;
-  name:       string;
-  instrument: string;
-  classType:  string;
+  uid:            string;
+  name:           string;
+  instrument:     string;
+  classType:      string;
+  breakStartDate: string | null;  // YYYY-MM-DD — attendance excluded from this date
 }
 
 interface AttendanceRec {
@@ -181,10 +182,11 @@ function AttendanceContent() {
           .map(d => {
             const data = d.data() as Record<string, unknown>;
             return {
-              uid:        d.id,
-              name:       (data.displayName as string) || (data.name as string) || d.id,
-              instrument: (data.instrument  as string) || "",
-              classType:  (data.classType   as string) === "personal" ? "personal" : "group",
+              uid:            d.id,
+              name:           (data.displayName as string) || (data.name as string) || d.id,
+              instrument:     (data.instrument  as string) || "",
+              classType:      (data.classType   as string) === "personal" ? "personal" : "group",
+              breakStartDate: null,
             };
           });
         rows.sort((a, b) => {
@@ -232,15 +234,21 @@ function AttendanceContent() {
         .filter(d => {
           const data = d.data() as Record<string, unknown>;
           const st = ((data.status ?? data.studentStatus ?? "active") as string);
-          return st !== "on_break" && st !== "break_requested" && st !== "inactive" && st !== "deactivation_requested";
+          // Include active students + on_break students (we'll exclude their records from breakStartDate)
+          return st !== "inactive" && st !== "deactivation_requested";
         })
         .map(d => {
           const data = d.data() as Record<string, unknown>;
+          const st = ((data.status ?? data.studentStatus ?? "active") as string);
           return {
-            uid:        d.id,
-            name:       (data.displayName as string) || (data.name as string) || d.id,
-            instrument: (data.instrument  as string) || "",
-            classType:  (data.classType   as string) === "personal" ? "personal" : "group",
+            uid:            d.id,
+            name:           (data.displayName as string) || (data.name as string) || d.id,
+            instrument:     (data.instrument  as string) || "",
+            classType:      (data.classType   as string) === "personal" ? "personal" : "group",
+            // For on_break / break_requested: carry breakStartDate so we can exclude records from that date
+            breakStartDate: (st === "on_break" || st === "break_requested")
+              ? ((data.breakStartDate as string) ?? null)
+              : null,
           };
         }));
     } finally {
@@ -271,14 +279,38 @@ function AttendanceContent() {
   const trends = useMemo(() => {
     if (!allAttendance.length || !allStudents.length) return null;
 
+    // Build per-student break start date lookup
+    const breakStartMap = new Map<string, string>();
+    allStudents.forEach(s => {
+      if (s.breakStartDate) breakStartMap.set(s.uid, s.breakStartDate);
+    });
+
+    // Filter attendance: exclude records for on_break students from their breakStartDate onwards
+    const effectiveAttendance = allAttendance.filter(r => {
+      const bsd = breakStartMap.get(r.studentUid);
+      if (bsd && r.date >= bsd) return false;  // on break — exclude
+      return true;
+    });
+
+    // For denominator: on a given date, count students NOT yet on break
+    // (available for future use in per-day accuracy)
+    void ((date: string) => {
+      let count = 0;
+      allStudents.forEach(s => {
+        const bsd = s.breakStartDate;
+        if (!bsd || date < bsd) count++;
+      });
+      return count;
+    });
+
     const totalStudents = allStudents.length;
     const today         = todayISO();
     const thisMonth     = isoToMonth(today);
     const thisWeek      = currentWeekKey();
 
-    // Group records by date
+    // Group records by date (using break-filtered records)
     const byDate = new Map<string, { present: number; absent: number }>();
-    allAttendance.forEach(r => {
+    effectiveAttendance.forEach(r => {
       const prev = byDate.get(r.date) ?? { present: 0, absent: 0 };
       if (r.status === "present") prev.present++;
       else prev.absent++;
@@ -298,7 +330,7 @@ function AttendanceContent() {
     // ── Weekly: last 12 weeks ─────────────────────────────────────────────
     const weeks12    = lastNWeeks(12);
     const byWeek     = new Map<string, { present: number; total: number; days: Set<string> }>();
-    allAttendance.forEach(r => {
+    effectiveAttendance.forEach(r => {
       const wk   = isoToWeekKey(r.date);
       const prev = byWeek.get(wk) ?? { present: 0, total: 0, days: new Set() };
       if (r.status === "present") prev.present++;
@@ -316,7 +348,7 @@ function AttendanceContent() {
     // ── Monthly: last 12 months ───────────────────────────────────────────
     const months12    = lastNMonths(12);
     const byMonth     = new Map<string, { present: number; total: number }>();
-    allAttendance.forEach(r => {
+    effectiveAttendance.forEach(r => {
       const mo   = isoToMonth(r.date);
       const prev = byMonth.get(mo) ?? { present: 0, total: 0 };
       if (r.status === "present") prev.present++;
@@ -347,8 +379,8 @@ function AttendanceContent() {
     const worstDay = daysWithRecords.length ? daysWithRecords.reduce((a, b) => b.pct < a.pct ? b : a) : null;
 
     // ── Per-student this month ────────────────────────────────────────────
-    const monthRecs = allAttendance.filter(r => r.date.startsWith(thisMonth));
-    const classDates = new Set(allAttendance.filter(r => r.date.startsWith(thisMonth)).map(r => r.date));
+    const monthRecs  = effectiveAttendance.filter(r => r.date.startsWith(thisMonth));
+    const classDates = new Set(effectiveAttendance.filter(r => r.date.startsWith(thisMonth)).map(r => r.date));
     const classDaysThisMonth = classDates.size;
 
     const studentMonthMap = new Map<string, { present: number; absent: number }>();
@@ -360,8 +392,19 @@ function AttendanceContent() {
     });
 
     const studentStats = allStudents.map(s => {
-      const rec     = studentMonthMap.get(s.uid) ?? { present: 0, absent: 0 };
-      const total   = classDaysThisMonth || (rec.present + rec.absent);
+      const rec = studentMonthMap.get(s.uid) ?? { present: 0, absent: 0 };
+      // For on_break students: denominator = class days before break started this month
+      let total: number;
+      if (s.breakStartDate && s.breakStartDate.startsWith(thisMonth)) {
+        // broke mid-month — count class dates before breakStartDate
+        const daysBeforeBreak = Array.from(classDates).filter(d => d < s.breakStartDate!).length;
+        total = daysBeforeBreak || (rec.present + rec.absent);
+      } else if (s.breakStartDate && s.breakStartDate <= `${thisMonth}-01`) {
+        // was already on break this entire month — denominator 0, skip
+        total = rec.present + rec.absent || 1;
+      } else {
+        total = classDaysThisMonth || (rec.present + rec.absent);
+      }
       return {
         ...s,
         present: rec.present,

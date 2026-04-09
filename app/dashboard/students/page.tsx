@@ -52,6 +52,7 @@ interface StudentRow {
   deactivationRequestedAt: string | null;
   breakRequestedBy: string | null;
   breakRequestedAt: string | null;
+  breakStartDate: string | null;
   breakReason: string | null;
 }
 
@@ -243,6 +244,7 @@ function StudentsContent() {
           deactivationRequestedAt: (s.deactivationRequestedAt ?? null) as string | null,
           breakRequestedBy: (s.breakRequestedBy ?? null) as string | null,
           breakRequestedAt: (s.breakRequestedAt ?? null) as string | null,
+          breakStartDate:   (s.breakStartDate   ?? null) as string | null,
           breakReason:      (s.breakReason ?? null) as string | null,
         };
       });
@@ -369,6 +371,7 @@ function StudentsContent() {
         deactivationApprovalStatus: null,
         breakRequestedBy:    null,
         breakRequestedAt:    null,
+        breakStartDate:      null,
         breakReason:         null,
         breakApprovalStatus: null,
         createdBy:   user?.uid ?? "unknown",
@@ -452,19 +455,23 @@ function StudentsContent() {
   }
 
   // ── Break actions ──────────────────────────────────────────────────────────
-  async function approveBreak(student: StudentRow) {
+  async function approveBreak(student: StudentRow, breakStartDate?: string) {
     if (!user) return;
+    // Default break start = today (IST-safe)
+    const d = new Date();
+    const startDate = breakStartDate || `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
     try {
       await updateDoc(doc(db, "users", student.id), {
         status:              "on_break",
         studentStatus:       "on_break",
         breakApprovalStatus: "approved",
+        breakStartDate:      startDate,
         updatedAt:           serverTimestamp(),
       });
       logAction({ action: "BREAK_APPROVED", initiatorId: user.uid, initiatorRole: role ?? "admin",
-        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
-      setStudents(prev => prev.map(s => s.id !== student.id ? s : { ...s, status: "on_break" }));
-      toast("Student is now on break.", "success");
+        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id, breakStartDate: startDate } });
+      setStudents(prev => prev.map(s => s.id !== student.id ? s : { ...s, status: "on_break", breakStartDate: startDate }));
+      toast(`Student is now on break from ${startDate}.`, "success");
     } catch { toast("Failed to approve break.", "error"); }
   }
 
@@ -477,13 +484,14 @@ function StudentsContent() {
         breakApprovalStatus: "rejected",
         breakRequestedBy:    null,
         breakRequestedAt:    null,
+        breakStartDate:      null,
         breakReason:         null,
         updatedAt:           serverTimestamp(),
       });
       logAction({ action: "BREAK_REJECTED", initiatorId: user.uid, initiatorRole: role ?? "admin",
         approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
       setStudents(prev => prev.map(s => s.id !== student.id ? s : {
-        ...s, status: "active", breakRequestedBy: null, breakRequestedAt: null, breakReason: null,
+        ...s, status: "active", breakRequestedBy: null, breakRequestedAt: null, breakStartDate: null, breakReason: null,
       }));
       toast("Break request rejected. Student is active.", "success");
     } catch { toast("Failed to reject break.", "error"); }
@@ -498,13 +506,14 @@ function StudentsContent() {
         breakApprovalStatus: null,
         breakRequestedBy:    null,
         breakRequestedAt:    null,
+        breakStartDate:      null,
         breakReason:         null,
         updatedAt:           serverTimestamp(),
       });
       logAction({ action: "BREAK_ENDED", initiatorId: user.uid, initiatorRole: role ?? "admin",
         approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
       setStudents(prev => prev.map(s => s.id !== student.id ? s : {
-        ...s, status: "active", breakRequestedBy: null, breakRequestedAt: null, breakReason: null,
+        ...s, status: "active", breakRequestedBy: null, breakRequestedAt: null, breakStartDate: null, breakReason: null,
       }));
       toast("Break ended. Student is active.", "success");
     } catch { toast("Failed to end break.", "error"); }
@@ -738,7 +747,7 @@ function StudentsContent() {
         <BreakRequestsPanel
           requests={filtered}
           centerMap={centerMap}
-          onApprove={approveBreak}
+          onApprove={(s, startDate) => approveBreak(s, startDate)}
           onReject={rejectBreak}
         />
       ) : tab === "on_break" ? (
@@ -855,6 +864,19 @@ function StudentsContent() {
             }));
             setBreakTarget(null);
             toast("Break request submitted for admin approval.", "success");
+          }}
+          onApprovedDirectly={(reason, startDate) => {
+            if (!user) return;
+            setStudents(prev => prev.map(s => s.id !== breakTarget.id ? s : {
+              ...s,
+              status: "on_break",
+              breakRequestedBy: user.uid,
+              breakRequestedAt: new Date().toISOString(),
+              breakStartDate: startDate,
+              breakReason: reason,
+            }));
+            setBreakTarget(null);
+            toast(`${breakTarget.name} is on break from ${startDate}.`, "success");
           }}
           currentUserUid={user?.uid ?? ""}
           currentUserRole={role ?? "teacher"}
@@ -1023,8 +1045,17 @@ function RequestsPanel({ requests, centerMap, onApprove, onReject }: {
 
 function BreakRequestsPanel({ requests, centerMap, onApprove, onReject }: {
   requests: StudentRow[]; centerMap: Map<string, string>;
-  onApprove: (s: StudentRow) => void; onReject: (s: StudentRow) => void;
+  onApprove: (s: StudentRow, startDate: string) => void; onReject: (s: StudentRow) => void;
 }) {
+  // Per-row break start date — defaults to today
+  function todayStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  }
+  const [startDates, setStartDates] = useState<Record<string, string>>(() =>
+    Object.fromEntries(requests.map(r => [r.id, todayStr()]))
+  );
+
   if (requests.length === 0) {
     return (
       <div style={p.card}>
@@ -1035,42 +1066,56 @@ function BreakRequestsPanel({ requests, centerMap, onApprove, onReject }: {
 
   return (
     <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
-      {requests.map(s => (
-        <div key={s.id} style={{ ...p.card, borderLeft: "4px solid #0369a1" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 12 }}>
-            <div>
-              <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{s.name}</div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
-                <span style={p.idChip}>{s.studentID}</span>
-                {" · "}
-                {centerMap.get(s.centerId) ?? s.centerId}
-                {" · "}
-                {s.course}
+      {requests.map(s => {
+        const startDate = startDates[s.id] ?? todayStr();
+        return (
+          <div key={s.id} style={{ ...p.card, borderLeft: "4px solid #0369a1" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" as const, gap: 16 }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{s.name}</div>
+                <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
+                  <span style={p.idChip}>{s.studentID}</span>
+                  {" · "}
+                  {centerMap.get(s.centerId) ?? s.centerId}
+                  {" · "}
+                  {s.course}
+                </div>
+                {s.breakReason && (
+                  <div style={{ fontSize: 12, color: "#0369a1", marginTop: 6, background: "#f0f9ff", padding: "5px 10px", borderRadius: 6 }}>
+                    <strong>Reason:</strong> {s.breakReason}
+                  </div>
+                )}
+                {s.breakRequestedAt && (
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
+                    Requested: {s.breakRequestedAt.slice(0, 10)}
+                  </div>
+                )}
+                {/* Break start date picker */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Break starts:</label>
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={e => setStartDates(prev => ({ ...prev, [s.id]: e.target.value }))}
+                    style={{ fontSize: 12, border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", color: "#111827", outline: "none" }}
+                  />
+                  <span style={{ fontSize: 11, color: "#6b7280" }}>Attendance excluded from this date</span>
+                </div>
               </div>
-              {s.breakReason && (
-                <div style={{ fontSize: 12, color: "#0369a1", marginTop: 6, background: "#f0f9ff", padding: "5px 10px", borderRadius: 6 }}>
-                  <strong>Reason:</strong> {s.breakReason}
-                </div>
-              )}
-              {s.breakRequestedAt && (
-                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
-                  Requested: {s.breakRequestedAt.slice(0, 10)}
-                </div>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => onApprove(s)}
-                style={{ background: "#0369a1", color: "#fff", border: "none", padding: "7px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                ✓ Approve (Put on Break)
-              </button>
-              <button onClick={() => onReject(s)}
-                style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", padding: "7px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                ✕ Reject (Keep Active)
-              </button>
+              <div style={{ display: "flex", gap: 8, alignSelf: "flex-end" as const }}>
+                <button onClick={() => onApprove(s, startDate)}
+                  style={{ background: "#0369a1", color: "#fff", border: "none", padding: "7px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                  ✓ Approve Break
+                </button>
+                <button onClick={() => onReject(s)}
+                  style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", padding: "7px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                  ✕ Reject
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1108,9 +1153,13 @@ function OnBreakPanel({ students, centerMap, onEndBreak, isAdmin }: {
                   <strong>Break reason:</strong> {s.breakReason}
                 </div>
               )}
-              {s.breakRequestedAt && (
-                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>
-                  On break since: {s.breakRequestedAt.slice(0, 10)}
+              {s.breakStartDate && (
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 6, background: "#fef3c7", padding: "4px 10px", borderRadius: 6 }}>
+                  <span style={{ fontSize: 13 }}>📅</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#92400e" }}>
+                    On break from: {s.breakStartDate}
+                  </span>
+                  <span style={{ fontSize: 11, color: "#b45309" }}>— attendance excluded from this date</span>
                 </div>
               )}
             </div>
@@ -1129,21 +1178,28 @@ function OnBreakPanel({ students, centerMap, onEndBreak, isAdmin }: {
 
 // ─── Break Request Modal ───────────────────────────────────────────────────────
 
-function BreakRequestModal({ student, onClose, onRequested, currentUserUid, currentUserRole, isAdmin }: {
+function BreakRequestModal({ student, onClose, onRequested, onApprovedDirectly, currentUserUid, currentUserRole, isAdmin }: {
   student: StudentRow;
   onClose: () => void;
   onRequested: (reason: string) => void;
+  onApprovedDirectly: (reason: string, startDate: string) => void;
   currentUserUid: string;
   currentUserRole: string;
   isAdmin: boolean;
 }) {
-  const [reason, setReason] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState("");
+  function todayStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  }
+  const [reason, setReason]       = useState("");
+  const [startDate, setStartDate] = useState(todayStr);
+  const [saving, setSaving]       = useState(false);
+  const [error, setError]         = useState("");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!reason.trim()) { setError("Please provide a reason for the break."); return; }
+    if (isAdmin && !startDate) { setError("Please select a break start date."); return; }
     setError("");
     setSaving(true);
     try {
@@ -1151,25 +1207,44 @@ function BreakRequestModal({ student, onClose, onRequested, currentUserUid, curr
       const { db: fdb } = await import("@/config/firebase");
       const { logAction: la } = await import("@/services/audit/audit.service");
 
-      await updateDoc(doc(fdb, "users", student.id), {
-        status:              "break_requested",
-        studentStatus:       "break_requested",
-        breakApprovalStatus: "pending",
-        breakRequestedBy:    currentUserUid,
-        breakRequestedAt:    new Date().toISOString(),
-        breakReason:         reason.trim(),
-        updatedAt:           sts(),
-      });
-
-      la({
-        action: "BREAK_REQUESTED", initiatorId: currentUserUid, initiatorRole: currentUserRole as import("@/types").Role,
-        approverId: null, approverRole: null, reason: reason.trim(),
-        metadata: { studentId: student.id, studentName: student.name },
-      });
-
-      onRequested(reason.trim());
+      if (isAdmin) {
+        // Admin: approve directly, no request step
+        await updateDoc(doc(fdb, "users", student.id), {
+          status:              "on_break",
+          studentStatus:       "on_break",
+          breakApprovalStatus: "approved",
+          breakRequestedBy:    currentUserUid,
+          breakRequestedAt:    new Date().toISOString(),
+          breakStartDate:      startDate,
+          breakReason:         reason.trim(),
+          updatedAt:           sts(),
+        });
+        la({
+          action: "BREAK_APPROVED", initiatorId: currentUserUid, initiatorRole: currentUserRole as import("@/types").Role,
+          approverId: null, approverRole: null, reason: reason.trim(),
+          metadata: { studentId: student.id, studentName: student.name, breakStartDate: startDate },
+        });
+        onApprovedDirectly(reason.trim(), startDate);
+      } else {
+        // Teacher: submit for admin approval
+        await updateDoc(doc(fdb, "users", student.id), {
+          status:              "break_requested",
+          studentStatus:       "break_requested",
+          breakApprovalStatus: "pending",
+          breakRequestedBy:    currentUserUid,
+          breakRequestedAt:    new Date().toISOString(),
+          breakReason:         reason.trim(),
+          updatedAt:           sts(),
+        });
+        la({
+          action: "BREAK_REQUESTED", initiatorId: currentUserUid, initiatorRole: currentUserRole as import("@/types").Role,
+          approverId: null, approverRole: null, reason: reason.trim(),
+          metadata: { studentId: student.id, studentName: student.name },
+        });
+        onRequested(reason.trim());
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to submit break request.");
+      setError(err instanceof Error ? err.message : "Failed to submit break.");
     } finally {
       setSaving(false);
     }
@@ -1180,14 +1255,34 @@ function BreakRequestModal({ student, onClose, onRequested, currentUserUid, curr
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000,
       display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
     }}>
-      <div style={{ background: "#fff", borderRadius: 14, padding: 28, width: "100%", maxWidth: 440, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
-        <div style={{ fontWeight: 700, fontSize: 17, color: "#111827", marginBottom: 4 }}>☕ Request Break</div>
-        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>
-          Marking <strong>{student.name}</strong> as on break. An admin will confirm this request.
+      <div style={{ background: "#fff", borderRadius: 14, padding: 28, width: "100%", maxWidth: 460, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
+        <div style={{ fontWeight: 700, fontSize: 17, color: "#111827", marginBottom: 4 }}>☕ {isAdmin ? "Put on Break" : "Request Break"}</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 18 }}>
+          {isAdmin
+            ? <>Directly putting <strong>{student.name}</strong> on break. Choose start date — attendance will be excluded from that date.</>
+            : <>Submitting break request for <strong>{student.name}</strong>. An admin will confirm.</>
+          }
         </div>
         <form onSubmit={handleSubmit}>
+          {isAdmin && (
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
+                📅 Break starts on *
+              </label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={e => setStartDate(e.target.value)}
+                required
+                style={{ border: "1px solid #d1d5db", borderRadius: 7, padding: "8px 12px", fontSize: 14, outline: "none", color: "#111827" }}
+              />
+              <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>
+                Attendance will not be counted for this student from this date onwards.
+              </div>
+            </div>
+          )}
           <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
-            Reason for break *
+            Reason *
           </label>
           <textarea
             value={reason}
@@ -1204,7 +1299,7 @@ function BreakRequestModal({ student, onClose, onRequested, currentUserUid, curr
             </button>
             <button type="submit" disabled={saving}
               style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: saving ? "#93c5fd" : "#0369a1", color: "#fff", fontSize: 14, fontWeight: 600, cursor: saving ? "not-allowed" : "pointer" }}>
-              {saving ? "Submitting…" : "Submit Request"}
+              {saving ? "Saving…" : isAdmin ? "Put on Break" : "Submit Request"}
             </button>
           </div>
         </form>

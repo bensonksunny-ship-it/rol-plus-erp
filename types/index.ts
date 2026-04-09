@@ -100,7 +100,8 @@ export interface StudentUser extends UserBase {
   deactivationApprovalStatus: ApprovalStatus | null;
   // Break fields — mirrors deactivation pattern
   breakRequestedBy: string | null;        // uid of requesting teacher
-  breakRequestedAt: string | null;        // ISO timestamp
+  breakRequestedAt: string | null;        // ISO timestamp of request
+  breakStartDate: string | null;          // YYYY-MM-DD — date break begins (set on approval)
   breakReason: string | null;
   breakApprovalStatus: ApprovalStatus | null;
   // Teacher-specific fields excluded entirely
@@ -122,6 +123,7 @@ export interface TeacherUser extends UserBase {
   deactivationApprovalStatus?: never;
   breakRequestedBy?: never;
   breakRequestedAt?: never;
+  breakStartDate?: never;
   breakReason?: never;
   breakApprovalStatus?: never;
 }
@@ -139,6 +141,7 @@ export interface AdminUser extends UserBase {
   deactivationApprovalStatus?: never;
   breakRequestedBy?: never;
   breakRequestedAt?: never;
+  breakStartDate?: never;
   breakReason?: never;
   breakApprovalStatus?: never;
   centerIds?: never;
