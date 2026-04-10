@@ -23,6 +23,7 @@ interface StudentRow {
   classType:      string;
   centerId:       string;
   centerName:     string;
+  classDays:      string[];   // ["Mon","Wed"] — personal students; [] = every day (group)
   breakStartDate: string | null;  // YYYY-MM-DD — attendance excluded from this date
 }
 
@@ -34,7 +35,8 @@ interface AttendanceRec {
 }
 
 type MarkStatus = "present" | "absent";
-type PageTab    = "mark" | "trends";
+type CellStatus = "present" | "absent" | "not_marked" | "break" | "non_class" | "future";
+type PageTab    = "mark" | "trends" | "sheet";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -146,7 +148,11 @@ function AttendanceContent() {
   const [allAttendance,  setAllAttendance]  = useState<AttendanceRec[]>([]);
   const [allStudents,    setAllStudents]    = useState<StudentRow[]>([]);
   const [loadingTrends,  setLoadingTrends]  = useState(false);
-  const [selectedMonth,  setSelectedMonth]  = useState<string>(currentMonth);
+  const [selectedMonth,  setSelectedMonth]  = useState<string>(currentMonth());
+  const [sheetMonth,     setSheetMonth]     = useState<string>(currentMonth());
+  const [sheetStudents,  setSheetStudents]  = useState<StudentRow[]>([]);
+  const [sheetAttendance,setSheetAttendance]= useState<AttendanceRec[]>([]);
+  const [loadingSheet,   setLoadingSheet]   = useState(false);
   const trendTimerRef                       = useRef<ReturnType<typeof setInterval> | null>(null);
   const isTrendsCurrentMonth                = selectedMonth === currentMonth();
 
@@ -201,6 +207,7 @@ function AttendanceContent() {
               classType:      (data.classType   as string) === "personal" ? "personal" : "group",
               centerId:       selectedCentre,
               centerName:     "",
+              classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
               breakStartDate: null,
             };
           });
@@ -268,6 +275,7 @@ function AttendanceContent() {
             classType:      (data.classType   as string) === "personal" ? "personal" : "group",
             centerId:       cid,
             centerName:     centreNameMap.get(cid) ?? cid,
+            classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
             // For on_break / break_requested: carry breakStartDate so we can exclude records from that date
             breakStartDate: (st === "on_break" || st === "break_requested")
               ? ((data.breakStartDate as string) ?? null)
@@ -286,6 +294,80 @@ function AttendanceContent() {
     trendTimerRef.current = setInterval(() => loadTrends(selectedCentre), 60_000);
     return () => { if (trendTimerRef.current) clearInterval(trendTimerRef.current); };
   }, [selectedCentre, tab, loadTrends]);
+
+  // ── Load Sheet data ───────────────────────────────────────────────────────
+  const loadSheet = useCallback(async (centreId: string, month: string) => {
+    setLoadingSheet(true);
+    try {
+      const [stuSnap, centreSnap] = await Promise.all([
+        getDocs(query(collection(db, "users"), where("role","==","student"), where("centerId","==",centreId))),
+        getDocs(collection(db, "centers")),
+      ]);
+      const centreNameMap = new Map<string, string>();
+      centreSnap.docs.forEach(d => centreNameMap.set(d.id, (d.data().name as string) ?? d.id));
+
+      // Date range for the month
+      const [yr, mo] = month.split("-").map(Number);
+      const daysInMonth = new Date(yr, mo, 0).getDate();
+      const monthStart  = `${month}-01`;
+      const monthEnd    = `${month}-${String(daysInMonth).padStart(2,"0")}`;
+
+      // Fetch all attendance for this centre within the month
+      const attSnap = await getDocs(query(
+        collection(db, "attendance"),
+        where("centerId", "==", centreId),
+      ));
+      const attRecs: AttendanceRec[] = attSnap.docs
+        .map(d => {
+          const r = d.data() as Record<string, unknown>;
+          return {
+            studentUid: r.studentUid as string,
+            centerId:   r.centerId   as string,
+            date:       (r.date as string) ?? "",
+            status:     (r.status as "present" | "absent") ?? "absent",
+          };
+        })
+        .filter(r => r.date >= monthStart && r.date <= monthEnd);
+
+      const rows: StudentRow[] = stuSnap.docs
+        .filter(d => {
+          const data = d.data() as Record<string, unknown>;
+          const st = ((data.status ?? data.studentStatus ?? "active") as string);
+          return st !== "inactive" && st !== "deactivation_requested";
+        })
+        .map(d => {
+          const data = d.data() as Record<string, unknown>;
+          const st   = ((data.status ?? data.studentStatus ?? "active") as string);
+          const cid  = (data.centerId as string) ?? centreId;
+          return {
+            uid:            d.id,
+            name:           (data.displayName as string) || (data.name as string) || d.id,
+            instrument:     (data.instrument  as string) || "",
+            classType:      (data.classType   as string) === "personal" ? "personal" : "group",
+            centerId:       cid,
+            centerName:     centreNameMap.get(cid) ?? cid,
+            classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
+            breakStartDate: (st === "on_break" || st === "break_requested")
+              ? ((data.breakStartDate as string) ?? null)
+              : null,
+          };
+        })
+        .sort((a, b) => {
+          if (a.classType !== b.classType) return a.classType === "group" ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+
+      setSheetStudents(rows);
+      setSheetAttendance(attRecs);
+    } finally {
+      setLoadingSheet(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedCentre || tab !== "sheet") return;
+    loadSheet(selectedCentre, sheetMonth);
+  }, [selectedCentre, tab, sheetMonth, loadSheet]);
 
   // ── Mark-attendance summary ───────────────────────────────────────────────
   const markSummary = useMemo(() => {
@@ -560,16 +642,37 @@ function AttendanceContent() {
               </div>
             </Field>
           )}
+          {tab === "sheet" && (
+            <Field label="Month">
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input
+                  type="month"
+                  value={sheetMonth}
+                  min={minMonth()}
+                  max={currentMonth()}
+                  onChange={e => setSheetMonth(e.target.value)}
+                  style={s.input}
+                />
+                {sheetMonth !== currentMonth() && (
+                  <button
+                    onClick={() => setSheetMonth(currentMonth())}
+                    style={{ fontSize: 11, padding: "5px 10px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer", color: "#374151", whiteSpace: "nowrap" as const }}>
+                    ← Current
+                  </button>
+                )}
+              </div>
+            </Field>
+          )}
           {/* Tab switcher */}
           <div style={{ marginLeft: "auto", display: "flex", gap: 4, background: "#f3f4f6", borderRadius: 8, padding: 3 }}>
-            {(["mark", "trends"] as PageTab[]).map(t => (
+            {(["mark", "trends", "sheet"] as PageTab[]).map(t => (
               <button key={t} onClick={() => setTab(t)} style={{
                 padding: "6px 18px", borderRadius: 6, border: "none", fontSize: 13, fontWeight: 600, cursor: "pointer",
                 background: tab === t ? "#fff" : "transparent",
                 color:      tab === t ? "#111827" : "#6b7280",
                 boxShadow:  tab === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
               }}>
-                {t === "mark" ? "✏️ Mark" : "📊 Trends"}
+                {t === "mark" ? "✏️ Mark" : t === "trends" ? "📊 Trends" : "📋 Sheet"}
               </button>
             ))}
           </div>
@@ -849,11 +952,297 @@ function AttendanceContent() {
         </>
       )}
 
+      {/* ══════════════════════ SHEET TAB ══════════════════════════════════ */}
+      {tab === "sheet" && (
+        <>
+          {!selectedCentre && <EmptyHint icon="🏛" text="Select a centre to view the attendance sheet." />}
+          {selectedCentre && loadingSheet && (
+            <div style={{ ...s.card, textAlign: "center", padding: "64px 0", color: "#6b7280" }}>Loading attendance sheet…</div>
+          )}
+          {selectedCentre && !loadingSheet && (
+            <AttendanceSheet
+              students={sheetStudents}
+              attendance={sheetAttendance}
+              month={sheetMonth}
+            />
+          )}
+        </>
+      )}
+
       {/* Pulse animation */}
       <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
     </div>
   );
 }
+
+// ─── Attendance Sheet ─────────────────────────────────────────────────────────
+
+const DAY_ABBR = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+/** All calendar dates in a YYYY-MM month as "YYYY-MM-DD" strings */
+function datesInMonth(month: string): string[] {
+  const [yr, mo] = month.split("-").map(Number);
+  const count    = new Date(yr, mo, 0).getDate();
+  return Array.from({ length: count }, (_, i) => {
+    const d = i + 1;
+    return `${month}-${String(d).padStart(2,"0")}`;
+  });
+}
+
+/** Given attendance records for all students + the set of ALL dated records,
+ *  compute which dates were actual class days at this centre.
+ *  For group students: a class day = any date that appears in the attendance collection
+ *  (i.e. teacher explicitly marked that day for at least one student).
+ */
+function groupClassDatesSet(attendance: AttendanceRec[], allDates: string[]): Set<string> {
+  const marked = new Set(attendance.map(r => r.date));
+  return new Set(allDates.filter(d => marked.has(d)));
+}
+
+/** Is this date a scheduled class day for this student? */
+function isScheduledDay(date: string, student: StudentRow, groupClassDates: Set<string>): boolean {
+  if (student.classType === "personal") {
+    // Personal: only days matching their classDays array
+    if (student.classDays.length === 0) return false;
+    const dow = DAY_ABBR[new Date(date + "T00:00:00").getDay()];
+    return student.classDays.includes(dow);
+  }
+  // Group: any date the teacher has marked attendance for the centre
+  return groupClassDates.has(date);
+}
+
+/** Determine cell status for one student on one date */
+function cellStatus(
+  date:            string,
+  student:         StudentRow,
+  attMap:          Map<string, "present" | "absent">,  // key: `${studentUid}|${date}`
+  groupClassDates: Set<string>,
+  today:           string,
+): CellStatus {
+  // Future date
+  if (date > today) return "future";
+  // On break from this date
+  if (student.breakStartDate && date >= student.breakStartDate) return "break";
+  // Is it a scheduled class day?
+  if (!isScheduledDay(date, student, groupClassDates)) return "non_class";
+  // Scheduled — check attendance
+  const key = `${student.uid}|${date}`;
+  const rec = attMap.get(key);
+  if (rec === "present") return "present";
+  if (rec === "absent")  return "absent";
+  return "not_marked";
+}
+
+const CELL_STYLE: Record<CellStatus, React.CSSProperties> = {
+  present:    { background: "#dcfce7", color: "#16a34a", fontWeight: 700 },
+  absent:     { background: "#fee2e2", color: "#dc2626", fontWeight: 700 },
+  not_marked: { background: "#fef9c3", color: "#92400e", fontWeight: 500 },
+  break:      { background: "#e0f2fe", color: "#0369a1", fontWeight: 600 },
+  non_class:  { background: "#f9fafb", color: "#d1d5db" },
+  future:     { background: "#f9fafb", color: "#e5e7eb" },
+};
+
+const CELL_LABEL: Record<CellStatus, string> = {
+  present:    "P",
+  absent:     "A",
+  not_marked: "—",
+  break:      "☕",
+  non_class:  "",
+  future:     "",
+};
+
+function AttendanceSheet({ students, attendance, month }: {
+  students:   StudentRow[];
+  attendance: AttendanceRec[];
+  month:      string;
+}) {
+  const today      = todayISO();
+  const allDates   = datesInMonth(month);
+
+  // Build attendance lookup map: `${uid}|${date}` → status
+  const attMap = useMemo(() => {
+    const m = new Map<string, "present" | "absent">();
+    attendance.forEach(r => m.set(`${r.studentUid}|${r.date}`, r.status));
+    return m;
+  }, [attendance]);
+
+  // Dates when teacher actually marked group attendance (at this centre, this month)
+  const groupClassDates = useMemo(() => groupClassDatesSet(attendance, allDates), [attendance, allDates]);
+
+  // For display: only show dates that are class days for at least one student
+  const relevantDates = useMemo(() => allDates.filter(date => {
+    if (date > today) return false; // don't show future columns
+    // Include if any student has it as a scheduled day
+    return students.some(s => isScheduledDay(date, s, groupClassDates));
+  }), [allDates, students, groupClassDates, today]);
+
+  // Summary per student
+  const summaries = useMemo(() => students.map(s => {
+    let present = 0, absent = 0, notMarked = 0, breakDays = 0;
+    relevantDates.forEach(date => {
+      const cs = cellStatus(date, s, attMap, groupClassDates, today);
+      if (cs === "present")    present++;
+      else if (cs === "absent")     absent++;
+      else if (cs === "not_marked") notMarked++;
+      else if (cs === "break")      breakDays++;
+    });
+    const scheduled = present + absent + notMarked;
+    return { present, absent, notMarked, breakDays, scheduled, pct: pct(present, scheduled || 1) };
+  }), [students, relevantDates, attMap, groupClassDates, today]);
+
+  if (students.length === 0) {
+    return <EmptyHint icon="📋" text="No students found for this centre." />;
+  }
+
+  if (relevantDates.length === 0) {
+    return <EmptyHint icon="📋" text={`No attendance recorded for ${fmtMonth(month)} yet.`} />;
+  }
+
+  // Split students by group/personal for section headers
+  const groupStudents    = students.filter(s => s.classType === "group");
+  const personalStudents = students.filter(s => s.classType === "personal");
+
+  function renderSection(rows: StudentRow[], label: string) {
+    if (rows.length === 0) return null;
+    return (
+      <>
+        {/* Section header row */}
+        <tr>
+          <td colSpan={relevantDates.length + 6} style={{
+            background: "#f3f4f6", padding: "6px 14px", fontSize: 11,
+            fontWeight: 800, color: "#6b7280", textTransform: "uppercase" as const,
+            letterSpacing: 1, borderBottom: "1px solid #e5e7eb",
+          }}>
+            {label} ({rows.length})
+          </td>
+        </tr>
+        {rows.map((st, i) => {
+          const idx     = students.indexOf(st);
+          const summary = summaries[idx];
+          return (
+            <tr key={st.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
+              {/* Fixed: # */}
+              <td style={sheetTd}>{idx + 1}</td>
+              {/* Fixed: Name */}
+              <td style={{ ...sheetTd, fontWeight: 600, color: "#111827", minWidth: 140, whiteSpace: "nowrap" as const }}>
+                <div>{st.name}</div>
+                {st.instrument && <div style={{ fontSize: 10, color: "#9ca3af", fontWeight: 400 }}>{st.instrument}</div>}
+              </td>
+              {/* Fixed: Centre */}
+              <td style={{ ...sheetTd, fontSize: 11, color: "#6b7280", minWidth: 100, whiteSpace: "nowrap" as const }}>
+                {st.centerName}
+              </td>
+              {/* Date cells */}
+              {relevantDates.map(date => {
+                const cs    = cellStatus(date, st, attMap, groupClassDates, today);
+                const style = CELL_STYLE[cs];
+                const label = CELL_LABEL[cs];
+                return (
+                  <td key={date} title={cs === "not_marked" ? `${st.name} — ${date} (not marked)` : cs === "break" ? `On break from ${st.breakStartDate}` : undefined}
+                    style={{
+                      ...sheetTd, textAlign: "center" as const, fontSize: 12,
+                      minWidth: 34, padding: "5px 3px",
+                      borderLeft: "1px solid #f3f4f6",
+                      ...style,
+                    }}>
+                    {label}
+                  </td>
+                );
+              })}
+              {/* Summary columns */}
+              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 700, color: "#16a34a", minWidth: 42 }}>{summary.present}</td>
+              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 700, color: "#dc2626", minWidth: 42 }}>{summary.absent}</td>
+              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 600, color: "#92400e", minWidth: 42, fontSize: 12 }}>
+                {summary.notMarked > 0 ? summary.notMarked : "—"}
+              </td>
+              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 800, fontSize: 13, color: pctColor(summary.pct), minWidth: 48 }}>
+                {summary.scheduled > 0 ? `${summary.pct}%` : "—"}
+              </td>
+            </tr>
+          );
+        })}
+      </>
+    );
+  }
+
+  return (
+    <div style={s.card}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>
+            Attendance Sheet — {fmtMonth(month)}
+          </div>
+          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+            {students.length} students · {relevantDates.length} class days
+          </div>
+        </div>
+        {/* Legend */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, fontSize: 12 }}>
+          {(["present","absent","not_marked","break"] as CellStatus[]).map(cs => (
+            <span key={cs} style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "3px 9px", borderRadius: 6, ...CELL_STYLE[cs], fontSize: 11,
+            }}>
+              <strong>{CELL_LABEL[cs] || "·"}</strong>
+              {cs === "present" ? "Present" : cs === "absent" ? "Absent" : cs === "not_marked" ? "Not Marked" : "On Break"}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }}>
+          <thead>
+            {/* Month/day header row */}
+            <tr style={{ background: "#f9fafb" }}>
+              <th style={sheetTh}>#</th>
+              <th style={{ ...sheetTh, minWidth: 140 }}>Student</th>
+              <th style={{ ...sheetTh, minWidth: 100 }}>Centre</th>
+              {relevantDates.map(date => {
+                const d   = new Date(date + "T00:00:00");
+                const day = d.getDate();
+                const dow = DAY_ABBR[d.getDay()];
+                const isToday = date === today;
+                return (
+                  <th key={date} style={{
+                    ...sheetTh, textAlign: "center" as const,
+                    minWidth: 34, padding: "6px 3px",
+                    borderLeft: "1px solid #e5e7eb",
+                    background: isToday ? "#fef3c7" : "#f9fafb",
+                    color: isToday ? "#92400e" : "#6b7280",
+                  }}>
+                    <div style={{ fontWeight: 700 }}>{day}</div>
+                    <div style={{ fontSize: 9, fontWeight: 400 }}>{dow}</div>
+                  </th>
+                );
+              })}
+              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#dcfce7", color: "#166534", minWidth: 42 }}>P</th>
+              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#fee2e2", color: "#991b1b", minWidth: 42 }}>A</th>
+              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#fef9c3", color: "#92400e", minWidth: 42 }}>N/M</th>
+              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#ede9fe", color: "#4f46e5", minWidth: 48 }}>%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {renderSection(groupStudents, "👥 Group Students")}
+            {renderSection(personalStudents, "👤 Personal Students")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+const sheetTh: React.CSSProperties = {
+  padding: "8px 10px", textAlign: "left", fontSize: 11, fontWeight: 700,
+  color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5,
+  borderBottom: "2px solid #e5e7eb", whiteSpace: "nowrap",
+  background: "#f9fafb",
+};
+const sheetTd: React.CSSProperties = {
+  padding: "8px 10px", verticalAlign: "middle",
+  borderBottom: "1px solid #f3f4f6",
+};
 
 // ─── Bar Chart (SVG, no deps) ─────────────────────────────────────────────────
 
