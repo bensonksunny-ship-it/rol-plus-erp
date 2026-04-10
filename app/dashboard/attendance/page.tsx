@@ -21,6 +21,8 @@ interface StudentRow {
   name:           string;
   instrument:     string;
   classType:      string;
+  centerId:       string;
+  centerName:     string;
   breakStartDate: string | null;  // YYYY-MM-DD — attendance excluded from this date
 }
 
@@ -61,6 +63,15 @@ function fmtDate(iso: string): string {
 }
 function pct(n: number, d: number): number {
   return d === 0 ? 0 : Math.round((n / d) * 100);
+}
+function currentMonth(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+}
+function minMonth(): string {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - 3);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
 }
 function pctColor(p: number): string {
   if (p >= 75) return "#16a34a";
@@ -135,7 +146,9 @@ function AttendanceContent() {
   const [allAttendance,  setAllAttendance]  = useState<AttendanceRec[]>([]);
   const [allStudents,    setAllStudents]    = useState<StudentRow[]>([]);
   const [loadingTrends,  setLoadingTrends]  = useState(false);
+  const [selectedMonth,  setSelectedMonth]  = useState<string>(currentMonth);
   const trendTimerRef                       = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isTrendsCurrentMonth                = selectedMonth === currentMonth();
 
   // ── Load centres ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -186,6 +199,8 @@ function AttendanceContent() {
               name:           (data.displayName as string) || (data.name as string) || d.id,
               instrument:     (data.instrument  as string) || "",
               classType:      (data.classType   as string) === "personal" ? "personal" : "group",
+              centerId:       selectedCentre,
+              centerName:     "",
               breakStartDate: null,
             };
           });
@@ -217,10 +232,15 @@ function AttendanceContent() {
   const loadTrends = useCallback(async (centreId: string) => {
     setLoadingTrends(true);
     try {
-      const [attSnap, stuSnap] = await Promise.all([
+      const [attSnap, stuSnap, centreSnap] = await Promise.all([
         getDocs(query(collection(db, "attendance"), where("centerId", "==", centreId))),
         getDocs(query(collection(db, "users"), where("role", "==", "student"), where("centerId", "==", centreId))),
+        getDocs(collection(db, "centers")),
       ]);
+      // Build centre name map
+      const centreNameMap = new Map<string, string>();
+      centreSnap.docs.forEach(d => centreNameMap.set(d.id, (d.data().name as string) ?? d.id));
+
       setAllAttendance(attSnap.docs.map(d => {
         const r = d.data() as Record<string, unknown>;
         return {
@@ -239,12 +259,15 @@ function AttendanceContent() {
         })
         .map(d => {
           const data = d.data() as Record<string, unknown>;
-          const st = ((data.status ?? data.studentStatus ?? "active") as string);
+          const st   = ((data.status ?? data.studentStatus ?? "active") as string);
+          const cid  = (data.centerId as string) ?? centreId;
           return {
             uid:            d.id,
             name:           (data.displayName as string) || (data.name as string) || d.id,
             instrument:     (data.instrument  as string) || "",
             classType:      (data.classType   as string) === "personal" ? "personal" : "group",
+            centerId:       cid,
+            centerName:     centreNameMap.get(cid) ?? cid,
             // For on_break / break_requested: carry breakStartDate so we can exclude records from that date
             breakStartDate: (st === "on_break" || st === "break_requested")
               ? ((data.breakStartDate as string) ?? null)
@@ -292,20 +315,11 @@ function AttendanceContent() {
       return true;
     });
 
-    // For denominator: on a given date, count students NOT yet on break
-    // (available for future use in per-day accuracy)
-    void ((date: string) => {
-      let count = 0;
-      allStudents.forEach(s => {
-        const bsd = s.breakStartDate;
-        if (!bsd || date < bsd) count++;
-      });
-      return count;
-    });
-
     const totalStudents = allStudents.length;
     const today         = todayISO();
-    const thisMonth     = isoToMonth(today);
+    // Use selectedMonth for student breakdown, current date for live stats
+    const viewMonth     = selectedMonth;
+    const thisMonth     = isoToMonth(today);  // for live stats (Today, This Week)
     const thisWeek      = currentWeekKey();
 
     // Group records by date (using break-filtered records)
@@ -370,7 +384,7 @@ function AttendanceContent() {
     const weekRec     = byWeek.get(thisWeek);
     const weekPct     = weekRec ? pct(weekRec.present, weekRec.total) : null;
 
-    const monthRec    = byMonth.get(thisMonth);
+    const monthRec    = byMonth.get(viewMonth);
     const monthPct    = monthRec ? pct(monthRec.present, monthRec.total) : null;
 
     // Best and worst day in last 30 days (only days with records)
@@ -378,9 +392,9 @@ function AttendanceContent() {
     const bestDay  = daysWithRecords.length ? daysWithRecords.reduce((a, b) => b.pct > a.pct ? b : a) : null;
     const worstDay = daysWithRecords.length ? daysWithRecords.reduce((a, b) => b.pct < a.pct ? b : a) : null;
 
-    // ── Per-student this month ────────────────────────────────────────────
-    const monthRecs  = effectiveAttendance.filter(r => r.date.startsWith(thisMonth));
-    const classDates = new Set(effectiveAttendance.filter(r => r.date.startsWith(thisMonth)).map(r => r.date));
+    // ── Per-student breakdown for selected month ──────────────────────────
+    const monthRecs  = effectiveAttendance.filter(r => r.date.startsWith(viewMonth));
+    const classDates = new Set(effectiveAttendance.filter(r => r.date.startsWith(viewMonth)).map(r => r.date));
     const classDaysThisMonth = classDates.size;
 
     const studentMonthMap = new Map<string, { present: number; absent: number }>();
@@ -395,11 +409,11 @@ function AttendanceContent() {
       const rec = studentMonthMap.get(s.uid) ?? { present: 0, absent: 0 };
       // For on_break students: denominator = class days before break started this month
       let total: number;
-      if (s.breakStartDate && s.breakStartDate.startsWith(thisMonth)) {
+      if (s.breakStartDate && s.breakStartDate.startsWith(viewMonth)) {
         // broke mid-month — count class dates before breakStartDate
         const daysBeforeBreak = Array.from(classDates).filter(d => d < s.breakStartDate!).length;
         total = daysBeforeBreak || (rec.present + rec.absent);
-      } else if (s.breakStartDate && s.breakStartDate <= `${thisMonth}-01`) {
+      } else if (s.breakStartDate && s.breakStartDate <= `${viewMonth}-01`) {
         // was already on break this entire month — denominator 0, skip
         total = rec.present + rec.absent || 1;
       } else {
@@ -418,9 +432,9 @@ function AttendanceContent() {
       dailyData, weeklyData, monthlyData,
       todayPct, todayPresent, weekPct, monthPct,
       bestDay, worstDay, studentStats,
-      classDaysThisMonth, totalStudents, thisMonth,
+      classDaysThisMonth, totalStudents, viewMonth,
     };
-  }, [allAttendance, allStudents]);
+  }, [allAttendance, allStudents, selectedMonth]);
 
   // ── Mark-attendance handlers ──────────────────────────────────────────────
   function toggle(uid: string) {
@@ -523,6 +537,27 @@ function AttendanceContent() {
           {tab === "mark" && (
             <Field label="Date">
               <input type="date" value={date} onChange={e => setDate(e.target.value)} style={s.input} />
+            </Field>
+          )}
+          {tab === "trends" && (
+            <Field label="Month">
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input
+                  type="month"
+                  value={selectedMonth}
+                  min={minMonth()}
+                  max={currentMonth()}
+                  onChange={e => setSelectedMonth(e.target.value)}
+                  style={s.input}
+                />
+                {!isTrendsCurrentMonth && (
+                  <button
+                    onClick={() => setSelectedMonth(currentMonth())}
+                    style={{ fontSize: 11, padding: "5px 10px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer", color: "#374151", whiteSpace: "nowrap" as const }}>
+                    ← Current
+                  </button>
+                )}
+              </div>
             </Field>
           )}
           {/* Tab switcher */}
@@ -633,6 +668,14 @@ function AttendanceContent() {
 
           {selectedCentre && !loadingTrends && trends && (
             <>
+              {/* ── Past-month notice ──────────────────────────────────── */}
+              {!isTrendsCurrentMonth && (
+                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 14px", marginBottom: 14, fontSize: 13, color: "#92400e", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 16 }}>📅</span>
+                  <span>Viewing <strong>{fmtMonth(selectedMonth)}</strong> — student breakdown reflects that month's attendance</span>
+                </div>
+              )}
+
               {/* ── Live summary cards ─────────────────────────────────── */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, marginBottom: 16 }}>
                 <StatCard
@@ -650,7 +693,7 @@ function AttendanceContent() {
                   icon="📆"
                 />
                 <StatCard
-                  label={`${fmtMonth(trends.thisMonth)}`}
+                  label={fmtMonth(trends.viewMonth)}
                   value={trends.monthPct !== null ? `${trends.monthPct}%` : "—"}
                   sub={`${trends.classDaysThisMonth} class day${trends.classDaysThisMonth !== 1 ? "s" : ""}`}
                   color={trends.monthPct !== null ? pctColor(trends.monthPct) : "#9ca3af"}
@@ -724,7 +767,7 @@ function AttendanceContent() {
                     value: d.pct,
                     sub:   d.total > 0 ? `${d.present}/${d.total}` : "—",
                     empty: d.total === 0,
-                    isToday: d.month === isoToMonth(todayISO()),
+                    isToday: d.month === trends.viewMonth,
                   }))}
                   height={140}
                 />
@@ -740,10 +783,10 @@ function AttendanceContent() {
                 </div>
               </div>
 
-              {/* ── Per-student this month ─────────────────────────────── */}
+              {/* ── Per-student breakdown ─────────────────────────────── */}
               <div style={s.card}>
                 <div style={s.chartTitle}>
-                  Student Breakdown — {fmtMonth(trends.thisMonth)}
+                  Student Breakdown — {fmtMonth(trends.viewMonth)}
                   <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: "#9ca3af" }}>
                     {trends.classDaysThisMonth} class day{trends.classDaysThisMonth !== 1 ? "s" : ""}
                   </span>
@@ -754,12 +797,13 @@ function AttendanceContent() {
                   <div style={{ overflowX: "auto" }}>
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
-                        <tr>
+                        <tr style={{ background: "#f9fafb" }}>
                           <th style={s.th}>Student</th>
+                          <th style={s.th}>Centre</th>
                           <th style={s.th}>Type</th>
-                          <th style={s.th}>Present</th>
-                          <th style={s.th}>Absent</th>
-                          <th style={s.th}>Attendance %</th>
+                          <th style={{ ...s.th, textAlign: "center" as const }}>Present</th>
+                          <th style={{ ...s.th, textAlign: "center" as const }}>Absent</th>
+                          <th style={{ ...s.th, textAlign: "center" as const }}>{fmtMonth(trends.viewMonth)} %</th>
                           <th style={s.th}>Bar</th>
                         </tr>
                       </thead>
@@ -769,15 +813,23 @@ function AttendanceContent() {
                             <td style={s.td}>
                               <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
                               {st.instrument && <div style={{ fontSize: 11, color: "#9ca3af" }}>{st.instrument}</div>}
+                              {st.breakStartDate && (
+                                <div style={{ fontSize: 10, color: "#0369a1", marginTop: 2 }}>☕ On break from {st.breakStartDate}</div>
+                              )}
+                            </td>
+                            <td style={{ ...s.td, fontSize: 12, color: "#374151", maxWidth: 130 }}>
+                              <span style={{ background: "#f3f4f6", padding: "2px 7px", borderRadius: 6, fontWeight: 500 }}>
+                                {st.centerName || "—"}
+                              </span>
                             </td>
                             <td style={s.td}>
                               <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: st.classType === "personal" ? "#fef9c3" : "#dcfce7", color: st.classType === "personal" ? "#92400e" : "#166534" }}>
                                 {st.classType === "personal" ? "Personal" : "Group"}
                               </span>
                             </td>
-                            <td style={{ ...s.td, textAlign: "center", fontWeight: 700, color: "#16a34a" }}>{st.present}</td>
-                            <td style={{ ...s.td, textAlign: "center", fontWeight: 700, color: "#dc2626" }}>{st.absent}</td>
-                            <td style={{ ...s.td, textAlign: "center" }}>
+                            <td style={{ ...s.td, textAlign: "center" as const, fontWeight: 700, color: "#16a34a" }}>{st.present}</td>
+                            <td style={{ ...s.td, textAlign: "center" as const, fontWeight: 700, color: "#dc2626" }}>{st.absent}</td>
+                            <td style={{ ...s.td, textAlign: "center" as const }}>
                               <span style={{ fontWeight: 800, fontSize: 14, color: pctColor(st.pct) }}>{st.pct}%</span>
                             </td>
                             <td style={{ ...s.td, minWidth: 100 }}>
