@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   collection,
   getDocs,
@@ -16,7 +17,10 @@ import { getCenterById } from "@/services/center/center.service";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
+  saveExtraClass,
+  getExtraClassesByCentre,
 } from "@/services/attendance/attendance.service";
+import type { AttendanceStatus, ExtraClass } from "@/services/attendance/attendance.service";
 import {
   getLessonsForStudent,
   getProgressByStudent,
@@ -43,12 +47,6 @@ interface StudentRow {
   classType?: string;  // "group" | "personal" — present on personal student rows
 }
 
-// Sentinel value used as selectedCenter when the teacher is viewing personal students
-const PERSONAL_TAB_ID = "__personal__";
-
-interface AttendanceState {
-  [studentUid: string]: "present" | "absent";
-}
 
 interface StudentProgress {
   uid:        string;
@@ -78,16 +76,18 @@ interface DashboardInsights {
 
 type View =
   | { type: "overview" }
-  | { type: "attendance" }
+  | { type: "attendance"; centreId: string; daysOfWeek: string[] }
   | { type: "students" }
-  | { type: "progress"; student: StudentRow };
+  | { type: "progress"; student: StudentRow; from: "overview" | "students" };
 
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
 export default function TeacherDashboardPage() {
   return (
     <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.ADMIN, ROLES.SUPER_ADMIN]}>
-      <TeacherDashboardContent />
+      <Suspense fallback={<div style={{ padding: "60px 0", textAlign: "center", color: "#9ca3af" }}>Loading…</div>}>
+        <TeacherDashboardContent />
+      </Suspense>
     </ProtectedRoute>
   );
 }
@@ -96,120 +96,83 @@ export default function TeacherDashboardPage() {
 
 function TeacherDashboardContent() {
   const { user } = useAuthContext();
-  const { isAllowed, isTeacherRole } = useCentreAccess(); // isAllowed guards per-centre access
+  const { isTeacherRole, filterCentres } = useCentreAccess();
+  const router       = useRouter();
+  const searchParams = useSearchParams();
 
-  // Safely extract centerIds using the type guard — TeacherUser has centerIds: string[]
-  // AdminUser has centerIds?: never so we must not access it without narrowing first
-  // Serialised as a string so effects re-run when the list actually changes
+  const centreIdParam = searchParams.get("centerId") ?? "";
+  const tabParam      = (searchParams.get("tab") ?? "attendance") as "attendance" | "students" | "progress";
+
   const centerIdsKey: string = user && isTeacher(user) ? user.centerIds.join(",") : "";
   const centerIds: string[]  = useMemo(
     () => centerIdsKey ? centerIdsKey.split(",") : [],
     [centerIdsKey],
   );
 
-  const [centers, setCenters]               = useState<Center[]>([]);
-  const [selectedCenter, setSelectedCenter] = useState<string>("");
-  const [view, setView]                     = useState<View>({ type: "overview" });
-  const [loading, setLoading]               = useState(true);
-
-  // Loaded per-center
-  const [students, setStudents]             = useState<StudentRow[]>([]);
-  const [attendancePct, setAttendancePct]   = useState<number | null>(null);
-  const [lowProgressCount, setLowProgressCount] = useState<number | null>(null);
-  const [centerDataLoading, setCenterDataLoading] = useState(false);
-  const [insights, setInsights]             = useState<DashboardInsights | null>(null);
-
-  // Personal students assigned directly to this teacher (classType === "personal")
-  const [personalStudents, setPersonalStudents] = useState<StudentRow[]>([]);
-  const [personalLoading, setPersonalLoading]   = useState(false);
-
-  // Stable date string — computed once on mount, never changes reference
   const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
-  // ── Load centers the teacher/admin is assigned to ─────────────────────────
+  // ── State ─────────────────────────────────────────────────────────────────
+  const [centers,          setCenters]          = useState<Center[]>([]);
+  const [centreLoading,    setCentreLoading]    = useState(true);
 
+  // Centre-workspace state (loaded when centreIdParam is set)
+  const [students,         setStudents]         = useState<StudentRow[]>([]);
+  const [attendancePct,    setAttendancePct]    = useState<number | null>(null);
+  const [lowProgressCount, setLowProgressCount] = useState<number | null>(null);
+  const [centerDataLoading,setCenterDataLoading]= useState(false);
+  const [insights,         setInsights]         = useState<DashboardInsights | null>(null);
+
+  // Progress detail
+  const [progressStudent, setProgressStudent]   = useState<StudentRow | null>(null);
+  const [progressFrom,    setProgressFrom]      = useState<"students" | "overview">("overview");
+
+  // ── Load assigned centres ────────────────────────────────────────────────
   useEffect(() => {
     if (!user) return;
-
-    // Teacher with no assigned centres yet — show empty state
-    if (isTeacherRole && centerIds.length === 0) {
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-
-    async function loadCenters() {
+    if (isTeacherRole && centerIds.length === 0) { setCentreLoading(false); return; }
+    setCentreLoading(true);
+    (async () => {
       try {
         let mine: Center[];
         if (centerIds.length > 0) {
-          // Fetch each assigned centre by ID — respects teacher.centerIds exactly
           const results = await Promise.allSettled(centerIds.map(id => getCenterById(id)));
           mine = results
             .filter((r): r is PromiseFulfilledResult<Center> => r.status === "fulfilled")
             .map(r => r.value);
         } else {
-          // Admin with no specific centres — fetch all centres
           const snap = await getDocs(collection(db, "centers"));
           mine = snap.docs.map(d => ({ id: d.id, ...d.data() } as Center));
         }
-        setCenters(mine);
-        // Select first centre by default (teacher.centerIds[0])
-        if (mine.length > 0) {
-          setSelectedCenter(prev => prev && mine.some(c => c.id === prev) ? prev : mine[0].id);
-        }
+        setCenters(filterCentres(mine));
       } catch (err) {
         console.error("Failed to load centers:", err);
       } finally {
-        setLoading(false);
+        setCentreLoading(false);
       }
-    }
-    loadCenters();
-  // Re-run when uid changes OR when centerIds list changes (firebase may populate later)
+    })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, centerIdsKey]);
 
-  // ── Load data for the selected center ────────────────────────────────────
-
+  // ── Load centre workspace data when centreIdParam changes ────────────────
   const loadCenterData = useCallback(async (centerId: string) => {
     if (!centerId || !user) return;
-
-    // Clear stale data immediately so previous centre never bleeds through
     setStudents([]);
     setAttendancePct(null);
     setLowProgressCount(null);
     setInsights(null);
     setCenterDataLoading(true);
-
     try {
-      // ── 1. Students for this centre ─────────────────────────────────────
-      // Two-field equality query — uses the deployed composite index
-      // (role ASC + centerId ASC). Same pattern used in the attendance page.
       const studentSnap = await getDocs(query(
         collection(db, "users"),
         where("role",     "==", "student"),
         where("centerId", "==", centerId),
       ));
-
-      // Client-side filter: role === "student" AND status active.
-      // Fallback: old docs may only have studentStatus (written before dual-write fix).
-      // Mirror the same fallback chain used in admin students page fetchData.
       const rows: StudentRow[] = studentSnap.docs
         .filter(d => {
           const u = d.data();
-          const effectiveStatus = (u.status ?? u.studentStatus ?? "active") as string;
-
-          // Safety check: warn and skip if student.centerId does not match queried centerId.
-          // This catches data inconsistencies (e.g. student assigned to wrong centre in Firestore).
-          if (u.centerId && u.centerId !== centerId) {
-            console.warn(
-              `[Faculty Suite] Student ${d.id} has centerId "${u.centerId}"` +
-              ` but was returned in query for centerId "${centerId}" — skipping.`
-            );
-            return false;
-          }
-
-          return u.role === "student" && effectiveStatus === "active";
+          if (u.centerId && u.centerId !== centerId) return false;
+          const status = (u.status ?? u.studentStatus ?? "active") as string;
+          return u.role === "student" && status === "active";
         })
         .map(d => {
           const u = d.data();
@@ -223,30 +186,15 @@ function TeacherDashboardContent() {
         });
       setStudents(rows);
 
-      // ── 2. Today's attendance (centre-based) ────────────────────────────
-      // Use rows.length (enrolled students) as denominator, not todayRecs.length.
-      // todayRecs only contains students already marked — using it as denominator
-      // inflates the percentage (5 marked present out of 5 marked = 100%, not 5/10).
-      // Same logic as attendance page summary: total = students.length.
       const allTodayRecs = await getAttendanceByCentreDate(centerId, today);
-      // Safety: skip attendance records whose centerId doesn't match — these are stale
-      // records from a previous centre assignment before data was corrected.
-      const todayRecs = allTodayRecs.filter(r => {
-        if ((r as unknown as Record<string, unknown>).centerId !== centerId) {
-          console.warn(
-            `[Faculty Suite] Attendance record ${r.id} has centerId mismatch — skipping.`
-          );
-          return false;
-        }
-        return true;
-      });
+      const todayRecs    = allTodayRecs.filter(r =>
+        (r as unknown as Record<string,unknown>).centerId === centerId
+      );
       const presentCnt = todayRecs.filter(r => r.status === "present").length;
       const absentCnt  = todayRecs.filter(r => r.status === "absent").length;
-      const attTotal   = rows.length;   // enrolled students, not marked records
-      const todayPct   = attTotal > 0 ? Math.round((presentCnt / attTotal) * 100) : null;
+      const todayPct   = rows.length > 0 ? Math.round((presentCnt / rows.length) * 100) : null;
       setAttendancePct(todayPct);
 
-      // ── 3. Per-student progress (parallel, best-effort) ─────────────────
       const progressList: StudentProgress[] = await Promise.all(
         rows.map(async st => {
           try {
@@ -259,69 +207,41 @@ function TeacherDashboardContent() {
             prog.forEach(p => { pm[p.itemId] = p; });
             const pct = calcOverallPercent(allItems, pm);
             const raw = studentSnap.docs.find(d => d.id === st.uid)?.data();
-            return {
-              uid: st.uid, name: st.name, instrument: st.instrument,
-              pct, balance: Number(raw?.currentBalance ?? 0), status: st.status,
-            };
+            return { uid: st.uid, name: st.name, instrument: st.instrument, pct, balance: Number(raw?.currentBalance ?? 0), status: st.status };
           } catch {
             return { uid: st.uid, name: st.name, instrument: st.instrument, pct: 0, balance: 0, status: st.status };
           }
         }),
       );
+      setLowProgressCount(progressList.filter(p => p.pct < 40).length);
 
-      const lowCount = progressList.filter(p => p.pct < 40).length;
-      setLowProgressCount(lowCount);
-
-      // ── 4. Weekly attendance trend (last 7 days) ────────────────────────
-      // Query all attendance for this centre, filter by date client-side
       const allAttSnap = await getDocs(
         query(collection(db, "attendance"), where("centerId", "==", centerId)),
       );
       const allAttRecs = allAttSnap.docs.map(d => d.data() as { date?: string; status?: string });
-
       const weekDays: WeekDay[] = Array.from({ length: 7 }, (_, i) => {
-        const d    = new Date();
-        d.setDate(d.getDate() - (6 - i));
-        const iso  = d.toISOString().slice(0, 10);
-        const label = d.toLocaleDateString("en-IN", { weekday: "short" });
-        const recs  = allAttRecs.filter(r => r.date === iso);
-        const prs   = recs.filter(r => r.status === "present").length;
-        const pct   = recs.length > 0 ? Math.round((prs / recs.length) * 100) : null;
-        return { date: iso, label, pct };
+        const d = new Date(); d.setDate(d.getDate() - (6 - i));
+        const iso = d.toISOString().slice(0, 10);
+        const recs = allAttRecs.filter(r => r.date === iso);
+        const prs  = recs.filter(r => r.status === "present").length;
+        return { date: iso, label: d.toLocaleDateString("en-IN", { weekday: "short" }), pct: recs.length > 0 ? Math.round((prs / recs.length) * 100) : null };
       });
 
-      // ── 5. Alerts: pending fees + deactivation requests ─────────────────
-      const pendingFeeCount = progressList.filter(p => p.balance > 0).length;
-      // Count deactivation requests from THIS centre's students only.
-      // studentSnap is already scoped to centerId so this is correct.
-      // Admin writes status: "deactivation_requested" (not a separate field).
-      const deactivationCount = studentSnap.docs.filter(d => {
-        const data = d.data();
-        const effectiveStatus = (data.status ?? data.studentStatus ?? "") as string;
-        return effectiveStatus === "deactivation_requested";
+      const pendingFeeCount    = progressList.filter(p => p.balance > 0).length;
+      const deactivationCount  = studentSnap.docs.filter(d => {
+        const st = (d.data().status ?? d.data().studentStatus ?? "") as string;
+        return st === "deactivation_requested";
       }).length;
 
-      // ── 6. Teacher score (0–100) ────────────────────────────────────────
-      // Weighted: attendance(40%) + avg progress(40%) + consistency(20%)
-      const attScore   = todayPct ?? 0;                              // 0–100
-      const avgPct     = progressList.length > 0
-        ? progressList.reduce((s, p) => s + p.pct, 0) / progressList.length
-        : 0;                                                         // 0–100
-      const markedDays = weekDays.filter(d => d.pct !== null).length;
-      const consistency = Math.round((markedDays / 7) * 100);       // 0–100
+      const attScore    = todayPct ?? 0;
+      const avgPct      = progressList.length > 0 ? progressList.reduce((s, p) => s + p.pct, 0) / progressList.length : 0;
+      const consistency = Math.round((weekDays.filter(d => d.pct !== null).length / 7) * 100);
       const teacherScore = Math.round(attScore * 0.4 + avgPct * 0.4 + consistency * 0.2);
-
-      // Score change: compare today's score vs the average of the previous 6 days
-      const prevDayScores = weekDays.slice(0, 6).map(d => d.pct ?? 0);
-      const prevAvg = prevDayScores.length > 0
-        ? prevDayScores.reduce((a, b) => a + b, 0) / prevDayScores.length
-        : 0;
-      const scoreChange = Math.round(attScore - prevAvg);
+      const prevAvg      = weekDays.slice(0, 6).reduce((s, d) => s + (d.pct ?? 0), 0) / 6;
 
       setInsights({
-        teacherScore, scoreChange, weeklyTrend: weekDays,
-        studentProgress: progressList,
-        presentCount: presentCnt, absentCount: absentCnt,
+        teacherScore, scoreChange: Math.round(attScore - prevAvg), weeklyTrend: weekDays,
+        studentProgress: progressList, presentCount: presentCnt, absentCount: absentCnt,
         pendingFeeCount, deactivationCount,
       });
     } catch (err) {
@@ -329,272 +249,106 @@ function TeacherDashboardContent() {
     } finally {
       setCenterDataLoading(false);
     }
-  // today is stable (useMemo []); user.uid is the meaningful identity dep
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, today]);
 
   useEffect(() => {
-    if (selectedCenter && selectedCenter !== PERSONAL_TAB_ID) loadCenterData(selectedCenter);
-  }, [selectedCenter, loadCenterData]);
+    if (centreIdParam) loadCenterData(centreIdParam);
+  }, [centreIdParam, loadCenterData]);
 
-  // ── Load personal students assigned to this teacher ───────────────────────
-  useEffect(() => {
-    if (!user?.uid || !isTeacherRole) return;
-    setPersonalLoading(true);
-    getDocs(query(
-      collection(db, "users"),
-      where("role",               "==", "student"),
-      where("assignedTeacherUid", "==", user.uid),
-    )).then(snap => {
-      const rows: StudentRow[] = snap.docs
-        .filter(d => {
-          const u = d.data();
-          const status = (u.status ?? u.studentStatus ?? "active") as string;
-          return status === "active";
-        })
-        .map(d => {
-          const u = d.data();
-          return {
-            uid:        d.id,
-            name:       (u.displayName ?? u.name ?? "—") as string,
-            instrument: (u.instrument ?? "—") as string,
-            status:     ((u.status ?? u.studentStatus ?? "active") as string),
-            centerId:   (u.centerId ?? "") as string,
-            classType:  "personal",
-          };
-        });
-      setPersonalStudents(rows);
-    }).catch(err => {
-      console.error("[Faculty Suite] Failed to load personal students:", err);
-    }).finally(() => {
-      setPersonalLoading(false);
-    });
-  }, [user?.uid, isTeacherRole]);
+  // ── Navigation helpers ────────────────────────────────────────────────────
+  function goToCentre(id: string, tab: "attendance" | "students" | "progress" = "attendance") {
+    router.push(`/dashboard/teacher?centerId=${id}&tab=${tab}`);
+  }
+  function goToTab(tab: "attendance" | "students" | "progress") {
+    router.push(`/dashboard/teacher?centerId=${centreIdParam}&tab=${tab}`);
+  }
+  function goToFacultySuite() {
+    router.push("/dashboard/teacher");
+  }
 
   // ── Guards ────────────────────────────────────────────────────────────────
+  if (centreLoading) return <div style={s.center}>Loading Faculty Suite…</div>;
 
-  if (loading) return <div style={s.center}>Loading Faculty Suite…</div>;
+  // ── Derive selected centre object ─────────────────────────────────────────
+  const selectedCentreObj = centers.find(c => c.id === centreIdParam) ?? null;
 
-  if (centers.length === 0) {
+  // ── Centre Workspace (centreIdParam present + valid) ──────────────────────
+  if (centreIdParam && selectedCentreObj) {
+    const daysOfWeek = parseDaysOfWeek(selectedCentreObj.timeSlot ?? "");
+
     return (
-      <div style={s.emptyState}>
-        {isTeacherRole
-          ? "You have not been assigned to any centre yet. Contact your administrator."
-          : "No centres found."}
-      </div>
-    );
-  }
+      <div style={s.page}>
+        {/* Breadcrumb back */}
+        <button style={s.backBtn} onClick={goToFacultySuite}>← Faculty Suite</button>
 
-  // Hard block: teacher somehow navigated to a centre outside their list
-  if (selectedCenter && isTeacherRole && !isAllowed(selectedCenter)) {
-    return (
-      <div style={{ ...s.emptyState, color: "#dc2626" }}>
-        🚫 Access Denied — you are not assigned to this centre.
-      </div>
-    );
-  }
-
-  const selectedCentreObj = centers.find(c => c.id === selectedCenter);
-  const centerName = selectedCentreObj?.name ?? selectedCenter;
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  return (
-    <div style={s.page}>
-
-      {/* ── Top Bar ── */}
-      <div style={s.topBar}>
-        <div style={s.topBarLeft}>
-          <div style={s.teacherName}>{user?.displayName}</div>
-          <div style={s.todayDate}>
-            {new Date().toLocaleDateString("en-IN", {
-              weekday: "long", day: "numeric", month: "long", year: "numeric",
-            })}
+        {/* Centre header */}
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:8 }}>
+          <div>
+            <div style={{ fontSize:20, fontWeight:800, color:"#111" }}>{selectedCentreObj.name}</div>
+            <div style={{ fontSize:12, color:"#9ca3af", marginTop:2 }}>{selectedCentreObj.timeSlot}</div>
           </div>
-        </div>
-        {/* Centre badge / count on the right */}
-        <div style={s.topBarRight}>
-          <span style={s.centerBadge}>
-            🏫 {centers.length} {centers.length === 1 ? "Centre" : "Centres"}
+          <span style={{ fontSize:12, color:"#6b7280", background:"#f3f4f6", borderRadius:8, padding:"4px 12px" }}>
+            {today}
           </span>
         </div>
-      </div>
 
-      {/* ── Centre Tab Bar (shown for all counts; tabs only clickable when > 1) ── */}
-      <div style={s.tabBar}>
-        {centers.map(c => (
-          <button
-            key={c.id}
-            style={{
-              ...s.tab,
-              ...(c.id === selectedCenter ? s.tabActive : {}),
-            }}
-            onClick={() => {
-              if (c.id !== selectedCenter) {
-                setSelectedCenter(c.id);
-                setView({ type: "overview" });
-              }
-            }}
-          >
-            {c.name}
-            {c.id === selectedCenter && centerDataLoading && (
-              <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.6 }}>…</span>
-            )}
-          </button>
-        ))}
-        {/* Personal students tab — always shown for teachers */}
-        {isTeacherRole && (
-          <button
-            style={{
-              ...s.tab,
-              ...(selectedCenter === PERSONAL_TAB_ID ? s.tabActive : {}),
-            }}
-            onClick={() => {
-              if (selectedCenter !== PERSONAL_TAB_ID) {
-                setSelectedCenter(PERSONAL_TAB_ID);
-                setView({ type: "students" });
-              }
-            }}
-          >
-            👤 Personal
-            {personalLoading
-              ? <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.6 }}>…</span>
-              : personalStudents.length > 0
-                ? <span style={{ marginLeft: 6, fontSize: 11, background: "var(--color-accent,#6366f1)", color: "#fff", borderRadius: 10, padding: "1px 6px" }}>{personalStudents.length}</span>
-                : null}
-          </button>
-        )}
-      </div>
+        {/* Tab bar */}
+        <div style={s.tabBar}>
+          {(["attendance","students","progress"] as const).map(tab => (
+            <button key={tab} style={{ ...s.tab, ...(tabParam === tab ? s.tabActive : {}) }}
+              onClick={() => { if (tab !== "progress") { setProgressStudent(null); goToTab(tab); } else goToTab(tab); }}>
+              {tab === "attendance" ? "✓ Attendance" : tab === "students" ? "👥 Students" : "📊 Progress"}
+            </button>
+          ))}
+        </div>
 
-      {/* ── Back button ── */}
-      {view.type !== "overview" && selectedCenter !== PERSONAL_TAB_ID && (
-        <button style={s.backBtn} onClick={() => setView({ type: "overview" })}>
-          ← Back to Overview
-        </button>
-      )}
-      {view.type === "progress" && selectedCenter === PERSONAL_TAB_ID && (
-        <button style={s.backBtn} onClick={() => setView({ type: "students" })}>
-          ← Back to Personal Students
-        </button>
-      )}
-
-      {/* ── Personal Tab: show personal students list or progress ── */}
-      {selectedCenter === PERSONAL_TAB_ID && (
-        personalLoading
-          ? <div style={{ ...s.center, paddingTop: 64 }}>Loading personal students…</div>
-          : view.type === "progress"
-            ? <ProgressView
-                student={view.student}
-                teacherUid={user?.uid ?? ""}
-                teacherRole={(user?.role ?? ROLES.TEACHER) as Role}
-              />
-            : personalStudents.length === 0
-              ? <div style={s.emptyState}>No personal students assigned to you yet.</div>
-              : <StudentsView
-                  students={personalStudents}
-                  teacherUid={user?.uid ?? ""}
-                  onViewProgress={st => setView({ type: "progress", student: st })}
-                />
-      )}
-
-      {/* ── Centre Views ── */}
-      {selectedCenter !== PERSONAL_TAB_ID && view.type === "overview" && (
-        centerDataLoading
-          ? <div style={{ ...s.center, paddingTop: 64 }}>Loading centre data…</div>
-          : <OverviewView
-              teacherName={user?.displayName ?? "Teacher"}
-              centerId={selectedCenter}
-              centerName={centerName}
-              today={today}
+        {/* Tab content */}
+        {centerDataLoading ? (
+          <div style={s.center}>Loading…</div>
+        ) : tabParam === "attendance" ? (
+          <AttendanceGridView
+            centreId={centreIdParam}
+            daysOfWeek={daysOfWeek}
+            students={students}
+            markedBy={user?.uid ?? ""}
+            onDone={() => loadCenterData(centreIdParam)}
+          />
+        ) : tabParam === "students" ? (
+          progressStudent ? (
+            <>
+              <button style={s.backBtn} onClick={() => { setProgressStudent(null); goToTab("students"); }}>← Back to Students</button>
+              <ProgressView student={progressStudent} teacherUid={user?.uid ?? ""} teacherRole={(user?.role ?? ROLES.TEACHER) as Role} />
+            </>
+          ) : (
+            <StudentsView
               students={students}
-              attendancePct={attendancePct}
-              lowProgressCount={lowProgressCount}
-              insights={insights}
-              onMarkAttendance={() => setView({ type: "attendance" })}
-              onViewStudents={() => setView({ type: "students" })}
-              onViewProgress={st => setView({ type: "progress", student: st })}
-              onRefresh={() => loadCenterData(selectedCenter)}
+              teacherUid={user?.uid ?? ""}
+              onViewProgress={st => { setProgressStudent(st); setProgressFrom("students"); goToTab("progress"); }}
             />
-      )}
+          )
+        ) : tabParam === "progress" ? (
+          progressStudent ? (
+            <>
+              <button style={s.backBtn} onClick={() => { setProgressStudent(null); goToTab(progressFrom === "students" ? "students" : "students"); }}>← Back to Students</button>
+              <ProgressView student={progressStudent} teacherUid={user?.uid ?? ""} teacherRole={(user?.role ?? ROLES.TEACHER) as Role} />
+            </>
+          ) : (
+            <StudentsView
+              students={students}
+              teacherUid={user?.uid ?? ""}
+              onViewProgress={st => { setProgressStudent(st); setProgressFrom("overview"); }}
+            />
+          )
+        ) : null}
+      </div>
+    );
+  }
 
-      {selectedCenter !== PERSONAL_TAB_ID && view.type === "attendance" && (
-        <AttendanceView
-          centerId={selectedCenter}
-          date={today}
-          students={students}
-          markedBy={user?.uid ?? ""}
-          onDone={() => { setView({ type: "overview" }); loadCenterData(selectedCenter); }}
-        />
-      )}
-
-      {selectedCenter !== PERSONAL_TAB_ID && view.type === "students" && (
-        <StudentsView
-          students={students}
-          teacherUid={user?.uid ?? ""}
-          onViewProgress={st => setView({ type: "progress", student: st })}
-        />
-      )}
-
-      {selectedCenter !== PERSONAL_TAB_ID && view.type === "progress" && (
-        <ProgressView
-          student={view.student}
-          teacherUid={user?.uid ?? ""}
-          teacherRole={(user?.role ?? ROLES.TEACHER) as Role}
-        />
-      )}
-
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// OVERVIEW
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function OverviewView({
-  teacherName, centerId, centerName, today,
-  students, attendancePct, lowProgressCount, insights,
-  onMarkAttendance, onViewStudents, onViewProgress, onRefresh,
-}: {
-  teacherName:      string;
-  centerId:         string;
-  centerName:       string;
-  today:            string;
-  students:         StudentRow[];
-  attendancePct:    number | null;
-  lowProgressCount: number | null;
-  insights:         DashboardInsights | null;
-  onMarkAttendance: () => void;
-  onViewStudents:   () => void;
-  onViewProgress:   (st: StudentRow) => void;
-  onRefresh:        () => void;
-}) {
-  void centerId; void onRefresh; // kept for future use
-
-  const score       = insights?.teacherScore ?? null;
-  const scoreChange = insights?.scoreChange  ?? 0;
-  const trend       = insights?.weeklyTrend  ?? [];
-
-  // Top / bottom 3 students by progress
-  const sorted      = [...(insights?.studentProgress ?? [])].sort((a,b) => b.pct - a.pct);
-  const top3        = sorted.slice(0, 3);
-  const bottom3     = sorted.slice(-3).reverse();
-
-  // Alert list
-  const alerts: { icon: string; msg: string; color: string }[] = [];
-  if (attendancePct === null)
-    alerts.push({ icon: "📋", msg: "Attendance not marked today.", color: "#b45309" });
-  if ((lowProgressCount ?? 0) > 0)
-    alerts.push({ icon: "📉", msg: `${lowProgressCount} student(s) below 40% progress.`, color: "#dc2626" });
-  if ((insights?.pendingFeeCount ?? 0) > 0)
-    alerts.push({ icon: "💰", msg: `${insights!.pendingFeeCount} student(s) have pending fees.`, color: "#7c3aed" });
-  if ((insights?.deactivationCount ?? 0) > 0)
-    alerts.push({ icon: "⚠️", msg: `${insights!.deactivationCount} deactivation request(s) pending.`, color: "#dc2626" });
-
+  // ── Faculty Suite Overview (no centreIdParam) ─────────────────────────────
   return (
-    <div>
-
-      {/* ── HERO ── */}
+    <div style={s.page}>
+      {/* Hero */}
       <div style={{
         background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
         borderRadius: 14, padding: "24px 28px", marginBottom: 20,
@@ -602,301 +356,487 @@ function OverviewView({
       }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 2 }}>
-            Welcome, {teacherName} 👋
+            Welcome, {user?.displayName ?? "Teacher"} 👋
           </div>
-          <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>
-            {centerName} · {new Date(today + "T12:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            {attendancePct === null && (
-              <span style={{ background: "#fef9c3", color: "#b45309", borderRadius: 99, padding: "3px 12px", fontSize: 12, fontWeight: 700 }}>
-                📋 Attendance not marked today
-              </span>
-            )}
+          <div style={{ fontSize: 13, opacity: 0.85 }}>
+            {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </div>
         </div>
-        {score !== null && (
-          <div style={{ textAlign: "center", background: "rgba(255,255,255,0.15)", borderRadius: 12, padding: "16px 28px" }}>
-            <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", opacity: 0.8, marginBottom: 4 }}>
-              Faculty Score
-            </div>
-            <div style={{ fontSize: 42, fontWeight: 900, lineHeight: 1 }}>{score}</div>
-            <div style={{ fontSize: 12, marginTop: 4, opacity: 0.8 }}>
-              {scoreChange >= 0 ? "▲" : "▼"} {Math.abs(scoreChange)}% vs last week
-            </div>
-          </div>
-        )}
+        <span style={{ background: "rgba(255,255,255,0.15)", borderRadius: 99, padding: "6px 18px", fontSize: 13, fontWeight: 600 }}>
+          🏫 {centers.length} {centers.length === 1 ? "Centre" : "Centres"}
+        </span>
       </div>
 
-      {/* ── TODAY'S STATUS ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12, marginBottom: 20 }}>
-        <InsightCard label="Students"    value={String(students.length)}                                         color="#4f46e5" />
-        <InsightCard label="Att. Today"  value={attendancePct !== null ? `${attendancePct}%` : "—"}              color="#16a34a" />
-        <InsightCard label="Present"     value={insights?.presentCount != null ? String(insights.presentCount) : "—"} color="#0891b2" />
-        <InsightCard label="Low Progress" value={lowProgressCount !== null ? String(lowProgressCount) : "—"}    color="#dc2626" />
-      </div>
-
-      {/* Action bar */}
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "14px 18px", marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
-            {centerName} · Today
-          </div>
-          <span style={{ fontSize: 14, color: "#6b7280" }}>
-            {students.length === 0
-              ? "No active students in this centre."
-              : `${students.length} active student${students.length === 1 ? "" : "s"} enrolled`}
-          </span>
+      {/* Empty state */}
+      {centers.length === 0 ? (
+        <div style={s.emptyState}>
+          {isTeacherRole
+            ? "You have not been assigned to any centre yet. Contact your administrator."
+            : "No centres found."}
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button style={s.btnPrimary} onClick={onMarkAttendance}>✓ Mark Attendance</button>
-          <button style={s.btnGhost}   onClick={onViewStudents}>👥 Students</button>
-        </div>
-      </div>
-
-      {/* ── QUICK ACTIONS ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 10, marginBottom: 24 }}>
-        {[
-          { label: "✓ Mark Attendance", fn: onMarkAttendance, bg: "#4f46e5", fg: "#fff" },
-          { label: "👥 View Students",  fn: onViewStudents,   bg: "#f3f4f6", fg: "#374151" },
-          { label: "📊 View Progress",  fn: () => { if(sorted[0]) onViewProgress(students.find(s=>s.uid===sorted[0].uid) ?? students[0]); }, bg: "#f3f4f6", fg: "#374151" },
-          { label: "🔄 Refresh Data",   fn: onRefresh,        bg: "#f3f4f6", fg: "#374151" },
-        ].map(a => (
-          <button key={a.label} onClick={a.fn}
-            style={{ background: a.bg, color: a.fg, border: "none", borderRadius: 10, padding: "14px 10px", fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "center" }}>
-            {a.label}
-          </button>
-        ))}
-      </div>
-
-      {/* ── ALERTS ── */}
-      {alerts.length > 0 && (
-        <div style={{ marginBottom: 20 }}>
-          <div style={s.sectionTitle}>⚠️ Alerts</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
-            {alerts.map((a, i) => (
-              <div key={i} style={{
-                display: "flex", alignItems: "center", gap: 10,
-                background: "#fff", border: `1px solid #e5e7eb`, borderLeft: `4px solid ${a.color}`,
-                borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#374151",
-              }}>
-                <span>{a.icon}</span>
-                <span style={{ flex: 1 }}>{a.msg}</span>
-                {i === 0 && attendancePct === null && (
-                  <button style={s.btnSm} onClick={onMarkAttendance}>Mark now</button>
-                )}
+      ) : (
+        <>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>
+            Your Centres
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
+            {centers.map(c => (
+              <div key={c.id}
+                onClick={() => goToCentre(c.id, "attendance")}
+                style={{
+                  background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12,
+                  padding: "18px 20px", cursor: "pointer", transition: "box-shadow 0.15s",
+                  display: "flex", flexDirection: "column", gap: 10,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.boxShadow = "0 4px 16px rgba(79,70,229,0.12)")}
+                onMouseLeave={e => (e.currentTarget.style.boxShadow = "none")}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: "#111" }}>{c.name}</div>
+                  <span style={{ fontSize: 11, background: "#ede9fe", color: "#4f46e5", borderRadius: 6, padding: "2px 8px", fontWeight: 600 }}>
+                    {c.centerCode}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: "#6b7280" }}>{c.timeSlot || "—"}</div>
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  {(["attendance","students","progress"] as const).map(tab => (
+                    <button key={tab}
+                      onClick={e => { e.stopPropagation(); goToCentre(c.id, tab); }}
+                      style={{ flex: 1, padding: "6px 4px", borderRadius: 7, border: "1px solid #e5e7eb",
+                               background: "#f9fafb", color: "#374151", fontSize: 11, fontWeight: 600,
+                               cursor: "pointer" }}>
+                      {tab === "attendance" ? "✓ Att." : tab === "students" ? "👥 Students" : "📊 Progress"}
+                    </button>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
-        </div>
-      )}
-
-      {/* ── ATTENDANCE SUMMARY ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
-        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "16px 20px", textAlign: "center" }}>
-          <div style={{ fontSize: 32, fontWeight: 800, color: "#16a34a" }}>{insights?.presentCount ?? "—"}</div>
-          <div style={{ fontSize: 12, color: "#15803d", fontWeight: 600, marginTop: 4 }}>Present Today</div>
-        </div>
-        <div style={{ background: "#fff1f2", border: "1px solid #fecaca", borderRadius: 10, padding: "16px 20px", textAlign: "center" }}>
-          <div style={{ fontSize: 32, fontWeight: 800, color: "#dc2626" }}>{insights?.absentCount ?? "—"}</div>
-          <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 600, marginTop: 4 }}>Absent Today</div>
-        </div>
-      </div>
-
-      {/* ── STUDENT PERFORMANCE SNAPSHOT ── */}
-      {sorted.length > 0 && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
-            {/* Top 3 */}
-            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ padding: "10px 14px", background: "#f0fdf4", fontSize: 12, fontWeight: 700, color: "#15803d", borderBottom: "1px solid #bbf7d0" }}>
-                🏆 Top Students
-              </div>
-              {top3.map((st, i) => (
-                <div key={st.uid} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: i < top3.length-1 ? "1px solid #f3f4f6" : "none", gap: 8 }}>
-                  <span style={{ fontSize: 11, fontWeight: 800, color: "#9ca3af", minWidth: 16 }}>{i+1}</span>
-                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#111" }}>{st.name}</span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: "#16a34a" }}>{st.pct}%</span>
-                  <button style={s.linkBtn} onClick={() => { const row = students.find(s=>s.uid===st.uid); if(row) onViewProgress(row); }}>→</button>
-                </div>
-              ))}
-            </div>
-            {/* Bottom 3 */}
-            <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ padding: "10px 14px", background: "#fff1f2", fontSize: 12, fontWeight: 700, color: "#b91c1c", borderBottom: "1px solid #fecaca" }}>
-                📉 Need Attention
-              </div>
-              {bottom3.map((st, i) => (
-                <div key={st.uid} style={{ display: "flex", alignItems: "center", padding: "10px 14px", borderBottom: i < bottom3.length-1 ? "1px solid #f3f4f6" : "none", gap: 8 }}>
-                  <span style={{ fontSize: 11, fontWeight: 800, color: "#9ca3af", minWidth: 16 }}>{sorted.length - (bottom3.length - 1 - i)}</span>
-                  <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#111" }}>{st.name}</span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: "#dc2626" }}>{st.pct}%</span>
-                  <button style={s.linkBtn} onClick={() => { const row = students.find(s=>s.uid===st.uid); if(row) onViewProgress(row); }}>→</button>
-                </div>
-              ))}
-            </div>
-          </div>
         </>
       )}
-
-      {/* ── WEEKLY PERFORMANCE TREND ── */}
-      {trend.length > 0 && (
-        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "16px 18px", marginBottom: 20 }}>
-          <div style={{ ...s.sectionTitle, marginBottom: 14 }}>📈 Weekly Attendance Trend</div>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 80 }}>
-            {trend.map(d => {
-              const h   = d.pct !== null ? Math.max(8, Math.round(d.pct * 0.72)) : 8;
-              const bg  = d.date === today ? "#4f46e5" : d.pct !== null ? "#a5b4fc" : "#e5e7eb";
-              const col = d.date === today ? "#4f46e5" : "#9ca3af";
-              return (
-                <div key={d.date} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                  <span style={{ fontSize: 10, fontWeight: 600, color: col }}>
-                    {d.pct !== null ? `${d.pct}%` : "—"}
-                  </span>
-                  <div style={{ width: "100%", height: h, background: bg, borderRadius: 4 }} />
-                  <span style={{ fontSize: 10, color: col, fontWeight: d.date === today ? 800 : 400 }}>{d.label}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
     </div>
   );
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATTENDANCE VIEW
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function AttendanceView({ centerId, date, students, markedBy, onDone }: {
-  centerId:  string;
-  date:      string;         // YYYY-MM-DD
-  students:  StudentRow[];
-  markedBy:  string;
-  onDone:    () => void;
-}) {
-  const [marks,   setMarks]   = useState<AttendanceState>({});
-  const [loading, setLoading] = useState(true);
-  const [saving,  setSaving]  = useState(false);
-  const [saved,   setSaved]   = useState(false);
-  const [err,     setErr]     = useState<string | null>(null);
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-  // Pre-fill from existing records on mount
-  useEffect(() => {
-    const init: AttendanceState = {};
-    students.forEach(s => { init[s.uid] = "present"; }); // default all present
-    setMarks(init);
+const DAY_MAP: Record<string, number> = {
+  sun:0, sunday:0, mon:1, monday:1, tue:2, tuesday:2,
+  wed:3, wednesday:3, thu:4, thursday:4, fri:5, friday:5, sat:6, saturday:6,
+};
 
-    getAttendanceByCentreDate(centerId, date)
-      .then(recs => {
-        setMarks(prev => {
-          const next = { ...prev };
-          recs.forEach(r => {
-            if (r.status === "present" || r.status === "absent") {
-              next[r.studentUid] = r.status;
-            }
-          });
-          return next;
-        });
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centerId, date]);
+/** Parse day abbreviations / names from a timeSlot string like "Mon/Wed/Fri 17:00–18:30" */
+function parseDaysOfWeek(timeSlot: string): string[] {
+  const tokens = timeSlot.toLowerCase().split(/[\s/,]+/);
+  return tokens.filter(t => t in DAY_MAP);
+}
 
-  function toggle(uid: string) {
-    setMarks(prev => ({ ...prev, [uid]: prev[uid] === "present" ? "absent" : "present" }));
-  }
-
-  function markAll(status: "present" | "absent") {
-    const next: AttendanceState = {};
-    students.forEach(s => { next[s.uid] = status; });
-    setMarks(next);
-  }
-
-  async function handleSave() {
-    setSaving(true);
-    setSaved(false);
-    setErr(null);
-    try {
-      await Promise.all(
-        students.map(st =>
-          saveCentreAttendance({
-            studentUid: st.uid,
-            centerId,
-            date,
-            status:   marks[st.uid] ?? "present",
-            markedBy,
-          }),
-        ),
+/** Return all YYYY-MM-DD dates in a month (1-indexed mo) where dayOfWeek matches. */
+function scheduledDatesInMonth(year: number, mo: number, days: string[]): string[] {
+  const nums = new Set(days.map(d => DAY_MAP[d]).filter(n => n !== undefined));
+  const result: string[] = [];
+  const daysInMonth = new Date(year, mo, 0).getDate();
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dt = new Date(year, mo - 1, d);
+    if (nums.has(dt.getDay())) {
+      result.push(
+        `${year}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`
       );
-      setSaved(true);
-      // Return to overview and reload dashboard data automatically
-      setTimeout(() => onDone(), 800);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to save attendance.");
-    } finally {
-      setSaving(false);
     }
   }
+  return result;
+}
 
-  const presentCount = Object.values(marks).filter(v => v === "present").length;
+// ─── Status colours ────────────────────────────────────────────────────────────
 
-  if (loading) return <div style={s.center}>Loading attendance…</div>;
+const STATUS_LABEL: Record<AttendanceStatus, string> = {
+  present:            "✔ Present",
+  absent:             "✗ Absent",
+  break:              "☕ Break",
+  cancelled_teacher:  "CT Cancel",
+  cancelled_student:  "CS Cancel",
+};
+const STATUS_BG: Record<AttendanceStatus, string> = {
+  present:           "#dcfce7",
+  absent:            "#fee2e2",
+  break:             "#fef9c3",
+  cancelled_teacher: "#ede9fe",
+  cancelled_student: "#fce7f3",
+};
+const STATUS_COLOR: Record<AttendanceStatus, string> = {
+  present:           "#166534",
+  absent:            "#991b1b",
+  break:             "#92400e",
+  cancelled_teacher: "#5b21b6",
+  cancelled_student: "#9d174d",
+};
 
+// ─── Status picker modal ───────────────────────────────────────────────────────
+
+function StatusModal({
+  current, onSelect, onClose,
+}: { current: AttendanceStatus | null; onSelect:(s:AttendanceStatus)=>void; onClose:()=>void }) {
+  const statuses: AttendanceStatus[] = ["present","absent","break","cancelled_teacher","cancelled_student"];
   return (
-    <div>
-      <div style={s.sectionHeader}>
-        <div style={s.sectionTitle}>Attendance — {date}</div>
-        <span style={{ fontSize: 12, color: "#6b7280" }}>{centerId}</span>
-      </div>
-
-      {err   && <div style={s.errBanner}>{err}</div>}
-      {saved && <div style={s.successBanner}>Saved — {presentCount}/{students.length} present.</div>}
-
-      <div style={s.attActions}>
-        <button style={s.btnSm} onClick={() => markAll("present")}>✓ All Present</button>
-        <button style={{ ...s.btnSm, marginLeft: 8 }} onClick={() => markAll("absent")}>✗ All Absent</button>
-        <span style={s.attCount}>{presentCount}/{students.length} present</span>
-      </div>
-
-      {students.length === 0 ? (
-        <div style={s.emptyCard}>No active students enrolled in this centre.</div>
-      ) : (
-        <div style={s.attList}>
-          {students.map(st => {
-            const status = marks[st.uid] ?? "present";
-            return (
-              <div key={st.uid} style={s.attRow}>
-                <div style={s.attName}>{st.name}</div>
-                <div style={s.attInst}>{st.instrument}</div>
-                <button
-                  style={{ ...s.attToggle, ...(status === "present" ? s.attPresent : s.attAbsent) }}
-                  onClick={() => toggle(st.uid)}
-                >
-                  {status === "present" ? "✔ Present" : "✗ Absent"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <div style={s.attFooter}>
-        <button style={s.btnGhost} onClick={onDone}>← Back</button>
-        <button
-          style={{ ...s.btnPrimary, opacity: saving ? 0.5 : 1, marginLeft: 10 }}
-          onClick={handleSave}
-          disabled={saving}
-        >
-          {saving ? "Saving…" : "Save Attendance"}
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.45)", zIndex:999,
+                  display:"flex", alignItems:"center", justifyContent:"center" }}
+         onClick={onClose}>
+      <div style={{ background:"#fff", borderRadius:12, padding:20, minWidth:220,
+                    boxShadow:"0 8px 32px rgba(0,0,0,0.18)" }}
+           onClick={e => e.stopPropagation()}>
+        <div style={{ fontWeight:700, fontSize:14, marginBottom:12, color:"#111" }}>Mark Status</div>
+        {statuses.map(st => (
+          <button key={st} onClick={() => onSelect(st)}
+            style={{ display:"block", width:"100%", textAlign:"left", padding:"9px 14px",
+                     marginBottom:6, borderRadius:8, border:"none", cursor:"pointer",
+                     background: current===st ? STATUS_BG[st] : "#f3f4f6",
+                     color: current===st ? STATUS_COLOR[st] : "#374151",
+                     fontWeight: current===st ? 700 : 400, fontSize:13 }}>
+            {STATUS_LABEL[st]}
+          </button>
+        ))}
+        <button onClick={onClose}
+          style={{ marginTop:4, width:"100%", padding:"8px 0", borderRadius:8, border:"none",
+                   background:"#f3f4f6", color:"#6b7280", fontSize:13, cursor:"pointer" }}>
+          Cancel
         </button>
       </div>
     </div>
   );
 }
+
+// ─── Extra class date picker modal ────────────────────────────────────────────
+
+function ExtraClassModal({
+  month, existing, onAdd, onClose,
+}: { month:string; existing:Set<string>; onAdd:(date:string)=>void; onClose:()=>void }) {
+  const [date, setDate] = useState("");
+  const [err,  setErr]  = useState("");
+  const min = `${month}-01`;
+  const [yr,mo] = month.split("-").map(Number);
+  const max = `${month}-${String(new Date(yr,mo,0).getDate()).padStart(2,"0")}`;
+
+  function submit() {
+    if (!date) { setErr("Select a date."); return; }
+    if (existing.has(date)) { setErr("Already a class on this date."); return; }
+    onAdd(date);
+  }
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.45)", zIndex:999,
+                  display:"flex", alignItems:"center", justifyContent:"center" }}
+         onClick={onClose}>
+      <div style={{ background:"#fff", borderRadius:12, padding:24, minWidth:260,
+                    boxShadow:"0 8px 32px rgba(0,0,0,0.18)" }}
+           onClick={e => e.stopPropagation()}>
+        <div style={{ fontWeight:700, fontSize:14, marginBottom:12, color:"#111" }}>Add Extra Class</div>
+        <input type="date" min={min} max={max} value={date}
+          onChange={e => { setDate(e.target.value); setErr(""); }}
+          style={{ width:"100%", padding:"9px 12px", borderRadius:8,
+                   border:"1px solid #d1d5db", fontSize:14, marginBottom:8 }} />
+        {err && <div style={{ fontSize:12, color:"#dc2626", marginBottom:8 }}>{err}</div>}
+        <div style={{ display:"flex", gap:8, marginTop:4 }}>
+          <button onClick={submit}
+            style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none",
+                     background:"#4f46e5", color:"#fff", fontWeight:600, fontSize:13, cursor:"pointer" }}>
+            Add
+          </button>
+          <button onClick={onClose}
+            style={{ flex:1, padding:"9px 0", borderRadius:8, border:"none",
+                     background:"#f3f4f6", color:"#374151", fontSize:13, cursor:"pointer" }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ATTENDANCE GRID VIEW  — monthly calendar grid
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type GridMarks = Record<string, Record<string, AttendanceStatus>>; // [date][studentUid]
+
+function AttendanceGridView({ centreId, daysOfWeek, students, markedBy, onDone }: {
+  centreId:   string;
+  daysOfWeek: string[];
+  students:   StudentRow[];
+  markedBy:   string;
+  onDone:     () => void;
+}) {
+  const todayStr = new Date().toISOString().split("T")[0];
+  const [month,   setMonth]   = useState(() => todayStr.slice(0,7));          // "YYYY-MM"
+  const [marks,   setMarks]   = useState<GridMarks>({});
+  const [loading, setLoading] = useState(false);
+  const [saving,  setSaving]  = useState<string|null>(null);  // "date|uid" being saved
+  const [err,     setErr]     = useState<string|null>(null);
+
+  // Extra class state
+  const [extraDates,     setExtraDates]     = useState<Set<string>>(new Set());
+  const [showExtraModal, setShowExtraModal] = useState(false);
+  const [addingExtra,    setAddingExtra]    = useState(false);
+
+  // Status modal
+  const [modal, setModal] = useState<{ date:string; uid:string } | null>(null);
+
+  // Derive scheduled dates from daysOfWeek + extra dates
+  const [yr, mo] = month.split("-").map(Number);
+  const scheduledDates: string[] = useMemo(() => {
+    const base = scheduledDatesInMonth(yr, mo, daysOfWeek);
+    const extra = Array.from(extraDates).filter(d => d.startsWith(month)).sort();
+    return [...new Set([...base, ...extra])].sort();
+  }, [yr, mo, daysOfWeek, extraDates, month]);
+
+  // Load attendance records for the whole month
+  useEffect(() => {
+    if (!centreId || scheduledDates.length === 0) return;
+    setLoading(true);
+    setErr(null);
+    (async () => {
+      try {
+        // Fetch records for each scheduled date in parallel
+        const results = await Promise.all(
+          scheduledDates.map(date => getAttendanceByCentreDate(centreId, date))
+        );
+        const grid: GridMarks = {};
+        scheduledDates.forEach((date, i) => {
+          grid[date] = {};
+          results[i].forEach(r => {
+            const status = r.status as string;
+            if (["present","absent","break","cancelled_teacher","cancelled_student"].includes(status)) {
+              grid[date][r.studentUid] = status as AttendanceStatus;
+            }
+          });
+        });
+        setMarks(grid);
+      } catch(e) {
+        setErr(e instanceof Error ? e.message : "Failed to load attendance.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centreId, month, extraDates]);
+
+  // Load extra classes
+  useEffect(() => {
+    getExtraClassesByCentre(centreId, month)
+      .then(list => setExtraDates(new Set(list.map(e => e.date))))
+      .catch(console.error);
+  }, [centreId, month]);
+
+  function isFuture(date: string) { return date > todayStr; }
+
+  function openModal(date: string, uid: string) {
+    if (isFuture(date)) return;
+    setModal({ date, uid });
+  }
+
+  async function handleSelect(status: AttendanceStatus) {
+    if (!modal) return;
+    const { date, uid } = modal;
+    setModal(null);
+
+    // Optimistic update
+    setMarks(prev => ({
+      ...prev,
+      [date]: { ...prev[date], [uid]: status },
+    }));
+
+    const key = `${date}|${uid}`;
+    setSaving(key);
+    try {
+      await saveCentreAttendance({ studentUid: uid, centerId: centreId, date, status, markedBy });
+    } catch(e) {
+      setErr(e instanceof Error ? e.message : "Save failed.");
+      // Revert optimistic update on error
+      setMarks(prev => {
+        const next = { ...prev, [date]: { ...prev[date] } };
+        delete next[date][uid];
+        return next;
+      });
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function handleAddExtra(date: string) {
+    setShowExtraModal(false);
+    setAddingExtra(true);
+    try {
+      await saveExtraClass(centreId, date, markedBy);
+      setExtraDates(prev => new Set([...prev, date]));
+    } catch(e) {
+      setErr(e instanceof Error ? e.message : "Failed to add extra class.");
+    } finally {
+      setAddingExtra(false);
+    }
+  }
+
+  // Summary per student
+  function summary(uid: string) {
+    let p = 0, a = 0, total = 0;
+    scheduledDates.forEach(date => {
+      if (isFuture(date)) return;
+      total++;
+      const st = marks[date]?.[uid];
+      if (st === "present") p++;
+      else if (st === "absent") a++;
+    });
+    const pct = total > 0 ? Math.round((p/total)*100) : null;
+    return { p, a, pct };
+  }
+
+  const prevMonth = () => {
+    const d = new Date(yr, mo - 2, 1);
+    setMonth(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`);
+  };
+  const nextMonth = () => {
+    const d = new Date(yr, mo, 1);
+    setMonth(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`);
+  };
+
+  const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  return (
+    <div style={{ paddingBottom: 32 }}>
+      {modal && (
+        <StatusModal
+          current={marks[modal.date]?.[modal.uid] ?? null}
+          onSelect={handleSelect}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {showExtraModal && (
+        <ExtraClassModal
+          month={month}
+          existing={new Set(scheduledDates)}
+          onAdd={handleAddExtra}
+          onClose={() => setShowExtraModal(false)}
+        />
+      )}
+
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16, flexWrap:"wrap" }}>
+        <div style={{ fontWeight:700, fontSize:17, color:"#111" }}>Monthly Attendance</div>
+        <div style={{ display:"flex", alignItems:"center", gap:6, marginLeft:"auto" }}>
+          <button onClick={prevMonth}
+            style={{ padding:"4px 10px", borderRadius:6, border:"1px solid #d1d5db",
+                     background:"#fff", cursor:"pointer", fontSize:14 }}>‹</button>
+          <span style={{ fontSize:14, fontWeight:600, color:"#374151", minWidth:80, textAlign:"center" }}>
+            {MONTH_NAMES[mo-1]} {yr}
+          </span>
+          <button onClick={nextMonth}
+            style={{ padding:"4px 10px", borderRadius:6, border:"1px solid #d1d5db",
+                     background:"#fff", cursor:"pointer", fontSize:14 }}>›</button>
+        </div>
+        <button
+          onClick={() => setShowExtraModal(true)}
+          disabled={addingExtra}
+          style={{ padding:"6px 14px", borderRadius:8, border:"none", background:"#4f46e5",
+                   color:"#fff", fontWeight:600, fontSize:13, cursor:"pointer",
+                   opacity: addingExtra ? 0.5 : 1 }}>
+          + Extra Class
+        </button>
+      </div>
+
+      {err && <div style={s.errBanner}>{err}</div>}
+
+      {loading ? (
+        <div style={s.center}>Loading…</div>
+      ) : students.length === 0 ? (
+        <div style={s.emptyCard}>No students enrolled in this centre.</div>
+      ) : scheduledDates.length === 0 ? (
+        <div style={s.emptyCard}>No scheduled classes this month. Add an extra class to begin.</div>
+      ) : (
+        <div style={{ overflowX:"auto", WebkitOverflowScrolling:"touch" }}>
+          <table style={{ borderCollapse:"collapse", minWidth: 320 + scheduledDates.length * 60, fontSize:12 }}>
+            <thead>
+              <tr>
+                <th style={{ ...thStyle, minWidth:130, textAlign:"left", position:"sticky", left:0,
+                              background:"#f9fafb", zIndex:2 }}>
+                  Student
+                </th>
+                {scheduledDates.map(date => {
+                  const isExtra = extraDates.has(date);
+                  const isTod   = date === todayStr;
+                  return (
+                    <th key={date} style={{ ...thStyle, minWidth:54,
+                        background: isTod ? "#eff6ff" : isExtra ? "#fdf4ff" : "#f9fafb",
+                        color: isTod ? "#1d4ed8" : isExtra ? "#7c3aed" : "#374151" }}>
+                      <div>{new Date(date+"T00:00:00").toLocaleDateString("en-IN",{day:"2-digit"})}</div>
+                      <div style={{ fontWeight:400, fontSize:10, color:"#9ca3af" }}>
+                        {new Date(date+"T00:00:00").toLocaleDateString("en-IN",{weekday:"short"})}
+                      </div>
+                      {isExtra && <div style={{ fontSize:9, color:"#7c3aed" }}>extra</div>}
+                    </th>
+                  );
+                })}
+                <th style={{ ...thStyle, minWidth:36 }}>P</th>
+                <th style={{ ...thStyle, minWidth:36 }}>A</th>
+                <th style={{ ...thStyle, minWidth:46 }}>%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {students.map((st, idx) => {
+                const { p, a, pct } = summary(st.uid);
+                return (
+                  <tr key={st.uid} style={{ background: idx%2===0 ? "#fff" : "#f9fafb" }}>
+                    <td style={{ ...tdStyle, position:"sticky", left:0,
+                                 background: idx%2===0 ? "#fff" : "#f9fafb", zIndex:1,
+                                 fontWeight:500, color:"#111" }}>
+                      <div>{st.name}</div>
+                      <div style={{ fontSize:10, color:"#9ca3af" }}>{st.instrument}</div>
+                    </td>
+                    {scheduledDates.map(date => {
+                      const future  = isFuture(date);
+                      const status  = marks[date]?.[st.uid] ?? null;
+                      const isSaving= saving === `${date}|${st.uid}`;
+                      return (
+                        <td key={date}
+                          onClick={() => openModal(date, st.uid)}
+                          style={{ ...tdStyle, textAlign:"center", cursor: future ? "default" : "pointer",
+                                   background: future ? "#f3f4f6"
+                                     : status ? STATUS_BG[status] : "#fff",
+                                   color: status ? STATUS_COLOR[status] : "#9ca3af",
+                                   opacity: isSaving ? 0.5 : 1,
+                                   transition:"background 0.15s" }}>
+                          {isSaving ? "…"
+                            : future ? <span style={{ color:"#d1d5db" }}>–</span>
+                            : status ? STATUS_LABEL[status].split(" ")[0]
+                            : "·"}
+                        </td>
+                      );
+                    })}
+                    <td style={{ ...tdStyle, textAlign:"center", fontWeight:600, color:"#166534" }}>{p}</td>
+                    <td style={{ ...tdStyle, textAlign:"center", fontWeight:600, color:"#991b1b" }}>{a}</td>
+                    <td style={{ ...tdStyle, textAlign:"center", fontWeight:700,
+                                 color: pct===null?"#9ca3af":pct>=75?"#166534":pct>=50?"#92400e":"#991b1b" }}>
+                      {pct===null ? "–" : `${pct}%`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const thStyle: React.CSSProperties = {
+  padding: "8px 6px", borderBottom: "2px solid #e5e7eb",
+  fontWeight: 600, fontSize: 11, color: "#374151", whiteSpace: "nowrap",
+};
+const tdStyle: React.CSSProperties = {
+  padding: "7px 5px", borderBottom: "1px solid #f3f4f6",
+  fontSize: 11, whiteSpace: "nowrap",
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STUDENTS VIEW
