@@ -35,18 +35,14 @@ function clearSessionCookie() {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  // resolvedWithUser: set to true once we receive a real (non-null) user.
-  // After that we ignore further callbacks to prevent re-render loops on mobile.
-  // We do NOT use this to block the null→real-user transition — Firebase always
-  // fires null first when reading from localStorage, then fires the real user.
-  const resolvedWithUserRef = useRef(false);
-  // resolvedDefinitiveNull: set true when we receive null AND have waited enough
-  // time to confirm there is no session (safety timeout or cookie-less null).
-  const resolvedDefinitiveNullRef = useRef(false);
+  const resolvedWithUserRef        = useRef(false);
+  const resolvedDefinitiveNullRef  = useRef(false);
+  // Debounce timer for null-after-user — gives Firebase time to re-emit the
+  // real user during a token refresh on mobile networks before treating as
+  // a genuine sign-out.
+  const signOutDebounceRef         = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    // Safety timeout: if Firebase never resolves a real user within AUTH_TIMEOUT_MS,
-    // treat as definitively signed out.
     const safetyTimer = setTimeout(() => {
       if (!resolvedWithUserRef.current && !resolvedDefinitiveNullRef.current) {
         resolvedDefinitiveNullRef.current = true;
@@ -58,25 +54,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const unsubscribe = subscribeToAuthState((resolvedUser) => {
       if (resolvedUser) {
-        // Real user resolved — lock in this state, ignore further callbacks.
-        if (resolvedWithUserRef.current) return;
+        // Real user — cancel any pending sign-out debounce and lock in.
+        if (signOutDebounceRef.current) {
+          clearTimeout(signOutDebounceRef.current);
+          signOutDebounceRef.current = null;
+        }
         clearTimeout(safetyTimer);
         resolvedWithUserRef.current = true;
         resolvedDefinitiveNullRef.current = false;
         setUser(resolvedUser);
         setLoading(false);
       } else {
-        // Null callback — Firebase fires this first before reading localStorage.
-        // Only treat as definitive sign-out if:
-        //   (a) we already had a real user (genuine sign-out), OR
-        //   (b) there is no session cookie (no persisted session to wait for).
         if (resolvedWithUserRef.current) {
-          // Genuine sign-out after having been logged in.
-          resolvedWithUserRef.current = false;
-          resolvedDefinitiveNullRef.current = true;
-          clearSessionCookie();
-          setUser(null);
-          // Keep loading=false (already false from prior real-user resolve).
+          // Null after having a real user — may be a token refresh flicker on
+          // mobile. Debounce for 2 s before committing to sign-out state.
+          // If Firebase re-emits the real user within 2 s the timer is cancelled.
+          if (signOutDebounceRef.current) return; // already debouncing
+          signOutDebounceRef.current = setTimeout(() => {
+            signOutDebounceRef.current = null;
+            // Only sign out if no real user arrived during the debounce window.
+            if (!resolvedWithUserRef.current) return;
+            // Check: did Firebase re-fire with a user? If so resolvedWithUserRef
+            // would have been set back to true — but we check the cookie too.
+            const hasSessionCookie =
+              typeof document !== "undefined" &&
+              document.cookie.includes("rol_session=");
+            if (!hasSessionCookie) {
+              resolvedWithUserRef.current = false;
+              resolvedDefinitiveNullRef.current = true;
+              clearSessionCookie();
+              setUser(null);
+            }
+          }, 2_000);
           return;
         }
 
@@ -85,7 +94,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           document.cookie.includes("rol_session=");
 
         if (!hasSessionCookie) {
-          // No cookie → definitively not logged in; no need to wait.
           if (!resolvedDefinitiveNullRef.current) {
             clearTimeout(safetyTimer);
             resolvedDefinitiveNullRef.current = true;
@@ -94,14 +102,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setLoading(false);
           }
         }
-        // If cookie IS present: Firebase is still reading from localStorage.
-        // Keep loading=true and wait — the real user callback will come shortly.
-        // The safety timer will unblock if it never arrives.
+        // Cookie present → still waiting for Firebase IndexedDB read.
       }
     });
 
     return () => {
       clearTimeout(safetyTimer);
+      if (signOutDebounceRef.current) clearTimeout(signOutDebounceRef.current);
       unsubscribe();
     };
   }, []);

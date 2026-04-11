@@ -57,7 +57,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Teachers",     icon: "👥", href: "/dashboard/teachers",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Admins",       icon: "👤", href: "/dashboard/admins",         roles: [ROLES.SUPER_ADMIN] },
   { label: "Students",     icon: "🎓", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT] },
+  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Finance",      icon: "₹",  href: "/dashboard/finance",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   {
     label: "Syllabus", icon: "📚",

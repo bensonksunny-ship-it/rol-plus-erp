@@ -42,8 +42,13 @@ export default function LoginPage() {
     try {
       const session = await signIn(email.trim(), password);
       const maxAge  = 60 * 60 * 24 * 7;
+      // Write cookie BEFORE navigation so middleware sees it on the next request.
+      // Do NOT call window.location.replace here — let the useEffect above handle
+      // the redirect once Firebase's onAuthStateChanged confirms the user. This
+      // prevents a mobile race where the cookie isn't sent on an immediate hard
+      // navigation, causing middleware to redirect back to /login.
       document.cookie = `rol_session=${session.token}; path=/; SameSite=Lax; max-age=${maxAge}`;
-      window.location.replace(ROLE_ROUTES[session.user.role] ?? "/dashboard");
+      // submitting stays true — the useEffect redirect will unmount this page.
     } catch (err: unknown) {
       const code = err instanceof Error ? err.message : "unknown";
       setError(ERROR_MESSAGES[code] ?? "Something went wrong. Please try again.");

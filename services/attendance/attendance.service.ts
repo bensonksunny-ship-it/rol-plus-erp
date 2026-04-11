@@ -221,7 +221,12 @@ export async function getAttendanceByCentreDate(
     .filter(r => r.date === date);
 }
 
-export type AttendanceStatus = "present" | "absent";
+export type AttendanceStatus =
+  | "present"
+  | "absent"
+  | "break"
+  | "cancelled_teacher"
+  | "cancelled_student";
 
 export interface CentreAttendanceInput {
   studentUid: string;
@@ -296,6 +301,49 @@ export async function saveCentreAttendance(
       createdAt:  serverTimestamp(),
     });
   }
+}
+
+// ─── Extra Classes ────────────────────────────────────────────────────────────
+
+const EXTRA_CLASSES = "extraClasses";
+
+export interface ExtraClass {
+  id:        string;
+  centerId:  string;
+  date:      string;   // YYYY-MM-DD
+  note:      string;
+  createdBy: string;
+  createdAt: string;
+}
+
+/** Add an extra class date for a centre. Idempotent — skips if already exists. */
+export async function saveExtraClass(
+  centerId: string,
+  date:     string,
+  createdBy:string,
+  note = "",
+): Promise<void> {
+  const q    = query(collection(db, EXTRA_CLASSES), where("centerId","==",centerId), where("date","==",date));
+  const snap = await getDocs(q);
+  if (!snap.empty) return; // already exists
+  await addDoc(collection(db, EXTRA_CLASSES), {
+    centerId, date, note, createdBy, createdAt: serverTimestamp(),
+  });
+}
+
+/** Fetch extra class dates for a centre within a month (YYYY-MM). */
+export async function getExtraClassesByCentre(
+  centerId: string,
+  month:    string,   // "YYYY-MM"
+): Promise<ExtraClass[]> {
+  const [yr, mo] = month.split("-").map(Number);
+  const start    = `${month}-01`;
+  const end      = `${month}-${String(new Date(yr, mo, 0).getDate()).padStart(2,"0")}`;
+  const q        = query(collection(db, EXTRA_CLASSES), where("centerId","==",centerId));
+  const snap     = await getDocs(q);
+  return snap.docs
+    .map(d => ({ id: d.id, ...d.data() }) as ExtraClass)
+    .filter(e => e.date >= start && e.date <= end);
 }
 
 // ─── Class-based Attendance ────────────────────────────────────────────────────
