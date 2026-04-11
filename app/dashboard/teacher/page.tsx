@@ -16,10 +16,7 @@ import { getCenterById } from "@/services/center/center.service";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
-  saveExtraClass,
-  getExtraClassesByCentre,
 } from "@/services/attendance/attendance.service";
-import type { AttendanceStatus } from "@/services/attendance/attendance.service";
 import {
   getLessonsForStudent,
   getProgressByStudent,
@@ -50,7 +47,7 @@ interface StudentRow {
 const PERSONAL_TAB_ID = "__personal__";
 
 interface AttendanceState {
-  [studentUid: string]: AttendanceStatus;
+  [studentUid: string]: "present" | "absent";
 }
 
 interface StudentProgress {
@@ -81,9 +78,9 @@ interface DashboardInsights {
 
 type View =
   | { type: "overview" }
-  | { type: "attendance"; centreId: string; daysOfWeek: string[] }
+  | { type: "attendance" }
   | { type: "students" }
-  | { type: "progress"; student: StudentRow; from: "overview" | "students" };
+  | { type: "progress"; student: StudentRow };
 
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
@@ -405,6 +402,24 @@ function TeacherDashboardContent() {
   return (
     <div style={s.page}>
 
+      {/* ── Top Bar ── */}
+      <div style={s.topBar}>
+        <div style={s.topBarLeft}>
+          <div style={s.teacherName}>{user?.displayName}</div>
+          <div style={s.todayDate}>
+            {new Date().toLocaleDateString("en-IN", {
+              weekday: "long", day: "numeric", month: "long", year: "numeric",
+            })}
+          </div>
+        </div>
+        {/* Centre badge / count on the right */}
+        <div style={s.topBarRight}>
+          <span style={s.centerBadge}>
+            🏫 {centers.length} {centers.length === 1 ? "Centre" : "Centres"}
+          </span>
+        </div>
+      </div>
+
       {/* ── Centre Tab Bar (shown for all counts; tabs only clickable when > 1) ── */}
       <div style={s.tabBar}>
         {centers.map(c => (
@@ -453,11 +468,8 @@ function TeacherDashboardContent() {
 
       {/* ── Back button ── */}
       {view.type !== "overview" && selectedCenter !== PERSONAL_TAB_ID && (
-        <button style={s.backBtn} onClick={() => {
-          if (view.type === "progress" && view.from === "students") setView({ type: "students" });
-          else setView({ type: "overview" });
-        }}>
-          {view.type === "progress" && view.from === "students" ? "← Back to Students" : "← Back to Overview"}
+        <button style={s.backBtn} onClick={() => setView({ type: "overview" })}>
+          ← Back to Overview
         </button>
       )}
       {view.type === "progress" && selectedCenter === PERSONAL_TAB_ID && (
@@ -481,7 +493,7 @@ function TeacherDashboardContent() {
               : <StudentsView
                   students={personalStudents}
                   teacherUid={user?.uid ?? ""}
-                  onViewProgress={st => setView({ type: "progress", student: st, from: "students" })}
+                  onViewProgress={st => setView({ type: "progress", student: st })}
                 />
       )}
 
@@ -498,17 +510,17 @@ function TeacherDashboardContent() {
               attendancePct={attendancePct}
               lowProgressCount={lowProgressCount}
               insights={insights}
-              onMarkAttendance={() => setView({ type: "attendance", centreId: selectedCenter, daysOfWeek: (selectedCentreObj as (typeof selectedCentreObj) & { daysOfWeek?: string[] })?.daysOfWeek ?? [] })}
+              onMarkAttendance={() => setView({ type: "attendance" })}
               onViewStudents={() => setView({ type: "students" })}
-              onViewProgress={st => setView({ type: "progress", student: st, from: "overview" })}
+              onViewProgress={st => setView({ type: "progress", student: st })}
               onRefresh={() => loadCenterData(selectedCenter)}
             />
       )}
 
       {selectedCenter !== PERSONAL_TAB_ID && view.type === "attendance" && (
-        <AttendanceGridView
-          centreId={view.centreId}
-          daysOfWeek={view.daysOfWeek}
+        <AttendanceView
+          centerId={selectedCenter}
+          date={today}
           students={students}
           markedBy={user?.uid ?? ""}
           onDone={() => { setView({ type: "overview" }); loadCenterData(selectedCenter); }}
@@ -519,7 +531,7 @@ function TeacherDashboardContent() {
         <StudentsView
           students={students}
           teacherUid={user?.uid ?? ""}
-          onViewProgress={st => setView({ type: "progress", student: st, from: "students" })}
+          onViewProgress={st => setView({ type: "progress", student: st })}
         />
       )}
 
@@ -585,41 +597,76 @@ function OverviewView({
       {/* ── HERO ── */}
       <div style={{
         background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
-        borderRadius: 12, padding: "20px 24px", marginBottom: 20,
+        borderRadius: 14, padding: "24px 28px", marginBottom: 20,
         color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16,
       }}>
         <div>
-          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 2 }}>
-            {teacherName}
+          <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 2 }}>
+            Welcome, {teacherName} 👋
           </div>
-          <div style={{ fontSize: 13, opacity: 0.75 }}>
-            {centerName} · {new Date(today + "T12:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}
+          <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 6 }}>
+            {centerName} · {new Date(today + "T12:00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {attendancePct === null && (
+              <span style={{ background: "#fef9c3", color: "#b45309", borderRadius: 99, padding: "3px 12px", fontSize: 12, fontWeight: 700 }}>
+                📋 Attendance not marked today
+              </span>
+            )}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {score !== null && (
-            <div style={{ textAlign: "center", background: "rgba(255,255,255,0.15)", borderRadius: 10, padding: "10px 20px" }}>
-              <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1 }}>{score}</div>
-              <div style={{ fontSize: 11, opacity: 0.75, marginTop: 2 }}>
-                {scoreChange >= 0 ? "▲" : "▼"} {Math.abs(scoreChange)}% vs last week
-              </div>
+        {score !== null && (
+          <div style={{ textAlign: "center", background: "rgba(255,255,255,0.15)", borderRadius: 12, padding: "16px 28px" }}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", opacity: 0.8, marginBottom: 4 }}>
+              Faculty Score
             </div>
-          )}
-          <button style={{ ...s.btnPrimary, background: "rgba(255,255,255,0.2)", border: "1px solid rgba(255,255,255,0.4)", color: "#fff" }} onClick={onMarkAttendance}>
-            ✓ Attendance
-          </button>
-          <button style={{ ...s.btnGhost, background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.3)", color: "#fff" }} onClick={onViewStudents}>
-            👥 Students
-          </button>
+            <div style={{ fontSize: 42, fontWeight: 900, lineHeight: 1 }}>{score}</div>
+            <div style={{ fontSize: 12, marginTop: 4, opacity: 0.8 }}>
+              {scoreChange >= 0 ? "▲" : "▼"} {Math.abs(scoreChange)}% vs last week
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── TODAY'S STATUS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12, marginBottom: 20 }}>
+        <InsightCard label="Students"    value={String(students.length)}                                         color="#4f46e5" />
+        <InsightCard label="Att. Today"  value={attendancePct !== null ? `${attendancePct}%` : "—"}              color="#16a34a" />
+        <InsightCard label="Present"     value={insights?.presentCount != null ? String(insights.presentCount) : "—"} color="#0891b2" />
+        <InsightCard label="Low Progress" value={lowProgressCount !== null ? String(lowProgressCount) : "—"}    color="#dc2626" />
+      </div>
+
+      {/* Action bar */}
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "14px 18px", marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
+            {centerName} · Today
+          </div>
+          <span style={{ fontSize: 14, color: "#6b7280" }}>
+            {students.length === 0
+              ? "No active students in this centre."
+              : `${students.length} active student${students.length === 1 ? "" : "s"} enrolled`}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button style={s.btnPrimary} onClick={onMarkAttendance}>✓ Mark Attendance</button>
+          <button style={s.btnGhost}   onClick={onViewStudents}>👥 Students</button>
         </div>
       </div>
 
-      {/* ── STATS ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px,1fr))", gap: 12, marginBottom: 20 }}>
-        <InsightCard label="Students"    value={String(students.length)}                                              color="#4f46e5" />
-        <InsightCard label="Att. Today"  value={attendancePct !== null ? `${attendancePct}%` : "—"}                   color="#16a34a" />
-        <InsightCard label="Present"     value={insights?.presentCount != null ? String(insights.presentCount) : "—"} color="#0891b2" />
-        <InsightCard label="Low Progress" value={lowProgressCount !== null ? String(lowProgressCount) : "—"}          color="#dc2626" />
+      {/* ── QUICK ACTIONS ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 10, marginBottom: 24 }}>
+        {[
+          { label: "✓ Mark Attendance", fn: onMarkAttendance, bg: "#4f46e5", fg: "#fff" },
+          { label: "👥 View Students",  fn: onViewStudents,   bg: "#f3f4f6", fg: "#374151" },
+          { label: "📊 View Progress",  fn: () => { if(sorted[0]) onViewProgress(students.find(s=>s.uid===sorted[0].uid) ?? students[0]); }, bg: "#f3f4f6", fg: "#374151" },
+          { label: "🔄 Refresh Data",   fn: onRefresh,        bg: "#f3f4f6", fg: "#374151" },
+        ].map(a => (
+          <button key={a.label} onClick={a.fn}
+            style={{ background: a.bg, color: a.fg, border: "none", borderRadius: 10, padding: "14px 10px", fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "center" }}>
+            {a.label}
+          </button>
+        ))}
       </div>
 
       {/* ── ALERTS ── */}
@@ -720,301 +767,136 @@ function OverviewView({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ATTENDANCE GRID VIEW (monthly calendar)
+// ATTENDANCE VIEW
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const ATT_STATUSES: AttendanceStatus[] = [
-  "present","absent","break","cancelled_teacher","cancelled_student",
-];
-const ATT_LABEL: Record<AttendanceStatus, string> = {
-  present:           "Present",
-  absent:            "Absent",
-  break:             "Break",
-  cancelled_teacher: "Cancelled (Teacher)",
-  cancelled_student: "Cancelled (Student)",
-};
-const ATT_SHORT: Record<AttendanceStatus, string> = {
-  present:           "P",
-  absent:            "A",
-  break:             "☕",
-  cancelled_teacher: "CT",
-  cancelled_student: "CS",
-};
-const ATT_COLOR: Record<AttendanceStatus, { bg: string; fg: string }> = {
-  present:           { bg: "#dcfce7", fg: "#16a34a" },
-  absent:            { bg: "#fee2e2", fg: "#dc2626" },
-  break:             { bg: "#e0f2fe", fg: "#0369a1" },
-  cancelled_teacher: { bg: "#fef3c7", fg: "#92400e" },
-  cancelled_student: { bg: "#ede9fe", fg: "#6d28d9" },
-};
-
-const DAY_ABBR = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-function todayStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-}
-function currentMonthStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
-}
-function minMonthStr(): string {
-  const d = new Date(); d.setFullYear(d.getFullYear() - 3);
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
-}
-function datesInMonth(month: string): string[] {
-  const [yr, mo] = month.split("-").map(Number);
-  return Array.from({ length: new Date(yr, mo, 0).getDate() }, (_, i) =>
-    `${month}-${String(i+1).padStart(2,"0")}`);
-}
-function dowOf(iso: string): string {
-  return DAY_ABBR[new Date(iso + "T00:00:00").getDay()];
-}
-
-function AttendanceGridView({ centreId, daysOfWeek, students, markedBy, onDone }: {
-  centreId:   string;
-  daysOfWeek: string[];
-  students:   StudentRow[];
-  markedBy:   string;
-  onDone:     () => void;
+function AttendanceView({ centerId, date, students, markedBy, onDone }: {
+  centerId:  string;
+  date:      string;         // YYYY-MM-DD
+  students:  StudentRow[];
+  markedBy:  string;
+  onDone:    () => void;
 }) {
-  const today = useMemo(() => todayStr(), []);
-  const [month,        setMonth]        = useState(currentMonthStr());
-  const [attMap,       setAttMap]       = useState<Map<string, AttendanceStatus>>(new Map());
-  const [extraDates,   setExtraDates]   = useState<Set<string>>(new Set());
-  const [loading,      setLoading]      = useState(true);
-  const [modal,        setModal]        = useState<{ uid: string; name: string; date: string; current: AttendanceStatus | null } | null>(null);
-  const [saving,       setSaving]       = useState(false);
-  const [showExtra,    setShowExtra]    = useState(false);
-  const [extraDate,    setExtraDate]    = useState(currentMonthStr() + "-01");
-  const [savingExtra,  setSavingExtra]  = useState(false);
+  const [marks,   setMarks]   = useState<AttendanceState>({});
+  const [loading, setLoading] = useState(true);
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+  const [err,     setErr]     = useState<string | null>(null);
 
-  // Load attendance + extra classes for centre + month
+  // Pre-fill from existing records on mount
   useEffect(() => {
-    setLoading(true);
-    const [yr, mo] = month.split("-").map(Number);
-    const mStart = `${month}-01`;
-    const mEnd   = `${month}-${String(new Date(yr, mo, 0).getDate()).padStart(2,"0")}`;
-    Promise.all([
-      getDocs(query(collection(db, "attendance"), where("centerId","==",centreId))),
-      getExtraClassesByCentre(centreId, month),
-    ]).then(([attSnap, extras]) => {
-      const m = new Map<string, AttendanceStatus>();
-      attSnap.docs.forEach(d => {
-        const r = d.data() as Record<string, unknown>;
-        const date = r.date as string;
-        if (date >= mStart && date <= mEnd) {
-          m.set(`${r.studentUid as string}|${date}`, r.status as AttendanceStatus);
-        }
-      });
-      setAttMap(m);
-      setExtraDates(new Set(extras.map(e => e.date)));
-    }).catch(console.error).finally(() => setLoading(false));
+    const init: AttendanceState = {};
+    students.forEach(s => { init[s.uid] = "present"; }); // default all present
+    setMarks(init);
+
+    getAttendanceByCentreDate(centerId, date)
+      .then(recs => {
+        setMarks(prev => {
+          const next = { ...prev };
+          recs.forEach(r => {
+            if (r.status === "present" || r.status === "absent") {
+              next[r.studentUid] = r.status;
+            }
+          });
+          return next;
+        });
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centreId, month]);
+  }, [centerId, date]);
 
-  // Scheduled dates = centre daysOfWeek + extra dates
-  const scheduledDates = useMemo(() => {
-    const all = datesInMonth(month);
-    return all.filter(d =>
-      extraDates.has(d) ||
-      (daysOfWeek.length > 0 && daysOfWeek.includes(dowOf(d)))
-    );
-  }, [month, daysOfWeek, extraDates]);
+  function toggle(uid: string) {
+    setMarks(prev => ({ ...prev, [uid]: prev[uid] === "present" ? "absent" : "present" }));
+  }
 
-  // Save a single cell
-  async function handleSave(status: AttendanceStatus) {
-    if (!modal) return;
+  function markAll(status: "present" | "absent") {
+    const next: AttendanceState = {};
+    students.forEach(s => { next[s.uid] = status; });
+    setMarks(next);
+  }
+
+  async function handleSave() {
     setSaving(true);
+    setSaved(false);
+    setErr(null);
     try {
-      await saveCentreAttendance({ studentUid: modal.uid, centerId: centreId, date: modal.date, status, markedBy });
-      setAttMap(prev => {
-        const next = new Map(prev);
-        next.set(`${modal.uid}|${modal.date}`, status);
-        return next;
-      });
-      setModal(null);
-    } catch (e) { console.error(e); }
-    finally { setSaving(false); }
+      await Promise.all(
+        students.map(st =>
+          saveCentreAttendance({
+            studentUid: st.uid,
+            centerId,
+            date,
+            status:   marks[st.uid] ?? "present",
+            markedBy,
+          }),
+        ),
+      );
+      setSaved(true);
+      // Return to overview and reload dashboard data automatically
+      setTimeout(() => onDone(), 800);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to save attendance.");
+    } finally {
+      setSaving(false);
+    }
   }
 
-  // Add extra class
-  async function handleAddExtra() {
-    if (!extraDate) return;
-    setSavingExtra(true);
-    try {
-      await saveExtraClass(centreId, extraDate, markedBy);
-      setExtraDates(prev => new Set([...prev, extraDate]));
-      setShowExtra(false);
-    } catch (e) { console.error(e); }
-    finally { setSavingExtra(false); }
-  }
+  const presentCount = Object.values(marks).filter(v => v === "present").length;
 
-  if (loading) return <div style={s.center}>Loading…</div>;
-
-  const [yr, mo] = month.split("-").map(Number);
-  const maxDate  = `${month}-${String(new Date(yr, mo, 0).getDate()).padStart(2,"0")}`;
+  if (loading) return <div style={s.center}>Loading attendance…</div>;
 
   return (
     <div>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
-        <div style={s.sectionTitle}>Attendance</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <input type="month" value={month} min={minMonthStr()} max={currentMonthStr()}
-            onChange={e => setMonth(e.target.value)}
-            style={{ padding: "6px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, cursor: "pointer" }} />
-          {month !== currentMonthStr() && (
-            <button onClick={() => setMonth(currentMonthStr())} style={s.btnSm}>← Today</button>
-          )}
-          <button onClick={() => { setExtraDate(`${month}-01`); setShowExtra(true); }} style={s.btnSm}>+ Extra Class</button>
-        </div>
+      <div style={s.sectionHeader}>
+        <div style={s.sectionTitle}>Attendance — {date}</div>
+        <span style={{ fontSize: 12, color: "#6b7280" }}>{centerId}</span>
       </div>
 
-      {/* Extra class modal */}
-      {showExtra && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
-          onClick={e => { if (e.target === e.currentTarget) setShowExtra(false); }}>
-          <div style={{ background: "#fff", borderRadius: 12, padding: 24, width: 300, boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 16 }}>Add Extra Class</div>
-            <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 12, fontWeight: 600, color: "#6b7280" }}>
-              DATE
-              <input type="date" value={extraDate} min={`${month}-01`} max={maxDate}
-                onChange={e => setExtraDate(e.target.value)}
-                style={{ padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13 }} />
-            </label>
-            <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-              <button onClick={() => setShowExtra(false)} style={s.btnGhost} disabled={savingExtra}>Cancel</button>
-              <button onClick={handleAddExtra} disabled={savingExtra || !extraDate}
-                style={{ ...s.btnPrimary, flex: 1, opacity: savingExtra ? 0.5 : 1 }}>
-                {savingExtra ? "Adding…" : "Add"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {err   && <div style={s.errBanner}>{err}</div>}
+      {saved && <div style={s.successBanner}>Saved — {presentCount}/{students.length} present.</div>}
 
-      {/* Cell modal */}
-      {modal && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
-          onClick={e => { if (e.target === e.currentTarget) setModal(null); }}>
-          <div style={{ background: "#fff", borderRadius: 12, padding: 24, width: 320, boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{modal.name}</div>
-            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 14 }}>
-              {new Date(modal.date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" })}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-              {ATT_STATUSES.map(st => {
-                const { bg, fg } = ATT_COLOR[st];
-                const active = (modal.current ?? "present") === st;
-                return (
-                  <button key={st} onClick={() => handleSave(st)} disabled={saving}
-                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 7, cursor: "pointer",
-                      border: active ? `2px solid ${fg}` : "2px solid transparent",
-                      background: active ? bg : "#f9fafb", color: active ? fg : "#374151",
-                      fontWeight: active ? 700 : 500, fontSize: 13, opacity: saving ? 0.6 : 1 }}>
-                    <span style={{ minWidth: 22, textAlign: "center" }}>{ATT_SHORT[st]}</span>
-                    {ATT_LABEL[st]}
-                    {modal.current === st && <span style={{ marginLeft: "auto", fontSize: 10, color: "#9ca3af" }}>current</span>}
-                  </button>
-                );
-              })}
-            </div>
-            <button onClick={() => setModal(null)} style={{ ...s.btnGhost, width: "100%", marginTop: 14 }}>Cancel</button>
-          </div>
-        </div>
-      )}
+      <div style={s.attActions}>
+        <button style={s.btnSm} onClick={() => markAll("present")}>✓ All Present</button>
+        <button style={{ ...s.btnSm, marginLeft: 8 }} onClick={() => markAll("absent")}>✗ All Absent</button>
+        <span style={s.attCount}>{presentCount}/{students.length} present</span>
+      </div>
 
       {students.length === 0 ? (
         <div style={s.emptyCard}>No active students enrolled in this centre.</div>
-      ) : scheduledDates.length === 0 ? (
-        <div style={s.emptyCard}>No scheduled classes in this month.{daysOfWeek.length === 0 ? " Configure class days in Centre settings." : ""}</div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }}>
-            <thead>
-              <tr>
-                <th style={gTh}>Student</th>
-                {scheduledDates.map(date => {
-                  const isExtra = extraDates.has(date) && !daysOfWeek.includes(dowOf(date));
-                  const isToday = date === today;
-                  const d = new Date(date + "T00:00:00");
-                  return (
-                    <th key={date} style={{ ...gTh, textAlign: "center", minWidth: 36, padding: "4px 2px", borderLeft: "1px solid #e5e7eb",
-                      background: isToday ? "#fef3c7" : isExtra ? "#f0fdf4" : "#f9fafb",
-                      color: isToday ? "#92400e" : isExtra ? "#166534" : "#6b7280" }}>
-                      <div style={{ fontWeight: 700 }}>{d.getDate()}</div>
-                      <div style={{ fontSize: 9 }}>{DAY_ABBR[d.getDay()]}</div>
-                      {isExtra && <div style={{ fontSize: 8, color: "#16a34a" }}>+</div>}
-                    </th>
-                  );
-                })}
-                <th style={{ ...gTh, textAlign: "center", background: "#dcfce7", color: "#166534", minWidth: 34 }}>P</th>
-                <th style={{ ...gTh, textAlign: "center", background: "#fee2e2", color: "#991b1b", minWidth: 34 }}>A</th>
-                <th style={{ ...gTh, textAlign: "center", minWidth: 34 }}>%</th>
-              </tr>
-            </thead>
-            <tbody>
-              {students.map((st, i) => {
-                let p = 0, a = 0;
-                const cells = scheduledDates.map(date => {
-                  const isFuture   = date > today;
-                  const onBreak    = !!(st as StudentRow & { breakStartDate?: string | null }).breakStartDate &&
-                                     date >= ((st as StudentRow & { breakStartDate?: string | null }).breakStartDate!);
-                  const status     = attMap.get(`${st.uid}|${date}`) ?? null;
-                  if (status === "present") p++;
-                  else if (status === "absent") a++;
-
-                  if (isFuture) return (
-                    <td key={date} style={{ ...gTd, textAlign: "center", minWidth: 36, padding: "4px 2px", borderLeft: "1px solid #f3f4f6", color: "#e5e7eb" }}>·</td>
-                  );
-
-                  const effective = status ?? (onBreak ? "break" : null);
-                  const sc = effective ? ATT_COLOR[effective] : { bg: "#f9fafb", fg: "#d1d5db" };
-                  return (
-                    <td key={date}
-                      onClick={() => setModal({ uid: st.uid, name: st.name, date, current: effective })}
-                      style={{ ...gTd, textAlign: "center", minWidth: 36, padding: "4px 2px", cursor: "pointer",
-                        borderLeft: "1px solid #f3f4f6", background: sc.bg, color: sc.fg }}
-                      title={effective ? ATT_LABEL[effective] : "Click to mark"}>
-                      {effective ? ATT_SHORT[effective] : <span style={{ color: "#d1d5db" }}>·</span>}
-                    </td>
-                  );
-                });
-                return (
-                  <tr key={st.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-                    <td style={{ ...gTd, minWidth: 140, whiteSpace: "nowrap" }}>
-                      <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
-                      {st.instrument && <div style={{ fontSize: 10, color: "#9ca3af" }}>{st.instrument}</div>}
-                    </td>
-                    {cells}
-                    <td style={{ ...gTd, textAlign: "center", fontWeight: 700, color: "#16a34a", minWidth: 34 }}>{p}</td>
-                    <td style={{ ...gTd, textAlign: "center", fontWeight: 700, color: "#dc2626", minWidth: 34 }}>{a}</td>
-                    <td style={{ ...gTd, textAlign: "center", fontWeight: 700, fontSize: 12, minWidth: 34,
-                      color: p+a > 0 ? (p/(p+a) >= 0.75 ? "#16a34a" : p/(p+a) >= 0.5 ? "#d97706" : "#dc2626") : "#9ca3af" }}>
-                      {p+a > 0 ? `${Math.round(p/(p+a)*100)}%` : "—"}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div style={s.attList}>
+          {students.map(st => {
+            const status = marks[st.uid] ?? "present";
+            return (
+              <div key={st.uid} style={s.attRow}>
+                <div style={s.attName}>{st.name}</div>
+                <div style={s.attInst}>{st.instrument}</div>
+                <button
+                  style={{ ...s.attToggle, ...(status === "present" ? s.attPresent : s.attAbsent) }}
+                  onClick={() => toggle(st.uid)}
+                >
+                  {status === "present" ? "✔ Present" : "✗ Absent"}
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      <div style={{ marginTop: 16 }}>
-        <button style={s.btnGhost} onClick={onDone}>← Back to Overview</button>
+      <div style={s.attFooter}>
+        <button style={s.btnGhost} onClick={onDone}>← Back</button>
+        <button
+          style={{ ...s.btnPrimary, opacity: saving ? 0.5 : 1, marginLeft: 10 }}
+          onClick={handleSave}
+          disabled={saving}
+        >
+          {saving ? "Saving…" : "Save Attendance"}
+        </button>
       </div>
     </div>
   );
 }
-
-const gTh: React.CSSProperties = {
-  padding: "7px 10px", textAlign: "left", fontSize: 11, fontWeight: 700,
-  color: "#6b7280", borderBottom: "2px solid #e5e7eb", whiteSpace: "nowrap", background: "#f9fafb",
-};
-const gTd: React.CSSProperties = {
-  padding: "8px 10px", verticalAlign: "middle", borderBottom: "1px solid #f3f4f6",
-};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STUDENTS VIEW
