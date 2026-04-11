@@ -42,15 +42,25 @@ export default function LoginPage() {
     try {
       const session = await signIn(email.trim(), password);
       const maxAge  = 60 * 60 * 24 * 7;
+
       // Set cookie for server/middleware
       document.cookie = `rol_session=${session.token}; path=/; SameSite=Lax; max-age=${maxAge}`;
+
       // Also store in localStorage as backup for mobile browsers that drop cookies
       if (typeof window !== "undefined") {
-        localStorage.setItem("rol_session", session.token);
-        localStorage.setItem("rol_session_expires", String(Date.now() + maxAge * 1000));
+        try {
+          localStorage.setItem("rol_session", session.token);
+          localStorage.setItem("rol_session_expires", String(Date.now() + maxAge * 1000));
+          localStorage.setItem("rol_user_role", session.user.role);
+        } catch (e) {
+          // localStorage might be disabled on some mobile browsers, continue anyway
+          console.warn("localStorage unavailable:", e);
+        }
       }
-      // Redirect immediately with the role from the login response
-      window.location.replace(ROLE_ROUTES[session.user.role] ?? "/dashboard");
+
+      // Redirect immediately using role from login response (most reliable method)
+      const redirectUrl = ROLE_ROUTES[session.user.role] ?? "/dashboard";
+      window.location.replace(redirectUrl);
     } catch (err: unknown) {
       const code = err instanceof Error ? err.message : "unknown";
       setError(ERROR_MESSAGES[code] ?? "Something went wrong. Please try again.");
