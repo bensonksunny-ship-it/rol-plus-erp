@@ -1,70 +1,52 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  collection, getDocs, query, where,
+} from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import {
-  getAttendanceByCentreDate,
   saveCentreAttendance,
+  saveExtraClass,
+  getExtraClassesByCentre,
 } from "@/services/attendance/attendance.service";
+import type { AttendanceStatus } from "@/services/attendance/attendance.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface CentreOption { id: string; name: string; code: string; }
+interface CentreRow {
+  id:         string;
+  name:       string;
+  code:       string;
+  daysOfWeek: string[];   // ["Mon","Wed","Fri"]
+  teacherUid: string;
+}
 
 interface StudentRow {
   uid:            string;
   name:           string;
   instrument:     string;
-  classType:      string;
-  centerId:       string;
-  centerName:     string;
-  classDays:      string[];   // ["Mon","Wed"] — personal students; [] = every day (group)
-  breakStartDate: string | null;  // YYYY-MM-DD — attendance excluded from this date
+  classType:      "group" | "personal";
+  classDays:      string[];    // personal only
+  breakStartDate: string | null;
 }
 
-interface AttendanceRec {
+interface AttRec {
+  id:         string;
   studentUid: string;
-  centerId:   string;
-  date:       string;       // "YYYY-MM-DD"
-  status:     "present" | "absent";
+  date:       string;
+  status:     AttendanceStatus;
 }
-
-type MarkStatus = "present" | "absent";
-type CellStatus = "present" | "absent" | "not_marked" | "break" | "non_class" | "future";
-type PageTab    = "mark" | "trends" | "sheet";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function todayISO(): string {
-  const d  = new Date();
-  const y  = d.getFullYear();
-  const mo = String(d.getMonth() + 1).padStart(2, "0");
-  const dy = String(d.getDate()).padStart(2, "0");
-  return `${y}-${mo}-${dy}`;
-}
-function currentWeekKey(d = new Date()): string {
-  const jan1  = new Date(d.getFullYear(), 0, 1);
-  const week  = Math.ceil((((d.getTime() - jan1.getTime()) / 86400000) + jan1.getDay() + 1) / 7);
-  return `${d.getFullYear()}-W${String(week).padStart(2, "0")}`;
-}
-function isoToWeekKey(iso: string): string { return currentWeekKey(new Date(iso)); }
-function isoToMonth(iso: string): string   { return iso.slice(0, 7); }
-function fmtMonth(ym: string): string {
-  const [y, m] = ym.split("-");
-  const names  = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  return `${names[parseInt(m,10)-1]} ${y}`;
-}
-function fmtDate(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
-}
-function pct(n: number, d: number): number {
-  return d === 0 ? 0 : Math.round((n / d) * 100);
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
 function currentMonth(): string {
   const d = new Date();
@@ -75,45 +57,56 @@ function minMonth(): string {
   d.setFullYear(d.getFullYear() - 3);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
 }
-function pctColor(p: number): string {
-  if (p >= 75) return "#16a34a";
-  if (p >= 50) return "#d97706";
-  return "#dc2626";
+function fmtMonth(ym: string): string {
+  const [y, m] = ym.split("-");
+  const names  = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${names[parseInt(m,10)-1]} ${y}`;
 }
-function lastNDays(n: number): string[] {
-  const days: string[] = [];
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const y  = d.getFullYear();
-    const mo = String(d.getMonth() + 1).padStart(2, "0");
-    const dy = String(d.getDate()).padStart(2, "0");
-    days.push(`${y}-${mo}-${dy}`);
-  }
-  return days;
+function datesInMonth(month: string): string[] {
+  const [yr, mo] = month.split("-").map(Number);
+  const days     = new Date(yr, mo, 0).getDate();
+  return Array.from({ length: days }, (_, i) =>
+    `${month}-${String(i+1).padStart(2,"0")}`);
 }
-function lastNWeeks(n: number): string[] {
-  const weeks: string[] = [];
-  const d = new Date();
-  for (let i = n - 1; i >= 0; i--) {
-    const t = new Date(d);
-    t.setDate(t.getDate() - i * 7);
-    weeks.push(isoToWeekKey(t.toISOString().slice(0, 10)));
-  }
-  return [...new Set(weeks)].slice(-n);
+const DAY_ABBR = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+function dowOf(iso: string): string {
+  return DAY_ABBR[new Date(iso + "T00:00:00").getDay()];
 }
-function lastNMonths(n: number): string[] {
-  const months: string[] = [];
-  const d = new Date();
-  for (let i = n - 1; i >= 0; i--) {
-    const t = new Date(d.getFullYear(), d.getMonth() - i, 1);
-    // Use local year/month to avoid UTC shift issues
-    const y = t.getFullYear();
-    const m = String(t.getMonth() + 1).padStart(2, "0");
-    months.push(`${y}-${m}`);
-  }
-  return months;
+function dayNum(iso: string): number {
+  return new Date(iso + "T00:00:00").getDate();
 }
+
+// Is this date a scheduled class for a centre (regular schedule or extra class)?
+function isScheduled(date: string, centre: CentreRow, extraDates: Set<string>): boolean {
+  if (extraDates.has(date)) return true;
+  if (centre.daysOfWeek.length === 0) return false;
+  return centre.daysOfWeek.includes(dowOf(date));
+}
+
+const STATUS_LABEL: Record<AttendanceStatus, string> = {
+  present:            "Present",
+  absent:             "Absent",
+  break:              "Break",
+  cancelled_teacher:  "Cancelled (Teacher)",
+  cancelled_student:  "Cancelled (Student)",
+};
+const STATUS_COLOR: Record<AttendanceStatus, { bg: string; fg: string }> = {
+  present:           { bg: "#dcfce7", fg: "#16a34a" },
+  absent:            { bg: "#fee2e2", fg: "#dc2626" },
+  break:             { bg: "#e0f2fe", fg: "#0369a1" },
+  cancelled_teacher: { bg: "#fef3c7", fg: "#92400e" },
+  cancelled_student: { bg: "#ede9fe", fg: "#6d28d9" },
+};
+const STATUS_SHORT: Record<AttendanceStatus, string> = {
+  present:           "P",
+  absent:            "A",
+  break:             "☕",
+  cancelled_teacher: "CT",
+  cancelled_student: "CS",
+};
+const ALL_STATUSES: AttendanceStatus[] = [
+  "present","absent","break","cancelled_teacher","cancelled_student",
+];
 
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
@@ -125,1265 +118,602 @@ export default function AttendancePage() {
   );
 }
 
-// ─── Main content ─────────────────────────────────────────────────────────────
+// ─── Modal ────────────────────────────────────────────────────────────────────
 
-function AttendanceContent() {
-  const { user, loading: authLoading } = useAuthContext();
-  const { isAllowed, filterCentres, isTeacherRole } = useCentreAccess();
+interface ModalState {
+  centreId:   string;
+  studentUid: string;
+  studentName:string;
+  date:       string;
+  current:    AttendanceStatus | null;
+}
 
-  const [tab,            setTab]            = useState<PageTab>("mark");
-  const [centres,        setCentres]        = useState<CentreOption[]>([]);
-  const [selectedCentre, setSelectedCentre] = useState<string>("");
-  const [date,           setDate]           = useState<string>(todayISO());
-
-  // ── Mark-attendance state ─────────────────────────────────────────────────
-  const [students,       setStudents]       = useState<StudentRow[]>([]);
-  const [marks,          setMarks]          = useState<Record<string, MarkStatus>>({});
-  const [existingIds,    setExistingIds]    = useState<Record<string, string>>({});
-  const [loadingStudents,setLoadingStudents]= useState(false);
-  const [saving,         setSaving]         = useState(false);
-  const [feedback,       setFeedback]       = useState<{ ok: boolean; msg: string } | null>(null);
-
-  // ── Trend state ───────────────────────────────────────────────────────────
-  const [allAttendance,  setAllAttendance]  = useState<AttendanceRec[]>([]);
-  const [allStudents,    setAllStudents]    = useState<StudentRow[]>([]);
-  const [loadingTrends,  setLoadingTrends]  = useState(false);
-  const [selectedMonth,  setSelectedMonth]  = useState<string>(currentMonth());
-  const [sheetMonth,     setSheetMonth]     = useState<string>(currentMonth());
-  const [sheetStudents,  setSheetStudents]  = useState<StudentRow[]>([]);
-  const [sheetAttendance,setSheetAttendance]= useState<AttendanceRec[]>([]);
-  const [loadingSheet,   setLoadingSheet]   = useState(false);
-  const trendTimerRef                       = useRef<ReturnType<typeof setInterval> | null>(null);
-  const isTrendsCurrentMonth                = selectedMonth === currentMonth();
-
-  // ── Load centres ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (authLoading || !user) return;
-    async function load() {
-      const snap = await getDocs(collection(db, "centers"));
-      const all: CentreOption[] = snap.docs.map(d => ({
-        id:   d.id,
-        name: (d.data().name       as string) || d.id,
-        code: (d.data().centerCode as string) || "",
-      }));
-      const visible = filterCentres(all);
-      setCentres(visible);
-      if (visible.length === 1) setSelectedCentre(visible[0].id);
-    }
-    load().catch(console.error);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user]);
-
-  // ── Load students + existing marks (Mark tab) ────────────────────────────
-  useEffect(() => {
-    if (!selectedCentre || !user) return;
-    async function load() {
-      setLoadingStudents(true);
-      setStudents([]);
-      setMarks({});
-      setExistingIds({});
-      setFeedback(null);
-      try {
-        const q    = query(
-          collection(db, "users"),
-          where("role",     "==", "student"),
-          where("centerId", "==", selectedCentre),
-        );
-        const snap = await getDocs(q);
-        const rows: StudentRow[] = snap.docs
-          .filter(d => {
-            const data = d.data() as Record<string, unknown>;
-            const effectiveStatus = ((data.status ?? data.studentStatus ?? "active") as string);
-            // Exclude students who are on break or have a break requested
-            return effectiveStatus !== "on_break" && effectiveStatus !== "break_requested"
-              && effectiveStatus !== "inactive" && effectiveStatus !== "deactivation_requested";
-          })
-          .map(d => {
-            const data = d.data() as Record<string, unknown>;
-            return {
-              uid:            d.id,
-              name:           (data.displayName as string) || (data.name as string) || d.id,
-              instrument:     (data.instrument  as string) || "",
-              classType:      (data.classType   as string) === "personal" ? "personal" : "group",
-              centerId:       selectedCentre,
-              centerName:     "",
-              classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
-              breakStartDate: null,
-            };
-          });
-        rows.sort((a, b) => {
-          if (a.classType !== b.classType) return a.classType === "group" ? -1 : 1;
-          return a.name.localeCompare(b.name);
-        });
-        const existing = await getAttendanceByCentreDate(selectedCentre, date);
-        const existingMap: Record<string, string>     = {};
-        const statusMap:   Record<string, MarkStatus> = {};
-        existing.forEach(r => {
-          existingMap[r.studentUid] = r.id;
-          statusMap[r.studentUid]   = r.status as MarkStatus;
-        });
-        const defaultMarks: Record<string, MarkStatus> = {};
-        rows.forEach(s => { defaultMarks[s.uid] = statusMap[s.uid] ?? "present"; });
-        setStudents(rows);
-        setExistingIds(existingMap);
-        setMarks(defaultMarks);
-      } finally {
-        setLoadingStudents(false);
-      }
-    }
-    load().catch(console.error);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCentre, date]);
-
-  // ── Load all attendance for trend analysis ───────────────────────────────
-  const loadTrends = useCallback(async (centreId: string) => {
-    setLoadingTrends(true);
-    try {
-      const [attSnap, stuSnap, centreSnap] = await Promise.all([
-        getDocs(query(collection(db, "attendance"), where("centerId", "==", centreId))),
-        getDocs(query(collection(db, "users"), where("role", "==", "student"), where("centerId", "==", centreId))),
-        getDocs(collection(db, "centers")),
-      ]);
-      // Build centre name map
-      const centreNameMap = new Map<string, string>();
-      centreSnap.docs.forEach(d => centreNameMap.set(d.id, (d.data().name as string) ?? d.id));
-
-      setAllAttendance(attSnap.docs.map(d => {
-        const r = d.data() as Record<string, unknown>;
-        return {
-          studentUid: r.studentUid as string,
-          centerId:   r.centerId   as string,
-          date:       (r.date      as string) ?? "",
-          status:     (r.status    as "present" | "absent") ?? "absent",
-        };
-      }).filter(r => r.date));
-      setAllStudents(stuSnap.docs
-        .filter(d => {
-          const data = d.data() as Record<string, unknown>;
-          const st = ((data.status ?? data.studentStatus ?? "active") as string);
-          // Include active students + on_break students (we'll exclude their records from breakStartDate)
-          return st !== "inactive" && st !== "deactivation_requested";
-        })
-        .map(d => {
-          const data = d.data() as Record<string, unknown>;
-          const st   = ((data.status ?? data.studentStatus ?? "active") as string);
-          const cid  = (data.centerId as string) ?? centreId;
-          return {
-            uid:            d.id,
-            name:           (data.displayName as string) || (data.name as string) || d.id,
-            instrument:     (data.instrument  as string) || "",
-            classType:      (data.classType   as string) === "personal" ? "personal" : "group",
-            centerId:       cid,
-            centerName:     centreNameMap.get(cid) ?? cid,
-            classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
-            // For on_break / break_requested: carry breakStartDate so we can exclude records from that date
-            breakStartDate: (st === "on_break" || st === "break_requested")
-              ? ((data.breakStartDate as string) ?? null)
-              : null,
-          };
-        }));
-    } finally {
-      setLoadingTrends(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!selectedCentre || tab !== "trends") return;
-    loadTrends(selectedCentre);
-    // Live refresh every 60s
-    trendTimerRef.current = setInterval(() => loadTrends(selectedCentre), 60_000);
-    return () => { if (trendTimerRef.current) clearInterval(trendTimerRef.current); };
-  }, [selectedCentre, tab, loadTrends]);
-
-  // ── Load Sheet data ───────────────────────────────────────────────────────
-  const loadSheet = useCallback(async (centreId: string, month: string) => {
-    setLoadingSheet(true);
-    try {
-      const [stuSnap, centreSnap] = await Promise.all([
-        getDocs(query(collection(db, "users"), where("role","==","student"), where("centerId","==",centreId))),
-        getDocs(collection(db, "centers")),
-      ]);
-      const centreNameMap = new Map<string, string>();
-      centreSnap.docs.forEach(d => centreNameMap.set(d.id, (d.data().name as string) ?? d.id));
-
-      // Date range for the month
-      const [yr, mo] = month.split("-").map(Number);
-      const daysInMonth = new Date(yr, mo, 0).getDate();
-      const monthStart  = `${month}-01`;
-      const monthEnd    = `${month}-${String(daysInMonth).padStart(2,"0")}`;
-
-      // Fetch all attendance for this centre within the month
-      const attSnap = await getDocs(query(
-        collection(db, "attendance"),
-        where("centerId", "==", centreId),
-      ));
-      const attRecs: AttendanceRec[] = attSnap.docs
-        .map(d => {
-          const r = d.data() as Record<string, unknown>;
-          return {
-            studentUid: r.studentUid as string,
-            centerId:   r.centerId   as string,
-            date:       (r.date as string) ?? "",
-            status:     (r.status as "present" | "absent") ?? "absent",
-          };
-        })
-        .filter(r => r.date >= monthStart && r.date <= monthEnd);
-
-      const rows: StudentRow[] = stuSnap.docs
-        .filter(d => {
-          const data = d.data() as Record<string, unknown>;
-          const st = ((data.status ?? data.studentStatus ?? "active") as string);
-          return st !== "inactive" && st !== "deactivation_requested";
-        })
-        .map(d => {
-          const data = d.data() as Record<string, unknown>;
-          const st   = ((data.status ?? data.studentStatus ?? "active") as string);
-          const cid  = (data.centerId as string) ?? centreId;
-          return {
-            uid:            d.id,
-            name:           (data.displayName as string) || (data.name as string) || d.id,
-            instrument:     (data.instrument  as string) || "",
-            classType:      (data.classType   as string) === "personal" ? "personal" : "group",
-            centerId:       cid,
-            centerName:     centreNameMap.get(cid) ?? cid,
-            classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
-            breakStartDate: (st === "on_break" || st === "break_requested")
-              ? ((data.breakStartDate as string) ?? null)
-              : null,
-          };
-        })
-        .sort((a, b) => {
-          if (a.classType !== b.classType) return a.classType === "group" ? -1 : 1;
-          return a.name.localeCompare(b.name);
-        });
-
-      setSheetStudents(rows);
-      setSheetAttendance(attRecs);
-    } finally {
-      setLoadingSheet(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!selectedCentre || tab !== "sheet") return;
-    loadSheet(selectedCentre, sheetMonth);
-  }, [selectedCentre, tab, sheetMonth, loadSheet]);
-
-  // ── Mark-attendance summary ───────────────────────────────────────────────
-  const markSummary = useMemo(() => {
-    const total   = students.length;
-    const present = Object.values(marks).filter(m => m === "present").length;
-    return {
-      total, present, absent: total - present,
-      groupCount:    students.filter(s => s.classType === "group").length,
-      personalCount: students.filter(s => s.classType === "personal").length,
-    };
-  }, [students, marks]);
-
-  // ── Trend computations ────────────────────────────────────────────────────
-  const trends = useMemo(() => {
-    if (!allAttendance.length || !allStudents.length) return null;
-
-    // Build per-student break start date lookup
-    const breakStartMap = new Map<string, string>();
-    allStudents.forEach(s => {
-      if (s.breakStartDate) breakStartMap.set(s.uid, s.breakStartDate);
-    });
-
-    // Filter attendance: exclude records for on_break students from their breakStartDate onwards
-    const effectiveAttendance = allAttendance.filter(r => {
-      const bsd = breakStartMap.get(r.studentUid);
-      if (bsd && r.date >= bsd) return false;  // on break — exclude
-      return true;
-    });
-
-    const totalStudents = allStudents.length;
-    const today         = todayISO();
-    // Use selectedMonth for student breakdown, current date for live stats
-    const viewMonth     = selectedMonth;
-    const thisMonth     = isoToMonth(today);  // for live stats (Today, This Week)
-    const thisWeek      = currentWeekKey();
-
-    // Group records by date (using break-filtered records)
-    const byDate = new Map<string, { present: number; absent: number }>();
-    effectiveAttendance.forEach(r => {
-      const prev = byDate.get(r.date) ?? { present: 0, absent: 0 };
-      if (r.status === "present") prev.present++;
-      else prev.absent++;
-      byDate.set(r.date, prev);
-    });
-
-    // ── Daily: last 30 days ───────────────────────────────────────────────
-    const days30    = lastNDays(30);
-    const dailyData = days30.map(d => {
-      const rec     = byDate.get(d);
-      const present = rec?.present ?? 0;
-      const total   = rec ? (rec.present + rec.absent) : 0;
-      // pct is only meaningful when there are records; 0 total → empty bar
-      return { date: d, present, total, pct: total > 0 ? pct(present, total) : 0 };
-    });
-
-    // ── Weekly: last 12 weeks ─────────────────────────────────────────────
-    const weeks12    = lastNWeeks(12);
-    const byWeek     = new Map<string, { present: number; total: number; days: Set<string> }>();
-    effectiveAttendance.forEach(r => {
-      const wk   = isoToWeekKey(r.date);
-      const prev = byWeek.get(wk) ?? { present: 0, total: 0, days: new Set() };
-      if (r.status === "present") prev.present++;
-      prev.total++;
-      prev.days.add(r.date);
-      byWeek.set(wk, prev);
-    });
-    const weeklyData = weeks12.map(wk => {
-      const rec     = byWeek.get(wk);
-      const present = rec?.present ?? 0;
-      const total   = rec?.total   ?? 0;
-      return { week: wk, present, total, pct: pct(present, total || 1), days: rec?.days.size ?? 0 };
-    });
-
-    // ── Monthly: last 12 months ───────────────────────────────────────────
-    const months12    = lastNMonths(12);
-    const byMonth     = new Map<string, { present: number; total: number }>();
-    effectiveAttendance.forEach(r => {
-      const mo   = isoToMonth(r.date);
-      const prev = byMonth.get(mo) ?? { present: 0, total: 0 };
-      if (r.status === "present") prev.present++;
-      prev.total++;
-      byMonth.set(mo, prev);
-    });
-    const monthlyData = months12.map(mo => {
-      const rec     = byMonth.get(mo);
-      const present = rec?.present ?? 0;
-      const total   = rec?.total   ?? 0;
-      return { month: mo, present, total, pct: pct(present, total || 1) };
-    });
-
-    // ── Live summary stats ────────────────────────────────────────────────
-    const todayRec    = byDate.get(today);
-    const todayPct    = todayRec ? pct(todayRec.present, todayRec.present + todayRec.absent) : null;
-    const todayPresent= todayRec?.present ?? null;
-
-    const weekRec     = byWeek.get(thisWeek);
-    const weekPct     = weekRec ? pct(weekRec.present, weekRec.total) : null;
-
-    const monthRec    = byMonth.get(viewMonth);
-    const monthPct    = monthRec ? pct(monthRec.present, monthRec.total) : null;
-
-    // Best and worst day in last 30 days (only days with records)
-    const daysWithRecords = dailyData.filter(d => d.total > 0);
-    const bestDay  = daysWithRecords.length ? daysWithRecords.reduce((a, b) => b.pct > a.pct ? b : a) : null;
-    const worstDay = daysWithRecords.length ? daysWithRecords.reduce((a, b) => b.pct < a.pct ? b : a) : null;
-
-    // ── Per-student breakdown for selected month ──────────────────────────
-    const monthRecs  = effectiveAttendance.filter(r => r.date.startsWith(viewMonth));
-    const classDates = new Set(effectiveAttendance.filter(r => r.date.startsWith(viewMonth)).map(r => r.date));
-    const classDaysThisMonth = classDates.size;
-
-    const studentMonthMap = new Map<string, { present: number; absent: number }>();
-    monthRecs.forEach(r => {
-      const prev = studentMonthMap.get(r.studentUid) ?? { present: 0, absent: 0 };
-      if (r.status === "present") prev.present++;
-      else prev.absent++;
-      studentMonthMap.set(r.studentUid, prev);
-    });
-
-    const studentStats = allStudents.map(s => {
-      const rec = studentMonthMap.get(s.uid) ?? { present: 0, absent: 0 };
-      // For on_break students: denominator = class days before break started this month
-      let total: number;
-      if (s.breakStartDate && s.breakStartDate.startsWith(viewMonth)) {
-        // broke mid-month — count class dates before breakStartDate
-        const daysBeforeBreak = Array.from(classDates).filter(d => d < s.breakStartDate!).length;
-        total = daysBeforeBreak || (rec.present + rec.absent);
-      } else if (s.breakStartDate && s.breakStartDate <= `${viewMonth}-01`) {
-        // was already on break this entire month — denominator 0, skip
-        total = rec.present + rec.absent || 1;
-      } else {
-        total = classDaysThisMonth || (rec.present + rec.absent);
-      }
-      return {
-        ...s,
-        present: rec.present,
-        absent:  rec.absent,
-        pct:     pct(rec.present, total || 1),
-        total,
-      };
-    }).sort((a, b) => b.pct - a.pct);
-
-    return {
-      dailyData, weeklyData, monthlyData,
-      todayPct, todayPresent, weekPct, monthPct,
-      bestDay, worstDay, studentStats,
-      classDaysThisMonth, totalStudents, viewMonth,
-    };
-  }, [allAttendance, allStudents, selectedMonth]);
-
-  // ── Mark-attendance handlers ──────────────────────────────────────────────
-  function toggle(uid: string) {
-    setMarks(prev => ({ ...prev, [uid]: prev[uid] === "present" ? "absent" : "present" }));
-  }
-  function markAllPresent() {
-    const next: Record<string, MarkStatus> = {};
-    students.forEach(s => { next[s.uid] = "present"; });
-    setMarks(next);
-  }
-  function markAllAbsent() {
-    const next: Record<string, MarkStatus> = {};
-    students.forEach(s => { next[s.uid] = "absent"; });
-    setMarks(next);
-  }
-  async function handleSave() {
-    if (!selectedCentre || !user || students.length === 0 || saving) return;
-    setSaving(true);
-    setFeedback(null);
-    const results = await Promise.allSettled(
-      students.map(s =>
-        saveCentreAttendance({
-          studentUid: s.uid,
-          centerId:   selectedCentre,
-          date,
-          status:     marks[s.uid] ?? "present",
-          markedBy:   user.uid,
-        }),
-      ),
-    );
-    const failed = results.filter(r => r.status === "rejected").length;
-    setSaving(false);
-    if (failed === 0) {
-      const fresh = await getAttendanceByCentreDate(selectedCentre, date);
-      const map: Record<string, string> = {};
-      fresh.forEach(r => { map[r.studentUid] = r.id; });
-      setExistingIds(map);
-      setFeedback({ ok: true, msg: `Saved — ${markSummary.present} present, ${markSummary.absent} absent.` });
-      // Refresh trends data too so it's immediately up-to-date
-      if (tab === "trends") loadTrends(selectedCentre);
-    } else {
-      setFeedback({ ok: false, msg: `${failed} record(s) failed to save.` });
-    }
-  }
-
-  // ── Guards ────────────────────────────────────────────────────────────────
-  if (authLoading) return null;
-  if (selectedCentre && !isAllowed(selectedCentre)) {
-    return (
-      <div style={{ padding: "64px 0", textAlign: "center" }}>
-        <div style={{ fontSize: 40, marginBottom: 12 }}>🚫</div>
-        <p style={{ fontSize: 16, fontWeight: 700, color: "#dc2626" }}>Access Denied</p>
-      </div>
-    );
-  }
-
-  const canSave          = !!selectedCentre && students.length > 0 && !saving;
-  const hideCentreDropdown = isTeacherRole && centres.length === 1;
+function CellModal({
+  state,
+  onSave,
+  onClose,
+  saving,
+}: {
+  state:   ModalState;
+  onSave:  (status: AttendanceStatus) => void;
+  onClose: () => void;
+  saving:  boolean;
+}) {
+  const [pick, setPick] = useState<AttendanceStatus>(state.current ?? "present");
 
   return (
-    <div style={{ fontFamily: "inherit" }}>
-
-      {/* ── Page header ─────────────────────────────────────────────────── */}
-      <div style={{ marginBottom: 20, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111827", margin: 0 }}>Attendance</h1>
-          <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4, margin: 0 }}>
-            Mark attendance and track daily, weekly, and monthly trends.
-          </p>
+    <div style={overlay} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={modal}>
+        <div style={{ fontWeight: 700, fontSize: 15, color: "#111827", marginBottom: 4 }}>
+          {state.studentName}
         </div>
-        {/* Live badge */}
-        {tab === "trends" && selectedCentre && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#16a34a", fontWeight: 600, background: "#dcfce7", padding: "4px 10px", borderRadius: 99 }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#16a34a", display: "inline-block", animation: "pulse 2s infinite" }} />
-            LIVE · refreshes every 60s
-          </div>
-        )}
-      </div>
-
-      {/* ── Centre selector + date ──────────────────────────────────────── */}
-      <div style={s.card}>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-          {!hideCentreDropdown && (
-            <Field label="Centre">
-              <select value={selectedCentre} onChange={e => setSelectedCentre(e.target.value)} style={s.input}>
-                <option value="">— Select centre —</option>
-                {centres.map(c => (
-                  <option key={c.id} value={c.id}>{c.code ? `[${c.code}] ` : ""}{c.name}</option>
-                ))}
-              </select>
-            </Field>
-          )}
-          {hideCentreDropdown && centres[0] && (
-            <Field label="Centre">
-              <div style={{ ...s.input, background: "#f9fafb", cursor: "default", fontWeight: 600 }}>
-                {centres[0].code ? `[${centres[0].code}] ` : ""}{centres[0].name}
-              </div>
-            </Field>
-          )}
-          {tab === "mark" && (
-            <Field label="Date">
-              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={s.input} />
-            </Field>
-          )}
-          {tab === "trends" && (
-            <Field label="Month">
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="month"
-                  value={selectedMonth}
-                  min={minMonth()}
-                  max={currentMonth()}
-                  onChange={e => setSelectedMonth(e.target.value)}
-                  style={s.input}
-                />
-                {!isTrendsCurrentMonth && (
-                  <button
-                    onClick={() => setSelectedMonth(currentMonth())}
-                    style={{ fontSize: 11, padding: "5px 10px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer", color: "#374151", whiteSpace: "nowrap" as const }}>
-                    ← Current
-                  </button>
-                )}
-              </div>
-            </Field>
-          )}
-          {tab === "sheet" && (
-            <Field label="Month">
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="month"
-                  value={sheetMonth}
-                  min={minMonth()}
-                  max={currentMonth()}
-                  onChange={e => setSheetMonth(e.target.value)}
-                  style={s.input}
-                />
-                {sheetMonth !== currentMonth() && (
-                  <button
-                    onClick={() => setSheetMonth(currentMonth())}
-                    style={{ fontSize: 11, padding: "5px 10px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer", color: "#374151", whiteSpace: "nowrap" as const }}>
-                    ← Current
-                  </button>
-                )}
-              </div>
-            </Field>
-          )}
-          {/* Tab switcher */}
-          <div style={{ marginLeft: "auto", display: "flex", gap: 4, background: "#f3f4f6", borderRadius: 8, padding: 3 }}>
-            {(["mark", "trends", "sheet"] as PageTab[]).map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{
-                padding: "6px 18px", borderRadius: 6, border: "none", fontSize: 13, fontWeight: 600, cursor: "pointer",
-                background: tab === t ? "#fff" : "transparent",
-                color:      tab === t ? "#111827" : "#6b7280",
-                boxShadow:  tab === t ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 16 }}>
+          {new Date(state.date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {ALL_STATUSES.map(s => {
+            const { bg, fg } = STATUS_COLOR[s];
+            const active     = pick === s;
+            return (
+              <button key={s} onClick={() => setPick(s)} style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "10px 14px", borderRadius: 8, cursor: "pointer",
+                border: active ? `2px solid ${fg}` : "2px solid transparent",
+                background: active ? bg : "#f9fafb", color: active ? fg : "#374151",
+                fontWeight: active ? 700 : 500, fontSize: 13, textAlign: "left",
               }}>
-                {t === "mark" ? "✏️ Mark" : t === "trends" ? "📊 Trends" : "📋 Sheet"}
+                <span style={{ fontSize: 16, minWidth: 24, textAlign: "center" }}>{STATUS_SHORT[s]}</span>
+                {STATUS_LABEL[s]}
+                {state.current === s && <span style={{ marginLeft: "auto", fontSize: 11, color: "#9ca3af" }}>current</span>}
               </button>
-            ))}
-          </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 20 }}>
+          <button onClick={onClose} style={btnGhost} disabled={saving}>Cancel</button>
+          <button onClick={() => onSave(pick)} style={btnPrimary} disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </button>
         </div>
       </div>
-
-      {/* ══════════════════════ MARK TAB ═══════════════════════════════════ */}
-      {tab === "mark" && (
-        <>
-          {/* Quick actions + summary */}
-          {students.length > 0 && (
-            <div style={{ ...s.card, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={markAllPresent} style={btn("#16a34a", "#fff")}>✓ All Present</button>
-                <button onClick={markAllAbsent}  style={btn("#dc2626", "#fff")}>✗ All Absent</button>
-              </div>
-              <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-                <Chip label="Total"    value={markSummary.total}         color="#4f46e5" />
-                <Chip label="Present"  value={markSummary.present}       color="#16a34a" />
-                <Chip label="Absent"   value={markSummary.absent}        color="#dc2626" />
-                <Chip label="Group"    value={markSummary.groupCount}    color="#166534" />
-                <Chip label="Personal" value={markSummary.personalCount} color="#92400e" />
-                <button onClick={handleSave} disabled={!canSave}
-                  style={{ ...btn("#4f46e5", "#fff"), minWidth: 130, opacity: canSave ? 1 : 0.45 }}>
-                  {saving ? "Saving…" : "💾 Save"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Feedback */}
-          {feedback && (
-            <div style={{ ...s.card, padding: "12px 16px", background: feedback.ok ? "#dcfce7" : "#fee2e2", border: `1px solid ${feedback.ok ? "#86efac" : "#fca5a5"}`, color: feedback.ok ? "#15803d" : "#dc2626", display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-              <span>{feedback.ok ? "✓" : "✗"}</span>
-              <span style={{ flex: 1 }}>{feedback.msg}</span>
-              <button onClick={() => setFeedback(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, opacity: 0.6 }}>×</button>
-            </div>
-          )}
-
-          {/* Empty states */}
-          {!selectedCentre && <EmptyHint icon="🏫" text="Select a centre to begin." />}
-          {selectedCentre && loadingStudents && <div style={{ ...s.card, textAlign: "center", padding: "48px 0", color: "#6b7280" }}>Loading students…</div>}
-          {selectedCentre && !loadingStudents && students.length === 0 && <EmptyHint icon="👥" text="No students found for this centre." />}
-
-          {/* Student list */}
-          {selectedCentre && !loadingStudents && students.length > 0 && (
-            <div style={{ ...s.card, padding: 0, overflow: "hidden" }}>
-              {students.map((st, i) => {
-                const isPresent = (marks[st.uid] ?? "present") === "present";
-                const hasRecord = !!existingIds[st.uid];
-                return (
-                  <div key={st.uid} onClick={() => toggle(st.uid)} style={{
-                    display: "flex", alignItems: "center", padding: "14px 20px", cursor: "pointer",
-                    borderBottom: i < students.length - 1 ? "1px solid #f3f4f6" : "none",
-                    background: isPresent ? "#f0fdf4" : "#fff1f2", userSelect: "none" as const,
-                  }}>
-                    <div style={{ width: 12, height: 12, borderRadius: "50%", background: isPresent ? "#22c55e" : "#ef4444", marginRight: 14, flexShrink: 0, boxShadow: isPresent ? "0 0 0 3px rgba(34,197,94,0.18)" : "0 0 0 3px rgba(239,68,68,0.18)" }} />
-                    <div style={{ flex: 1 }}>
-                      <span style={{ fontWeight: 600, fontSize: 14, color: "#111827" }}>{st.name}</span>
-                      {st.instrument && <span style={{ marginLeft: 8, fontSize: 12, color: "#6b7280" }}>{st.instrument}</span>}
-                      <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 99, background: st.classType === "personal" ? "#fef9c3" : "#dcfce7", color: st.classType === "personal" ? "#92400e" : "#166534" }}>
-                        {st.classType === "personal" ? "Personal" : "Group"}
-                      </span>
-                    </div>
-                    {hasRecord && <span style={{ fontSize: 11, color: "#9ca3af", marginRight: 12 }}>saved</span>}
-                    <span style={{ padding: "4px 14px", borderRadius: 99, fontSize: 12, fontWeight: 700, background: isPresent ? "#dcfce7" : "#fee2e2", color: isPresent ? "#15803d" : "#dc2626" }}>
-                      {isPresent ? "Present" : "Absent"}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Bottom save */}
-          {students.length > 7 && (
-            <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
-              <button onClick={handleSave} disabled={!canSave}
-                style={{ ...btn("#4f46e5", "#fff"), opacity: canSave ? 1 : 0.45, padding: "10px 28px", fontSize: 14 }}>
-                {saving ? "Saving…" : "💾 Save Attendance"}
-              </button>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* ══════════════════════ TRENDS TAB ═════════════════════════════════ */}
-      {tab === "trends" && (
-        <>
-          {!selectedCentre && <EmptyHint icon="🏫" text="Select a centre to view trends." />}
-          {selectedCentre && loadingTrends && <div style={{ ...s.card, textAlign: "center", padding: "64px 0", color: "#6b7280" }}>Loading attendance data…</div>}
-
-          {selectedCentre && !loadingTrends && !trends && (
-            <EmptyHint icon="📊" text="No attendance records found for this centre." />
-          )}
-
-          {selectedCentre && !loadingTrends && trends && (
-            <>
-              {/* ── Past-month notice ──────────────────────────────────── */}
-              {!isTrendsCurrentMonth && (
-                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 14px", marginBottom: 14, fontSize: 13, color: "#92400e", display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 16 }}>📅</span>
-                  <span>Viewing <strong>{fmtMonth(selectedMonth)}</strong> — student breakdown reflects that month's attendance</span>
-                </div>
-              )}
-
-              {/* ── Live summary cards ─────────────────────────────────── */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, marginBottom: 16 }}>
-                <StatCard
-                  label="Today"
-                  value={trends.todayPct !== null ? `${trends.todayPct}%` : "—"}
-                  sub={trends.todayPresent !== null ? `${trends.todayPresent} present` : "Not marked yet"}
-                  color={trends.todayPct !== null ? pctColor(trends.todayPct) : "#9ca3af"}
-                  icon="📅"
-                />
-                <StatCard
-                  label="This Week"
-                  value={trends.weekPct !== null ? `${trends.weekPct}%` : "—"}
-                  sub="avg attendance"
-                  color={trends.weekPct !== null ? pctColor(trends.weekPct) : "#9ca3af"}
-                  icon="📆"
-                />
-                <StatCard
-                  label={fmtMonth(trends.viewMonth)}
-                  value={trends.monthPct !== null ? `${trends.monthPct}%` : "—"}
-                  sub={`${trends.classDaysThisMonth} class day${trends.classDaysThisMonth !== 1 ? "s" : ""}`}
-                  color={trends.monthPct !== null ? pctColor(trends.monthPct) : "#9ca3af"}
-                  icon="🗓"
-                />
-                <StatCard
-                  label="Best Day (30d)"
-                  value={trends.bestDay ? `${trends.bestDay.pct}%` : "—"}
-                  sub={trends.bestDay ? fmtDate(trends.bestDay.date) : ""}
-                  color="#16a34a"
-                  icon="🌟"
-                />
-                <StatCard
-                  label="Worst Day (30d)"
-                  value={trends.worstDay ? `${trends.worstDay.pct}%` : "—"}
-                  sub={trends.worstDay ? fmtDate(trends.worstDay.date) : ""}
-                  color="#dc2626"
-                  icon="⚠"
-                />
-                <StatCard
-                  label="Total Students"
-                  value={String(trends.totalStudents)}
-                  sub="enrolled"
-                  color="#4f46e5"
-                  icon="🎓"
-                />
-              </div>
-
-              {/* ── Daily trend (30 days) ──────────────────────────────── */}
-              <div style={s.card}>
-                <div style={s.chartTitle}>Daily Attendance — Last 30 Days</div>
-                <BarChart
-                  data={trends.dailyData.map(d => ({
-                    label: fmtDate(d.date),
-                    value: d.pct,
-                    sub:   d.total > 0 ? `${d.present}/${d.total}` : "—",
-                    empty: d.total === 0,
-                    isToday: d.date === todayISO(),
-                  }))}
-                  height={160}
-                />
-                <div style={s.chartLegend}>
-                  <LegendDot color="#16a34a" label="≥75%" />
-                  <LegendDot color="#d97706" label="50–74%" />
-                  <LegendDot color="#dc2626" label="<50%" />
-                  <LegendDot color="#e5e7eb" label="No data" />
-                </div>
-              </div>
-
-              {/* ── Weekly trend (12 weeks) ────────────────────────────── */}
-              <div style={s.card}>
-                <div style={s.chartTitle}>Weekly Attendance — Last 12 Weeks</div>
-                <BarChart
-                  data={trends.weeklyData.map(d => ({
-                    label: d.week.replace(/\d{4}-/, ""),
-                    value: d.pct,
-                    sub:   d.total > 0 ? `${d.present}/${d.total}` : "—",
-                    empty: d.total === 0,
-                    isToday: d.week === currentWeekKey(),
-                  }))}
-                  height={140}
-                />
-              </div>
-
-              {/* ── Monthly trend (12 months) ──────────────────────────── */}
-              <div style={s.card}>
-                <div style={s.chartTitle}>Monthly Attendance — Last 12 Months</div>
-                <BarChart
-                  data={trends.monthlyData.map(d => ({
-                    label: fmtMonth(d.month).split(" ")[0], // "Apr"
-                    value: d.pct,
-                    sub:   d.total > 0 ? `${d.present}/${d.total}` : "—",
-                    empty: d.total === 0,
-                    isToday: d.month === trends.viewMonth,
-                  }))}
-                  height={140}
-                />
-                <div style={{ display: "flex", gap: 16, marginTop: 8, overflowX: "auto", paddingBottom: 4 }}>
-                  {trends.monthlyData.map(d => (
-                    <div key={d.month} style={{ textAlign: "center", minWidth: 48, fontSize: 11, color: "#374151" }}>
-                      <div style={{ fontWeight: 700, color: d.total ? pctColor(d.pct) : "#9ca3af" }}>
-                        {d.total ? `${d.pct}%` : "—"}
-                      </div>
-                      <div style={{ color: "#9ca3af" }}>{fmtMonth(d.month).split(" ")[0]}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* ── Per-student breakdown ─────────────────────────────── */}
-              <div style={s.card}>
-                <div style={s.chartTitle}>
-                  Student Breakdown — {fmtMonth(trends.viewMonth)}
-                  <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: "#9ca3af" }}>
-                    {trends.classDaysThisMonth} class day{trends.classDaysThisMonth !== 1 ? "s" : ""}
-                  </span>
-                </div>
-                {trends.studentStats.length === 0 ? (
-                  <div style={{ color: "#9ca3af", fontSize: 13, padding: "12px 0" }}>No records yet this month.</div>
-                ) : (
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                      <thead>
-                        <tr style={{ background: "#f9fafb" }}>
-                          <th style={s.th}>Student</th>
-                          <th style={s.th}>Centre</th>
-                          <th style={s.th}>Type</th>
-                          <th style={{ ...s.th, textAlign: "center" as const }}>Present</th>
-                          <th style={{ ...s.th, textAlign: "center" as const }}>Absent</th>
-                          <th style={{ ...s.th, textAlign: "center" as const }}>{fmtMonth(trends.viewMonth)} %</th>
-                          <th style={s.th}>Bar</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {trends.studentStats.map(st => (
-                          <tr key={st.uid} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                            <td style={s.td}>
-                              <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
-                              {st.instrument && <div style={{ fontSize: 11, color: "#9ca3af" }}>{st.instrument}</div>}
-                              {st.breakStartDate && (
-                                <div style={{ fontSize: 10, color: "#0369a1", marginTop: 2 }}>☕ On break from {st.breakStartDate}</div>
-                              )}
-                            </td>
-                            <td style={{ ...s.td, fontSize: 12, color: "#374151", maxWidth: 130 }}>
-                              <span style={{ background: "#f3f4f6", padding: "2px 7px", borderRadius: 6, fontWeight: 500 }}>
-                                {st.centerName || "—"}
-                              </span>
-                            </td>
-                            <td style={s.td}>
-                              <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: st.classType === "personal" ? "#fef9c3" : "#dcfce7", color: st.classType === "personal" ? "#92400e" : "#166534" }}>
-                                {st.classType === "personal" ? "Personal" : "Group"}
-                              </span>
-                            </td>
-                            <td style={{ ...s.td, textAlign: "center" as const, fontWeight: 700, color: "#16a34a" }}>{st.present}</td>
-                            <td style={{ ...s.td, textAlign: "center" as const, fontWeight: 700, color: "#dc2626" }}>{st.absent}</td>
-                            <td style={{ ...s.td, textAlign: "center" as const }}>
-                              <span style={{ fontWeight: 800, fontSize: 14, color: pctColor(st.pct) }}>{st.pct}%</span>
-                            </td>
-                            <td style={{ ...s.td, minWidth: 100 }}>
-                              <div style={{ background: "#f3f4f6", borderRadius: 99, height: 8, width: "100%", overflow: "hidden" }}>
-                                <div style={{ background: pctColor(st.pct), height: "100%", width: `${st.pct}%`, borderRadius: 99, transition: "width 0.4s ease" }} />
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </>
-      )}
-
-      {/* ══════════════════════ SHEET TAB ══════════════════════════════════ */}
-      {tab === "sheet" && (
-        <>
-          {!selectedCentre && <EmptyHint icon="🏛" text="Select a centre to view the attendance sheet." />}
-          {selectedCentre && loadingSheet && (
-            <div style={{ ...s.card, textAlign: "center", padding: "64px 0", color: "#6b7280" }}>Loading attendance sheet…</div>
-          )}
-          {selectedCentre && !loadingSheet && (
-            <AttendanceSheet
-              students={sheetStudents}
-              attendance={sheetAttendance}
-              month={sheetMonth}
-            />
-          )}
-        </>
-      )}
-
-      {/* Pulse animation */}
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
     </div>
   );
 }
 
-// ─── Attendance Sheet ─────────────────────────────────────────────────────────
+// ─── Extra Class Modal ────────────────────────────────────────────────────────
 
-const DAY_ABBR = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-
-/** All calendar dates in a YYYY-MM month as "YYYY-MM-DD" strings */
-function datesInMonth(month: string): string[] {
-  const [yr, mo] = month.split("-").map(Number);
-  const count    = new Date(yr, mo, 0).getDate();
-  return Array.from({ length: count }, (_, i) => {
-    const d = i + 1;
-    return `${month}-${String(d).padStart(2,"0")}`;
-  });
-}
-
-/** Given attendance records for all students + the set of ALL dated records,
- *  compute which dates were actual class days at this centre.
- *  For group students: a class day = any date that appears in the attendance collection
- *  (i.e. teacher explicitly marked that day for at least one student).
- */
-function groupClassDatesSet(attendance: AttendanceRec[], allDates: string[]): Set<string> {
-  const marked = new Set(attendance.map(r => r.date));
-  return new Set(allDates.filter(d => marked.has(d)));
-}
-
-/** Is this date a scheduled class day for this student? */
-function isScheduledDay(date: string, student: StudentRow, groupClassDates: Set<string>): boolean {
-  if (student.classType === "personal") {
-    // Personal: only days matching their classDays array
-    if (student.classDays.length === 0) return false;
-    const dow = DAY_ABBR[new Date(date + "T00:00:00").getDay()];
-    return student.classDays.includes(dow);
-  }
-  // Group: any date the teacher has marked attendance for the centre
-  return groupClassDates.has(date);
-}
-
-/** Determine cell status for one student on one date */
-function cellStatus(
-  date:            string,
-  student:         StudentRow,
-  attMap:          Map<string, "present" | "absent">,  // key: `${studentUid}|${date}`
-  groupClassDates: Set<string>,
-  today:           string,
-): CellStatus {
-  // Future date
-  if (date > today) return "future";
-  // On break from this date
-  if (student.breakStartDate && date >= student.breakStartDate) return "break";
-  // Is it a scheduled class day?
-  if (!isScheduledDay(date, student, groupClassDates)) return "non_class";
-  // Scheduled — check attendance
-  const key = `${student.uid}|${date}`;
-  const rec = attMap.get(key);
-  if (rec === "present") return "present";
-  if (rec === "absent")  return "absent";
-  return "not_marked";
-}
-
-const CELL_STYLE: Record<CellStatus, React.CSSProperties> = {
-  present:    { background: "#dcfce7", color: "#16a34a", fontWeight: 700 },
-  absent:     { background: "#fee2e2", color: "#dc2626", fontWeight: 700 },
-  not_marked: { background: "#fef9c3", color: "#92400e", fontWeight: 500 },
-  break:      { background: "#e0f2fe", color: "#0369a1", fontWeight: 600 },
-  non_class:  { background: "#f9fafb", color: "#d1d5db" },
-  future:     { background: "#f9fafb", color: "#e5e7eb" },
-};
-
-const CELL_LABEL: Record<CellStatus, string> = {
-  present:    "P",
-  absent:     "A",
-  not_marked: "—",
-  break:      "☕",
-  non_class:  "",
-  future:     "",
-};
-
-function AttendanceSheet({ students, attendance, month }: {
-  students:   StudentRow[];
-  attendance: AttendanceRec[];
-  month:      string;
+function ExtraClassModal({
+  centreId,
+  month,
+  existingDates,
+  onSave,
+  onClose,
+  saving,
+}: {
+  centreId:      string;
+  month:         string;
+  existingDates: Set<string>;
+  onSave:        (date: string, note: string) => void;
+  onClose:       () => void;
+  saving:        boolean;
 }) {
-  const today      = todayISO();
-  const allDates   = datesInMonth(month);
+  const [yr, mo] = month.split("-").map(Number);
+  const maxDate  = `${month}-${String(new Date(yr, mo, 0).getDate()).padStart(2,"0")}`;
+  const [date, setDate] = useState(`${month}-01`);
+  const [note, setNote] = useState("");
+  const already = existingDates.has(date);
 
-  // Build attendance lookup map: `${uid}|${date}` → status
+  return (
+    <div style={overlay} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={modal}>
+        <div style={{ fontWeight: 700, fontSize: 15, color: "#111827", marginBottom: 16 }}>
+          Add Extra Class
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <label style={labelStyle}>
+            Date
+            <input
+              type="date"
+              value={date}
+              min={`${month}-01`}
+              max={maxDate}
+              onChange={e => setDate(e.target.value)}
+              style={inputStyle}
+            />
+          </label>
+          <label style={labelStyle}>
+            Note (optional)
+            <input
+              type="text"
+              value={note}
+              placeholder="e.g. Makeup class"
+              onChange={e => setNote(e.target.value)}
+              style={inputStyle}
+            />
+          </label>
+          {already && (
+            <div style={{ fontSize: 12, color: "#92400e", background: "#fef3c7", padding: "8px 12px", borderRadius: 7 }}>
+              ⚠ This date is already a scheduled class day.
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 20 }}>
+          <button onClick={onClose} style={btnGhost} disabled={saving}>Cancel</button>
+          <button onClick={() => onSave(date, note)} style={btnPrimary} disabled={saving || already}>
+            {saving ? "Adding…" : "Add"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Centre Calendar Card ─────────────────────────────────────────────────────
+
+function CentreCard({
+  centre,
+  students,
+  attendance,
+  extraDates,
+  month,
+  today,
+  onCellClick,
+  onAddExtra,
+}: {
+  centre:      CentreRow;
+  students:    StudentRow[];
+  attendance:  AttRec[];
+  extraDates:  Set<string>;
+  month:       string;
+  today:       string;
+  onCellClick: (m: ModalState) => void;
+  onAddExtra:  () => void;
+}) {
+  const allDates    = useMemo(() => datesInMonth(month), [month]);
+  const scheduledDates = useMemo(
+    () => allDates.filter(d => isScheduled(d, centre, extraDates)),
+    [allDates, centre, extraDates],
+  );
+
+  // attMap: `${studentUid}|${date}` → status
   const attMap = useMemo(() => {
-    const m = new Map<string, "present" | "absent">();
+    const m = new Map<string, AttendanceStatus>();
     attendance.forEach(r => m.set(`${r.studentUid}|${r.date}`, r.status));
     return m;
   }, [attendance]);
 
-  // Dates when teacher actually marked group attendance (at this centre, this month)
-  const groupClassDates = useMemo(() => groupClassDatesSet(attendance, allDates), [attendance, allDates]);
-
-  // For display: only show dates that are class days for at least one student
-  const relevantDates = useMemo(() => allDates.filter(date => {
-    if (date > today) return false; // don't show future columns
-    // Include if any student has it as a scheduled day
-    return students.some(s => isScheduledDay(date, s, groupClassDates));
-  }), [allDates, students, groupClassDates, today]);
-
-  // Summary per student
-  const summaries = useMemo(() => students.map(s => {
-    let present = 0, absent = 0, notMarked = 0, breakDays = 0;
-    relevantDates.forEach(date => {
-      const cs = cellStatus(date, s, attMap, groupClassDates, today);
-      if (cs === "present")    present++;
-      else if (cs === "absent")     absent++;
-      else if (cs === "not_marked") notMarked++;
-      else if (cs === "break")      breakDays++;
-    });
-    const scheduled = present + absent + notMarked;
-    return { present, absent, notMarked, breakDays, scheduled, pct: pct(present, scheduled || 1) };
-  }), [students, relevantDates, attMap, groupClassDates, today]);
-
-  if (students.length === 0) {
-    return <EmptyHint icon="📋" text="No students found for this centre." />;
-  }
-
-  if (relevantDates.length === 0) {
-    return <EmptyHint icon="📋" text={`No attendance recorded for ${fmtMonth(month)} yet.`} />;
-  }
-
-  // Split students by group/personal for section headers
-  const groupStudents    = students.filter(s => s.classType === "group");
-  const personalStudents = students.filter(s => s.classType === "personal");
-
-  function renderSection(rows: StudentRow[], label: string) {
-    if (rows.length === 0) return null;
-    return (
-      <>
-        {/* Section header row */}
-        <tr>
-          <td colSpan={relevantDates.length + 6} style={{
-            background: "#f3f4f6", padding: "6px 14px", fontSize: 11,
-            fontWeight: 800, color: "#6b7280", textTransform: "uppercase" as const,
-            letterSpacing: 1, borderBottom: "1px solid #e5e7eb",
-          }}>
-            {label} ({rows.length})
-          </td>
-        </tr>
-        {rows.map((st, i) => {
-          const idx     = students.indexOf(st);
-          const summary = summaries[idx];
-          return (
-            <tr key={st.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-              {/* Fixed: # */}
-              <td style={sheetTd}>{idx + 1}</td>
-              {/* Fixed: Name */}
-              <td style={{ ...sheetTd, fontWeight: 600, color: "#111827", minWidth: 140, whiteSpace: "nowrap" as const }}>
-                <div>{st.name}</div>
-                {st.instrument && <div style={{ fontSize: 10, color: "#9ca3af", fontWeight: 400 }}>{st.instrument}</div>}
-              </td>
-              {/* Fixed: Centre */}
-              <td style={{ ...sheetTd, fontSize: 11, color: "#6b7280", minWidth: 100, whiteSpace: "nowrap" as const }}>
-                {st.centerName}
-              </td>
-              {/* Date cells */}
-              {relevantDates.map(date => {
-                const cs    = cellStatus(date, st, attMap, groupClassDates, today);
-                const style = CELL_STYLE[cs];
-                const label = CELL_LABEL[cs];
-                return (
-                  <td key={date} title={cs === "not_marked" ? `${st.name} — ${date} (not marked)` : cs === "break" ? `On break from ${st.breakStartDate}` : undefined}
-                    style={{
-                      ...sheetTd, textAlign: "center" as const, fontSize: 12,
-                      minWidth: 34, padding: "5px 3px",
-                      borderLeft: "1px solid #f3f4f6",
-                      ...style,
-                    }}>
-                    {label}
-                  </td>
-                );
-              })}
-              {/* Summary columns */}
-              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 700, color: "#16a34a", minWidth: 42 }}>{summary.present}</td>
-              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 700, color: "#dc2626", minWidth: 42 }}>{summary.absent}</td>
-              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 600, color: "#92400e", minWidth: 42, fontSize: 12 }}>
-                {summary.notMarked > 0 ? summary.notMarked : "—"}
-              </td>
-              <td style={{ ...sheetTd, textAlign: "center" as const, fontWeight: 800, fontSize: 13, color: pctColor(summary.pct), minWidth: 48 }}>
-                {summary.scheduled > 0 ? `${summary.pct}%` : "—"}
-              </td>
-            </tr>
-          );
-        })}
-      </>
-    );
-  }
+  if (students.length === 0) return null;
 
   return (
-    <div style={s.card}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+    <div style={card}>
+      {/* Centre header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>
-            Attendance Sheet — {fmtMonth(month)}
-          </div>
-          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-            {students.length} students · {relevantDates.length} class days
-          </div>
-        </div>
-        {/* Legend */}
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, fontSize: 12 }}>
-          {(["present","absent","not_marked","break"] as CellStatus[]).map(cs => (
-            <span key={cs} style={{
-              display: "inline-flex", alignItems: "center", gap: 5,
-              padding: "3px 9px", borderRadius: 6, ...CELL_STYLE[cs], fontSize: 11,
-            }}>
-              <strong>{CELL_LABEL[cs] || "·"}</strong>
-              {cs === "present" ? "Present" : cs === "absent" ? "Absent" : cs === "not_marked" ? "Not Marked" : "On Break"}
+          <span style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>
+            {centre.code ? `[${centre.code}] ` : ""}{centre.name}
+          </span>
+          {centre.daysOfWeek.length > 0 && (
+            <span style={{ marginLeft: 10, fontSize: 11, color: "#6b7280", background: "#f3f4f6", padding: "2px 8px", borderRadius: 99 }}>
+              {centre.daysOfWeek.join(" · ")}
             </span>
-          ))}
+          )}
         </div>
+        <button onClick={onAddExtra} style={btnSmall}>+ Extra Class</button>
       </div>
 
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }}>
-          <thead>
-            {/* Month/day header row */}
-            <tr style={{ background: "#f9fafb" }}>
-              <th style={sheetTh}>#</th>
-              <th style={{ ...sheetTh, minWidth: 140 }}>Student</th>
-              <th style={{ ...sheetTh, minWidth: 100 }}>Centre</th>
-              {relevantDates.map(date => {
-                const d   = new Date(date + "T00:00:00");
-                const day = d.getDate();
-                const dow = DAY_ABBR[d.getDay()];
-                const isToday = date === today;
+      {scheduledDates.length === 0 ? (
+        <p style={{ fontSize: 13, color: "#9ca3af", margin: 0 }}>
+          No scheduled classes in {fmtMonth(month)}.
+          {centre.daysOfWeek.length === 0 && " Centre has no class days configured."}
+        </p>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }}>
+            <thead>
+              <tr>
+                <th style={th}>Student</th>
+                {scheduledDates.map(date => {
+                  const isExtra = extraDates.has(date) && !centre.daysOfWeek.includes(dowOf(date));
+                  const isToday = date === today;
+                  return (
+                    <th key={date} style={{
+                      ...th, textAlign: "center", minWidth: 38, padding: "5px 3px",
+                      borderLeft: "1px solid #e5e7eb",
+                      background: isToday ? "#fef3c7" : isExtra ? "#f0fdf4" : "#f9fafb",
+                      color: isToday ? "#92400e" : isExtra ? "#166534" : "#6b7280",
+                    }}>
+                      <div style={{ fontWeight: 700 }}>{dayNum(date)}</div>
+                      <div style={{ fontSize: 9 }}>{dowOf(date)}</div>
+                      {isExtra && <div style={{ fontSize: 8, color: "#16a34a" }}>+extra</div>}
+                    </th>
+                  );
+                })}
+                {/* Summary */}
+                <th style={{ ...th, textAlign: "center", background: "#dcfce7", color: "#166534", minWidth: 36 }}>P</th>
+                <th style={{ ...th, textAlign: "center", background: "#fee2e2", color: "#991b1b", minWidth: 36 }}>A</th>
+                <th style={{ ...th, textAlign: "center", background: "#f9fafb", color: "#6b7280", minWidth: 36 }}>%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {students.map((st, i) => {
+                let p = 0, a = 0;
                 return (
-                  <th key={date} style={{
-                    ...sheetTh, textAlign: "center" as const,
-                    minWidth: 34, padding: "6px 3px",
-                    borderLeft: "1px solid #e5e7eb",
-                    background: isToday ? "#fef3c7" : "#f9fafb",
-                    color: isToday ? "#92400e" : "#6b7280",
-                  }}>
-                    <div style={{ fontWeight: 700 }}>{day}</div>
-                    <div style={{ fontSize: 9, fontWeight: 400 }}>{dow}</div>
-                  </th>
+                  <tr key={st.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
+                    <td style={{ ...td, minWidth: 140, whiteSpace: "nowrap" }}>
+                      <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
+                      {st.instrument && <div style={{ fontSize: 10, color: "#9ca3af" }}>{st.instrument}</div>}
+                    </td>
+                    {scheduledDates.map(date => {
+                      const onBreak    = !!st.breakStartDate && date >= st.breakStartDate;
+                      const isFuture   = date > today;
+                      const statusKey  = `${st.uid}|${date}`;
+                      const status     = attMap.get(statusKey) ?? null;
+
+                      // Count for summary
+                      if (status === "present") p++;
+                      else if (status === "absent") a++;
+
+                      if (isFuture) {
+                        return <td key={date} style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, background: "#fafafa", color: "#e5e7eb", borderLeft: "1px solid #f3f4f6" }}>·</td>;
+                      }
+                      if (onBreak && !status) {
+                        return (
+                          <td key={date} onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break" })}
+                            style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...STATUS_COLOR.break }}>
+                            {STATUS_SHORT.break}
+                          </td>
+                        );
+                      }
+
+                      const sc = status ? STATUS_COLOR[status] : { bg: "#f9fafb", fg: "#d1d5db" };
+                      return (
+                        <td key={date}
+                          onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status })}
+                          style={{
+                            ...td, textAlign: "center", padding: "5px 3px", minWidth: 38,
+                            cursor: "pointer", borderLeft: "1px solid #f3f4f6",
+                            background: sc.bg, color: sc.fg,
+                          }}
+                          title={status ? STATUS_LABEL[status] : "Click to mark"}
+                        >
+                          {status ? STATUS_SHORT[status] : <span style={{ color: "#d1d5db" }}>·</span>}
+                        </td>
+                      );
+                    })}
+                    {/* Summary */}
+                    <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#16a34a", minWidth: 36 }}>{p}</td>
+                    <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#dc2626", minWidth: 36 }}>{a}</td>
+                    <td style={{ ...td, textAlign: "center", fontWeight: 700, fontSize: 12, color: p + a > 0 ? (p / (p+a) >= 0.75 ? "#16a34a" : p / (p+a) >= 0.5 ? "#d97706" : "#dc2626") : "#9ca3af", minWidth: 36 }}>
+                      {p + a > 0 ? `${Math.round(p/(p+a)*100)}%` : "—"}
+                    </td>
+                  </tr>
                 );
               })}
-              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#dcfce7", color: "#166534", minWidth: 42 }}>P</th>
-              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#fee2e2", color: "#991b1b", minWidth: 42 }}>A</th>
-              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#fef9c3", color: "#92400e", minWidth: 42 }}>N/M</th>
-              <th style={{ ...sheetTh, textAlign: "center" as const, background: "#ede9fe", color: "#4f46e5", minWidth: 48 }}>%</th>
-            </tr>
-          </thead>
-          <tbody>
-            {renderSection(groupStudents, "👥 Group Students")}
-            {renderSection(personalStudents, "👤 Personal Students")}
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+        {ALL_STATUSES.map(s => (
+          <span key={s} style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4, color: STATUS_COLOR[s].fg, background: STATUS_COLOR[s].bg, padding: "2px 8px", borderRadius: 99 }}>
+            <b>{STATUS_SHORT[s]}</b> {STATUS_LABEL[s]}
+          </span>
+        ))}
       </div>
     </div>
   );
 }
 
-const sheetTh: React.CSSProperties = {
-  padding: "8px 10px", textAlign: "left", fontSize: 11, fontWeight: 700,
-  color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5,
-  borderBottom: "2px solid #e5e7eb", whiteSpace: "nowrap",
-  background: "#f9fafb",
-};
-const sheetTd: React.CSSProperties = {
-  padding: "8px 10px", verticalAlign: "middle",
-  borderBottom: "1px solid #f3f4f6",
-};
+// ─── Main content ─────────────────────────────────────────────────────────────
 
-// ─── Bar Chart (SVG, no deps) ─────────────────────────────────────────────────
+function AttendanceContent() {
+  const { user, loading: authLoading } = useAuthContext();
+  const { filterCentres }              = useCentreAccess();
 
-function BarChart({ data, height = 140 }: {
-  data:   { label: string; value: number; sub: string; empty: boolean; isToday: boolean }[];
-  height?: number;
-}) {
-  const barW  = Math.max(8, Math.min(32, Math.floor(560 / data.length) - 4));
-  const gap   = Math.max(2, Math.floor(560 / data.length) - barW);
-  const totalW = data.length * (barW + gap);
-  const chartH = height - 32; // reserve 32px for labels below
+  const [month,   setMonth]   = useState<string>(currentMonth());
+  const [centres, setCentres] = useState<CentreRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Per-centre data
+  const [studentMap,    setStudentMap]    = useState<Map<string, StudentRow[]>>(new Map());
+  const [attMap,        setAttMap]        = useState<Map<string, AttRec[]>>(new Map());
+  const [extraMap,      setExtraMap]      = useState<Map<string, Set<string>>>(new Map());
+
+  // Modal state
+  const [modal,       setModal]       = useState<ModalState | null>(null);
+  const [saving,      setSaving]      = useState(false);
+  const [extraTarget, setExtraTarget] = useState<string | null>(null);   // centreId
+  const [savingExtra, setSavingExtra] = useState(false);
+
+  const today = todayISO();
+
+  // ── Load centres ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (authLoading || !user) return;
+    (async () => {
+      const snap = await getDocs(collection(db, "centers"));
+      const all: CentreRow[] = snap.docs.map(d => {
+        const data = d.data() as Record<string, unknown>;
+        return {
+          id:         d.id,
+          name:       (data.name       as string) || d.id,
+          code:       (data.centerCode as string) || "",
+          daysOfWeek: Array.isArray(data.daysOfWeek) ? (data.daysOfWeek as string[]) : [],
+          teacherUid: (data.teacherUid as string) || "",
+        };
+      });
+      setCentres(filterCentres(all));
+    })().catch(console.error);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, user]);
+
+  // ── Load students + attendance for all centres when month changes ─────────
+  const loadAll = useCallback(async (centreList: CentreRow[], m: string) => {
+    if (!centreList.length) return;
+    setLoading(true);
+    try {
+      const [yr, mo] = m.split("-").map(Number);
+      const daysInM  = new Date(yr, mo, 0).getDate();
+      const mStart   = `${m}-01`;
+      const mEnd     = `${m}-${String(daysInM).padStart(2,"0")}`;
+
+      // Batch load students and attendance for each centre
+      const centreIds = centreList.map(c => c.id);
+
+      // Students: one query per centre (Firestore limitation)
+      const stuPromises = centreIds.map(cid =>
+        getDocs(query(collection(db, "users"), where("role","==","student"), where("centerId","==",cid)))
+      );
+      // Attendance: one query per centre
+      const attPromises = centreIds.map(cid =>
+        getDocs(query(collection(db, "attendance"), where("centerId","==",cid)))
+      );
+      // Extra classes: use service function
+      const extraPromises = centreIds.map(cid => getExtraClassesByCentre(cid, m));
+
+      const [stuResults, attResults, extraResults] = await Promise.all([
+        Promise.all(stuPromises),
+        Promise.all(attPromises),
+        Promise.all(extraPromises),
+      ]);
+
+      const newStudentMap = new Map<string, StudentRow[]>();
+      const newAttMap     = new Map<string, AttRec[]>();
+      const newExtraMap   = new Map<string, Set<string>>();
+
+      centreIds.forEach((cid, i) => {
+        const students: StudentRow[] = stuResults[i].docs
+          .filter(d => {
+            const st = ((d.data().status ?? d.data().studentStatus ?? "active") as string);
+            return st !== "inactive" && st !== "deactivation_requested";
+          })
+          .map(d => {
+            const data = d.data() as Record<string, unknown>;
+            const st   = ((data.status ?? data.studentStatus ?? "active") as string);
+            return {
+              uid:            d.id,
+              name:           (data.displayName as string) || (data.name as string) || d.id,
+              instrument:     (data.instrument  as string) || "",
+              classType:      ((data.classType as string) === "personal" ? "personal" : "group") as "group" | "personal",
+              classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
+              breakStartDate: (st === "on_break" || st === "break_requested")
+                ? ((data.breakStartDate as string) ?? null) : null,
+            };
+          })
+          .sort((a, b) => {
+            if (a.classType !== b.classType) return a.classType === "group" ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
+
+        const attRecs: AttRec[] = attResults[i].docs
+          .map(d => {
+            const r = d.data() as Record<string, unknown>;
+            return {
+              id:         d.id,
+              studentUid: r.studentUid as string,
+              date:       (r.date as string) ?? "",
+              status:     (r.status as AttendanceStatus) ?? "absent",
+            };
+          })
+          .filter(r => r.date >= mStart && r.date <= mEnd);
+
+        const extraSet = new Set(extraResults[i].map(e => e.date));
+
+        newStudentMap.set(cid, students);
+        newAttMap.set(cid, attRecs);
+        newExtraMap.set(cid, extraSet);
+      });
+
+      setStudentMap(newStudentMap);
+      setAttMap(newAttMap);
+      setExtraMap(newExtraMap);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (centres.length > 0) loadAll(centres, month);
+  }, [centres, month, loadAll]);
+
+  // ── Save attendance ───────────────────────────────────────────────────────
+  async function handleSave(status: AttendanceStatus) {
+    if (!modal || !user) return;
+    setSaving(true);
+    try {
+      await saveCentreAttendance({
+        studentUid: modal.studentUid,
+        centerId:   modal.centreId,
+        date:       modal.date,
+        status,
+        markedBy:   user.uid,
+      });
+      // Update local attMap
+      setAttMap(prev => {
+        const next    = new Map(prev);
+        const recs    = [...(next.get(modal.centreId) ?? [])];
+        const idx     = recs.findIndex(r => r.studentUid === modal.studentUid && r.date === modal.date);
+        if (idx >= 0) recs[idx] = { ...recs[idx], status };
+        else recs.push({ id: `${modal.studentUid}|${modal.date}`, studentUid: modal.studentUid, date: modal.date, status });
+        next.set(modal.centreId, recs);
+        return next;
+      });
+      setModal(null);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── Save extra class ──────────────────────────────────────────────────────
+  async function handleSaveExtra(date: string, note: string) {
+    if (!extraTarget || !user) return;
+    setSavingExtra(true);
+    try {
+      await saveExtraClass(extraTarget, date, user.uid, note);
+      setExtraMap(prev => {
+        const next = new Map(prev);
+        const set  = new Set(next.get(extraTarget) ?? []);
+        set.add(date);
+        next.set(extraTarget, set);
+        return next;
+      });
+      setExtraTarget(null);
+    } finally {
+      setSavingExtra(false);
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  if (authLoading) return null;
 
   return (
-    <div style={{ overflowX: "auto", paddingBottom: 4 }}>
-      <svg width={Math.max(totalW, 100)} height={height} style={{ display: "block" }}>
-        {/* Gridlines */}
-        {[25, 50, 75, 100].map(v => {
-          const y = chartH - (v / 100) * chartH;
-          return (
-            <g key={v}>
-              <line x1={0} x2={totalW} y1={y} y2={y} stroke="#f3f4f6" strokeWidth={1} />
-              <text x={0} y={y - 2} fontSize={9} fill="#d1d5db">{v}%</text>
-            </g>
-          );
-        })}
-        {/* 75% threshold line */}
-        <line x1={0} x2={totalW} y1={chartH - 0.75 * chartH} y2={chartH - 0.75 * chartH}
-          stroke="#86efac" strokeWidth={1} strokeDasharray="4,3" />
+    <div style={{ fontFamily: "inherit" }}>
+      {/* Header */}
+      <div style={{ marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111827", margin: 0 }}>Attendance</h1>
+          <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4, margin: 0 }}>
+            All centres · click any cell to mark or edit
+          </p>
+        </div>
+        {/* Month picker */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="month"
+            value={month}
+            min={minMonth()}
+            max={currentMonth()}
+            onChange={e => setMonth(e.target.value)}
+            style={inputStyle}
+          />
+          {month !== currentMonth() && (
+            <button onClick={() => setMonth(currentMonth())} style={btnGhost}>
+              ← Today
+            </button>
+          )}
+        </div>
+      </div>
 
-        {data.map((d, i) => {
-          const x     = i * (barW + gap);
-          const barH  = d.empty ? 0 : Math.max(2, (d.value / 100) * chartH);
-          const y     = chartH - barH;
-          const color = d.empty ? "#e5e7eb" : pctColor(d.value);
-          return (
-            <g key={i} style={{ cursor: "default" }}>
-              {/* Hover target (full column height) */}
-              <rect x={x} y={0} width={barW} height={chartH} fill="transparent">
-                <title>{d.empty ? `${d.label}: No data` : `${d.label}: ${d.value}% (${d.sub})`}</title>
-              </rect>
-              {/* Bar */}
-              <rect x={x} y={y} width={barW} height={d.empty ? 3 : barH} rx={3} fill={color} opacity={d.isToday ? 1 : 0.82} />
-              {/* Today highlight ring */}
-              {d.isToday && <rect x={x - 1} y={0} width={barW + 2} height={chartH} rx={3} fill="none" stroke="#f59e0b" strokeWidth={1.5} />}
-              {/* Value on top of bar */}
-              {!d.empty && barH > 16 && (
-                <text x={x + barW / 2} y={y + 11} textAnchor="middle" fontSize={9} fontWeight={700} fill="#fff">
-                  {d.value}%
-                </text>
-              )}
-              {/* Label below baseline */}
-              <text x={x + barW / 2} y={chartH + 14} textAnchor="middle" fontSize={9} fill={d.isToday ? "#f59e0b" : "#9ca3af"} fontWeight={d.isToday ? 700 : 400}>
-                {d.label}
-              </text>
-            </g>
-          );
-        })}
-        {/* Baseline */}
-        <line x1={0} x2={totalW} y1={chartH} y2={chartH} stroke="#e5e7eb" strokeWidth={1} />
-      </svg>
-    </div>
-  );
-}
+      {loading && (
+        <div style={{ textAlign: "center", padding: "64px 0", color: "#9ca3af", fontSize: 14 }}>
+          Loading…
+        </div>
+      )}
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+      {!loading && centres.length === 0 && (
+        <div style={{ textAlign: "center", padding: "64px 0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>🏫</div>
+          <p style={{ color: "#6b7280", fontSize: 14 }}>No centres available.</p>
+        </div>
+      )}
 
-function StatCard({ label, value, sub, color, icon }: { label: string; value: string; sub: string; color: string; icon: string }) {
-  return (
-    <div style={{ ...s.card, marginBottom: 0, display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
-      <div style={{ fontSize: 18 }}>{icon}</div>
-      <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: 0.5 }}>{label}</div>
-      <div style={{ fontSize: 26, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 11, color: "#9ca3af" }}>{sub}</div>
-    </div>
-  );
-}
+      {!loading && centres.map(centre => (
+        <CentreCard
+          key={centre.id}
+          centre={centre}
+          students={studentMap.get(centre.id) ?? []}
+          attendance={attMap.get(centre.id) ?? []}
+          extraDates={extraMap.get(centre.id) ?? new Set()}
+          month={month}
+          today={today}
+          onCellClick={setModal}
+          onAddExtra={() => setExtraTarget(centre.id)}
+        />
+      ))}
 
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#6b7280" }}>
-      <div style={{ width: 10, height: 10, borderRadius: 2, background: color }} />
-      {label}
-    </div>
-  );
-}
+      {/* Cell modal */}
+      {modal && (
+        <CellModal
+          state={modal}
+          onSave={handleSave}
+          onClose={() => setModal(null)}
+          saving={saving}
+        />
+      )}
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <label style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</label>
-      {children}
-    </div>
-  );
-}
-
-function Chip({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <div style={{ textAlign: "center", minWidth: 36 }}>
-      <div style={{ fontSize: 20, fontWeight: 700, color, lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{label}</div>
-    </div>
-  );
-}
-
-function EmptyHint({ icon, text }: { icon: string; text: string }) {
-  return (
-    <div style={{ ...s.card, textAlign: "center", padding: "52px 0" }}>
-      <div style={{ fontSize: 36, marginBottom: 10 }}>{icon}</div>
-      <p style={{ fontSize: 14, color: "#6b7280", margin: 0 }}>{text}</p>
+      {/* Extra class modal */}
+      {extraTarget && (
+        <ExtraClassModal
+          centreId={extraTarget}
+          month={month}
+          existingDates={(() => {
+            const c   = centres.find(c => c.id === extraTarget)!;
+            const all = datesInMonth(month);
+            const ex  = extraMap.get(extraTarget) ?? new Set<string>();
+            // All already-scheduled dates (regular + extra)
+            return new Set(all.filter(d => isScheduled(d, c, ex)));
+          })()}
+          onSave={handleSaveExtra}
+          onClose={() => setExtraTarget(null)}
+          saving={savingExtra}
+        />
+      )}
     </div>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
-const s = {
-  card: {
-    background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10,
-    padding: "16px 20px", marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-  } as React.CSSProperties,
-  input: {
-    padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 7,
-    fontSize: 13, outline: "none", color: "#111827", background: "#fff",
-    cursor: "pointer", minWidth: 180,
-  } as React.CSSProperties,
-  chartTitle: {
-    fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 14,
-  } as React.CSSProperties,
-  chartLegend: {
-    display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap",
-  } as React.CSSProperties,
-  th: {
-    padding: "8px 12px", textAlign: "left" as const, fontSize: 11, fontWeight: 700,
-    color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: 0.5,
-    borderBottom: "2px solid #f3f4f6", whiteSpace: "nowrap" as const,
-  } as React.CSSProperties,
-  td: {
-    padding: "10px 12px", verticalAlign: "middle" as const,
-  } as React.CSSProperties,
+const card: React.CSSProperties = {
+  background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10,
+  padding: "16px 20px", marginBottom: 20, boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
 };
-
-function btn(bg: string, fg: string): React.CSSProperties {
-  return { background: bg, color: fg, border: "none", padding: "8px 16px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" };
-}
+const th: React.CSSProperties = {
+  padding: "7px 10px", textAlign: "left", fontSize: 11, fontWeight: 700,
+  color: "#6b7280", borderBottom: "2px solid #e5e7eb", whiteSpace: "nowrap",
+  background: "#f9fafb",
+};
+const td: React.CSSProperties = {
+  padding: "8px 10px", verticalAlign: "middle", borderBottom: "1px solid #f3f4f6",
+};
+const overlay: React.CSSProperties = {
+  position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000,
+  display: "flex", alignItems: "center", justifyContent: "center",
+};
+const modal: React.CSSProperties = {
+  background: "#fff", borderRadius: 12, padding: "24px", width: 340, maxWidth: "90vw",
+  boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+};
+const inputStyle: React.CSSProperties = {
+  padding: "8px 12px", border: "1px solid #d1d5db", borderRadius: 7,
+  fontSize: 13, outline: "none", color: "#111827", background: "#fff",
+  cursor: "pointer",
+};
+const labelStyle: React.CSSProperties = {
+  display: "flex", flexDirection: "column", gap: 5,
+  fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5,
+};
+const btnPrimary: React.CSSProperties = {
+  flex: 1, padding: "10px 0", borderRadius: 8, border: "none",
+  background: "#1d4ed8", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer",
+};
+const btnGhost: React.CSSProperties = {
+  padding: "8px 14px", borderRadius: 7, border: "1px solid #d1d5db",
+  background: "#fff", color: "#374151", fontSize: 13, cursor: "pointer",
+};
+const btnSmall: React.CSSProperties = {
+  padding: "5px 12px", borderRadius: 6, border: "1px solid #d1d5db",
+  background: "#fff", color: "#374151", fontSize: 12, fontWeight: 600, cursor: "pointer",
+};
