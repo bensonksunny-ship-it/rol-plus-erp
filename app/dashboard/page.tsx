@@ -244,14 +244,47 @@ function CommandCenter() {
     return { uid: t.uid, name: t.displayName, score: q?.score ?? null, factors: q?.factors ?? null };
   }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1)), [teachers, quality]);
 
-  // Revenue 7-day trend
-  const revTrend = useMemo(() => Array.from({ length: 7 }, (_, i) => {
-    const date  = isoDaysAgo(6 - i);
-    const amt   = completedTx.filter(t => t.date === date).reduce((s, t) => s + t.amount, 0);
-    const label = new Date(date + "T12:00:00").toLocaleDateString("en-IN", { weekday: "short" });
-    return { date, label, amt };
+  // Monthly revenue trend (last 6 months)
+  const revMonthlyTrend = useMemo(() => Array.from({ length: 6 }, (_, i) => {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - (5 - i));
+    const ym  = d.toISOString().slice(0, 7);
+    const amt = completedTx.filter(t => t.date?.startsWith(ym)).reduce((s, t) => s + t.amount, 0);
+    const label = d.toLocaleDateString("en-IN", { month: "short" });
+    return { ym, label, amt };
   }), [completedTx]);
-  const maxRev = Math.max(...revTrend.map(d => d.amt), 1);
+
+  // Weekly attendance trend (last 7 days)
+  const attWeeklyTrend = useMemo(() => Array.from({ length: 7 }, (_, i) => {
+    const date  = isoDaysAgo(6 - i);
+    const recs  = attendance.filter(a => a.date === date);
+    const pct   = recs.length > 0 ? Math.round((recs.filter(a => a.status === "present").length / recs.length) * 100) : null;
+    const label = new Date(date + "T12:00:00").toLocaleDateString("en-IN", { weekday: "short" });
+    return { date, label, pct };
+  }), [attendance]);
+
+  // Top 5 centres by revenue + students
+  const top5Rev      = [...centreRows].sort((a,b) => b.revenue30d - a.revenue30d).slice(0,5);
+  const top5Students = [...centreRows].sort((a,b) => b.studentCount - a.studentCount).slice(0,5);
+
+  // Attendance breakdown (present / absent / cancelled)
+  const attBreakdown = useMemo(() => {
+    return centreRows.slice(0,5).map(row => {
+      const recs = attendance.filter(a => a.centerId === row.center.id);
+      return {
+        name:      row.center.name.length > 10 ? row.center.name.slice(0,10)+"…" : row.center.name,
+        present:   recs.filter(a => a.status === "present").length,
+        absent:    recs.filter(a => a.status === "absent").length,
+        cancelled: recs.filter(a => a.status?.startsWith("cancelled")).length,
+      };
+    });
+  }, [centreRows, attendance]);
+
+  // Fee pie
+  const feePaid    = completedTx.reduce((s,t) => s + t.amount, 0);
+  const feePending = totalPendingFees;
+
+  // Revenue goal (hardcoded target = 1.2× last month or 50000 floor)
+  const revGoal = Math.max(50000, Math.round(revLastMonth * 1.2));
 
   // Alerts (priority issues)
   const alerts = useMemo(() => {
@@ -294,13 +327,11 @@ function CommandCenter() {
   return (
     <div style={s.page}>
 
-      {/* ── HEADER ── */}
+      {/* ── 1. HEADER ── */}
       <div style={s.header}>
         <div>
           <div style={s.eyebrow}>COMMAND CENTER</div>
-          <div style={s.date}>
-            {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
-          </div>
+          <div style={s.date}>{new Date().toLocaleDateString("en-IN", { weekday:"long", day:"numeric", month:"long", year:"numeric" })}</div>
         </div>
         <div style={s.actions}>
           <button style={s.btn}    onClick={() => router.push("/dashboard/centers")}>+ Centre</button>
@@ -309,112 +340,288 @@ function CommandCenter() {
         </div>
       </div>
 
-      {/* ── KPI STRIP ── */}
+      {/* ── 2. KPI ROW ── */}
       <div style={s.kpiStrip}>
-        <div style={s.kpi}>
-          <div style={s.kpiLabel}>Students</div>
-          <div style={s.kpiValue}>{totalStudents}</div>
-          <div style={s.kpiSub}>{activeStudents} active</div>
-        </div>
-        <div style={s.kpiDivider} />
-        <div style={s.kpi}>
-          <div style={s.kpiLabel}>Centres</div>
-          <div style={s.kpiValue}>{centers.length}</div>
-          <div style={s.kpiSub}>{centers.filter(c => c.status === "active").length} active</div>
-        </div>
-        <div style={s.kpiDivider} />
-        <div style={s.kpi}>
-          <div style={s.kpiLabel}>Attendance Today</div>
-          <div style={{ ...s.kpiValue, color: attColor }}>
-            {todayPct !== null ? `${todayPct}%` : "—"}
-          </div>
-          <div style={{ ...s.kpiSub, color: attColor }}>
-            {todayTotal > 0 ? `${todayPresent} / ${todayTotal}` : "No records yet"}
-          </div>
-        </div>
-        <div style={s.kpiDivider} />
-        <div style={s.kpi}>
-          <div style={s.kpiLabel}>Revenue · Month</div>
-          <div style={{ ...s.kpiValue, color: revColor }}>₹{revThisMonth.toLocaleString("en-IN")}</div>
-          <div style={{ ...s.kpiSub, color: revColor }}>
-            {revGrowthPct !== null ? `${revGrowthPct >= 0 ? "▲" : "▼"} ${Math.abs(revGrowthPct)}% vs last month` : "No prior data"}
-          </div>
-        </div>
-        <div style={s.kpiDivider} />
-        <div style={s.kpi}>
-          <div style={s.kpiLabel}>Pending Fees</div>
-          <div style={{ ...s.kpiValue, color: totalPendingFees === 0 ? "var(--color-success)" : "var(--color-warning)" }}>
-            {totalPendingFees === 0 ? "All Clear" : `₹${totalPendingFees.toLocaleString("en-IN")}`}
-          </div>
-          <div style={s.kpiSub}>{totalPendingFees === 0 ? "Fees collected" : `${pendingFeeStudents} students`}</div>
-        </div>
+        <KpiCard label="Total Students"   value={String(totalStudents)}   sub={`${activeStudents} active`} color="#4f46e5" />
+        <KpiCard label="Active Centres"   value={String(centers.filter(c=>c.status==="active").length)} sub={`of ${centers.length} total`} color="#0891b2" />
+        <KpiCard label="Revenue · Month"  value={`₹${(revThisMonth/1000).toFixed(1)}k`}
+          sub={revGrowthPct!==null ? `${revGrowthPct>=0?"▲":"▼"} ${Math.abs(revGrowthPct)}% vs last` : "no prior data"}
+          color={revGrowthPct===null?"#6b7280":revGrowthPct>=0?"#16a34a":"#dc2626"} />
+        <KpiCard label="Pending Fees"     value={totalPendingFees===0?"All Clear":`₹${(totalPendingFees/1000).toFixed(1)}k`}
+          sub={totalPendingFees===0?"Collected":`${pendingFeeStudents} students`}
+          color={totalPendingFees===0?"#16a34a":"#f59e0b"} />
       </div>
 
-      {/* ── ALERTS (max 3) ── */}
-      {alerts.length > 0 ? (
-        <div style={s.alertsBox}>
-          <div style={s.alertsHeader}>
-            <span style={s.alertsTitle}>Needs Attention</span>
-            <span style={s.alertsCount}>{alerts.length}</span>
-          </div>
-          <div style={s.alertsList}>
-            {alerts.slice(0, 3).map((a, i) => (
-              <div key={i} style={s.alertRow}>
-                <span style={{ ...s.alertDot, background: a.level === "critical" ? "var(--color-danger)" : "var(--color-warning)" }} />
-                <span style={s.alertIcon}>{a.icon}</span>
-                <span style={s.alertMsg}>{a.msg}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div style={s.allClear}>✓ No issues right now.</div>
-      )}
+      {/* ── 3. TRENDS ROW ── */}
+      <div style={s.twoCol}>
+        <ChartCard title="Revenue Trend" sub="6 months">
+          <LineChart data={revMonthlyTrend.map(d=>({ label:d.label, value:d.amt }))} color="#4f46e5" formatValue={v=>`₹${(v/1000).toFixed(1)}k`} />
+        </ChartCard>
+        <ChartCard title="Attendance Trend" sub="7 days">
+          <LineChart data={attWeeklyTrend.map(d=>({ label:d.label, value:d.pct??0 }))} color="#16a34a" formatValue={v=>`${v}%`} />
+        </ChartCard>
+      </div>
 
-      {/* ── TOP CENTRES (max 5) ── */}
-      <div style={s.section}>
-        <div style={s.sectionHeader}>
-          <span style={s.sectionTitle}>Top Centres</span>
-          <button style={s.viewAllBtn} onClick={() => router.push("/dashboard/centers")}>
-            View All →
-          </button>
-        </div>
-        {centreRows.length === 0 ? (
-          <div style={s.empty}>No centres found.</div>
-        ) : (
-          centreRows.slice(0, 5).map((row, i) => {
-            const ac = row.attendancePct === null ? "var(--color-text-muted)"
-              : row.attendancePct < 60 ? "var(--color-danger)"
-              : row.attendancePct < 80 ? "var(--color-warning)"
-              : "var(--color-success)";
-            return (
-              <div key={row.center.id} style={s.centreRow}
-                onClick={() => router.push("/dashboard/centers")}
-              >
-                <span style={s.rank}>#{i + 1}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: "var(--color-text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {row.center.name}
-                  </div>
-                  <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 1 }}>
-                    {row.studentCount} students · {row.teacherName}
-                  </div>
-                </div>
-                <span style={{ fontWeight: 700, fontSize: 13, color: ac, minWidth: 44, textAlign: "right" }}>
-                  {row.attendancePct !== null ? `${row.attendancePct}%` : "—"}
-                </span>
-                {row.pendingFeeCount > 0 && (
-                  <span style={{ fontSize: 11, background: "#fef9c3", color: "#b45309", borderRadius: 6, padding: "2px 8px", marginLeft: 8, fontWeight: 600 }}>
-                    {row.pendingFeeCount} fees
-                  </span>
-                )}
-              </div>
-            );
-          })
-        )}
+      {/* ── 4. TOP CENTRES ── */}
+      <div style={s.twoCol}>
+        <ChartCard title="Top 5 Centres by Revenue" sub="30 days">
+          <BarChart data={top5Rev.map(r=>({ label:r.center.name, value:r.revenue30d }))} color="#4f46e5" formatValue={v=>`₹${(v/1000).toFixed(1)}k`} />
+        </ChartCard>
+        <ChartCard title="Top 5 Centres by Students" sub="active">
+          <BarChart data={top5Students.map(r=>({ label:r.center.name, value:r.studentCount }))} color="#0891b2" formatValue={v=>String(v)} />
+        </ChartCard>
+      </div>
+
+      {/* ── 5. ATTENDANCE BREAKDOWN ── */}
+      <ChartCard title="Attendance Breakdown" sub="present / absent / cancelled — top 5 centres">
+        <StackedBarChart data={attBreakdown} />
+      </ChartCard>
+
+      {/* ── 6. FINANCE ROW ── */}
+      <div style={s.twoCol}>
+        <ChartCard title="Fee Status" sub="collected vs pending">
+          <PieChart paid={feePaid} pending={feePending} />
+        </ChartCard>
+        <ChartCard title="Revenue vs Goal" sub={`Target ₹${(revGoal/1000).toFixed(1)}k this month`}>
+          <GaugeChart value={revThisMonth} goal={revGoal} />
+        </ChartCard>
       </div>
 
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHART PRIMITIVES  (pure SVG, no library)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function ChartCard({ title, sub, children }: { title:string; sub?:string; children:React.ReactNode }) {
+  return (
+    <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:"18px 20px", marginBottom:0 }}>
+      <div style={{ marginBottom:12 }}>
+        <div style={{ fontSize:13, fontWeight:700, color:"#111" }}>{title}</div>
+        {sub && <div style={{ fontSize:11, color:"#9ca3af", marginTop:2 }}>{sub}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function KpiCard({ label, value, sub, color }: { label:string; value:string; sub:string; color:string }) {
+  return (
+    <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:"16px 18px",
+                  borderTop:`3px solid ${color}`, flex:1, minWidth:140 }}>
+      <div style={{ fontSize:11, fontWeight:600, color:"#9ca3af", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:6 }}>{label}</div>
+      <div style={{ fontSize:24, fontWeight:800, color, lineHeight:1 }}>{value}</div>
+      <div style={{ fontSize:11, color:"#6b7280", marginTop:4 }}>{sub}</div>
+    </div>
+  );
+}
+
+// ── Line Chart ────────────────────────────────────────────────────────────────
+function LineChart({ data, color, formatValue }: {
+  data: { label:string; value:number }[];
+  color: string;
+  formatValue: (v:number) => string;
+}) {
+  const W=440, H=110, PL=10, PR=10, PT=20, PB=28;
+  const vals   = data.map(d=>d.value);
+  const maxV   = Math.max(...vals, 1);
+  const minV   = Math.min(...vals, 0);
+  const range  = maxV - minV || 1;
+  const xStep  = (W-PL-PR) / Math.max(data.length-1, 1);
+  const y      = (v:number) => PT + ((maxV - v) / range) * (H - PT - PB);
+  const x      = (i:number) => PL + i * xStep;
+  const pts    = data.map((_,i)=>`${x(i)},${y(vals[i])}`).join(" ");
+  const fill   = data.map((_,i)=>`${x(i)},${y(vals[i])}`).join(" ") + ` ${x(data.length-1)},${H-PB} ${PL},${H-PB}`;
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height:H, display:"block" }}>
+      {/* gradient area */}
+      <defs>
+        <linearGradient id={`lg-${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor={color} stopOpacity={0.18} />
+          <stop offset="100%" stopColor={color} stopOpacity={0.01} />
+        </linearGradient>
+      </defs>
+      <polygon points={fill} fill={`url(#lg-${color.replace("#","")})`} />
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      {/* dots + labels */}
+      {data.map((d,i) => (
+        <g key={i}>
+          <circle cx={x(i)} cy={y(vals[i])} r={3} fill={color} />
+          <text x={x(i)} y={H-PB+13} textAnchor="middle" fontSize={9} fill="#9ca3af">{d.label}</text>
+          {(i===0||i===data.length-1) && (
+            <text x={x(i)} y={y(vals[i])-7} textAnchor="middle" fontSize={9} fill={color} fontWeight="600">{formatValue(vals[i])}</text>
+          )}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+// ── Bar Chart ─────────────────────────────────────────────────────────────────
+function BarChart({ data, color, formatValue }: {
+  data: { label:string; value:number }[];
+  color: string;
+  formatValue: (v:number) => string;
+}) {
+  const W=440, H=120, PL=4, PR=4, PT=20, PB=28;
+  const maxV   = Math.max(...data.map(d=>d.value), 1);
+  const bW     = (W-PL-PR)/data.length;
+  const gap    = bW*0.22;
+  const bW2    = bW - gap;
+  const bH     = (v:number) => Math.max(4, ((v/maxV)*(H-PT-PB)));
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height:H, display:"block" }}>
+      <line x1={PL} y1={H-PB} x2={W-PR} y2={H-PB} stroke="#e5e7eb" strokeWidth={1} />
+      {data.map((d,i) => {
+        const barH = bH(d.value);
+        const bx   = PL + i*bW + gap/2;
+        const by   = H - PB - barH;
+        const short = d.label.length>8 ? d.label.slice(0,8)+"…" : d.label;
+        return (
+          <g key={i}>
+            <rect x={bx} y={by} width={bW2} height={barH} rx={3} fill={color} opacity={0.85} />
+            <text x={bx+bW2/2} y={by-5} textAnchor="middle" fontSize={9} fill={color} fontWeight="600">{formatValue(d.value)}</text>
+            <text x={bx+bW2/2} y={H-PB+13} textAnchor="middle" fontSize={9} fill="#9ca3af">{short}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ── Stacked Bar Chart ─────────────────────────────────────────────────────────
+function StackedBarChart({ data }: {
+  data: { name:string; present:number; absent:number; cancelled:number }[];
+}) {
+  const W=880, H=130, PL=4, PR=4, PT=20, PB=28;
+  const totals = data.map(d=>d.present+d.absent+d.cancelled);
+  const maxT   = Math.max(...totals, 1);
+  const bW     = (W-PL-PR)/data.length;
+  const gap    = bW*0.22;
+  const bW2    = bW-gap;
+  const maxBarH = H-PT-PB;
+  const SEG = [
+    { key:"present"  as const, color:"#16a34a" },
+    { key:"absent"   as const, color:"#dc2626" },
+    { key:"cancelled"as const, color:"#9ca3af" },
+  ];
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height:H, display:"block" }}>
+        {data.map((d,i)=>{
+          const bx    = PL + i*bW + gap/2;
+          const total = totals[i];
+          let yOff = H-PB;
+          return (
+            <g key={i}>
+              {SEG.map(seg=>{
+                const segH = total>0 ? Math.max(total>0?1:0, Math.round((d[seg.key]/maxT)*maxBarH)) : 0;
+                yOff -= segH;
+                return <rect key={seg.key} x={bx} y={yOff} width={bW2} height={segH} fill={seg.color} opacity={0.88} />;
+              })}
+              <text x={bx+bW2/2} y={H-PB+13} textAnchor="middle" fontSize={9} fill="#9ca3af">{d.name}</text>
+              {total>0 && <text x={bx+bW2/2} y={H-PB - Math.round((total/maxT)*maxBarH) - 4} textAnchor="middle" fontSize={9} fill="#374151" fontWeight="600">{total}</text>}
+            </g>
+          );
+        })}
+        <line x1={PL} y1={H-PB} x2={W-PR} y2={H-PB} stroke="#e5e7eb" />
+      </svg>
+      <div style={{ display:"flex", gap:14, marginTop:6, flexWrap:"wrap" }}>
+        {[["#16a34a","Present"],["#dc2626","Absent"],["#9ca3af","Cancelled"]].map(([c,l])=>(
+          <div key={l} style={{ display:"flex", alignItems:"center", gap:5, fontSize:11, color:"#6b7280" }}>
+            <div style={{ width:10, height:10, borderRadius:2, background:c }} />
+            {l}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Pie Chart ─────────────────────────────────────────────────────────────────
+function PieChart({ paid, pending }: { paid:number; pending:number }) {
+  const total = paid + pending || 1;
+  const paidPct = paid / total;
+  const R=60, CX=80, CY=80;
+  const arc = (pct:number, r:number) => {
+    const angle = pct * 2 * Math.PI - 0.001;
+    const x = CX + r * Math.sin(angle);
+    const y = CY - r * Math.cos(angle);
+    return `M ${CX} ${CY-r} A ${r} ${r} 0 ${angle>Math.PI?1:0} 1 ${x} ${y} Z`;
+  };
+
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:24 }}>
+      <svg viewBox="0 0 160 160" style={{ width:130, height:130, flexShrink:0 }}>
+        <circle cx={CX} cy={CY} r={R} fill="#fee2e2" />
+        <path d={arc(paidPct, R)} fill="#16a34a" opacity={0.9} />
+        <circle cx={CX} cy={CY} r={R*0.55} fill="#fff" />
+        <text x={CX} y={CY+3} textAnchor="middle" fontSize={11} fontWeight="700" fill="#111">
+          {Math.round(paidPct*100)}%
+        </text>
+        <text x={CX} y={CY+15} textAnchor="middle" fontSize={9} fill="#6b7280">Paid</text>
+      </svg>
+      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        <div>
+          <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:12 }}>
+            <div style={{ width:10,height:10,borderRadius:2,background:"#16a34a" }} />
+            <span style={{ color:"#374151", fontWeight:600 }}>Collected</span>
+          </div>
+          <div style={{ fontSize:15, fontWeight:800, color:"#16a34a", marginTop:2 }}>₹{paid.toLocaleString("en-IN")}</div>
+        </div>
+        <div>
+          <div style={{ display:"flex", alignItems:"center", gap:6, fontSize:12 }}>
+            <div style={{ width:10,height:10,borderRadius:2,background:"#dc2626" }} />
+            <span style={{ color:"#374151", fontWeight:600 }}>Pending</span>
+          </div>
+          <div style={{ fontSize:15, fontWeight:800, color:"#dc2626", marginTop:2 }}>₹{pending.toLocaleString("en-IN")}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Gauge Chart ───────────────────────────────────────────────────────────────
+function GaugeChart({ value, goal }: { value:number; goal:number }) {
+  const pct   = Math.min(value / goal, 1);
+  const R=64, CX=100, CY=90;
+  const startAngle = -Math.PI * 0.85;
+  const endAngle   =  Math.PI * 0.85;
+  const toXY = (angle:number) => ({
+    x: CX + R * Math.cos(angle),
+    y: CY + R * Math.sin(angle),
+  });
+  const trackStart = toXY(startAngle);
+  const trackEnd   = toXY(endAngle);
+  const fillEnd    = toXY(startAngle + (endAngle - startAngle) * pct);
+  const arcFlag    = (endAngle - startAngle) * pct > Math.PI ? 1 : 0;
+  const fillFlag   = (endAngle - startAngle) > Math.PI ? 1 : 0;
+  const color      = pct >= 1 ? "#16a34a" : pct >= 0.6 ? "#f59e0b" : "#dc2626";
+
+  return (
+    <svg viewBox="0 0 200 115" style={{ width:"100%", height:115, display:"block" }}>
+      {/* track */}
+      <path d={`M ${trackStart.x} ${trackStart.y} A ${R} ${R} 0 ${fillFlag} 1 ${trackEnd.x} ${trackEnd.y}`}
+        fill="none" stroke="#e5e7eb" strokeWidth={14} strokeLinecap="round" />
+      {/* fill */}
+      {pct > 0 && (
+        <path d={`M ${trackStart.x} ${trackStart.y} A ${R} ${R} 0 ${arcFlag} 1 ${fillEnd.x} ${fillEnd.y}`}
+          fill="none" stroke={color} strokeWidth={14} strokeLinecap="round" />
+      )}
+      {/* labels */}
+      <text x={CX} y={CY-8}  textAnchor="middle" fontSize={20} fontWeight="800" fill={color}>
+        {Math.round(pct*100)}%
+      </text>
+      <text x={CX} y={CY+10} textAnchor="middle" fontSize={10} fill="#6b7280">of target</text>
+      <text x={CX} y={CY+24} textAnchor="middle" fontSize={11} fontWeight="700" fill="#374151">
+        ₹{(value/1000).toFixed(1)}k / ₹{(goal/1000).toFixed(1)}k
+      </text>
+    </svg>
   );
 }
 
@@ -934,7 +1141,7 @@ const s: Record<string, React.CSSProperties> = {
   sectionSub:    { fontSize: 11, color: "var(--color-text-muted)" },
 
   // Two col
-  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 0 },
+  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 },
 
   // Table
   table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
