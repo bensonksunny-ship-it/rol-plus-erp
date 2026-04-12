@@ -311,70 +311,54 @@ function CommandCenter() {
 
       {/* ── KPI STRIP ── */}
       <div style={s.kpiStrip}>
-
         <div style={s.kpi}>
           <div style={s.kpiLabel}>Students</div>
           <div style={s.kpiValue}>{totalStudents}</div>
-          <div style={s.kpiSub}>{activeStudents} active · {groupStudents} group · {personalStudents} personal</div>
+          <div style={s.kpiSub}>{activeStudents} active</div>
         </div>
-
         <div style={s.kpiDivider} />
-
         <div style={s.kpi}>
           <div style={s.kpiLabel}>Centres</div>
           <div style={s.kpiValue}>{centers.length}</div>
           <div style={s.kpiSub}>{centers.filter(c => c.status === "active").length} active</div>
         </div>
-
         <div style={s.kpiDivider} />
-
         <div style={s.kpi}>
           <div style={s.kpiLabel}>Attendance Today</div>
           <div style={{ ...s.kpiValue, color: attColor }}>
             {todayPct !== null ? `${todayPct}%` : "—"}
           </div>
           <div style={{ ...s.kpiSub, color: attColor }}>
-            {todayTotal > 0 ? `${todayPresent} / ${todayTotal} present` : "No records yet"}
+            {todayTotal > 0 ? `${todayPresent} / ${todayTotal}` : "No records yet"}
           </div>
         </div>
-
         <div style={s.kpiDivider} />
-
         <div style={s.kpi}>
-          <div style={s.kpiLabel}>Revenue This Month</div>
-          <div style={{ ...s.kpiValue, color: revColor }}>
-            ₹{revThisMonth.toLocaleString("en-IN")}
-          </div>
+          <div style={s.kpiLabel}>Revenue · Month</div>
+          <div style={{ ...s.kpiValue, color: revColor }}>₹{revThisMonth.toLocaleString("en-IN")}</div>
           <div style={{ ...s.kpiSub, color: revColor }}>
-            {revGrowthPct !== null
-              ? `${revGrowthPct >= 0 ? "▲" : "▼"} ${Math.abs(revGrowthPct)}% vs last month`
-              : "No prior data"}
+            {revGrowthPct !== null ? `${revGrowthPct >= 0 ? "▲" : "▼"} ${Math.abs(revGrowthPct)}% vs last month` : "No prior data"}
           </div>
         </div>
-
         <div style={s.kpiDivider} />
-
         <div style={s.kpi}>
           <div style={s.kpiLabel}>Pending Fees</div>
           <div style={{ ...s.kpiValue, color: totalPendingFees === 0 ? "var(--color-success)" : "var(--color-warning)" }}>
             {totalPendingFees === 0 ? "All Clear" : `₹${totalPendingFees.toLocaleString("en-IN")}`}
           </div>
-          <div style={s.kpiSub}>
-            {totalPendingFees === 0 ? "All fees collected" : `${pendingFeeStudents} students pending`}
-          </div>
+          <div style={s.kpiSub}>{totalPendingFees === 0 ? "Fees collected" : `${pendingFeeStudents} students`}</div>
         </div>
-
       </div>
 
-      {/* ── PRIORITY ALERTS ── */}
-      {alerts.length > 0 && (
+      {/* ── ALERTS (max 3) ── */}
+      {alerts.length > 0 ? (
         <div style={s.alertsBox}>
           <div style={s.alertsHeader}>
             <span style={s.alertsTitle}>Needs Attention</span>
             <span style={s.alertsCount}>{alerts.length}</span>
           </div>
           <div style={s.alertsList}>
-            {alerts.map((a, i) => (
+            {alerts.slice(0, 3).map((a, i) => (
               <div key={i} style={s.alertRow}>
                 <span style={{ ...s.alertDot, background: a.level === "critical" ? "var(--color-danger)" : "var(--color-warning)" }} />
                 <span style={s.alertIcon}>{a.icon}</span>
@@ -383,125 +367,51 @@ function CommandCenter() {
             ))}
           </div>
         </div>
+      ) : (
+        <div style={s.allClear}>✓ No issues right now.</div>
       )}
 
-      {alerts.length === 0 && (
-        <div style={s.allClear}>✓ Everything looks healthy — no issues right now.</div>
-      )}
-
-      {/* ── CENTRE PERFORMANCE ── */}
+      {/* ── TOP CENTRES (max 5) ── */}
       <div style={s.section}>
         <div style={s.sectionHeader}>
-          <span style={s.sectionTitle}>Centre Performance</span>
-          <span style={s.sectionSub}>7-day attendance · ranked</span>
+          <span style={s.sectionTitle}>Top Centres</span>
+          <button style={s.viewAllBtn} onClick={() => router.push("/dashboard/centers")}>
+            View All →
+          </button>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={s.table}>
-            <thead>
-              <tr>
-                {["Centre", "Teacher", "7d Att%", "Students", "Growth", "Pending Fees", "Rev (30d)"].map(h => (
-                  <th key={h} style={s.th}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {centreRows.map((row, i) => {
-                const ac = row.attendancePct === null ? "var(--color-text-muted)"
-                  : row.attendancePct < 60  ? "var(--color-danger)"
-                  : row.attendancePct < 80  ? "var(--color-warning)"
-                  : "var(--color-success)";
-                return (
-                  <tr key={row.center.id} style={s.tr}>
-                    <td style={{ ...s.td, fontWeight: 700, color: "var(--color-text-primary)" }}>
-                      <span style={s.rank}>#{i + 1}</span> {row.center.name}
-                    </td>
-                    <td style={s.td}>{row.teacherName}</td>
-                    <td style={{ ...s.td, textAlign: "center" }}>
-                      <span style={{ fontWeight: 700, color: ac }}>
-                        {row.attendancePct !== null ? `${row.attendancePct}%` : "—"}
-                      </span>
-                    </td>
-                    <td style={{ ...s.td, textAlign: "center" }}>
-                      <div style={{ fontWeight: 700 }}>{row.studentCount}</div>
-                      <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
-                        👥{row.groupCount} · 👤{row.personalCount}
-                      </div>
-                    </td>
-                    <td style={{ ...s.td, textAlign: "center" }}>
-                      {row.growthPct === null
-                        ? <span style={{ color: "var(--color-text-muted)" }}>—</span>
-                        : <span style={{ fontWeight: 700, color: row.growthPct > 0 ? "var(--color-success)" : row.growthPct < 0 ? "var(--color-danger)" : "var(--color-text-muted)" }}>
-                            {row.growthPct > 0 ? "▲" : row.growthPct < 0 ? "▼" : ""}{Math.abs(row.growthPct)}%
-                          </span>
-                      }
-                    </td>
-                    <td style={{ ...s.td, textAlign: "center" }}>
-                      <span style={{ color: row.pendingFeeCount > 0 ? "var(--color-warning)" : "var(--color-success)" }}>
-                        {row.pendingFeeCount > 0 ? `${row.pendingFeeCount} students` : "None"}
-                      </span>
-                    </td>
-                    <td style={{ ...s.td, textAlign: "right" }}>₹{row.revenue30d.toLocaleString("en-IN")}</td>
-                  </tr>
-                );
-              })}
-              {centreRows.length === 0 && (
-                <tr><td colSpan={7} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "24px" }}>No centres found.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* ── TEACHER LEADERBOARD ── */}
-      <div style={s.twoCol}>
-
-        <div style={s.section}>
-          <div style={s.sectionHeader}>
-            <span style={s.sectionTitle}>Top Teachers</span>
-          </div>
-          {teacherPerf.slice(0, 5).length === 0
-            ? <div style={s.empty}>No quality scores yet.</div>
-            : teacherPerf.slice(0, 5).map((t, i) => (
-                <TeacherRow key={t.uid} rank={i + 1} name={t.name} score={t.score} factors={t.factors} top />
-              ))
-          }
-        </div>
-
-        <div style={s.section}>
-          <div style={s.sectionHeader}>
-            <span style={s.sectionTitle}>Needs Coaching</span>
-          </div>
-          {teacherPerf.length === 0
-            ? <div style={s.empty}>No quality scores yet.</div>
-            : [...teacherPerf].reverse().slice(0, 5).map((t, i) => (
-                <TeacherRow key={t.uid} rank={teacherPerf.length - i} name={t.name} score={t.score} factors={t.factors} top={false} />
-              ))
-          }
-        </div>
-
-      </div>
-
-      {/* ── REVENUE TREND ── */}
-      <div style={s.section}>
-        <div style={s.sectionHeader}>
-          <span style={s.sectionTitle}>Revenue — Last 7 Days</span>
-          <span style={s.sectionSub}>₹{completedTx.filter(t => t.date >= days30ago).reduce((a, t) => a + t.amount, 0).toLocaleString("en-IN")} this month</span>
-        </div>
-        <div style={s.barChart}>
-          {revTrend.map(d => {
-            const h   = d.amt > 0 ? Math.max(8, Math.round((d.amt / maxRev) * 64)) : 4;
-            const isT = d.date === today;
+        {centreRows.length === 0 ? (
+          <div style={s.empty}>No centres found.</div>
+        ) : (
+          centreRows.slice(0, 5).map((row, i) => {
+            const ac = row.attendancePct === null ? "var(--color-text-muted)"
+              : row.attendancePct < 60 ? "var(--color-danger)"
+              : row.attendancePct < 80 ? "var(--color-warning)"
+              : "var(--color-success)";
             return (
-              <div key={d.date} style={s.barCol}>
-                <span style={{ fontSize: 10, fontWeight: 600, color: isT ? "var(--color-accent)" : "var(--color-text-muted)", marginBottom: 4 }}>
-                  {d.amt > 0 ? `₹${(d.amt / 1000).toFixed(1)}k` : "—"}
+              <div key={row.center.id} style={s.centreRow}
+                onClick={() => router.push("/dashboard/centers")}
+              >
+                <span style={s.rank}>#{i + 1}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: "var(--color-text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {row.center.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 1 }}>
+                    {row.studentCount} students · {row.teacherName}
+                  </div>
+                </div>
+                <span style={{ fontWeight: 700, fontSize: 13, color: ac, minWidth: 44, textAlign: "right" }}>
+                  {row.attendancePct !== null ? `${row.attendancePct}%` : "—"}
                 </span>
-                <div style={{ ...s.bar, height: h, background: isT ? "var(--color-accent)" : d.amt > 0 ? "var(--color-success)" : "var(--color-border)" }} />
-                <span style={{ fontSize: 10, color: isT ? "var(--color-accent)" : "var(--color-text-muted)", fontWeight: isT ? 800 : 400 }}>{d.label}</span>
+                {row.pendingFeeCount > 0 && (
+                  <span style={{ fontSize: 11, background: "#fef9c3", color: "#b45309", borderRadius: 6, padding: "2px 8px", marginLeft: 8, fontWeight: 600 }}>
+                    {row.pendingFeeCount} fees
+                  </span>
+                )}
               </div>
             );
-          })}
-        </div>
+          })
+        )}
       </div>
 
     </div>
@@ -1031,7 +941,9 @@ const s: Record<string, React.CSSProperties> = {
   th:    { textAlign: "left", padding: "8px 12px", fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)", borderBottom: "1px solid var(--color-border)", background: "var(--color-surface-2)", whiteSpace: "nowrap" as const },
   tr:    { borderBottom: "1px solid var(--color-border-subtle)" },
   td:    { padding: "12px 12px", color: "var(--color-text-secondary)", verticalAlign: "middle" },
-  rank:  { fontSize: 11, color: "var(--color-text-muted)", marginRight: 6 },
+  rank:       { fontSize: 11, color: "var(--color-text-muted)", marginRight: 6, minWidth: 24 },
+  viewAllBtn: { background: "none", border: "none", color: "var(--color-accent,#4f46e5)", fontSize: 12, fontWeight: 600, cursor: "pointer", padding: 0 },
+  centreRow:  { display: "flex", alignItems: "center", padding: "11px 16px", borderBottom: "1px solid var(--color-border,#f3f4f6)", cursor: "pointer", gap: 8 },
 
   // Teacher rows
   teacherRow: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderBottom: "1px solid var(--color-border-subtle)" },
