@@ -11,7 +11,7 @@ import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { signOut } from "@/services/firebase/auth.service";
+import { clearPersistedSession, signOut } from "@/services/firebase/auth.service";
 import { ROLES } from "@/config/constants";
 
 // ─── Alert count hook ──────────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     if (!user) {
       if (redirectingRef.current) return;
       redirectingRef.current = true;
-      document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
+      clearPersistedSession();
       router.replace("/login");
       return;
     }
@@ -108,7 +108,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
   async function handleSignOut() {
     await signOut();
-    document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
+    clearPersistedSession();
     router.replace("/login");
   }
 

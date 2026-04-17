@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { subscribeToAuthState } from "@/services/firebase/auth.service";
+import { clearPersistedSession, subscribeToAuthState } from "@/services/firebase/auth.service";
 import type { User } from "@/types";
 
 // Safety timeout — only fires if Firebase never calls onAuthStateChanged at all.
@@ -26,11 +26,6 @@ const AuthContext = createContext<AuthContextValue>({
   user: null,
   loading: true,
 });
-
-function clearSessionCookie() {
-  document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
-  document.cookie = "rol_session=; path=/; max-age=0; SameSite=Strict";
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
@@ -51,7 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // extreme privacy mode) — unblock loading after AUTH_TIMEOUT_MS.
     const safetyTimer = setTimeout(() => {
       if (!mountedRef.current) return;
-      clearSessionCookie();
+      clearPersistedSession();
       setUser(null);
       setLoading(false);
     }, AUTH_TIMEOUT_MS);
@@ -85,8 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // treat as genuine sign-out — clear everything.
           // (hadUserRef is still true here; we clear it on sign-out.)
           hadUserRef.current = false;
-          clearSessionCookie();
-          try { localStorage.removeItem("rol_session"); } catch(_) {}
+          clearPersistedSession();
           setUser(null);
           // loading stays false — it was already resolved when we had the user.
         }, 2_000);

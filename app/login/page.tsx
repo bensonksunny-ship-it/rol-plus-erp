@@ -2,7 +2,7 @@
 
 // ─── ALL AUTH LOGIC UNCHANGED ─────────────────────────────────────────────────
 import { useState, useEffect, useRef } from "react";
-import { signIn } from "@/services/firebase/auth.service";
+import { persistSessionToken, signIn } from "@/services/firebase/auth.service";
 import { useAuth } from "@/hooks/useAuth";
 import { ROLE_ROUTES } from "@/config/constants";
 
@@ -41,16 +41,7 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       const session = await signIn(email.trim(), password);
-      const maxAge  = 60 * 60 * 24 * 7;
-
-      // Write cookie FIRST — middleware needs this before any navigation.
-      document.cookie = `rol_session=${session.token}; path=/; SameSite=Lax; max-age=${maxAge}`;
-
-      // localStorage backup for mobile browsers that aggressively clear cookies.
-      try {
-        localStorage.setItem("rol_session", session.token);
-        localStorage.setItem("rol_session_expires", String(Date.now() + maxAge * 1000));
-      } catch (_) { /* localStorage may be blocked in private mode */ }
+      persistSessionToken(session.token);
 
       // DO NOT navigate here. Firebase's onAuthStateChanged will fire with the
       // real user object after signIn resolves, which triggers the useEffect
