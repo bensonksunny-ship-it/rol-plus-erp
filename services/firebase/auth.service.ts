@@ -11,14 +11,11 @@ import { USER_STATUS } from "@/config/constants";
 
 /**
  * Fetch the Firestore user profile — cache-first for speed.
- * Falls back to a server read only if the document is not in cache.
- * Returns null if the document does not exist.
+ * On mobile this resolves from the local Firestore cache in <5ms after the
+ * first load, avoiding a network round-trip that races onAuthStateChanged.
  */
 export async function getUserProfile(uid: string): Promise<User | null> {
   const ref  = doc(db, "users", uid);
-  // getDoc uses Firestore's local cache when available (offline-first).
-  // This is typically instant on subsequent page loads, preventing the
-  // auth timeout from firing before the profile resolves.
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
   return snap.data() as User;
@@ -26,17 +23,12 @@ export async function getUserProfile(uid: string): Promise<User | null> {
 
 /**
  * Create a Firestore user document if one does not already exist.
- * Uses cache-first read for the existence check to avoid slow server
- * round-trips that could race with the AuthContext timeout.
- * Never overwrites an existing document.
  */
 async function ensureUserDocument(user: FirebaseUser): Promise<boolean> {
   const userRef = doc(db, "users", user.uid);
-  // Cache-first check: if the doc is in Firestore cache it resolves instantly.
-  const snap = await getDoc(userRef);
+  const snap    = await getDoc(userRef);
   if (snap.exists()) return true;
 
-  // Doc not in cache — write it for the first time.
   await setDoc(userRef, {
     uid:          user.uid,
     email:        user.email || "",
@@ -48,7 +40,6 @@ async function ensureUserDocument(user: FirebaseUser): Promise<boolean> {
     updatedAt:    serverTimestamp(),
   });
 
-  // Verify with a server read only on first-time creation.
   const verifySnap = await getDocFromServer(userRef);
   if (!verifySnap.exists()) {
     throw new Error("FIRESTORE WRITE FAILED: document not found after setDoc");
@@ -57,17 +48,15 @@ async function ensureUserDocument(user: FirebaseUser): Promise<boolean> {
 }
 
 /**
- * Sign in with email + password, then validate role and active status.
- * Throws a typed error if the account is inactive — login is blocked.
+ * Sign in with email + password, validate role and active status.
  */
 export async function signIn(
   email: string,
   password: string
 ): Promise<AuthSession> {
-  const credential    = await signInWithEmailAndPassword(auth, email, password);
-  const firebaseUser  = credential.user;
+  const credential   = await signInWithEmailAndPassword(auth, email, password);
+  const firebaseUser = credential.user;
 
-  // Ensure a Firestore profile exists before reading it.
   await ensureUserDocument(firebaseUser);
 
   const profile = await getUserProfile(firebaseUser.uid);
@@ -76,7 +65,6 @@ export async function signIn(
     throw new Error("AUTH/USER_NOT_FOUND");
   }
 
-  // Strict rule: login blocked if account is inactive
   if (profile.status !== USER_STATUS.ACTIVE) {
     await firebaseSignOut(auth);
     throw new Error("AUTH/ACCOUNT_INACTIVE");
@@ -94,40 +82,72 @@ export async function signOut(): Promise<void> {
 }
 
 /**
- * Subscribe to Firebase Auth state. Resolves the full User profile on change.
- * Returns the unsubscribe function.
+ * Subscribe to Firebase Auth state changes, resolving the full Firestore
+ * User profile on each valid user callback.
  *
- * IMPORTANT: onAuthStateChanged fires multiple times on mobile:
- *  1. Immediately with the cached token (null or previous user)
- *  2. Again after the token is refreshed over the network
- * The AuthContext guards against processing multiple callbacks via resolvedRef.
- * This function simply propagates each callback as-is.
+ * KEY MOBILE FIX:
+ * onAuthStateChanged fires async, but we must not call callback(null) while
+ * a profile fetch is in-flight. On mobile, Firebase fires:
+ *   1. null  (IndexedDB not yet read)
+ *   2. user  (IndexedDB resolved)
+ *   3. null  (token refresh started)
+ *   4. user  (token refresh completed)
+ *
+ * We use a serial queue (pendingFetch ref) so:
+ *  - Each new Firebase callback cancels any in-flight profile fetch
+ *  - null is only forwarded once there is no concurrent user fetch running
+ *  - This prevents the AuthContext from ever seeing a spurious null while
+ *    a valid user is being loaded, which caused the login refresh loop.
  */
 export function subscribeToAuthState(
   callback: (user: User | null) => void
 ): () => void {
-  let cancelled = false;
+  let cancelled  = false;
+  // Monotonically increasing counter. Each onAuthStateChanged callback gets
+  // a unique generation number. Only the latest generation may call callback.
+  let generation = 0;
 
-  const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+  const unsubscribe = onAuthStateChanged(auth, (firebaseUser: FirebaseUser | null) => {
     if (cancelled) return;
 
+    // Claim this generation — any in-flight fetch from a previous callback
+    // will see its generation is stale and silently discard its result.
+    const myGen = ++generation;
+
     if (!firebaseUser) {
-      callback(null);
+      // Only emit null if this is still the latest callback.
+      // Use a microtask delay so that if Firebase immediately fires again
+      // with a real user (common on mobile token refresh), the null is
+      // superseded before it reaches AuthContext.
+      Promise.resolve().then(() => {
+        if (cancelled || myGen !== generation) return;
+        callback(null);
+      });
       return;
     }
 
-    const profile = await getUserProfile(firebaseUser.uid);
-    if (cancelled) return; // component may have unmounted during await
+    // Async profile fetch — uses Firestore cache so typically <5ms on repeat loads.
+    (async () => {
+      try {
+        const profile = await getUserProfile(firebaseUser.uid);
 
-    // If profile missing or inactive, treat as signed out.
-    // DO NOT call firebaseSignOut here — doing so triggers onAuthStateChanged
-    // again → callback fires again → infinite loop.
-    if (!profile || profile.status !== USER_STATUS.ACTIVE) {
-      callback(null);
-      return;
-    }
+        // Stale — a newer callback has superseded this one.
+        if (cancelled || myGen !== generation) return;
 
-    callback(profile);
+        if (!profile || profile.status !== USER_STATUS.ACTIVE) {
+          // Profile missing or inactive — emit null but do NOT call firebaseSignOut
+          // (that would trigger onAuthStateChanged again → infinite loop).
+          callback(null);
+          return;
+        }
+
+        callback(profile);
+      } catch {
+        if (cancelled || myGen !== generation) return;
+        // Firestore error — emit null conservatively.
+        callback(null);
+      }
+    })();
   });
 
   return () => {

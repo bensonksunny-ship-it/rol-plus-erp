@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth, setPersistence, browserLocalPersistence } from "firebase/auth";
+import { initializeAuth, browserLocalPersistence, getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -13,40 +13,31 @@ const firebaseConfig = {
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
-export const auth = getAuth(app);
-export const db   = getFirestore(app);
-
-// ─── Persistence ─────────────────────────────────────────────────────────────
-// Set localStorage persistence BEFORE the first onAuthStateChanged subscriber
-// is attached. We await it inside an IIFE so we don't block module evaluation
-// but the promise is resolved before AuthProvider mounts (React renders
-// synchronously after module evaluation on the same tick).
+// ─── Auth with persistence set at init time (synchronous, no race) ───────────
+// Using initializeAuth + browserLocalPersistence instead of getAuth +
+// setPersistence(). The async setPersistence() IIFE raced with AuthContext's
+// onAuthStateChanged subscription on mobile — Firebase fired an extra null
+// auth state when persistence changed mid-flight, causing the login loop.
+// initializeAuth sets persistence synchronously before any subscriber attaches.
 //
-// Do NOT call setPersistence inside AuthContext — doing so after
-// onAuthStateChanged is subscribed can trigger a second auth-state callback
-// on mobile, causing the login page to re-render/reload.
-(async () => {
-  try {
-    await setPersistence(auth, browserLocalPersistence);
-  } catch {
-    // Persistence failure is non-fatal — Firebase falls back to in-memory.
+// Guard: initializeAuth throws if called twice on the same app (HMR / double-
+// import). We catch and fall back to getAuth() which returns the existing
+// Auth instance. On SSR (no window), getAuth is used directly since
+// browserLocalPersistence requires a DOM.
+function buildAuth() {
+  if (typeof window === "undefined") {
+    // Server-side: no IndexedDB/localStorage — use default in-memory auth.
+    return getAuth(app);
   }
-})();
-
-// ─── One-time indexedDB cleanup ───────────────────────────────────────────────
-// Removes the stale Firebase indexedDB token store left behind from before we
-// switched to browserLocalPersistence. This must only run ONCE per device, not
-// on every page load — doing so on mobile triggers a visibilitychange event
-// (keyboard/focus) that the browser treats as a page reload.
-//
-// We use a localStorage flag so this only runs one time ever, then never again.
-if (typeof window !== "undefined" && typeof indexedDB !== "undefined") {
-  const CLEANUP_KEY = "__rol_idb_cleaned__";
-  if (!localStorage.getItem(CLEANUP_KEY)) {
-    try { indexedDB.deleteDatabase("firebaseLocalStorageDb"); } catch {}
-    try { indexedDB.deleteDatabase("firebase-heartbeat-database"); } catch {}
-    localStorage.setItem(CLEANUP_KEY, "1");
+  try {
+    return initializeAuth(app, { persistence: browserLocalPersistence });
+  } catch {
+    // Auth was already initialized (HMR double-module-eval) — reuse it.
+    return getAuth(app);
   }
 }
+
+export const auth = buildAuth();
+export const db   = getFirestore(app);
 
 export default app;
