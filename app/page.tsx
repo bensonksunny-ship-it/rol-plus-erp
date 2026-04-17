@@ -11,7 +11,6 @@ export default function RootPage() {
   useEffect(() => {
     if (loading) return;
     if (redirectedRef.current) return;
-    redirectedRef.current = true;
 
     // Check localStorage as backup if auth context doesn't have user yet
     // (especially on mobile where cookies may not persist)
@@ -20,10 +19,15 @@ export default function RootPage() {
     const isExpired = expires < Date.now();
 
     if (hasSession && !isExpired && !user) {
-      // Session exists in localStorage — user is authenticated, just waiting for auth context
-      // The AuthContext will resolve shortly, no need to redirect yet
+      // Session token exists in localStorage — Firebase is still resolving the
+      // user from IndexedDB. Keep the blank screen and wait for the next render
+      // when auth context emits the real user. Do NOT set redirectedRef here,
+      // otherwise the redirect below will never fire on the next render.
       return;
     }
+
+    // From this point we are committed to navigating — set the guard.
+    redirectedRef.current = true;
 
     // Use window.location.replace so the root "/" is not added to history,
     // and the middleware edge runtime sees the cookie on the very first request.

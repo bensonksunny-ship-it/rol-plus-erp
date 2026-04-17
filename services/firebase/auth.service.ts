@@ -104,9 +104,12 @@ export async function signIn(
 }
 
 /**
- * Sign out the current user.
+ * Sign out the current user and clear all persisted session artifacts.
+ * Clearing here ensures every call site is safe — callers do not need to
+ * manually clear the cookie or localStorage after calling this function.
  */
 export async function signOut(): Promise<void> {
+  clearPersistedSession();
   await firebaseSignOut(auth);
 }
 

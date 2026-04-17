@@ -107,8 +107,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   }, [loading, user, pathname, router]);
 
   async function handleSignOut() {
-    await signOut();
-    clearPersistedSession();
+    await signOut(); // signOut() now clears the session cookie and localStorage internally
     router.replace("/login");
   }
 
