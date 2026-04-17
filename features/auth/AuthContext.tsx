@@ -35,80 +35,83 @@ function clearSessionCookie() {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const resolvedWithUserRef        = useRef(false);
-  const resolvedDefinitiveNullRef  = useRef(false);
-  // Debounce timer for null-after-user — gives Firebase time to re-emit the
-  // real user during a token refresh on mobile networks before treating as
-  // a genuine sign-out.
-  const signOutDebounceRef         = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Tracks whether we have ever emitted a real user in this session.
+  // Used to distinguish "token refresh null flicker" from "genuine sign-out".
+  const hadUserRef        = useRef(false);
+  // Prevents multiple simultaneous debounce timers.
+  const debounceRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Prevents acting on stale callbacks after unmount.
+  const mountedRef        = useRef(true);
 
   useEffect(() => {
+    mountedRef.current = true;
+
+    // Safety valve: if Firebase never calls back at all (IndexedDB deadlock,
+    // extreme privacy mode) — unblock loading after AUTH_TIMEOUT_MS.
     const safetyTimer = setTimeout(() => {
-      if (!resolvedWithUserRef.current && !resolvedDefinitiveNullRef.current) {
-        resolvedDefinitiveNullRef.current = true;
-        clearSessionCookie();
-        setUser(null);
-        setLoading(false);
-      }
+      if (!mountedRef.current) return;
+      clearSessionCookie();
+      setUser(null);
+      setLoading(false);
     }, AUTH_TIMEOUT_MS);
 
     const unsubscribe = subscribeToAuthState((resolvedUser) => {
+      if (!mountedRef.current) return;
+
       if (resolvedUser) {
-        // Real user — cancel any pending sign-out debounce and lock in.
-        if (signOutDebounceRef.current) {
-          clearTimeout(signOutDebounceRef.current);
-          signOutDebounceRef.current = null;
+        // ── REAL USER: cancel debounce, lock in immediately ──────────────────
+        if (debounceRef.current) {
+          clearTimeout(debounceRef.current);
+          debounceRef.current = null;
         }
         clearTimeout(safetyTimer);
-        resolvedWithUserRef.current = true;
-        resolvedDefinitiveNullRef.current = false;
+        hadUserRef.current = true;
         setUser(resolvedUser);
         setLoading(false);
-      } else {
-        if (resolvedWithUserRef.current) {
-          // Null after having a real user — may be a token refresh flicker on
-          // mobile. Debounce for 2 s before committing to sign-out state.
-          // If Firebase re-emits the real user within 2 s the timer is cancelled.
-          if (signOutDebounceRef.current) return; // already debouncing
-          signOutDebounceRef.current = setTimeout(() => {
-            signOutDebounceRef.current = null;
-            // Only sign out if no real user arrived during the debounce window.
-            if (!resolvedWithUserRef.current) return;
-            // Check: did Firebase re-fire with a user? If so resolvedWithUserRef
-            // would have been set back to true — but we check the cookie too.
-            const hasSessionCookie =
-              typeof document !== "undefined" &&
-              document.cookie.includes("rol_session=");
-            if (!hasSessionCookie) {
-              resolvedWithUserRef.current = false;
-              resolvedDefinitiveNullRef.current = true;
-              clearSessionCookie();
-              setUser(null);
-            }
-          }, 2_000);
-          return;
-        }
-
-        const hasSessionCookie =
-          typeof document !== "undefined" &&
-          document.cookie.includes("rol_session=");
-
-        if (!hasSessionCookie) {
-          if (!resolvedDefinitiveNullRef.current) {
-            clearTimeout(safetyTimer);
-            resolvedDefinitiveNullRef.current = true;
-            clearSessionCookie();
-            setUser(null);
-            setLoading(false);
-          }
-        }
-        // Cookie present → still waiting for Firebase IndexedDB read.
+        return;
       }
+
+      // ── NULL CALLBACK ────────────────────────────────────────────────────────
+      if (hadUserRef.current) {
+        // We had a real user and now got null — this is the mobile token-refresh
+        // flicker. Debounce: wait 2 s for Firebase to re-emit the real user.
+        // If it does, the block above will cancel this timer.
+        if (debounceRef.current) return; // already waiting
+        debounceRef.current = setTimeout(() => {
+          debounceRef.current = null;
+          if (!mountedRef.current) return;
+          // After 2 s, if Firebase still hasn't given us a user back,
+          // treat as genuine sign-out — clear everything.
+          // (hadUserRef is still true here; we clear it on sign-out.)
+          hadUserRef.current = false;
+          clearSessionCookie();
+          try { localStorage.removeItem("rol_session"); } catch(_) {}
+          setUser(null);
+          // loading stays false — it was already resolved when we had the user.
+        }, 2_000);
+        return;
+      }
+
+      // First-ever null (fresh page load, no prior user in this mount).
+      // Check cookie: if present, Firebase is still reading from IndexedDB — wait.
+      // If absent, this is definitely a logged-out state.
+      const hasCookie =
+        typeof document !== "undefined" &&
+        document.cookie.includes("rol_session=");
+
+      if (!hasCookie) {
+        clearTimeout(safetyTimer);
+        setUser(null);
+        setLoading(false);
+      }
+      // else: cookie present, keep loading=true and wait for the real user callback.
     });
 
     return () => {
+      mountedRef.current = false;
       clearTimeout(safetyTimer);
-      if (signOutDebounceRef.current) clearTimeout(signOutDebounceRef.current);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
       unsubscribe();
     };
   }, []);

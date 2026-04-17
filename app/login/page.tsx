@@ -43,24 +43,21 @@ export default function LoginPage() {
       const session = await signIn(email.trim(), password);
       const maxAge  = 60 * 60 * 24 * 7;
 
-      // Set cookie for server/middleware
+      // Write cookie FIRST — middleware needs this before any navigation.
       document.cookie = `rol_session=${session.token}; path=/; SameSite=Lax; max-age=${maxAge}`;
 
-      // Also store in localStorage as backup for mobile browsers that drop cookies
-      if (typeof window !== "undefined") {
-        try {
-          localStorage.setItem("rol_session", session.token);
-          localStorage.setItem("rol_session_expires", String(Date.now() + maxAge * 1000));
-          localStorage.setItem("rol_user_role", session.user.role);
-        } catch (e) {
-          // localStorage might be disabled on some mobile browsers, continue anyway
-          console.warn("localStorage unavailable:", e);
-        }
-      }
+      // localStorage backup for mobile browsers that aggressively clear cookies.
+      try {
+        localStorage.setItem("rol_session", session.token);
+        localStorage.setItem("rol_session_expires", String(Date.now() + maxAge * 1000));
+      } catch (_) { /* localStorage may be blocked in private mode */ }
 
-      // Redirect immediately using role from login response (most reliable method)
-      const redirectUrl = ROLE_ROUTES[session.user.role] ?? "/dashboard";
-      window.location.replace(redirectUrl);
+      // DO NOT navigate here. Firebase's onAuthStateChanged will fire with the
+      // real user object after signIn resolves, which triggers the useEffect
+      // below to redirect. This avoids the mobile cookie-timing race where
+      // window.location.replace fires before the cookie is flushed to the
+      // browser's cookie jar, causing middleware to see no cookie → /login loop.
+      // submitting stays true — the useEffect redirect will unmount this page.
     } catch (err: unknown) {
       const code = err instanceof Error ? err.message : "unknown";
       setError(ERROR_MESSAGES[code] ?? "Something went wrong. Please try again.");
