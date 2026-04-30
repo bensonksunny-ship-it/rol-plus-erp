@@ -28,12 +28,17 @@ export function middleware(request: NextRequest) {
   );
 
   const hasSession = Boolean(request.cookies.get("rol_session")?.value);
+  const isDashboardRoute = pathname === "/dashboard" || pathname.startsWith("/dashboard/");
 
   // Protected route with no session cookie → send to login.
   // This is the only server-side redirect we make. The reverse redirect
   // (/login with cookie → /dashboard) is intentionally handled client-side
   // only, to avoid server loops on mobile where the cookie may be stale.
-  if (!isPublic && !hasSession) {
+  // Dashboard routes are exempt because some mobile/privacy browsers block
+  // first-party cookies while Firebase auth is still valid in IndexedDB.
+  // Redirecting those requests server-side causes a /login <-> /dashboard
+  // hard-refresh loop. Dashboard auth is enforced client-side in layout.
+  if (!isPublic && !hasSession && !isDashboardRoute) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 

@@ -24,6 +24,31 @@ interface State {
   reloading: boolean;
 }
 
+function getReloadTimestamp(key: string): number {
+  try {
+    return parseInt(localStorage.getItem(key) ?? "0", 10);
+  } catch {
+    return 0;
+  }
+}
+
+function setReloadTimestamp(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearReloadTimestamp(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore storage failures on restricted browsers.
+  }
+}
+
 export default class ChunkErrorBoundary extends React.Component<
   { children: React.ReactNode },
   State
@@ -63,7 +88,7 @@ export default class ChunkErrorBoundary extends React.Component<
     // Guard: only auto-reload ONCE per 30 seconds to avoid an infinite hard-reload loop
     // if the new deploy itself is broken.
     const RELOAD_KEY = "__chunk_reload_at__";
-    const lastReload = parseInt(localStorage.getItem(RELOAD_KEY) ?? "0", 10);
+    const lastReload = getReloadTimestamp(RELOAD_KEY);
     const now = Date.now();
 
     if (now - lastReload < 30_000) {
@@ -72,7 +97,13 @@ export default class ChunkErrorBoundary extends React.Component<
       return;
     }
 
-    localStorage.setItem(RELOAD_KEY, String(now));
+    const persisted = setReloadTimestamp(RELOAD_KEY, String(now));
+    if (!persisted) {
+      // If storage is blocked we cannot enforce the one-reload guard safely.
+      // In that case do not auto-reload; show fallback UI instead.
+      console.error("[ChunkErrorBoundary] Storage unavailable; skipping auto-reload to avoid loops.", error);
+      return;
+    }
     this.setState({ reloading: true });
 
     // Hard reload — bypasses the browser cache so the new chunk manifest is fetched.
@@ -135,7 +166,7 @@ export default class ChunkErrorBoundary extends React.Component<
             </div>
             <button
               onClick={() => {
-                localStorage.removeItem("__chunk_reload_at__");
+                clearReloadTimestamp("__chunk_reload_at__");
                 window.location.reload();
               }}
               style={{
