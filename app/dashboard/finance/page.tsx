@@ -1018,7 +1018,87 @@ function FinanceContent() {
                         {/* ── Inline panel row ──────────────────────────────── */}
                         {isOpen && (
                           <tr key={`${s.uid}-panel`}>
-                            <td colSpan={9} style={{ padding: "0 14px 16px", background: "#fffbeb" }}>
+                            <td colSpan={5} style={{ padding: "0 14px 16px", background: "#fffbeb" }}>
+
+                              {/* ── Attendance info strip ─────────────────────── */}
+                              <div style={{
+                                display: "flex", gap: 20, alignItems: "center",
+                                padding: "10px 0", borderBottom: "1px solid #fde68a", marginBottom: 14,
+                                flexWrap: "wrap" as const, fontSize: 13, color: "#6b7280",
+                              }}>
+                                <span>
+                                  <span style={{ fontWeight: 700, color: "#1d4ed8" }}>{s.attendanceCount}</span>
+                                  {" classes — "}{fmtMonth(selectedMonth)}
+                                </span>
+                                {s.feeCycle === "per_class" && (
+                                  <span>
+                                    Est. fee:{" "}
+                                    <span style={{ fontWeight: 700, color: "#7c3aed" }}>{fmtINR(s.estimatedFee)}</span>
+                                  </span>
+                                )}
+                                {lastTxMap.get(s.uid) && (
+                                  <span>
+                                    Last payment:{" "}
+                                    <span style={{ fontWeight: 600 }}>{fmtINR(lastTxMap.get(s.uid)!.amount)}</span>
+                                    {" · "}{formatDate(lastTxMap.get(s.uid)!.date ?? lastTxMap.get(s.uid)!.createdAt)}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* ── Action tabs ───────────────────────────────── */}
+                              <div style={{ display: "flex", gap: 4, marginBottom: 14, flexWrap: "wrap" as const }}>
+                                {(!isPrepay || overdue) && (
+                                  <button
+                                    onClick={() => setActiveAction("pay")}
+                                    style={{
+                                      ...st.tab, flex: "none" as const, padding: "6px 14px",
+                                      ...(activeAction === "pay" ? st.tabActive : {}),
+                                    }}
+                                  >
+                                    💳 Pay
+                                  </button>
+                                )}
+                                {isPrepay && (
+                                  <button
+                                    onClick={() => setActiveAction("deposit")}
+                                    style={{
+                                      ...st.tab, flex: "none" as const, padding: "6px 14px",
+                                      ...(activeAction === "deposit" ? st.tabActive : {}),
+                                    }}
+                                  >
+                                    ⬆ Deposit
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => setActiveAction("adjust")}
+                                  style={{
+                                    ...st.tab, flex: "none" as const, padding: "6px 14px",
+                                    ...(activeAction === "adjust" ? st.tabActive : {}),
+                                  }}
+                                >
+                                  ✏️ Adjust Fee
+                                </button>
+                                {s.feeCycle === "monthly" && (
+                                  <button
+                                    onClick={() => setActiveAction("bill")}
+                                    disabled={!canBill}
+                                    title={
+                                      alreadyBilled
+                                        ? `Fee due already generated for ${fmtMonth(month)}`
+                                        : !cycleComplete
+                                          ? `Available after ${fmtMonth(month)} ends — pick a completed month`
+                                          : `Generate fee due for ${fmtMonth(month)}`
+                                    }
+                                    style={{
+                                      ...st.tab, flex: "none" as const, padding: "6px 14px",
+                                      ...(activeAction === "bill" ? st.tabActive : {}),
+                                      ...(!canBill ? { opacity: 0.4, cursor: "not-allowed" as const } : {}),
+                                    }}
+                                  >
+                                    🗓 Generate Due
+                                  </button>
+                                )}
+                              </div>
 
                               {/* ════ PAY PANEL ════════════════════════════════ */}
                               {activeAction === "pay" && (
