@@ -857,8 +857,7 @@ function FinanceContent() {
                           style={{ background: rowBg, transition: "background 0.15s", cursor: "pointer" }}
                           onClick={(e) => {
                             if ((e.target as HTMLElement).closest("button")) return;
-                            const defaultAction: RowAction = isPrepay ? "deposit" : "pay";
-                            openPanel(s.uid, defaultAction, s);
+                            openPanel(s.uid, "history", s);
                           }}
                         >
                           {/* Student + center */}
@@ -985,49 +984,42 @@ function FinanceContent() {
                                 )}
                               </div>
 
-                              {/* ── Action tabs ───────────────────────────────── */}
-                              <div style={{ display: "flex", gap: 4, marginBottom: 14, flexWrap: "wrap" as const }}>
-                                {(!isPrepay || overdue) && (
+                              {/* ── Action tabs (only when opened via action button) ── */}
+                              {activeAction !== "history" && (
+                                <div style={{ display: "flex", gap: 4, marginBottom: 14, flexWrap: "wrap" as const }}>
+                                  {(!isPrepay || overdue) && (
+                                    <button
+                                      onClick={() => setActiveAction("pay")}
+                                      style={{
+                                        ...st.tab, flex: "none" as const, padding: "6px 14px",
+                                        ...(activeAction === "pay" ? st.tabActive : {}),
+                                      }}
+                                    >
+                                      💳 Pay
+                                    </button>
+                                  )}
+                                  {isPrepay && (
+                                    <button
+                                      onClick={() => setActiveAction("deposit")}
+                                      style={{
+                                        ...st.tab, flex: "none" as const, padding: "6px 14px",
+                                        ...(activeAction === "deposit" ? st.tabActive : {}),
+                                      }}
+                                    >
+                                      ⬆ Deposit
+                                    </button>
+                                  )}
                                   <button
-                                    onClick={() => setActiveAction("pay")}
+                                    onClick={() => setActiveAction("adjust")}
                                     style={{
                                       ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                      ...(activeAction === "pay" ? st.tabActive : {}),
+                                      ...(activeAction === "adjust" ? st.tabActive : {}),
                                     }}
                                   >
-                                    💳 Pay
+                                    ✏️ Adjust Fee
                                   </button>
-                                )}
-                                {isPrepay && (
-                                  <button
-                                    onClick={() => setActiveAction("deposit")}
-                                    style={{
-                                      ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                      ...(activeAction === "deposit" ? st.tabActive : {}),
-                                    }}
-                                  >
-                                    ⬆ Deposit
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => setActiveAction("adjust")}
-                                  style={{
-                                    ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                    ...(activeAction === "adjust" ? st.tabActive : {}),
-                                  }}
-                                >
-                                  ✏️ Adjust Fee
-                                </button>
-                                <button
-                                  onClick={() => setActiveAction("history")}
-                                  style={{
-                                    ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                    ...(activeAction === "history" ? st.tabActive : {}),
-                                  }}
-                                >
-                                  🧾 History
-                                </button>
-                              </div>
+                                </div>
+                              )}
 
                               {/* ════ PAY PANEL ════════════════════════════════ */}
                               {activeAction === "pay" && (
