@@ -174,6 +174,7 @@ function StudentsContent() {
   const [deleteTarget, setDeleteTarget]     = useState<StudentRow | null>(null);
   const [breakTarget, setBreakTarget]       = useState<StudentRow | null>(null);
   const debounceRef                         = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [selectedStudent, setSelectedStudent] = useState<StudentRow | null>(null);
   const { toasts, toast, remove }           = useToast();
 
   // Filters
@@ -313,6 +314,15 @@ function StudentsContent() {
       return true;
     });
   }, [baseList, search, filterCenter, filterCourse, filterInstrument, filterFeeStatus]);
+
+  const groupedByCenter = useMemo(() => {
+    const map = new Map<string, { centerId: string; centerName: string; students: StudentRow[] }>();
+    filtered.forEach(s => {
+      if (!map.has(s.centerId)) map.set(s.centerId, { centerId: s.centerId, centerName: s.centerName, students: [] });
+      map.get(s.centerId)!.students.push(s);
+    });
+    return Array.from(map.values()).sort((a, b) => a.centerName.localeCompare(b.centerName));
+  }, [filtered]);
 
   // ── Create student ─────────────────────────────────────────────────────────
   async function handleCreate(e: React.FormEvent) {
@@ -758,43 +768,35 @@ function StudentsContent() {
           isAdmin={isAdmin}
         />
       ) : (
-        <div style={p.tableWrap}>
-          <table style={p.table}>
-            <thead>
-              <tr style={{ background: "#f9fafb" }}>
-                <th style={p.th}>Student ID</th>
-                <th style={p.th}>Name</th>
-                <th style={p.th}>Email</th>
-                <th style={p.th}>Adm. No.</th>
-                <th style={p.th}>Center</th>
-                <th style={p.th}>Class Type</th>
-                <th style={p.th}>Instrument / Course</th>
-                <th style={p.th}>Fee</th>
-                <th style={p.th}>Balance</th>
-                <th style={p.th}>Status</th>
-                <th style={p.th}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((s, i) => (
-                <StudentRow
-                  key={s.id}
-                  student={s}
-                  index={i}
-                  isAdmin={isAdmin}
-                  isTeacher={isTeacher}
-                  onEdit={() => {
-                    if (isTeacherRole && !isAllowed(s.centerId)) return; // hard block
-                    setEditTarget(s);
-                  }}
-                  onRequestDeactivation={() => requestDeactivation(s)}
-                  onRequestBreak={() => setBreakTarget(s)}
-                  onClearHistory={isAdmin ? () => setClearHistoryTarget(s) : undefined}
-                  onDelete={isAdmin ? () => setDeleteTarget(s) : undefined}
-                />
-              ))}
-            </tbody>
-          </table>
+        <div>
+          {groupedByCenter.map(group => (
+            <div key={group.centerId} style={{ marginBottom: 28 }}>
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8,
+                marginBottom: 12, paddingBottom: 8,
+                borderBottom: "1px solid #e5e7eb",
+              }}>
+                <span style={{ fontSize: 16 }}>🏫</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{group.centerName}</span>
+                <span style={{
+                  background: "#ede9fe", color: "#6d28d9",
+                  fontSize: 11, fontWeight: 700,
+                  padding: "2px 8px", borderRadius: 99,
+                }}>
+                  {group.students.length}
+                </span>
+              </div>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+                gap: 12,
+              }}>
+                {group.students.map(s => (
+                  <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)} />
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -845,6 +847,22 @@ function StudentsContent() {
           }}
           currentUserUid={user?.uid ?? ""}
           currentUserRole={role ?? "admin"}
+        />
+      )}
+
+      {/* ── Student Detail Modal ── */}
+      {selectedStudent && (
+        <StudentDetailModal
+          student={selectedStudent}
+          isAdmin={isAdmin}
+          isTeacher={isTeacher}
+          canEdit={!isTeacherRole || isAllowed(selectedStudent.centerId)}
+          onClose={() => setSelectedStudent(null)}
+          onEdit={() => { setSelectedStudent(null); setEditTarget(selectedStudent); }}
+          onRequestDeactivation={() => { setSelectedStudent(null); requestDeactivation(selectedStudent); }}
+          onRequestBreak={() => { setSelectedStudent(null); setBreakTarget(selectedStudent); }}
+          onClearHistory={isAdmin ? () => { setSelectedStudent(null); setClearHistoryTarget(selectedStudent); } : undefined}
+          onDelete={isAdmin ? () => { setSelectedStudent(null); setDeleteTarget(selectedStudent); } : undefined}
         />
       )}
 
@@ -1726,6 +1744,148 @@ function DeleteStudentModal({ student, onClose, onDeleted, currentUserUid, curre
           >
             {busy ? "Deleting…" : "Delete Student"}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Student Card (grid tile) ─────────────────────────────────────────────────
+
+function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: () => void }) {
+  const [hover, setHover] = useState(false);
+  const initials = s.name.split(" ").map(n => n[0] ?? "").join("").slice(0, 2).toUpperCase() || "?";
+  const statusStyle = STATUS_BADGE[s.status] ?? { background: "#f3f4f6", color: "#6b7280" };
+  const isDue = s.balance > 0;
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background: "#fff",
+        border: `1px solid ${hover ? "#a5b4fc" : "#e5e7eb"}`,
+        borderRadius: 12, padding: "14px 16px", cursor: "pointer",
+        boxShadow: hover ? "0 4px 16px rgba(79,70,229,0.12)" : "0 1px 3px rgba(0,0,0,0.05)",
+        transition: "box-shadow 0.15s, border-color 0.15s",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <div style={{
+          width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
+          background: "linear-gradient(135deg, #6d28d9, #4f46e5)",
+          color: "#fff", fontSize: 13, fontWeight: 700,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {initials}
+        </div>
+        <div style={{ overflow: "hidden" }}>
+          <div style={{ fontWeight: 600, fontSize: 13, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
+          <span style={p.idChip}>{s.studentID}</span>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "#374151", marginBottom: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontWeight: 600 }}>{s.instrument}</span>
+        {s.course ? <span style={{ color: "#6b7280" }}> · {s.course}</span> : null}
+      </div>
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const, marginBottom: isDue ? 8 : 0 }}>
+        <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
+          {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+        </span>
+        <span style={{ ...p.badge, ...statusStyle }}>{s.status.replace(/_/g, " ")}</span>
+      </div>
+      {isDue && (
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", background: "#fef2f2", padding: "3px 8px", borderRadius: 4 }}>
+          Due {fmtINR(s.balance)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Student Detail Modal ──────────────────────────────────────────────────────
+
+function StudentDetailModal({ student: s, isAdmin, isTeacher, canEdit, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
+  student: StudentRow; isAdmin: boolean; isTeacher: boolean; canEdit: boolean;
+  onClose: () => void; onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
+  onClearHistory?: () => void; onDelete?: () => void;
+}) {
+  const statusStyle = STATUS_BADGE[s.status] ?? { background: "#f3f4f6", color: "#6b7280" };
+  function Row({ label, value }: { label: string; value: React.ReactNode }) {
+    return (
+      <div style={{ display: "flex", gap: 8, fontSize: 13, paddingBottom: 8, borderBottom: "1px solid #f3f4f6" }}>
+        <span style={{ minWidth: 130, fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", paddingTop: 2 }}>{label}</span>
+        <span style={{ color: "#111827", flex: 1 }}>{value}</span>
+      </div>
+    );
+  }
+  return (
+    <div style={modal.overlay} onClick={onClose}>
+      <div style={{ ...modal.box, maxWidth: 540 }} onClick={e => e.stopPropagation()}>
+        <div style={modal.header}>
+          <div>
+            <div style={modal.title}>{s.name}</div>
+            <div style={{ display: "flex", gap: 6, marginTop: 5, flexWrap: "wrap" as const }}>
+              <span style={p.idChip}>{s.studentID}</span>
+              <span style={{ ...p.badge, ...statusStyle }}>{s.status.replace(/_/g, " ")}</span>
+            </div>
+          </div>
+          <button onClick={onClose} style={modal.closeBtn}>✕</button>
+        </div>
+        <div style={{ ...modal.body, display: "flex", flexDirection: "column" as const, gap: 8 }}>
+          <Row label="Center"       value={s.centerName} />
+          <Row label="Admission No" value={<span style={p.admChip}>{s.admissionNo}</span>} />
+          <Row label="Email"        value={s.email} />
+          {s.phone && <Row label="Phone" value={s.phone} />}
+          <Row label="Instrument"   value={s.instrument} />
+          <Row label="Course"       value={s.course} />
+          <Row label="Class Type"   value={
+            <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
+              {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+            </span>
+          } />
+          {s.classType === "personal" && (
+            <Row label="Teacher" value={s.assignedTeacherName ?? <span style={{ color: "#d97706" }}>⚠ Unassigned</span>} />
+          )}
+          {s.classType === "personal" && s.classDays.length > 0 && (
+            <Row label="Class Days" value={`${s.classDays.join(", ")}${s.classTime ? " · " + s.classTime : ""}`} />
+          )}
+          <Row label="Fee"          value={
+            <span style={{ ...p.badge, ...(s.feeCycle === "per_class" ? { background: "#ede9fe", color: "#7c3aed" } : { background: "#dbeafe", color: "#1d4ed8" }) }}>
+              {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}
+            </span>
+          } />
+          <Row label="Billing Mode" value={
+            <span style={{ ...p.badge, ...(s.billingMode === "prepay" ? { background: "#fef3c7", color: "#92400e" } : { background: "#f3f4f6", color: "#374151" }) }}>
+              {s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}
+            </span>
+          } />
+          <Row label="Balance" value={
+            <span style={{ fontWeight: 700, color: s.balance > 0 ? "#dc2626" : "#16a34a" }}>{fmtINR(s.balance)}</span>
+          } />
+        </div>
+        <div style={{ ...modal.footer, justifyContent: "space-between", flexWrap: "wrap" as const, gap: 8 }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
+            {(isAdmin || isTeacher) && canEdit && (
+              <button onClick={onEdit} style={p.editBtn}>✏ Edit</button>
+            )}
+            {(isAdmin || isTeacher) && s.status === "active" && (
+              <button onClick={onRequestDeactivation} style={p.deactBtn}>Deactivate</button>
+            )}
+            {(isAdmin || isTeacher) && s.status === "active" && (
+              <button onClick={onRequestBreak} style={{ ...p.editBtn, background: "#e0f2fe", color: "#0369a1", borderColor: "#7dd3fc" }}>☕ Break</button>
+            )}
+            {onClearHistory && (
+              <button onClick={onClearHistory} style={p.clearBtn}>🗑 History</button>
+            )}
+            {onDelete && (
+              <button onClick={onDelete} style={p.deleteBtn}>✕ Delete</button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.syllabusBtn}>Syllabus</Link>
+            <button onClick={onClose} style={modal.cancelBtn}>Close</button>
+          </div>
         </div>
       </div>
     </div>
