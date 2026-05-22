@@ -5,6 +5,7 @@ import {
   getDocs,
   getDocFromServer,
   updateDoc,
+  deleteDoc,
   increment,
   query,
   where,
@@ -17,6 +18,7 @@ import type {
   CreateFeeStructureInput,
   Transaction,
   CreateTransactionInput,
+  EditableTransactionInput,
 } from "@/types/finance";
 import { logAction } from "@/services/audit/audit.service";
 
@@ -133,80 +135,7 @@ export async function createTransaction(
   return { id: snap.id, ...snap.data() } as Transaction;
 }
 
-// ─── Monthly Billing ──────────────────────────────────────────────────────────
-
-const MONTHLY_CHARGES = "monthly_charges";
-
-/**
- * Apply monthly fee to a student's balance.
- * Validates: student exists, has a center, feeStructure is monthly.
- * Prevents duplicate charge for the same student + billing cycle (YYYY-MM).
- * Returns true if charge applied, false if skipped (already charged or wrong cycle).
- */
-export async function applyMonthlyFee(studentUid: string): Promise<boolean> {
-  const student = await fetchStudent(studentUid);
-
-  if (!student.centerId) {
-    throw new Error(`STUDENT_NO_CENTER: student ${studentUid} has no assigned center`);
-  }
-
-  const feeStructure = await getFeeStructureByCenter(student.centerId);
-  if (!feeStructure) {
-    throw new Error(`FEE_STRUCTURE_NOT_FOUND: no fee structure for center ${student.centerId}`);
-  }
-  if (feeStructure.billingCycle !== "monthly") {
-    return false;
-  }
-
-  // Cycle key = "YYYY-MM" — one charge per student per calendar month
-  const cycleKey = new Date().toISOString().slice(0, 7);
-
-  const duplicateSnap = await getDocs(
-    query(
-      collection(db, MONTHLY_CHARGES),
-      where("studentUid", "==", studentUid),
-      where("cycleKey",   "==", cycleKey)
-    )
-  );
-  if (!duplicateSnap.empty) {
-    return false; // already charged this month
-  }
-
-  // Record the charge to prevent duplicates
-  const ref = await addDoc(collection(db, MONTHLY_CHARGES), {
-    studentUid: studentUid,
-    centerId:   student.centerId,
-    cycleKey:   cycleKey,
-    amount:     feeStructure.amount,
-    createdAt:  serverTimestamp(),
-  });
-
-  const snap = await getDocFromServer(ref);
-  if (!snap.exists()) throw new Error("MONTHLY_CHARGE_CREATE_FAILED: document not found after write");
-
-  // Apply charge to student balance
-  await updateDoc(doc(db, "users", studentUid), {
-    currentBalance: increment(feeStructure.amount),
-    updatedAt:      new Date().toISOString(),
-  });
-
-  logAction({
-    action:        "MONTHLY_FEE_APPLIED",
-    initiatorId:   "system",
-    initiatorRole: "admin",
-    approverId:    null,
-    approverRole:  null,
-    reason:        null,
-    metadata:      {
-      studentUid,
-      centerId:   student.centerId,
-      amount:     feeStructure.amount,
-      cycleKey,
-    },
-  });
-
-  return true;
-}
+// ─── Per-Class Billing ────────────────────────────────────────────────────────
 
 /**
  * Auto-charge a student per class attendance.
@@ -270,4 +199,176 @@ export async function getFeeStructureByCenter(
 
   const d = snap.docs[0];
   return { id: d.id, ...d.data() } as FeeStructure;
+}
+
+// ─── Edit / Delete (admin) ────────────────────────────────────────────────────
+
+/**
+ * Returns the *signed* effect this transaction had on `users.currentBalance`
+ * when it was originally written. To reverse, apply the negation.
+ *
+ * Convention used throughout the codebase:
+ *   • Payment (UPI/Cash/Bank, no billingMonth, type !== "deposit"): -amount  (reduces balance)
+ *   • Deposit (type === "deposit"):                                  -amount  (reduces balance / adds credit)
+ *   • Charge  (method === "auto" or "auto-monthly"):                +amount  (increases balance / owed)
+ */
+function balanceEffectFor(tx: Transaction): number {
+  const isCharge =
+    tx.method === "auto-monthly" ||
+    tx.method === "auto" ||
+    tx.type === "charge";
+  return isCharge ? +tx.amount : -tx.amount;
+}
+
+/**
+ * Edit an existing transaction. Reconciles `users.currentBalance` by the delta.
+ * Only the fields in EditableTransactionInput may change.
+ *
+ * If the new amount differs from the old, balance moves by:
+ *   delta = newEffect - oldEffect
+ *   (e.g. payment 2000 → 2500 ⇒ oldEffect=-2000, newEffect=-2500, delta=-500 ⇒ balance -= 500)
+ */
+export async function editTransaction(
+  txId: string,
+  patch: EditableTransactionInput,
+  editorUid: string,
+  editorRole: "admin" | "super_admin",
+): Promise<Transaction> {
+  if (patch.amount <= 0) throw new Error("INVALID_AMOUNT: amount must be greater than 0");
+
+  const txRef  = doc(db, TRANSACTIONS, txId);
+  const txSnap = await getDocFromServer(txRef);
+  if (!txSnap.exists()) throw new Error(`TRANSACTION_NOT_FOUND: ${txId}`);
+  const oldTx = { id: txSnap.id, ...txSnap.data() } as Transaction;
+
+  // Build the projected new transaction (locked fields preserved from old)
+  const newTx: Transaction = {
+    ...oldTx,
+    amount:  patch.amount,
+    method:  patch.method,
+    date:    patch.date,
+    status:  patch.status,
+    note:    patch.note ?? null,
+  };
+
+  const oldEffect = balanceEffectFor(oldTx);
+  const newEffect = balanceEffectFor(newTx);
+  const delta     = newEffect - oldEffect;
+
+  // 1) Persist the patch
+  await updateDoc(txRef, {
+    amount:    patch.amount,
+    method:    patch.method,
+    date:      patch.date,
+    status:    patch.status,
+    note:      patch.note ?? null,
+    updatedAt: new Date().toISOString(),
+    editedBy:  editorUid,
+  });
+
+  // 2) Reconcile student balance by the delta (only if non-zero)
+  if (delta !== 0 && oldTx.studentUid) {
+    await updateDoc(doc(db, "users", oldTx.studentUid), {
+      currentBalance: increment(delta),
+      updatedAt:      new Date().toISOString(),
+    });
+  }
+
+  // 3) Audit
+  logAction({
+    action:        "TRANSACTION_EDITED",
+    initiatorId:   editorUid,
+    initiatorRole: editorRole,
+    approverId:    null,
+    approverRole:  null,
+    reason:        null,
+    metadata: {
+      transactionId: txId,
+      studentUid:    oldTx.studentUid,
+      centerId:      oldTx.centerId,
+      before: {
+        amount: oldTx.amount,
+        method: oldTx.method,
+        date:   oldTx.date,
+        status: oldTx.status,
+        note:   oldTx.note ?? null,
+      },
+      after: {
+        amount: newTx.amount,
+        method: newTx.method,
+        date:   newTx.date,
+        status: newTx.status,
+        note:   newTx.note ?? null,
+      },
+      balanceDelta: delta,
+    },
+  });
+
+  return newTx;
+}
+
+/**
+ * Hard-delete a transaction. Reverses its effect on `users.currentBalance`.
+ * If the transaction was an auto-monthly fee-due charge, also clears the
+ * student's `lastBilledMonth` if it matches — re-opening the cycle so a new
+ * fee due can be generated for that month.
+ */
+export async function deleteTransaction(
+  txId: string,
+  deleterUid: string,
+  deleterRole: "admin" | "super_admin",
+): Promise<void> {
+  const txRef  = doc(db, TRANSACTIONS, txId);
+  const txSnap = await getDocFromServer(txRef);
+  if (!txSnap.exists()) throw new Error(`TRANSACTION_NOT_FOUND: ${txId}`);
+  const tx = { id: txSnap.id, ...txSnap.data() } as Transaction;
+
+  const oldEffect = balanceEffectFor(tx);
+
+  // 1) Reverse the balance effect (subtract the original effect)
+  if (oldEffect !== 0 && tx.studentUid) {
+    await updateDoc(doc(db, "users", tx.studentUid), {
+      currentBalance: increment(-oldEffect),
+      updatedAt:      new Date().toISOString(),
+    });
+  }
+
+  // 2) If this was a fee-due generation, reopen the cycle for that student/month
+  if (tx.method === "auto-monthly" && tx.billingMonth && tx.studentUid) {
+    const studentRef  = doc(db, "users", tx.studentUid);
+    const studentSnap = await getDocFromServer(studentRef);
+    if (studentSnap.exists()) {
+      const data = studentSnap.data() as { lastBilledMonth?: string };
+      if (data.lastBilledMonth === tx.billingMonth) {
+        await updateDoc(studentRef, {
+          lastBilledMonth: null,
+          updatedAt:       new Date().toISOString(),
+        });
+      }
+    }
+  }
+
+  // 3) Hard delete
+  await deleteDoc(txRef);
+
+  // 4) Audit
+  logAction({
+    action:        "TRANSACTION_DELETED",
+    initiatorId:   deleterUid,
+    initiatorRole: deleterRole,
+    approverId:    null,
+    approverRole:  null,
+    reason:        null,
+    metadata: {
+      transactionId: txId,
+      studentUid:    tx.studentUid,
+      centerId:      tx.centerId,
+      amount:        tx.amount,
+      method:        tx.method,
+      date:          tx.date,
+      status:        tx.status,
+      billingMonth:  tx.billingMonth ?? null,
+      reversedEffect: -oldEffect,
+    },
+  });
 }

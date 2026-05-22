@@ -1,0 +1,347 @@
+<h2>Finance Page — Before vs After</h2>
+<p class="subtitle">Pick the direction that feels right. Both keep all the same features — just presented more cleanly.</p>
+
+<div class="split" style="gap:20px;align-items:flex-start">
+
+  <!-- BEFORE -->
+  <div class="mockup" style="flex:1">
+    <div class="mockup-header" style="background:#fee2e2;color:#b91c1c">Current (Now)</div>
+    <div class="mockup-body" style="padding:12px;background:#f9fafb">
+
+      <!-- 8 cards crammed -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px">
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #16a34a">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Collected — May</div>
+          <div style="font-size:16px;font-weight:800;color:#16a34a">₹84,500</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #4f46e5">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Collected Today</div>
+          <div style="font-size:16px;font-weight:800;color:#4f46e5">₹4,200</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #d97706">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Pending Balance</div>
+          <div style="font-size:16px;font-weight:800;color:#d97706">₹12,000</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #dc2626;box-shadow:0 0 0 2px #fee2e2">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Overdue Students</div>
+          <div style="font-size:16px;font-weight:800;color:#dc2626">8</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #9d174d">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Prepay Credit Held</div>
+          <div style="font-size:16px;font-weight:800;color:#9d174d">₹6,500</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #b45309">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Low Credit Alert</div>
+          <div style="font-size:16px;font-weight:800;color:#b45309">3</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #059669">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Active Students</div>
+          <div style="font-size:16px;font-weight:800;color:#059669">42</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #7c3aed">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700">Est. Fees — May</div>
+          <div style="font-size:16px;font-weight:800;color:#7c3aed">₹31,200</div>
+        </div>
+      </div>
+
+      <!-- Tab bar -->
+      <div style="display:flex;gap:4px;background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:3px;margin-bottom:8px">
+        <div style="flex:1;text-align:center;padding:5px;background:#ede9fe;border-radius:4px;font-size:10px;font-weight:700;color:#6d28d9">📊 Overview</div>
+        <div style="flex:1;text-align:center;padding:5px;font-size:10px;color:#6b7280">🎓 Students (8 overdue)</div>
+        <div style="flex:1;text-align:center;padding:5px;font-size:10px;color:#6b7280">🧾 Transactions</div>
+      </div>
+
+      <!-- Filter row - many controls -->
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:4px 8px;font-size:9px;background:#fff">All Centers ▼</div>
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:4px 8px;font-size:9px;background:#fff">Search name/ID…</div>
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:2px 3px;font-size:9px;background:#fff;display:flex;gap:2px">
+          <span style="padding:2px 6px;background:#f59e0b;color:#fff;border-radius:3px">All</span>
+          <span style="padding:2px 6px;color:#6b7280">👥 Group</span>
+          <span style="padding:2px 6px;color:#6b7280">👤 Personal</span>
+        </div>
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:2px 3px;font-size:9px;background:#fff;display:flex;gap:2px">
+          <span style="padding:2px 6px;background:#9d174d;color:#fff;border-radius:3px">All Billing</span>
+          <span style="padding:2px 6px;color:#6b7280">⬇ Postpay</span>
+          <span style="padding:2px 6px;color:#6b7280">⬆ Prepay</span>
+        </div>
+      </div>
+
+      <!-- Dense student table -->
+      <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden">
+        <table style="width:100%;font-size:9px;border-collapse:collapse">
+          <thead>
+            <tr style="background:#f9fafb">
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Student</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Class</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Center</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Cycle</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Fee</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Att.</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Est.Fee</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Balance</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="background:#fff7f7">
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6"><div style="font-weight:700">Arjun Kumar</div><span style="font-size:8px;background:#dbeafe;color:#1e40af;padding:1px 4px;border-radius:3px">STU001</span></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6"><span style="background:#dcfce7;color:#166534;padding:1px 5px;border-radius:9px;font-size:8px">👥 Group</span><div style="margin-top:2px"><span style="background:#f3f4f6;color:#374151;padding:1px 4px;border-radius:9px;font-size:7px">⬇ Postpay</span></div></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;color:#9ca3af">Main Center</td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6"><span style="background:#dbeafe;color:#1d4ed8;padding:1px 5px;border-radius:9px;font-size:8px">Monthly</span></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;font-weight:700">₹2,500</td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;text-align:center"><span style="background:#dbeafe;color:#1d4ed8;padding:1px 5px;border-radius:9px;font-weight:700;font-size:9px">12</span></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;color:#9ca3af">—</td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;font-weight:700;color:#dc2626">₹2,500 <span style="font-size:7px;background:#fee2e2;padding:1px 4px;border-radius:2px;letter-spacing:0.5px">DUE</span></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6">
+                <div style="display:flex;gap:3px;flex-wrap:wrap">
+                  <span style="padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;font-size:8px;background:#dc2626;color:#fff">💳 Pay</span>
+                  <span style="padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;font-size:8px;background:#fff">✏️ Fee</span>
+                  <span style="padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;font-size:8px;background:#fff">🗓 Generate Fee Due</span>
+                </div>
+              </td>
+            </tr>
+            <tr style="background:#f0fdf4">
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6"><div style="font-weight:700">Priya Sharma</div><span style="font-size:8px;background:#dbeafe;color:#1e40af;padding:1px 4px;border-radius:3px">STU002</span></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6"><span style="background:#fef9c3;color:#92400e;padding:1px 5px;border-radius:9px;font-size:8px">👤 Personal</span><div style="margin-top:2px"><span style="background:#fce7f3;color:#9d174d;padding:1px 4px;border-radius:9px;font-size:7px">⬆ Prepay</span></div></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;color:#9ca3af">Main Center</td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6"><span style="background:#dbeafe;color:#1d4ed8;padding:1px 5px;border-radius:9px;font-size:8px">Monthly</span></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;font-weight:700">₹3,500</td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;text-align:center"><span style="background:#dbeafe;color:#1d4ed8;padding:1px 5px;border-radius:9px;font-weight:700;font-size:9px">14</span></td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;color:#9ca3af">—</td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6;font-weight:700;color:#16a34a">Credit ₹7,000</td>
+              <td style="padding:5px 6px;border-bottom:1px solid #f3f4f6">
+                <div style="display:flex;gap:3px;flex-wrap:wrap">
+                  <span style="padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;font-size:8px;background:#fff">⬆ Deposit</span>
+                  <span style="padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;font-size:8px;background:#fff">✏️ Fee</span>
+                  <span style="padding:2px 5px;border:1px solid #e5e7eb;border-radius:4px;font-size:8px;background:#fff;opacity:0.4">🗓 Generate Fee Due</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="font-size:9px;color:#dc2626;margin-top:6px;font-style:italic">← Hard to scan: too many columns, too many buttons per row</div>
+    </div>
+  </div>
+
+  <!-- OPTION A -->
+  <div class="mockup card" data-choice="a" onclick="toggleSelect(this)" style="flex:1;cursor:pointer">
+    <div class="mockup-header" style="background:#dcfce7;color:#166534">Option A — Focus on What Matters</div>
+    <div class="mockup-body" style="padding:12px;background:#f9fafb">
+
+      <!-- 4 key cards + secondary row -->
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:8px">
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;border-left:4px solid #16a34a">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700;margin-bottom:4px">💰 Collected — May</div>
+          <div style="font-size:20px;font-weight:800;color:#16a34a">₹84,500</div>
+          <div style="font-size:9px;color:#9ca3af;margin-top:2px">₹4,200 today</div>
+        </div>
+        <div style="background:#fff7f7;border:1px solid #fca5a5;border-radius:8px;padding:10px;border-left:4px solid #dc2626">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700;margin-bottom:4px">🚨 Overdue</div>
+          <div style="font-size:20px;font-weight:800;color:#dc2626">8 students</div>
+          <div style="font-size:9px;color:#dc2626;margin-top:2px">₹12,000 pending</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;border-left:4px solid #059669">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700;margin-bottom:4px">🎓 Active Students</div>
+          <div style="font-size:20px;font-weight:800;color:#059669">42</div>
+          <div style="font-size:9px;color:#9ca3af;margin-top:2px">34 group · 8 personal</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;border-left:4px solid #9d174d">
+          <div style="font-size:9px;color:#6b7280;text-transform:uppercase;font-weight:700;margin-bottom:4px">⬆ Prepay Credit</div>
+          <div style="font-size:20px;font-weight:800;color:#9d174d">₹6,500</div>
+          <div style="font-size:9px;color:#b45309;margin-top:2px">⚠ 3 students low credit</div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div style="display:flex;gap:4px;background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:3px;margin-bottom:8px">
+        <div style="flex:1;text-align:center;padding:5px;background:#ede9fe;border-radius:4px;font-size:10px;font-weight:700;color:#6d28d9">📊 Overview</div>
+        <div style="flex:1;text-align:center;padding:5px;font-size:10px;color:#dc2626;font-weight:600">🎓 Students (8 overdue)</div>
+        <div style="flex:1;text-align:center;padding:5px;font-size:10px;color:#6b7280">🧾 Transactions</div>
+      </div>
+
+      <!-- Cleaner filter -->
+      <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center">
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:4px 8px;font-size:9px;background:#fff;flex:1">🔍 Search student…</div>
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:4px 8px;font-size:9px;background:#fff">All Centers ▼</div>
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:4px 8px;font-size:9px;background:#fff">All Types ▼</div>
+      </div>
+
+      <!-- Cleaner student table — fewer columns -->
+      <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden">
+        <table style="width:100%;font-size:9px;border-collapse:collapse">
+          <thead>
+            <tr style="background:#f9fafb">
+              <th style="padding:6px 8px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Student</th>
+              <th style="padding:6px 8px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Type</th>
+              <th style="padding:6px 8px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Fee / Month</th>
+              <th style="padding:6px 8px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Balance</th>
+              <th style="padding:6px 8px;text-align:left;color:#6b7280;border-bottom:1px solid #e5e7eb">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="background:#fff7f7">
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6">
+                <div style="font-weight:700">Arjun Kumar</div>
+                <div style="font-size:8px;color:#9ca3af">Main Center · STU001</div>
+              </td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6">
+                <span style="background:#dcfce7;color:#166534;padding:2px 6px;border-radius:9px;font-size:8px;font-weight:600">Group</span>
+                <div style="font-size:8px;color:#9ca3af;margin-top:2px">Monthly · Postpay</div>
+              </td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6;font-weight:700">₹2,500</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6;font-weight:700;color:#dc2626">
+                ₹2,500 due
+              </td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6">
+                <button style="padding:4px 10px;background:#dc2626;color:#fff;border:none;border-radius:5px;font-size:9px;font-weight:700;cursor:pointer">💳 Collect</button>
+              </td>
+            </tr>
+            <tr style="background:#f0fdf4">
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6">
+                <div style="font-weight:700">Priya Sharma</div>
+                <div style="font-size:8px;color:#9ca3af">Main Center · STU002</div>
+              </td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6">
+                <span style="background:#fef9c3;color:#92400e;padding:2px 6px;border-radius:9px;font-size:8px;font-weight:600">Personal</span>
+                <div style="font-size:8px;color:#9ca3af;margin-top:2px">Monthly · Prepay</div>
+              </td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6;font-weight:700">₹3,500</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6;font-weight:700;color:#16a34a">
+                Credit ₹7,000
+              </td>
+              <td style="padding:6px 8px;border-bottom:1px solid #f3f4f6">
+                <button style="padding:4px 10px;background:#9d174d;color:#fff;border:none;border-radius:5px;font-size:9px;font-weight:700;cursor:pointer">⬆ Top Up</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="padding:5px 8px;font-size:8px;color:#6b7280;border-top:1px solid #e5e7eb">Click any row to expand → see Att. count, Est. Fee, Fee Adjust, Generate Fee Due</div>
+      </div>
+      <div style="font-size:9px;color:#16a34a;margin-top:6px;font-style:italic">✓ One focused action per row — extra actions hidden until needed</div>
+    </div>
+  </div>
+
+  <!-- OPTION B -->
+  <div class="mockup card" data-choice="b" onclick="toggleSelect(this)" style="flex:1;cursor:pointer">
+    <div class="mockup-header" style="background:#dbeafe;color:#1e40af">Option B — Same Columns, Better Visual Grouping</div>
+    <div class="mockup-body" style="padding:12px;background:#f9fafb">
+
+      <!-- 4 cards wider layout -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px">
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #16a34a">
+          <div style="font-size:8px;color:#6b7280;font-weight:700;text-transform:uppercase">💰 Collected</div>
+          <div style="font-size:15px;font-weight:800;color:#16a34a">₹84,500</div>
+          <div style="font-size:8px;color:#9ca3af">Today ₹4,200</div>
+        </div>
+        <div style="background:#fff7f7;border:1px solid #fca5a5;border-radius:6px;padding:8px;border-top:3px solid #dc2626">
+          <div style="font-size:8px;color:#6b7280;font-weight:700;text-transform:uppercase">🚨 Overdue</div>
+          <div style="font-size:15px;font-weight:800;color:#dc2626">8 · ₹12k</div>
+          <div style="font-size:8px;color:#9ca3af">pending</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #059669">
+          <div style="font-size:8px;color:#6b7280;font-weight:700;text-transform:uppercase">🎓 Students</div>
+          <div style="font-size:15px;font-weight:800;color:#059669">42 active</div>
+          <div style="font-size:8px;color:#9ca3af">3 low credit</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:8px;border-top:3px solid #9d174d">
+          <div style="font-size:8px;color:#6b7280;font-weight:700;text-transform:uppercase">⬆ Prepay</div>
+          <div style="font-size:15px;font-weight:800;color:#9d174d">₹6,500</div>
+          <div style="font-size:8px;color:#9ca3af">credit held</div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div style="display:flex;gap:4px;background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:3px;margin-bottom:8px">
+        <div style="flex:1;text-align:center;padding:5px;background:#ede9fe;border-radius:4px;font-size:10px;font-weight:700;color:#6d28d9">📊 Overview</div>
+        <div style="flex:1;text-align:center;padding:5px;font-size:10px;color:#dc2626;font-weight:600">🎓 Students (8 overdue)</div>
+        <div style="flex:1;text-align:center;padding:5px;font-size:10px;color:#6b7280">🧾 Transactions</div>
+      </div>
+
+      <!-- Filter row — same but less prominent -->
+      <div style="display:flex;gap:4px;margin-bottom:8px;align-items:center">
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:4px 8px;font-size:9px;background:#fff;flex:1">🔍 Search…</div>
+        <div style="border:1px solid #e5e7eb;border-radius:4px;padding:4px 8px;font-size:9px;background:#fff">Centers ▼</div>
+        <div style="display:flex;gap:2px;border:1px solid #e5e7eb;border-radius:4px;padding:2px;background:#fff">
+          <span style="padding:2px 6px;background:#f59e0b;color:#fff;border-radius:3px;font-size:8px">All</span>
+          <span style="padding:2px 6px;color:#6b7280;font-size:8px">Group</span>
+          <span style="padding:2px 6px;color:#6b7280;font-size:8px">Personal</span>
+        </div>
+        <div style="display:flex;gap:2px;border:1px solid #e5e7eb;border-radius:4px;padding:2px;background:#fff">
+          <span style="padding:2px 6px;background:#9d174d;color:#fff;border-radius:3px;font-size:8px">All</span>
+          <span style="padding:2px 6px;color:#6b7280;font-size:8px">Post</span>
+          <span style="padding:2px 6px;color:#6b7280;font-size:8px">Pre</span>
+        </div>
+      </div>
+
+      <!-- Same columns, visual grouping improved -->
+      <div style="background:#fff;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden">
+        <table style="width:100%;font-size:9px;border-collapse:collapse">
+          <thead>
+            <tr style="background:#f9fafb">
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:2px solid #e5e7eb">Student</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:2px solid #e5e7eb" colspan="2">Type &amp; Fee</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:2px solid #e5e7eb">Att.</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:2px solid #e5e7eb">Balance</th>
+              <th style="padding:5px 6px;text-align:left;color:#6b7280;border-bottom:2px solid #e5e7eb">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="background:#fff7f7">
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6">
+                <div style="font-weight:700">Arjun Kumar</div>
+                <div style="font-size:8px;color:#9ca3af">Main · STU001</div>
+              </td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6" colspan="2">
+                <span style="background:#dcfce7;color:#166534;padding:1px 5px;border-radius:9px;font-size:8px">Group</span>
+                <span style="background:#f3f4f6;color:#374151;padding:1px 5px;border-radius:9px;font-size:8px;margin-left:2px">Monthly</span>
+                <div style="font-weight:700;margin-top:2px">₹2,500</div>
+              </td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:700;color:#1d4ed8">12</td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6;font-weight:700;color:#dc2626">₹2,500 <span style="font-size:7px;background:#fee2e2;padding:1px 3px;border-radius:2px">DUE</span></td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6">
+                <div style="display:flex;gap:3px;align-items:center">
+                  <button style="padding:3px 8px;background:#dc2626;color:#fff;border:none;border-radius:4px;font-size:8px;font-weight:700">💳 Pay</button>
+                  <button style="padding:3px 6px;background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;border-radius:4px;font-size:8px">⋯</button>
+                </div>
+              </td>
+            </tr>
+            <tr style="background:#f0fdf4">
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6">
+                <div style="font-weight:700">Priya Sharma</div>
+                <div style="font-size:8px;color:#9ca3af">Main · STU002</div>
+              </td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6" colspan="2">
+                <span style="background:#fef9c3;color:#92400e;padding:1px 5px;border-radius:9px;font-size:8px">Personal</span>
+                <span style="background:#fce7f3;color:#9d174d;padding:1px 5px;border-radius:9px;font-size:8px;margin-left:2px">Prepay</span>
+                <div style="font-weight:700;margin-top:2px">₹3,500</div>
+              </td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6;text-align:center;font-weight:700;color:#1d4ed8">14</td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6;font-weight:700;color:#16a34a">Credit ₹7,000</td>
+              <td style="padding:6px;border-bottom:1px solid #f3f4f6">
+                <div style="display:flex;gap:3px;align-items:center">
+                  <button style="padding:3px 8px;background:#9d174d;color:#fff;border:none;border-radius:4px;font-size:8px;font-weight:700">⬆ Deposit</button>
+                  <button style="padding:3px 6px;background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;border-radius:4px;font-size:8px">⋯</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="font-size:9px;color:#1d4ed8;margin-top:6px;font-style:italic">✓ Same info, fewer columns — "⋯" reveals Fee Adjust, Generate Due, etc.</div>
+    </div>
+  </div>
+
+</div>
+
+<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-top:16px;font-size:12px;color:#374151">
+  <strong>Key changes in both options:</strong>
+  <ul style="margin:6px 0 0 16px;line-height:1.8">
+    <li>8 summary cards → 4 (Est. Fees, Prepay count, Low Credit, Today merged/removed)</li>
+    <li>Center name moved under student name (saves a column)</li>
+    <li>Action buttons: primary action is <strong>one button</strong> — secondary actions are hidden until needed</li>
+  </ul>
+  <br>
+  <strong>Difference:</strong> Option A removes Att. and Est.Fee columns (click row to see). Option B keeps those columns but merges Type+Fee and adds a <strong>⋯</strong> overflow menu for secondary actions.
+</div>

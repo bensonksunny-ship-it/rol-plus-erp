@@ -7,7 +7,7 @@ export interface FeeStructure {
   centerId:     string;
   amount:       number;
   billingCycle: BillingCycle;
-  dueDay:       number;         // day of month (1–31) for monthly billing
+  dueDay:       number;
   lateFee:      number;
   createdAt:    Timestamp | string;
   updatedAt:    Timestamp | string;
@@ -15,21 +15,31 @@ export interface FeeStructure {
 
 export type CreateFeeStructureInput = Omit<FeeStructure, "id" | "createdAt" | "updatedAt">;
 
-// ─── Transaction ──────────────────────────────────────────────────────────────
-
-export type PaymentMethod = "UPI" | "Cash" | "Bank";
+export type PaymentMethod = "UPI" | "Cash" | "Bank" | "auto" | "auto-monthly";
 export type TransactionStatus = "completed" | "pending" | "failed";
+export type TransactionKind = "payment" | "deposit" | "charge";
 
 export interface Transaction {
-  id:         string;
-  studentUid: string;
-  centerId:   string;
-  amount:     number;
-  method:     PaymentMethod;
-  receivedBy: string;        // UID of admin/teacher who recorded the payment
-  date:       string;        // ISO date string
-  status:     TransactionStatus;
-  createdAt:  Timestamp | string;
+  id:            string;
+  studentUid:    string;
+  centerId:      string;
+  amount:        number;
+  method:        PaymentMethod;
+  receivedBy:    string;
+  date:          string;
+  status:        TransactionStatus;
+  createdAt:     Timestamp | string;
+
+  type?:         TransactionKind;
+  note?:         string | null;
+  billingMonth?: string;
+  rawAmount?:    number;
+  discountAmt?:  number;
 }
 
 export type CreateTransactionInput = Omit<Transaction, "id" | "createdAt">;
+
+export type EditableTransactionInput = Pick<
+  Transaction,
+  "amount" | "method" | "date" | "status" | "note"
+>;

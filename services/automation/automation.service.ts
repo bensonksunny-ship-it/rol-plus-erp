@@ -5,48 +5,7 @@ import {
   where,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
-import { applyMonthlyFee } from "@/services/finance/finance.service";
 import { checkGhostClass } from "@/services/attendance/attendance.service";
-
-// ─── Monthly Billing ──────────────────────────────────────────────────────────
-
-/**
- * Run monthly billing for all active students.
- * Calls applyMonthlyFee for each student — skips if already charged this cycle.
- * Returns a summary of charged and skipped counts.
- */
-export async function runMonthlyBilling(): Promise<{
-  charged: number;
-  skipped: number;
-  errors:  number;
-}> {
-  const snap = await getDocs(
-    query(
-      collection(db, "users"),
-      where("role",   "==", "student"),
-      where("status", "==", "active")
-    )
-  );
-
-  let charged = 0;
-  let skipped = 0;
-  let errors  = 0;
-
-  for (const studentDoc of snap.docs) {
-    const studentUid = studentDoc.id;
-    try {
-      const applied = await applyMonthlyFee(studentUid);
-      if (applied) charged++;
-      else         skipped++;
-    } catch (error) {
-      console.error(`MONTHLY_BILLING_ERROR [${studentUid}]:`, error);
-      errors++;
-    }
-  }
-
-  console.log(`runMonthlyBilling complete — charged: ${charged}, skipped: ${skipped}, errors: ${errors}`);
-  return { charged, skipped, errors };
-}
 
 // ─── Ghost Check ──────────────────────────────────────────────────────────────
 

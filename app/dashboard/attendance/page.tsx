@@ -57,6 +57,18 @@ function minMonth(): string {
   d.setFullYear(d.getFullYear() - 3);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
 }
+// Furthest future date that can be marked as Break (90-day cap).
+function maxBreakDate(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 90);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+// Month corresponding to maxBreakDate — used to cap the month picker.
+function maxBreakMonth(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 90);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+}
 function fmtMonth(ym: string): string {
   const [y, m] = ym.split("-");
   const names  = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -126,6 +138,9 @@ interface ModalState {
   studentName:string;
   date:       string;
   current:    AttendanceStatus | null;
+  // When true, the modal only allows marking "break" — used for future dates
+  // where Present/Absent/Cancelled don't make sense yet.
+  futureOnly: boolean;
 }
 
 function CellModal({
@@ -139,7 +154,10 @@ function CellModal({
   onClose: () => void;
   saving:  boolean;
 }) {
-  const [pick, setPick] = useState<AttendanceStatus>(state.current ?? "present");
+  const allowed: AttendanceStatus[] = state.futureOnly ? ["break"] : ALL_STATUSES;
+  const [pick, setPick] = useState<AttendanceStatus>(
+    state.current && allowed.includes(state.current) ? state.current : allowed[0],
+  );
 
   return (
     <div style={overlay} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -147,11 +165,17 @@ function CellModal({
         <div style={{ fontWeight: 700, fontSize: 15, color: "#111827", marginBottom: 4 }}>
           {state.studentName}
         </div>
-        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 16 }}>
+        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>
           {new Date(state.date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
         </div>
+        {state.futureOnly && (
+          <div style={{ fontSize: 11, color: "#0369a1", background: "#e0f2fe", padding: "6px 10px", borderRadius: 6, marginBottom: 12 }}>
+            Future date — only Break can be marked in advance.
+          </div>
+        )}
+        {!state.futureOnly && <div style={{ marginBottom: 12 }} />}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {ALL_STATUSES.map(s => {
+          {allowed.map(s => {
             const { bg, fg } = STATUS_COLOR[s];
             const active     = pick === s;
             return (
