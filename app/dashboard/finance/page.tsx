@@ -869,17 +869,8 @@ function FinanceContent() {
                 <thead>
                   <tr>
                     <th style={st.th}>Student</th>
-                    <th style={st.th}>Class</th>
-                    <th style={st.th}>Center</th>
-                    <th style={st.th}>Cycle</th>
+                    <th style={st.th}>Type</th>
                     <th style={st.th}>Fee</th>
-                    <th style={st.th}>
-                      Att.{" "}
-                      <span style={{ fontSize: 10, fontWeight: 400, color: "#9ca3af" }}>
-                        {fmtMonth(selectedMonth).split(" ")[0].slice(0,3)}
-                      </span>
-                    </th>
-                    <th style={st.th}>Est. Fee</th>
                     <th style={st.th}>
                       Balance
                       {!isCurrentMonth && (
@@ -888,7 +879,7 @@ function FinanceContent() {
                         </span>
                       )}
                     </th>
-                    <th style={st.th}>Actions</th>
+                    <th style={st.th}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -920,15 +911,25 @@ function FinanceContent() {
 
                     return (
                       <>
-                        {/* ── Main data row ─────────────────────────────────── */}
-                        <tr key={s.uid} style={{ background: rowBg, transition: "background 0.15s" }}>
-
+                        {/* ── Main data row ─────────────────────────────── */}
+                        <tr
+                          key={s.uid}
+                          style={{ background: rowBg, transition: "background 0.15s", cursor: "pointer" }}
+                          onClick={(e) => {
+                            if ((e.target as HTMLElement).closest("button")) return;
+                            const defaultAction: RowAction = isPrepay ? "deposit" : "pay";
+                            openPanel(s.uid, defaultAction, s);
+                          }}
+                        >
+                          {/* Student + center */}
                           <td style={{ ...st.td, minWidth: 160 }}>
                             <div style={{ fontWeight: 600 }}>{s.name}</div>
-                            <span style={st.studentIDChip}>{s.studentID}</span>
+                            <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
+                              {s.centerName}{" · "}<span style={st.studentIDChip}>{s.studentID}</span>
+                            </div>
                           </td>
 
-                          {/* Class Type + Billing Mode */}
+                          {/* Type */}
                           <td style={st.td}>
                             <span style={{
                               ...st.badge,
@@ -938,56 +939,17 @@ function FinanceContent() {
                             }}>
                               {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
                             </span>
-                            <div style={{ marginTop: 3 }}>
-                              <span style={{
-                                ...st.badge, fontSize: 10,
-                                ...(isPrepay
-                                  ? { background: "#fce7f3", color: "#9d174d" }
-                                  : { background: "#f3f4f6", color: "#374151" }),
-                              }}>
-                                {isPrepay ? "⬆ Prepay" : "⬇ Postpay"}
-                              </span>
+                            <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 3 }}>
+                              {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
                             </div>
                           </td>
 
-                          <td style={{ ...st.td, fontSize: 12, color: "var(--color-text-secondary)" }}>
-                            {s.centerName}
-                          </td>
-
-                          <td style={st.td}>
-                            <span style={s.feeCycle === "per_class"
-                              ? { ...st.badge, background: "#ede9fe", color: "#7c3aed" }
-                              : { ...st.badge, background: "#dbeafe", color: "#1d4ed8" }}>
-                              {s.feeCycle === "per_class" ? "Per Class" : "Monthly"}
-                            </span>
-                          </td>
-
-                          {/* Fee amount — with edit hint */}
+                          {/* Fee */}
                           <td style={{ ...st.td, fontWeight: 600 }}>
-                            <span style={{ color: "var(--color-text-primary)" }}>
-                              {s.feeCycle === "monthly"
-                                ? fmtINR(s.monthlyFee)
-                                : fmtINR(s.feePerClass)}
-                            </span>
+                            {fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass)}
                           </td>
 
-                          <td style={{ ...st.td, textAlign: "center" as const }}>
-                            <span style={{
-                              ...st.badge,
-                              background: s.attendanceCount === 0 ? "#f3f4f6" : "#dbeafe",
-                              color:      s.attendanceCount === 0 ? "#9ca3af" : "#1d4ed8",
-                              fontWeight: 700,
-                            }}>
-                              {s.attendanceCount}
-                            </span>
-                          </td>
-
-                          <td style={{ ...st.td, fontWeight: 600 }}>
-                            {s.feeCycle === "per_class"
-                              ? <span style={{ color: s.estimatedFee > 0 ? "#7c3aed" : "#9ca3af" }}>{fmtINR(s.estimatedFee)}</span>
-                              : <span style={{ color: "#9ca3af" }}>—</span>}
-                          </td>
-
+                          {/* Balance */}
                           <td style={{ ...st.td, fontWeight: 700 }}>
                             {overdue ? (
                               <span style={{ color: "#dc2626", display: "flex", alignItems: "center", gap: 4 }}>
@@ -1008,77 +970,44 @@ function FinanceContent() {
                             )}
                           </td>
 
-                          {/* ── Action buttons ──────────────────────────────── */}
+                          {/* Primary action */}
                           <td style={{ ...st.td, whiteSpace: "nowrap" as const }}>
                             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-
-                              {/* Deposit (prepay only) */}
-                              {isPrepay && (
+                              {overdue ? (
+                                <button
+                                  onClick={() => openPanel(s.uid, "pay", s)}
+                                  style={{ ...st.actionBtn, background: "#dc2626", color: "#fff", border: "none" }}
+                                >
+                                  💳 Collect
+                                </button>
+                              ) : isPrepay && lowCredit ? (
+                                <button
+                                  onClick={() => openPanel(s.uid, "deposit", s)}
+                                  style={{ ...st.actionBtn, background: "#9d174d", color: "#fff", border: "none" }}
+                                >
+                                  ⬆ Top Up
+                                </button>
+                              ) : isPrepay ? (
                                 <button
                                   onClick={() => openPanel(s.uid, "deposit", s)}
                                   style={{
                                     ...st.actionBtn,
                                     ...(isOpen && activeAction === "deposit" ? st.actionBtnActive : {}),
-                                    background: lowCredit ? "#9d174d" : undefined,
-                                    color: lowCredit ? "#fff" : undefined,
-                                    border: lowCredit ? "none" : undefined,
                                   }}
-                                  title="Add advance deposit"
                                 >
                                   ⬆ Deposit
                                 </button>
-                              )}
-
-                              {/* Pay — for overdue or postpay collection */}
-                              {(!isPrepay || overdue) && (
+                              ) : (
                                 <button
                                   onClick={() => openPanel(s.uid, "pay", s)}
                                   style={{
                                     ...st.actionBtn,
                                     ...(isOpen && activeAction === "pay" ? st.actionBtnActive : {}),
-                                    ...(overdue ? { background: "#dc2626", color: "#fff", border: "none" } : {}),
                                   }}
-                                  title="Record payment received"
                                 >
-                                  💳 Pay
+                                  ⋯ More
                                 </button>
                               )}
-
-                              {/* Adjust fee */}
-                              <button
-                                onClick={() => openPanel(s.uid, "adjust", s)}
-                                style={{
-                                  ...st.actionBtn,
-                                  ...(isOpen && activeAction === "adjust" ? st.actionBtnActive : {}),
-                                }}
-                                title="Adjust fee amount"
-                              >
-                                ✏️ Fee
-                              </button>
-
-                              {/* Per-student fee due (monthly only — manual, after cycle completes) */}
-                              {s.feeCycle === "monthly" && (
-                                <button
-                                  onClick={() => openPanel(s.uid, "bill", s)}
-                                  disabled={!canBill}
-                                  style={{
-                                    ...st.actionBtn,
-                                    ...(isOpen && activeAction === "bill" ? st.actionBtnActive : {}),
-                                    ...(!canBill ? { opacity: 0.4, cursor: "not-allowed" } : {}),
-                                  }}
-                                  title={
-                                    alreadyBilled
-                                      ? `Fee due already generated for ${fmtMonth(month)}`
-                                      : !cycleComplete
-                                        ? `Available after ${fmtMonth(month)} ends — pick a completed month`
-                                        : `Generate fee due for ${fmtMonth(month)}`
-                                  }
-                                >
-                                  🗓 Generate Fee Due
-                                </button>
-                              )}
-
-                              {/* Close */}
                               {isOpen && (
                                 <button onClick={closePanel} style={st.closePanelBtn} title="Close">✕</button>
                               )}
