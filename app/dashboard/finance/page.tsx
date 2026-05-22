@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
   collection, getDocs, addDoc, updateDoc,
   query, where, doc, serverTimestamp,
@@ -10,8 +10,17 @@ import { db } from "@/config/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
-import { getTransactions } from "@/services/finance/finance.service";
-import type { Transaction } from "@/types/finance";
+import {
+  getTransactions,
+  editTransaction,
+  deleteTransaction,
+} from "@/services/finance/finance.service";
+import type {
+  Transaction,
+  EditableTransactionInput,
+  PaymentMethod,
+  TransactionStatus,
+} from "@/types/finance";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 
@@ -98,13 +107,13 @@ export default function FinancePage() {
 type ActiveTab = "overview" | "students" | "transactions";
 
 function FinanceContent() {
-  const { user }                             = useAuth();
+  const { user, isAdmin, isSuperAdmin }      = useAuth();
+  const canManageTx                          = isAdmin || isSuperAdmin;
   const [tab, setTab]                        = useState<ActiveTab>("overview");
   const [transactions, setTransactions]      = useState<Transaction[]>([]);
   const [students, setStudents]              = useState<StudentFeeRow[]>([]);
   const [centers, setCenters]                = useState<CenterOption[]>([]);
   const [loading, setLoading]                = useState(true);
-  const [billing, setBilling]                = useState(false);
   const { toasts, toast, remove }            = useToast();
   // ── Month selector ───────────────────────────────────────────────────────────
   const [selectedMonth, setSelectedMonth]    = useState<string>(currentMonth());
@@ -476,14 +485,19 @@ function FinanceContent() {
     }
   }
 
-  // ── Submit: per-student monthly billing ─────────────────────────────────────
+  // ── Submit: per-student fee due generation (manual, post-cycle) ─────────────
   async function submitBillStudent(student: StudentFeeRow) {
     if (student.lastBilledMonth === selectedMonth) {
-      toast(`${student.name} has already been billed for ${fmtMonth(selectedMonth)}`, "error");
+      toast(`Fee due for ${student.name} has already been generated for ${fmtMonth(selectedMonth)}`, "error");
       return;
     }
     if (student.feeCycle !== "monthly") {
-      toast(`${student.name} is on per-class billing — monthly billing does not apply`, "error");
+      toast(`${student.name} is on per-class billing — fee due generation does not apply`, "error");
+      return;
+    }
+    // Cycle-completion gate: only generate for completed calendar months
+    if (selectedMonth >= currentMonth()) {
+      toast(`Fee due can only be generated for a completed month. ${fmtMonth(selectedMonth)} is not yet complete.`, "error");
       return;
     }
     const amount = student.monthlyFee;
@@ -491,8 +505,8 @@ function FinanceContent() {
       toast(`No monthly fee set for ${student.name}`, "error");
       return;
     }
-    // For past months, use the last day of that month as the billing date
-    const billingDate = isCurrentMonth ? todayStr() : `${selectedMonth}-01`;
+    // Past month: stamp the billing transaction at the first day of that month.
+    const billingDate = `${selectedMonth}-01`;
     setBillSubmitting(true);
     try {
       await addDoc(collection(db, "transactions"), {
@@ -513,10 +527,10 @@ function FinanceContent() {
       });
       closePanel();
       await fetchAll(selectedMonth);
-      toast(`Monthly fee ${fmtINR(amount)} billed to ${student.name} for ${fmtMonth(selectedMonth)}`, "success");
+      toast(`Fee due ${fmtINR(amount)} generated for ${student.name} — ${fmtMonth(selectedMonth)}`, "success");
     } catch (err) {
-      console.error("Per-student billing failed:", err);
-      toast("Billing failed. Try again.", "error");
+      console.error("Per-student fee due generation failed:", err);
+      toast("Fee due generation failed. Try again.", "error");
     } finally {
       setBillSubmitting(false);
     }
@@ -559,51 +573,38 @@ function FinanceContent() {
     }
   }
 
-  // ── Bulk monthly billing ─────────────────────────────────────────────────────
-  async function runMonthlyBilling() {
-    const month = selectedMonth;
-    setBilling(true);
-    let charged = 0; let skipped = 0;
-    const billingDate = isCurrentMonth ? todayStr() : `${month}-01`;
+  // ── Edit / Delete transaction (admin) ───────────────────────────────────────
+  async function handleEditTx(txId: string, patch: EditableTransactionInput) {
+    if (!canManageTx) {
+      toast("You do not have permission to edit transactions", "error");
+      return;
+    }
     try {
-      const snap    = await getDocs(query(collection(db, "users"), where("role", "==", "student")));
-      const monthly = snap.docs
-        .map(d => ({ id: d.id, ...d.data() } as Record<string, unknown> & { id: string }))
-        .filter(s => s.feeCycle === "monthly");
-
-      await Promise.all(monthly.map(async student => {
-        if ((student.lastBilledMonth as string | undefined) === month) { skipped++; return; }
-        const amount = Number(student.monthlyFee ?? student.feePerClass ?? 0);
-        if (amount <= 0) { skipped++; return; }
-        await addDoc(collection(db, "transactions"), {
-          studentUid:   student.id,
-          centerId:     (student.centerId as string) ?? "",
-          amount,
-          method:       "auto-monthly",
-          receivedBy:   "system",
-          date:         billingDate,
-          billingMonth: month,
-          status:       "completed",
-          createdAt:    serverTimestamp(),
-        });
-        await updateDoc(doc(db, "users", student.id), {
-          currentBalance:  increment(amount),
-          lastBilledMonth: month,
-          updatedAt:       new Date().toISOString(),
-        });
-        charged++;
-      }));
-
-      await fetchAll(month);
-      toast(
-        `Billing for ${fmtMonth(month)} complete — ${charged} student${charged !== 1 ? "s" : ""} charged, ${skipped} already billed`,
-        "success"
-      );
+      const editorUid  = user?.uid ?? "unknown";
+      const editorRole = isSuperAdmin ? "super_admin" : "admin";
+      await editTransaction(txId, patch, editorUid, editorRole);
+      await fetchAll(selectedMonth);
+      toast("Transaction updated", "success");
     } catch (err) {
-      console.error("Monthly billing failed:", err);
-      toast("Monthly billing failed. Check console for details.", "error");
-    } finally {
-      setBilling(false);
+      console.error("Edit transaction failed:", err);
+      toast(`Edit failed: ${err instanceof Error ? err.message : "unknown error"}`, "error");
+    }
+  }
+
+  async function handleDeleteTx(txId: string) {
+    if (!canManageTx) {
+      toast("You do not have permission to delete transactions", "error");
+      return;
+    }
+    try {
+      const deleterUid  = user?.uid ?? "unknown";
+      const deleterRole = isSuperAdmin ? "super_admin" : "admin";
+      await deleteTransaction(txId, deleterUid, deleterRole);
+      await fetchAll(selectedMonth);
+      toast("Transaction deleted", "success");
+    } catch (err) {
+      console.error("Delete transaction failed:", err);
+      toast(`Delete failed: ${err instanceof Error ? err.message : "unknown error"}`, "error");
     }
   }
 
@@ -712,30 +713,40 @@ function FinanceContent() {
             </div>
           )}
         </div>
-        <button onClick={runMonthlyBilling} disabled={billing}
-          style={{ ...st.billingBtn, opacity: billing ? 0.6 : 1, cursor: billing ? "not-allowed" : "pointer" }}>
-          {billing ? "⏳ Processing…" : `⚡ Run Billing — ${fmtMonth(selectedMonth)}`}
-        </button>
       </div>
 
       {/* ── Summary Cards ────────────────────────────────────────────────────── */}
       <div style={st.cardGrid}>
-        <SummaryCard label={`Collected — ${fmtMonth(selectedMonth)}`} value={loading ? "…" : fmtINR(summary.total)} accent="#16a34a" icon="💰" />
-        {isCurrentMonth
-          ? <SummaryCard label="Collected Today"  value={loading ? "…" : fmtINR(summary.todayAmt)}  accent="#4f46e5" icon="📅" />
-          : <SummaryCard label="Month (Past)"     value={fmtMonth(selectedMonth)}                   accent="#b45309" icon="🕐" hint="Historical view" />
-        }
-        <SummaryCard label="Pending Balance"   value={loading ? "…" : fmtINR(summary.pendingBal)}    accent="#d97706" icon="⏳" />
-        <SummaryCard label="Overdue Students"  value={loading ? "…" : String(summary.overdueCount)}  accent="#dc2626" icon="🚨"
-          urgent={summary.overdueCount > 0} />
-        <SummaryCard label="Prepay Credit Held" value={loading ? "…" : fmtINR(summary.prepayCredit)} accent="#9d174d" icon="⬆"
-          hint={`${summary.prepayCount} prepay student${summary.prepayCount !== 1 ? "s" : ""}`} />
-        <SummaryCard label="Low Credit Alert"  value={loading ? "…" : String(summary.lowCreditCount)} accent="#b45309" icon="⚠"
+        <SummaryCard
+          label={`Collected — ${fmtMonth(selectedMonth)}`}
+          value={loading ? "…" : fmtINR(summary.total)}
+          accent="#16a34a" icon="💰"
+          hint={loading ? undefined : isCurrentMonth
+            ? `${fmtINR(summary.todayAmt)} today`
+            : "Historical view"}
+        />
+        <SummaryCard
+          label="Overdue"
+          value={loading ? "…" : String(summary.overdueCount)}
+          accent="#dc2626" icon="🚨"
+          urgent={summary.overdueCount > 0}
+          hint={loading ? undefined : `${fmtINR(summary.pendingBal)} pending`}
+        />
+        <SummaryCard
+          label="Active Students"
+          value={loading ? "…" : String(summary.activeCount)}
+          accent="#059669" icon="🎓"
+          hint={loading ? undefined : `${summary.groupCount} group · ${summary.personalCount} personal`}
+        />
+        <SummaryCard
+          label="Prepay Credit"
+          value={loading ? "…" : fmtINR(summary.prepayCredit)}
+          accent="#9d174d" icon="⬆"
           urgent={summary.lowCreditCount > 0}
-          hint="Credit < 1 month fee" />
-        <SummaryCard label="Active Students"   value={loading ? "…" : String(summary.activeCount)}   accent="#059669" icon="🎓" />
-        <SummaryCard label={`Est. Fees — ${fmtMonth(selectedMonth)}`} value={loading ? "…" : fmtINR(summary.totalEstFee)} accent="#7c3aed" icon="📊"
-          hint="Attendance × fee/class" />
+          hint={loading ? undefined : summary.lowCreditCount > 0
+            ? `⚠ ${summary.lowCreditCount} low credit`
+            : `${summary.prepayCount} prepay students`}
+        />
       </div>
 
       {/* ── Tabs ─────────────────────────────────────────────────────────────── */}
@@ -829,7 +840,8 @@ function FinanceContent() {
             Transactions — {fmtMonth(selectedMonth)}
           </div>
           <TxTable transactions={filteredTx.slice(0, 15)} students={students}
-            centers={centers} loading={loading} formatDate={formatDate} />
+            centers={centers} loading={loading} formatDate={formatDate}
+            canManage={canManageTx} onEdit={handleEditTx} onDelete={handleDeleteTx} />
           {filteredTx.length > 15 && (
             <div style={st.moreHint}>
               Showing 15 of {filteredTx.length}.{" "}
@@ -912,7 +924,10 @@ function FinanceContent() {
                     const isOpen     = activeUid === s.uid;
                     const month      = selectedMonth;
                     const alreadyBilled = s.lastBilledMonth === month;
-                    const canBill    = s.feeCycle === "monthly" && !alreadyBilled;
+                    // Fee due is only generatable once the calendar month has ended
+                    // (selected month must be strictly before current month).
+                    const cycleComplete = month < currentMonth();
+                    const canBill    = s.feeCycle === "monthly" && !alreadyBilled && cycleComplete;
                     const creditAmt  = hasCredit ? Math.abs(s.balance) : 0;
                     const fee        = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
                     const lowCredit  = isPrepay && s.balance >= -fee; // credit ≤ one fee cycle
@@ -1066,19 +1081,25 @@ function FinanceContent() {
                                 ✏️ Fee
                               </button>
 
-                              {/* Per-student bill (monthly only) */}
+                              {/* Per-student fee due (monthly only — manual, after cycle completes) */}
                               {s.feeCycle === "monthly" && (
                                 <button
                                   onClick={() => openPanel(s.uid, "bill", s)}
-                                  disabled={alreadyBilled}
+                                  disabled={!canBill}
                                   style={{
                                     ...st.actionBtn,
                                     ...(isOpen && activeAction === "bill" ? st.actionBtnActive : {}),
-                                    ...(alreadyBilled ? { opacity: 0.4, cursor: "not-allowed" } : {}),
+                                    ...(!canBill ? { opacity: 0.4, cursor: "not-allowed" } : {}),
                                   }}
-                                  title={alreadyBilled ? `Already billed for ${fmtMonth(month)}` : `Bill for ${fmtMonth(month)}`}
+                                  title={
+                                    alreadyBilled
+                                      ? `Fee due already generated for ${fmtMonth(month)}`
+                                      : !cycleComplete
+                                        ? `Available after ${fmtMonth(month)} ends — pick a completed month`
+                                        : `Generate fee due for ${fmtMonth(month)}`
+                                  }
                                 >
-                                  🗓 Bill
+                                  🗓 Generate Fee Due
                                 </button>
                               )}
 
@@ -1372,15 +1393,17 @@ function FinanceContent() {
                                       Monthly fee: <strong>{fmtINR(s.monthlyFee)}</strong>
                                     </span>
                                     <span style={alreadyBilled ? st.infoChipGreen : st.infoChipRed}>
-                                      {alreadyBilled ? `✓ Already billed for ${fmtMonth(month)}` : `Not yet billed for ${fmtMonth(month)}`}
+                                      {alreadyBilled ? `✓ Fee due already generated for ${fmtMonth(month)}` : `Not yet generated for ${fmtMonth(month)}`}
                                     </span>
                                   </div>
 
                                   {!canBill ? (
                                     <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
                                       {alreadyBilled
-                                        ? `${s.name} has already been billed for ${fmtMonth(month)}. No action needed.`
-                                        : `Per-class students are billed automatically on attendance. Manual monthly billing does not apply.`}
+                                        ? `Fee due for ${s.name} has already been generated for ${fmtMonth(month)}. No action needed.`
+                                        : !cycleComplete
+                                          ? `Fee due can only be generated after the billing cycle ends. ${fmtMonth(month)} is not yet complete — select a past month once it has ended.`
+                                          : `Per-class students are billed automatically on attendance. Manual fee due generation does not apply.`}
                                     </div>
                                   ) : (
                                     <>
@@ -1389,13 +1412,13 @@ function FinanceContent() {
                                           <>
                                             This will deduct <strong>{fmtINR(s.monthlyFee)}</strong> from <strong>{s.name}</strong>{"'s"} prepay credit for {fmtMonth(month)}.{" "}
                                             {hasCredit
-                                              ? <>Remaining credit after billing: <strong style={{ color: creditAmt >= s.monthlyFee ? "#16a34a" : "#dc2626" }}>{fmtINR(creditAmt - s.monthlyFee)}</strong></>
+                                              ? <>Remaining credit after generation: <strong style={{ color: creditAmt >= s.monthlyFee ? "#16a34a" : "#dc2626" }}>{fmtINR(creditAmt - s.monthlyFee)}</strong></>
                                               : <span style={{ color: "#dc2626" }}>No credit — balance will go further into due.</span>
                                             }
                                           </>
                                         ) : (
                                           <>
-                                            This will raise a monthly fee invoice of <strong>{fmtINR(s.monthlyFee)}</strong> for{" "}
+                                            This will generate a monthly fee due of <strong>{fmtINR(s.monthlyFee)}</strong> for{" "}
                                             <strong>{s.name}</strong> and add it to their balance for {fmtMonth(month)}.
                                           </>
                                         )}
@@ -1409,7 +1432,7 @@ function FinanceContent() {
                                             opacity: billSubmitting ? 0.6 : 1,
                                             cursor: billSubmitting ? "not-allowed" : "pointer",
                                           }}>
-                                          {billSubmitting ? "Billing…" : `⚡ Bill ${fmtINR(s.monthlyFee)} — ${fmtMonth(month)}`}
+                                          {billSubmitting ? "Generating…" : `⚡ Generate Fee Due ${fmtINR(s.monthlyFee)} — ${fmtMonth(month)}`}
                                         </button>
                                         <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
                                       </div>
@@ -1545,7 +1568,8 @@ function FinanceContent() {
             {(filterDate || filterCenter !== "all" || filterStatus !== "all") && " (filtered)"}
           </div>
           <TxTable transactions={filteredTx} students={students}
-            centers={centers} loading={loading} formatDate={formatDate} />
+            centers={centers} loading={loading} formatDate={formatDate}
+            canManage={canManageTx} onEdit={handleEditTx} onDelete={handleDeleteTx} />
         </div>
       )}
     </div>
@@ -1572,12 +1596,18 @@ function SummaryCard({ label, value, accent, icon, hint, urgent }: {
 
 // ─── Transaction Table ────────────────────────────────────────────────────────
 
-function TxTable({ transactions, students, centers, loading, formatDate }: {
+function TxTable({
+  transactions, students, centers, loading, formatDate,
+  canManage, onEdit, onDelete,
+}: {
   transactions: Transaction[];
   students:     StudentFeeRow[];
   centers:      CenterOption[];
   loading:      boolean;
   formatDate:   (v: unknown) => string;
+  canManage?:   boolean;
+  onEdit?:      (txId: string, patch: EditableTransactionInput) => Promise<void>;
+  onDelete?:    (txId: string) => Promise<void>;
 }) {
   const studentMap = useMemo(() => {
     const m = new Map<string, { name: string; studentID: string }>();
@@ -1591,8 +1621,75 @@ function TxTable({ transactions, students, centers, loading, formatDate }: {
     return m;
   }, [centers]);
 
+  // Edit panel state — one row open at a time
+  const [editingId,  setEditingId]  = useState<string | null>(null);
+  const [editAmount, setEditAmount] = useState<string>("");
+  const [editMethod, setEditMethod] = useState<PaymentMethod>("Cash");
+  const [editDate,   setEditDate]   = useState<string>("");
+  const [editStatus, setEditStatus] = useState<TransactionStatus>("completed");
+  const [editNote,   setEditNote]   = useState<string>("");
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Delete 2-click confirmation: id of row whose first delete click is pending
+  const [deletePending, setDeletePending] = useState<string | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const deleteResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function startEdit(tx: Transaction) {
+    setEditingId(tx.id);
+    setEditAmount(String(tx.amount ?? ""));
+    setEditMethod(tx.method);
+    setEditDate((tx.date ?? "").slice(0, 10));
+    setEditStatus(tx.status);
+    setEditNote(tx.note ?? "");
+    setDeletePending(null);
+  }
+  function cancelEdit() {
+    setEditingId(null);
+    setEditAmount("");
+    setEditNote("");
+  }
+
+  async function saveEdit(tx: Transaction) {
+    if (!onEdit) return;
+    const amt = Number(editAmount);
+    if (!Number.isFinite(amt) || amt <= 0) return;
+    if (!editDate) return;
+    setEditSaving(true);
+    try {
+      await onEdit(tx.id, {
+        amount: amt,
+        method: editMethod,
+        date:   editDate,
+        status: editStatus,
+        note:   editNote.trim() || null,
+      });
+      cancelEdit();
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  function clickDelete(txId: string) {
+    if (!onDelete) return;
+    if (deletePending !== txId) {
+      // First click — arm the confirmation, auto-reset after 4s
+      setDeletePending(txId);
+      if (deleteResetTimer.current) clearTimeout(deleteResetTimer.current);
+      deleteResetTimer.current = setTimeout(() => setDeletePending(null), 4000);
+      return;
+    }
+    // Second click — confirm
+    if (deleteResetTimer.current) clearTimeout(deleteResetTimer.current);
+    setDeletePending(null);
+    setDeleteSubmitting(true);
+    onDelete(txId).finally(() => setDeleteSubmitting(false));
+  }
+
   if (loading) return <div style={st.stateRow}>Loading…</div>;
   if (transactions.length === 0) return <div style={st.stateRow}>No transactions found.</div>;
+
+  const colCount = canManage ? 8 : 7;
 
   return (
     <div style={st.tableWrapper}>
@@ -1606,6 +1703,7 @@ function TxTable({ transactions, students, centers, loading, formatDate }: {
             <th style={st.th}>Method</th>
             <th style={st.th}>Status</th>
             <th style={st.th}>Date</th>
+            {canManage && <th style={st.th}>Actions</th>}
           </tr>
         </thead>
         <tbody>
@@ -1613,52 +1711,222 @@ function TxTable({ transactions, students, centers, loading, formatDate }: {
             const student    = tx.studentUid ? studentMap.get(tx.studentUid) : null;
             const centerName = tx.centerId   ? (centerMap.get(tx.centerId) ?? tx.centerId) : "—";
             const txData     = tx as Transaction & { rawAmount?: number; discountAmt?: number };
+            const isEditing  = editingId === tx.id;
+            const isPendingDelete = deletePending === tx.id;
             return (
-              <tr key={tx.id} style={i % 2 === 0 ? st.rowEven : st.rowOdd}>
-                <td style={{ ...st.td, minWidth: 160 }}>
-                  <div style={{ fontWeight: 600 }}>{student?.name ?? tx.studentUid ?? "—"}</div>
-                  {student?.studentID && (
-                    <div style={{ marginTop: 2 }}>
-                      <span style={st.studentIDChip}>{student.studentID}</span>
-                    </div>
-                  )}
-                </td>
-                <td style={st.td}>{centerName}</td>
-                <td style={{ ...st.td, fontWeight: 700 }}>
-                  {tx.amount != null ? fmtINR(tx.amount) : "—"}
-                  {txData.rawAmount && txData.rawAmount !== tx.amount && (
-                    <div style={{ fontSize: 10, color: "#9ca3af", textDecoration: "line-through" }}>
-                      {fmtINR(txData.rawAmount)}
-                    </div>
-                  )}
-                </td>
-                <td style={st.td}>
-                  {txData.discountAmt && txData.discountAmt > 0 ? (
-                    <span style={{ ...st.badge, background: "#dcfce7", color: "#16a34a" }}>
-                      −{fmtINR(txData.discountAmt)}
+              <Fragment key={tx.id}>
+                <tr style={i % 2 === 0 ? st.rowEven : st.rowOdd}>
+                  <td style={{ ...st.td, minWidth: 160 }}>
+                    <div style={{ fontWeight: 600 }}>{student?.name ?? tx.studentUid ?? "—"}</div>
+                    {student?.studentID && (
+                      <div style={{ marginTop: 2 }}>
+                        <span style={st.studentIDChip}>{student.studentID}</span>
+                      </div>
+                    )}
+                  </td>
+                  <td style={st.td}>{centerName}</td>
+                  <td style={{ ...st.td, fontWeight: 700 }}>
+                    {tx.amount != null ? fmtINR(tx.amount) : "—"}
+                    {txData.rawAmount && txData.rawAmount !== tx.amount && (
+                      <div style={{ fontSize: 10, color: "#9ca3af", textDecoration: "line-through" }}>
+                        {fmtINR(txData.rawAmount)}
+                      </div>
+                    )}
+                  </td>
+                  <td style={st.td}>
+                    {txData.discountAmt && txData.discountAmt > 0 ? (
+                      <span style={{ ...st.badge, background: "#dcfce7", color: "#16a34a" }}>
+                        −{fmtINR(txData.discountAmt)}
+                      </span>
+                    ) : (
+                      <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+                    )}
+                  </td>
+                  <td style={st.td}>
+                    <span style={{ ...st.badge, ...(METHOD_STYLES[tx.method] ?? {}) }}>
+                      {tx.method ?? "—"}
                     </span>
-                  ) : (
-                    <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+                  </td>
+                  <td style={st.td}>
+                    <span style={{ ...st.badge, ...(STATUS_BADGE[tx.status ?? ""] ?? {}) }}>
+                      {tx.status ?? "—"}
+                    </span>
+                  </td>
+                  <td style={{ ...st.td, ...st.mono }}>
+                    {formatDate(tx.date ?? tx.createdAt)}
+                  </td>
+                  {canManage && (
+                    <td style={{ ...st.td, whiteSpace: "nowrap" as const }}>
+                      <button
+                        onClick={() => (isEditing ? cancelEdit() : startEdit(tx))}
+                        disabled={editSaving || deleteSubmitting}
+                        style={{
+                          ...st.txActionBtn,
+                          ...(isEditing ? st.txActionBtnActive : {}),
+                        }}
+                        title={isEditing ? "Close editor" : "Edit transaction"}
+                      >
+                        {isEditing ? "Close" : "✏️ Edit"}
+                      </button>
+                    </td>
                   )}
-                </td>
-                <td style={st.td}>
-                  <span style={{ ...st.badge, ...(METHOD_STYLES[tx.method] ?? {}) }}>
-                    {tx.method ?? "—"}
-                  </span>
-                </td>
-                <td style={st.td}>
-                  <span style={{ ...st.badge, ...(STATUS_BADGE[tx.status ?? ""] ?? {}) }}>
-                    {tx.status ?? "—"}
-                  </span>
-                </td>
-                <td style={{ ...st.td, ...st.mono }}>
-                  {formatDate(tx.date ?? tx.createdAt)}
-                </td>
-              </tr>
+                </tr>
+
+                {isEditing && canManage && (
+                  <tr key={`${tx.id}-edit`}>
+                    <td colSpan={colCount} style={{ padding: "0 14px 14px", background: "#fffbeb" }}>
+                      <div style={{ ...st.panel, borderLeft: "3px solid #1d4ed8" }}>
+                        <div style={st.panelTitle}>
+                          ✏️ Edit Transaction — {student?.name ?? tx.studentUid}
+                          {tx.method === "auto-monthly" && tx.billingMonth && (
+                            <span style={{ ...st.infoChip, marginLeft: 8, fontSize: 11 }}>
+                              Fee due — {fmtMonth(tx.billingMonth)}
+                            </span>
+                          )}
+                        </div>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 12 }}>
+                          <div>
+                            <label style={st.panelLabel}>Amount (₹)</label>
+                            <input
+                              type="number" min={1} step={1}
+                              value={editAmount}
+                              onChange={e => setEditAmount(e.target.value)}
+                              style={st.panelInput}
+                            />
+                          </div>
+                          <div>
+                            <label style={st.panelLabel}>Method</label>
+                            <select
+                              value={editMethod}
+                              onChange={e => setEditMethod(e.target.value as PaymentMethod)}
+                              style={st.panelInput}
+                            >
+                              <option value="Cash">Cash</option>
+                              <option value="UPI">UPI</option>
+                              <option value="Bank">Bank</option>
+                              <option value="auto-monthly">auto-monthly</option>
+                              <option value="auto">auto</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label style={st.panelLabel}>Date</label>
+                            <input
+                              type="date"
+                              value={editDate}
+                              max={todayStr()}
+                              onChange={e => setEditDate(e.target.value)}
+                              style={st.panelInput}
+                            />
+                          </div>
+                          <div>
+                            <label style={st.panelLabel}>Status</label>
+                            <select
+                              value={editStatus}
+                              onChange={e => setEditStatus(e.target.value as TransactionStatus)}
+                              style={st.panelInput}
+                            >
+                              <option value="completed">completed</option>
+                              <option value="pending">pending</option>
+                              <option value="failed">failed</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div style={{ marginBottom: 12 }}>
+                          <label style={st.panelLabel}>Note (optional)</label>
+                          <input
+                            type="text"
+                            value={editNote}
+                            onChange={e => setEditNote(e.target.value)}
+                            placeholder="Add a note explaining the change…"
+                            style={st.panelInput}
+                          />
+                        </div>
+
+                        {/* Diff preview */}
+                        {(Number(editAmount) !== tx.amount ||
+                          editMethod !== tx.method ||
+                          editDate   !== (tx.date ?? "").slice(0, 10) ||
+                          editStatus !== tx.status ||
+                          (editNote.trim() || null) !== (tx.note ?? null)) && (
+                          <div style={st.diffBox}>
+                            <div style={st.diffTitle}>Changes</div>
+                            <DiffRow label="Amount" before={fmtINR(tx.amount)} after={fmtINR(Number(editAmount) || 0)} />
+                            <DiffRow label="Method" before={tx.method}         after={editMethod} />
+                            <DiffRow label="Date"   before={(tx.date ?? "").slice(0, 10)} after={editDate} />
+                            <DiffRow label="Status" before={tx.status}         after={editStatus} />
+                            <DiffRow label="Note"   before={tx.note ?? "—"}    after={editNote.trim() || "—"} />
+                          </div>
+                        )}
+
+                        <div style={{ ...st.panelActions, justifyContent: "space-between" }}>
+                          {/* Left: Delete (2-click confirm) */}
+                          <button
+                            onClick={() => clickDelete(tx.id)}
+                            disabled={editSaving || deleteSubmitting}
+                            style={{
+                              ...st.confirmBtn,
+                              background: isPendingDelete ? "#dc2626" : "#fee2e2",
+                              color:      isPendingDelete ? "#fff"    : "#b91c1c",
+                              border:     isPendingDelete ? "none"    : "1px solid #fecaca",
+                              opacity:    deleteSubmitting ? 0.6 : 1,
+                            }}
+                            title={isPendingDelete ? "Click again to confirm permanent delete" : "Delete transaction"}
+                          >
+                            {deleteSubmitting
+                              ? "Deleting…"
+                              : isPendingDelete
+                                ? "⚠ Click again to confirm Delete"
+                                : "🗑 Delete"}
+                          </button>
+
+                          {/* Right: Save / Cancel */}
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button onClick={cancelEdit} style={st.cancelBtn} disabled={editSaving || deleteSubmitting}>
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => saveEdit(tx)}
+                              disabled={
+                                editSaving ||
+                                deleteSubmitting ||
+                                !editAmount ||
+                                Number(editAmount) <= 0 ||
+                                !editDate
+                              }
+                              style={{
+                                ...st.confirmBtn,
+                                background: "#1d4ed8",
+                                opacity: editSaving ? 0.6 : 1,
+                                cursor: editSaving ? "not-allowed" : "pointer",
+                              }}
+                            >
+                              {editSaving ? "Saving…" : "💾 Save Changes"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             );
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function DiffRow({ label, before, after }: { label: string; before: string; after: string }) {
+  if (before === after) return null;
+  return (
+    <div style={{ fontSize: 12, color: "#374151", display: "flex", gap: 8, padding: "2px 0" }}>
+      <span style={{ width: 70, color: "#6b7280", fontWeight: 600 }}>{label}:</span>
+      <span style={{ color: "#9ca3af", textDecoration: "line-through" }}>{before}</span>
+      <span style={{ color: "#9ca3af" }}>→</span>
+      <span style={{ color: "#1d4ed8", fontWeight: 600 }}>{after}</span>
     </div>
   );
 }
@@ -1669,9 +1937,8 @@ const st: Record<string, React.CSSProperties> = {
   header:      { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20, gap: 16 },
   heading:     { fontSize: 22, fontWeight: 600, color: "var(--color-text-primary)", marginBottom: 4 },
   overdueAlert:{ fontSize: 12, color: "#dc2626", fontWeight: 600, background: "#fee2e2", display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 99 },
-  billingBtn:  { background: "#059669", color: "#fff", border: "none", padding: "10px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" as const, flexShrink: 0 },
 
-  cardGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(155px, 1fr))", gap: 14, marginBottom: 24 },
+  cardGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 24 },
   card:       { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, overflow: "hidden", display: "flex", flexDirection: "column" as const, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" },
   cardAccent: { height: 4, width: "100%" },
   cardBody:   { padding: "14px 18px" },
@@ -1734,4 +2001,12 @@ const st: Record<string, React.CSSProperties> = {
   methodGroup:     { display: "flex", gap: 6 },
   methodChip:      { padding: "6px 12px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", background: "#f9fafb", color: "#374151" },
   methodChipActive:{ background: "#f59e0b", color: "#fff", border: "1px solid #d97706" },
+
+  // Per-row tx actions (Edit / Delete)
+  txActionBtn:       { padding: "5px 10px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", background: "var(--color-surface)", color: "var(--color-text-primary)" },
+  txActionBtnActive: { background: "#dbeafe", borderColor: "#1d4ed8", color: "#1d4ed8" },
+
+  // Diff box for edit preview
+  diffBox:   { background: "#f9fafb", border: "1px dashed #d1d5db", borderRadius: 8, padding: "10px 14px", marginBottom: 12 },
+  diffTitle: { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.04em", marginBottom: 6 },
 };
