@@ -152,8 +152,7 @@ function FinanceContent() {
   const [filterStatus, setFilterStatus]      = useState<string>("all");
   const [filterDate, setFilterDate]          = useState<string>("");
   const [studentSearch, setStudentSearch]    = useState<string>("");
-  const [filterClassType, setFilterClassType]   = useState<string>("all");  // "all" | "group" | "personal"
-  const [filterBillingMode, setFilterBillingMode] = useState<string>("all"); // "all" | "prepay" | "postpay"
+  const [filterType, setFilterType] = useState<string>("all"); // "all"|"group"|"personal"|"prepay"|"postpay"
 
   // ── Fetch ────────────────────────────────────────────────────────────────────
   async function fetchAll(month: string = selectedMonth) {
@@ -626,12 +625,10 @@ function FinanceContent() {
 
   const filteredStudents = useMemo(() => {
     let list = filterCenter === "all" ? students : students.filter(s => s.centerId === filterCenter);
-    if (filterClassType !== "all") {
-      list = list.filter(s => s.classType === filterClassType);
-    }
-    if (filterBillingMode !== "all") {
-      list = list.filter(s => s.billingMode === filterBillingMode);
-    }
+    if      (filterType === "group")    list = list.filter(s => s.classType   === "group");
+    else if (filterType === "personal") list = list.filter(s => s.classType   === "personal");
+    else if (filterType === "prepay")   list = list.filter(s => s.billingMode === "prepay");
+    else if (filterType === "postpay")  list = list.filter(s => s.billingMode === "postpay");
     if (studentSearch.trim()) {
       const q = studentSearch.toLowerCase();
       list = list.filter(s =>
@@ -644,7 +641,7 @@ function FinanceContent() {
       if (a.balance > 0 && b.balance <= 0) return -1;
       return a.name.localeCompare(b.name);
     });
-  }, [students, filterCenter, studentSearch, filterClassType, filterBillingMode]);
+  }, [students, filterCenter, studentSearch, filterType]);
 
   function formatDate(value: unknown): string {
     if (!value || typeof value !== "string") return "-";
@@ -778,42 +775,20 @@ function FinanceContent() {
         </select>
         {tab === "students" && (
           <>
-            <input type="search" placeholder="Search name or ID…" value={studentSearch}
-              onChange={e => setStudentSearch(e.target.value)} style={st.searchInput} />
-            {/* Class type segmentation chips */}
-            <div style={{ display: "flex", gap: 4, background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6, padding: 3 }}>
-              {([
-                { key: "all",      label: "All" },
-                { key: "group",    label: "👥 Group" },
-                { key: "personal", label: "👤 Personal" },
-              ] as { key: string; label: string }[]).map(({ key, label }) => (
-                <button key={key} onClick={() => setFilterClassType(key)}
-                  style={{
-                    padding: "4px 12px", borderRadius: 4, border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                    background: filterClassType === key ? "var(--color-accent, #f59e0b)" : "transparent",
-                    color: filterClassType === key ? "#fff" : "var(--color-text-secondary)",
-                  }}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            {/* Billing mode chips */}
-            <div style={{ display: "flex", gap: 4, background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6, padding: 3 }}>
-              {([
-                { key: "all",     label: "All Billing" },
-                { key: "postpay", label: "⬇ Postpay" },
-                { key: "prepay",  label: "⬆ Prepay" },
-              ] as { key: string; label: string }[]).map(({ key, label }) => (
-                <button key={key} onClick={() => setFilterBillingMode(key)}
-                  style={{
-                    padding: "4px 12px", borderRadius: 4, border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                    background: filterBillingMode === key ? "#9d174d" : "transparent",
-                    color: filterBillingMode === key ? "#fff" : "var(--color-text-secondary)",
-                  }}>
-                  {label}
-                </button>
-              ))}
-            </div>
+            <input
+              type="search"
+              placeholder="Search name or ID…"
+              value={studentSearch}
+              onChange={e => setStudentSearch(e.target.value)}
+              style={{ ...st.searchInput, flex: 1 }}
+            />
+            <select value={filterType} onChange={e => setFilterType(e.target.value)} style={st.filterSelect}>
+              <option value="all">All Types</option>
+              <option value="group">👥 Group</option>
+              <option value="personal">👤 Personal</option>
+              <option value="postpay">⬇ Postpay</option>
+              <option value="prepay">⬆ Prepay</option>
+            </select>
           </>
         )}
         {tab === "transactions" && (
