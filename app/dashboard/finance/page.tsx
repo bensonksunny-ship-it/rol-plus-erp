@@ -49,7 +49,7 @@ interface CenterOption { id: string; name: string; centerCode: string; }
 type PayMethod      = "UPI" | "Cash" | "Bank";
 type DiscountType   = "fixed" | "percent";
 // Which inline panel is open for a student row
-type RowAction      = "pay" | "adjust" | "deposit";
+type RowAction      = "pay" | "adjust" | "deposit" | "history";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1018,6 +1018,15 @@ function FinanceContent() {
                                 >
                                   ✏️ Adjust Fee
                                 </button>
+                                <button
+                                  onClick={() => setActiveAction("history")}
+                                  style={{
+                                    ...st.tab, flex: "none" as const, padding: "6px 14px",
+                                    ...(activeAction === "history" ? st.tabActive : {}),
+                                  }}
+                                >
+                                  🧾 History
+                                </button>
                               </div>
 
                               {/* ════ PAY PANEL ════════════════════════════════ */}
@@ -1368,6 +1377,110 @@ function FinanceContent() {
                                   </div>
                                 </div>
                               )}
+
+                              {/* ════ HISTORY PANEL ══════════════════════════════ */}
+                              {activeAction === "history" && (() => {
+                                const studentTx = transactions
+                                  .filter(t => t.studentUid === s.uid)
+                                  .sort((a, b) => {
+                                    const da = String(a.date ?? a.createdAt ?? "");
+                                    const db2 = String(b.date ?? b.createdAt ?? "");
+                                    return db2.localeCompare(da);
+                                  });
+                                return (
+                                  <div style={{ ...st.panel, borderLeft: "3px solid #6d28d9" }}>
+                                    <div style={st.panelTitle}>🧾 Transaction History — {s.name}</div>
+                                    {studentTx.length === 0 ? (
+                                      <div style={{ fontSize: 13, color: "#9ca3af", textAlign: "center" as const, padding: "16px 0" }}>
+                                        No transactions recorded yet.
+                                      </div>
+                                    ) : (
+                                      <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
+                                        {studentTx.map(tx => {
+                                          const isPayment  = tx.type === "payment" || (!tx.type && tx.amount > 0 && tx.method !== "auto");
+                                          const isDeposit  = tx.type === "deposit";
+                                          const isCharge   = tx.type === "charge" || tx.method === "auto";
+                                          const isPending  = tx.status === "pending";
+                                          const isFailed   = tx.status === "failed";
+
+                                          const typeLabel = isDeposit ? "Deposit" : isCharge ? "Auto-charge" : "Payment";
+                                          const typeColor = isDeposit
+                                            ? { bg: "#fdf4ff", border: "#e9d5ff", text: "#7e22ce" }
+                                            : isCharge
+                                            ? { bg: "#fff7ed", border: "#fed7aa", text: "#c2410c" }
+                                            : { bg: "#f0fdf4", border: "#86efac", text: "#15803d" };
+
+                                          const methodLabel = tx.method === "auto" || tx.method === "auto-monthly"
+                                            ? "Auto" : tx.method;
+
+                                          const displayMonth = tx.billingMonth
+                                            ? fmtMonth(tx.billingMonth)
+                                            : formatDate(tx.date ?? tx.createdAt);
+
+                                          return (
+                                            <div key={tx.id} style={{
+                                              display: "flex", alignItems: "center", gap: 12,
+                                              padding: "8px 12px", borderRadius: 8,
+                                              background: isFailed ? "#fef2f2" : isPending ? "#fffbeb" : "#f9fafb",
+                                              border: `1px solid ${isFailed ? "#fecaca" : isPending ? "#fde68a" : "#e5e7eb"}`,
+                                              fontSize: 13, flexWrap: "wrap" as const,
+                                            }}>
+                                              {/* Month / billing period */}
+                                              <span style={{ fontWeight: 700, color: "#111827", minWidth: 90 }}>
+                                                {displayMonth}
+                                              </span>
+
+                                              {/* Type badge */}
+                                              <span style={{
+                                                fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99,
+                                                background: typeColor.bg, border: `1px solid ${typeColor.border}`, color: typeColor.text,
+                                              }}>
+                                                {typeLabel}
+                                              </span>
+
+                                              {/* Amount */}
+                                              <span style={{ fontWeight: 700, color: isCharge ? "#c2410c" : "#16a34a", minWidth: 70 }}>
+                                                {isCharge ? "−" : "+"}{fmtINR(tx.amount)}
+                                              </span>
+
+                                              {/* Payment date */}
+                                              <span style={{ color: "#6b7280", fontSize: 12 }}>
+                                                {formatDate(tx.date ?? tx.createdAt)}
+                                              </span>
+
+                                              {/* Method */}
+                                              <span style={{
+                                                fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 4,
+                                                background: "#e0e7ff", color: "#3730a3",
+                                              }}>
+                                                {methodLabel}
+                                              </span>
+
+                                              {/* Status */}
+                                              {(isPending || isFailed) && (
+                                                <span style={{
+                                                  fontSize: 11, fontWeight: 700, padding: "2px 7px", borderRadius: 4,
+                                                  background: isFailed ? "#fef2f2" : "#fffbeb",
+                                                  color: isFailed ? "#dc2626" : "#d97706",
+                                                }}>
+                                                  {tx.status}
+                                                </span>
+                                              )}
+
+                                              {/* Note */}
+                                              {tx.note && (
+                                                <span style={{ fontSize: 11, color: "#9ca3af", fontStyle: "italic" as const }}>
+                                                  {tx.note}
+                                                </span>
+                                              )}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
 
                             </td>
                           </tr>
