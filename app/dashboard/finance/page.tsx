@@ -42,7 +42,6 @@ interface StudentFeeRow {
   status:          string;
   attendanceCount: number;
   estimatedFee:    number;
-  lastBilledMonth: string | null;
 }
 
 interface CenterOption { id: string; name: string; centerCode: string; }
@@ -50,7 +49,7 @@ interface CenterOption { id: string; name: string; centerCode: string; }
 type PayMethod      = "UPI" | "Cash" | "Bank";
 type DiscountType   = "fixed" | "percent";
 // Which inline panel is open for a student row
-type RowAction      = "pay" | "adjust" | "bill" | "deposit";
+type RowAction      = "pay" | "adjust" | "deposit";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -137,8 +136,6 @@ function FinanceContent() {
   const [adjustSubmitting, setAdjustSubmitting] = useState(false);
   const adjustInputRef                       = useRef<HTMLInputElement>(null);
 
-  // Per-student billing state
-  const [billSubmitting, setBillSubmitting]  = useState(false);
 
   // Deposit state (prepay advance)
   const [depositAmount, setDepositAmount]    = useState<string>("");
@@ -214,8 +211,6 @@ function FinanceContent() {
 
       // Per-student balance as of end of selected month (only needed for past months)
       const historicalBalanceMap = new Map<string, number>();
-      // Per-student: was a billing charge recorded IN the selected month?
-      const billedThisMonthSet  = new Set<string>();
 
       if (!isCurrent) {
         // We need to replay ALL transactions up to monthEnd
@@ -233,27 +228,12 @@ function FinanceContent() {
           const prev = historicalBalanceMap.get(uid) ?? 0;
 
           if (method === "auto-monthly" || method === "auto") {
-            // Billing charge — adds to balance (student owes)
             historicalBalanceMap.set(uid, prev + amt);
-            // Mark billed for THIS month specifically
-            if (txDate.startsWith(month)) billedThisMonthSet.add(uid);
           } else if (type === "deposit") {
-            // Prepay deposit — reduces balance (adds credit)
             historicalBalanceMap.set(uid, prev - amt);
           } else {
-            // Payment received — reduces balance
             historicalBalanceMap.set(uid, prev - amt);
           }
-        });
-      } else {
-        // Current month: check transactions for billing in this month
-        txData.forEach(tx => {
-          if (tx.status !== "completed" || !tx.studentUid) return;
-          const txDate = (tx.date ?? "").slice(0, 10);
-          if (!txDate.startsWith(month)) return;
-          const raw    = tx as unknown as Record<string, unknown>;
-          const method = (raw.method ?? "") as string;
-          if (method === "auto-monthly") billedThisMonthSet.add(tx.studentUid);
         });
       }
 
@@ -271,13 +251,6 @@ function FinanceContent() {
           ? liveBalance
           : (historicalBalanceMap.get(d.id) ?? 0);
 
-        // lastBilledMonth: for current month use student doc field;
-        // for past months derive from transaction history
-        const liveLastBilled = (s.lastBilledMonth as string | null) ?? null;
-        const lastBilledMonth = isCurrent
-          ? liveLastBilled
-          : (billedThisMonthSet.has(d.id) ? month : liveLastBilled);
-
         return {
           uid:             d.id,
           name:            (s.displayName ?? s.name ?? "—") as string,
@@ -294,7 +267,6 @@ function FinanceContent() {
           status:          (s.status ?? "active") as string,
           attendanceCount: attCount,
           estimatedFee,
-          lastBilledMonth,
         };
       }));
     } catch (err) {
@@ -481,57 +453,6 @@ function FinanceContent() {
       toast("Fee adjustment failed. Try again.", "error");
     } finally {
       setAdjustSubmitting(false);
-    }
-  }
-
-  // ── Submit: per-student fee due generation (manual, post-cycle) ─────────────
-  async function submitBillStudent(student: StudentFeeRow) {
-    if (student.lastBilledMonth === selectedMonth) {
-      toast(`Fee due for ${student.name} has already been generated for ${fmtMonth(selectedMonth)}`, "error");
-      return;
-    }
-    if (student.feeCycle !== "monthly") {
-      toast(`${student.name} is on per-class billing — fee due generation does not apply`, "error");
-      return;
-    }
-    // Cycle-completion gate: only generate for completed calendar months
-    if (selectedMonth >= currentMonth()) {
-      toast(`Fee due can only be generated for a completed month. ${fmtMonth(selectedMonth)} is not yet complete.`, "error");
-      return;
-    }
-    const amount = student.monthlyFee;
-    if (!amount || amount <= 0) {
-      toast(`No monthly fee set for ${student.name}`, "error");
-      return;
-    }
-    // Past month: stamp the billing transaction at the first day of that month.
-    const billingDate = `${selectedMonth}-01`;
-    setBillSubmitting(true);
-    try {
-      await addDoc(collection(db, "transactions"), {
-        studentUid:    student.uid,
-        centerId:      student.centerId,
-        amount,
-        method:        "auto-monthly",
-        receivedBy:    user?.displayName ?? user?.email ?? "system",
-        date:          billingDate,
-        billingMonth:  selectedMonth,
-        status:        "completed",
-        createdAt:     serverTimestamp(),
-      });
-      await updateDoc(doc(db, "users", student.uid), {
-        currentBalance:  increment(amount),
-        lastBilledMonth: selectedMonth,
-        updatedAt:       new Date().toISOString(),
-      });
-      closePanel();
-      await fetchAll(selectedMonth);
-      toast(`Fee due ${fmtINR(amount)} generated for ${student.name} — ${fmtMonth(selectedMonth)}`, "success");
-    } catch (err) {
-      console.error("Per-student fee due generation failed:", err);
-      toast("Fee due generation failed. Try again.", "error");
-    } finally {
-      setBillSubmitting(false);
     }
   }
 
@@ -889,11 +810,6 @@ function FinanceContent() {
                     const hasCredit  = isPrepay && s.balance < 0; // prepay credit remaining
                     const isOpen     = activeUid === s.uid;
                     const month      = selectedMonth;
-                    const alreadyBilled = s.lastBilledMonth === month;
-                    // Fee due is only generatable once the calendar month has ended
-                    // (selected month must be strictly before current month).
-                    const cycleComplete = month < currentMonth();
-                    const canBill    = s.feeCycle === "monthly" && !alreadyBilled && cycleComplete;
                     const creditAmt  = hasCredit ? Math.abs(s.balance) : 0;
                     const fee        = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
                     const lowCredit  = isPrepay && s.balance >= -fee; // credit ≤ one fee cycle
@@ -1078,26 +994,6 @@ function FinanceContent() {
                                 >
                                   ✏️ Adjust Fee
                                 </button>
-                                {s.feeCycle === "monthly" && (
-                                  <button
-                                    onClick={() => setActiveAction("bill")}
-                                    disabled={!canBill}
-                                    title={
-                                      alreadyBilled
-                                        ? `Fee due already generated for ${fmtMonth(month)}`
-                                        : !cycleComplete
-                                          ? `Available after ${fmtMonth(month)} ends — pick a completed month`
-                                          : `Generate fee due for ${fmtMonth(month)}`
-                                    }
-                                    style={{
-                                      ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                      ...(activeAction === "bill" ? st.tabActive : {}),
-                                      ...(!canBill ? { opacity: 0.4, cursor: "not-allowed" as const } : {}),
-                                    }}
-                                  >
-                                    🗓 Generate Due
-                                  </button>
-                                )}
                               </div>
 
                               {/* ════ PAY PANEL ════════════════════════════════ */}
@@ -1340,88 +1236,6 @@ function FinanceContent() {
                                     </button>
                                     <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
                                   </div>
-                                </div>
-                              )}
-
-                              {/* ════ BILL PANEL ═══════════════════════════════ */}
-                              {activeAction === "bill" && (
-                                <div style={st.panel}>
-                                  <div style={st.panelTitle}>🗓 Monthly Billing — {s.name}</div>
-
-                                  {/* Attendance context for monthly billing */}
-                                  <div style={{
-                                    background: "#eff6ff",
-                                    border: "1px solid #bfdbfe",
-                                    borderRadius: 10,
-                                    padding: "12px 16px",
-                                    marginBottom: 12,
-                                    display: "flex",
-                                    gap: 20,
-                                    alignItems: "center",
-                                    flexWrap: "wrap" as const,
-                                  }}>
-                                    <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                      <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Monthly Fee</span>
-                                      <span style={{ fontSize: 22, fontWeight: 800, color: "#1d4ed8", lineHeight: 1 }}>{fmtINR(s.monthlyFee)}</span>
-                                    </div>
-                                    <div style={{ fontSize: 20, color: "#9ca3af" }}>·</div>
-                                    <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                      <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Classes — {fmtMonth(selectedMonth)}</span>
-                                      <span style={{ fontSize: 22, fontWeight: 800, color: "#374151", lineHeight: 1 }}>{s.attendanceCount}</span>
-                                      <span style={{ fontSize: 11, color: "#6b7280" }}>attended</span>
-                                    </div>
-                                  </div>
-
-                                  <div style={st.panelInfo}>
-                                    <span style={st.infoChip}>
-                                      Monthly fee: <strong>{fmtINR(s.monthlyFee)}</strong>
-                                    </span>
-                                    <span style={alreadyBilled ? st.infoChipGreen : st.infoChipRed}>
-                                      {alreadyBilled ? `✓ Fee due already generated for ${fmtMonth(month)}` : `Not yet generated for ${fmtMonth(month)}`}
-                                    </span>
-                                  </div>
-
-                                  {!canBill ? (
-                                    <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
-                                      {alreadyBilled
-                                        ? `Fee due for ${s.name} has already been generated for ${fmtMonth(month)}. No action needed.`
-                                        : !cycleComplete
-                                          ? `Fee due can only be generated after the billing cycle ends. ${fmtMonth(month)} is not yet complete — select a past month once it has ended.`
-                                          : `Per-class students are billed automatically on attendance. Manual fee due generation does not apply.`}
-                                    </div>
-                                  ) : (
-                                    <>
-                                      <div style={{ fontSize: 13, color: "#374151", padding: "8px 0" }}>
-                                        {isPrepay ? (
-                                          <>
-                                            This will deduct <strong>{fmtINR(s.monthlyFee)}</strong> from <strong>{s.name}</strong>{"'s"} prepay credit for {fmtMonth(month)}.{" "}
-                                            {hasCredit
-                                              ? <>Remaining credit after generation: <strong style={{ color: creditAmt >= s.monthlyFee ? "#16a34a" : "#dc2626" }}>{fmtINR(creditAmt - s.monthlyFee)}</strong></>
-                                              : <span style={{ color: "#dc2626" }}>No credit — balance will go further into due.</span>
-                                            }
-                                          </>
-                                        ) : (
-                                          <>
-                                            This will generate a monthly fee due of <strong>{fmtINR(s.monthlyFee)}</strong> for{" "}
-                                            <strong>{s.name}</strong> and add it to their balance for {fmtMonth(month)}.
-                                          </>
-                                        )}
-                                      </div>
-                                      <div style={st.panelActions}>
-                                        <button onClick={() => submitBillStudent(s)}
-                                          disabled={billSubmitting}
-                                          style={{
-                                            ...st.confirmBtn,
-                                            background: "#0369a1",
-                                            opacity: billSubmitting ? 0.6 : 1,
-                                            cursor: billSubmitting ? "not-allowed" : "pointer",
-                                          }}>
-                                          {billSubmitting ? "Generating…" : `⚡ Generate Fee Due ${fmtINR(s.monthlyFee)} — ${fmtMonth(month)}`}
-                                        </button>
-                                        <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
-                                      </div>
-                                    </>
-                                  )}
                                 </div>
                               )}
 
