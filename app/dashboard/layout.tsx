@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
+import Link from "next/link";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { useAuth } from "@/hooks/useAuth";
@@ -154,7 +155,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         {visibleNav.map(item => {
           const active = isActive(item);
           return (
-            <a
+            <Link
               key={item.resolvedHref}
               href={item.resolvedHref}
               onClick={onNavigate}
@@ -168,7 +169,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 <span style={s.navBadge}>{alertCount}</span>
               )}
               {active && <span style={s.navActivePip} />}
-            </a>
+            </Link>
           );
         })}
       </>
@@ -189,9 +190,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {canSeeAlerts && alertCount > 0 && (
-              <a href="/dashboard/alerts" style={s.alertBubble}>
+              <Link href="/dashboard/alerts" style={s.alertBubble}>
                 🔔<span style={s.alertBadge}>{alertCount}</span>
-              </a>
+              </Link>
             )}
             <div style={s.avatar}>{initials}</div>
           </div>
@@ -242,7 +243,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             {bottomNav.map(item => {
               const active = isActive(item);
               return (
-                <a
+                <Link
                   key={item.resolvedHref}
                   href={item.resolvedHref}
                   style={{ ...s.bnItem, ...(active ? s.bnItemActive : {}) }}
@@ -250,7 +251,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                   <span style={{ ...s.bnIcon, ...(active ? s.bnIconActive : {}) }}>{item.icon}</span>
                   <span style={s.bnLabel}>{item.label}</span>
                   {active && <span style={s.bnPip} />}
-                </a>
+                </Link>
               );
             })}
           </nav>
@@ -308,13 +309,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
           <div style={s.topbarRight}>
             {canSeeAlerts && (
-              <a href="/dashboard/alerts" style={s.alertBubble} aria-label={`${alertCount} alerts`}>
+              <Link href="/dashboard/alerts" style={s.alertBubble} aria-label={`${alertCount} alerts`}>
                 <svg width="15" height="15" viewBox="0 0 20 20" fill="none">
                   <path d="M10 2a6 6 0 0 0-6 6v3l-1.5 2.5h15L16 11V8a6 6 0 0 0-6-6z" stroke="currentColor" strokeWidth="1.4"/>
                   <path d="M8 16a2 2 0 0 0 4 0" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
                 </svg>
                 {alertCount > 0 && <span style={s.alertBadge}>{alertCount}</span>}
-              </a>
+              </Link>
             )}
             <div style={s.topbarUser}>
               <div style={s.avatar}>{initials}</div>
