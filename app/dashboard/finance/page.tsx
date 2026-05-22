@@ -733,19 +733,43 @@ function FinanceContent() {
       {tab === "overview" && (
         <div>
           <div style={st.sectionTitle}>
-            Transactions — {fmtMonth(selectedMonth)}
+            Students — {fmtMonth(selectedMonth)}
           </div>
-          <TxTable transactions={filteredTx.slice(0, 15)} students={students}
-            centers={centers} loading={loading} formatDate={formatDate}
-            canManage={canManageTx} onEdit={handleEditTx} onDelete={handleDeleteTx} />
-          {filteredTx.length > 15 && (
-            <div style={st.moreHint}>
-              Showing 15 of {filteredTx.length}.{" "}
-              <button onClick={() => setTab("transactions")} style={st.linkBtn}>View all →</button>
+          {loading ? (
+            <div style={st.stateRow}>Loading…</div>
+          ) : filteredStudents.length === 0 ? (
+            <div style={st.stateRow}>No students found.</div>
+          ) : (
+            <div style={st.tableWrapper}>
+              <table style={st.table}>
+                <thead>
+                  <tr>
+                    <th style={st.th}>Student</th>
+                    <th style={{ ...st.th, textAlign: "right" }}>Fee</th>
+                    <th style={{ ...st.th, textAlign: "center" }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredStudents.map((s) => {
+                    const fee    = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
+                    const isDue  = s.balance > 0;
+                    return (
+                      <tr key={s.uid} style={{ background: isDue ? "#fff7f7" : "var(--color-surface)" }}>
+                        <td style={st.td}>{s.name}</td>
+                        <td style={{ ...st.td, textAlign: "right" }}>{fmtINR(fee)}</td>
+                        <td style={{ ...st.td, textAlign: "center" }}>
+                          {isDue ? (
+                            <span style={{ color: "#dc2626", fontWeight: 600 }}>Due {fmtINR(s.balance)}</span>
+                          ) : (
+                            <span style={{ color: "#16a34a", fontWeight: 600 }}>Paid</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
-          )}
-          {!loading && filteredTx.length === 0 && (
-            <div style={st.stateRow}>No transactions for {fmtMonth(selectedMonth)}.</div>
           )}
         </div>
       )}
