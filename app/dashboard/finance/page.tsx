@@ -113,6 +113,8 @@ function FinanceContent() {
   const [students, setStudents]              = useState<StudentFeeRow[]>([]);
   const [centers, setCenters]                = useState<CenterOption[]>([]);
   const [loading, setLoading]                = useState(true);
+  const [attDatesMap, setAttDatesMap]        = useState<Map<string, string[]>>(new Map());
+  const [attPopupUid, setAttPopupUid]        = useState<string | null>(null);
   const { toasts, toast, remove }            = useToast();
   // ── Month selector ───────────────────────────────────────────────────────────
   const [selectedMonth, setSelectedMonth]    = useState<string>(currentMonth());
@@ -176,8 +178,9 @@ function FinanceContent() {
       const sortedTx = txData.sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
       setTransactions(sortedTx);
 
-      // ── Attendance count for the selected month ────────────────────────────
-      const monthAttMap = new Map<string, number>();
+      // ── Attendance count + dates for the selected month ───────────────────
+      const monthAttMap   = new Map<string, number>();
+      const monthDatesMap = new Map<string, string[]>();
       attSnap.docs.forEach(d => {
         const data = d.data();
         const date = (data.date ?? "") as string;
@@ -185,7 +188,13 @@ function FinanceContent() {
         const uid = (data.studentUid ?? "") as string;
         if (!uid) return;
         monthAttMap.set(uid, (monthAttMap.get(uid) ?? 0) + 1);
+        const arr = monthDatesMap.get(uid) ?? [];
+        arr.push(date);
+        monthDatesMap.set(uid, arr);
       });
+      // Sort each student's dates ascending
+      monthDatesMap.forEach(arr => arr.sort());
+      setAttDatesMap(monthDatesMap);
 
       // ── Historical balance reconstruction for past months ─────────────────
       // For the current month we trust the live `currentBalance` on the student doc.
@@ -866,6 +875,24 @@ function FinanceContent() {
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
                               {s.centerName}{" · "}<span style={st.studentIDChip}>{s.studentID}</span>
                             </div>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setAttPopupUid(s.uid); }}
+                              title="View attendance this month"
+                              style={{
+                                marginTop: 5, display: "inline-flex", alignItems: "center", gap: 4,
+                                background: s.attendanceCount > 0 ? "#dbeafe" : "#f3f4f6",
+                                color:      s.attendanceCount > 0 ? "#1d4ed8" : "#9ca3af",
+                                border: "none", borderRadius: 99, padding: "2px 8px",
+                                fontSize: 11, fontWeight: 700, cursor: "pointer",
+                              }}
+                            >
+                              <span style={{
+                                width: 7, height: 7, borderRadius: "50%",
+                                background: s.attendanceCount > 0 ? "#3b82f6" : "#d1d5db",
+                                display: "inline-block",
+                              }} />
+                              {s.attendanceCount} classes
+                            </button>
                           </td>
 
                           {/* Type */}
@@ -1486,6 +1513,54 @@ function FinanceContent() {
           </div>
         </div>
       )}
+
+      {/* ══ ATTENDANCE POPUP ════════════════════════════════════════════════════ */}
+      {attPopupUid && (() => {
+        const s     = students.find(x => x.uid === attPopupUid);
+        const dates = attDatesMap.get(attPopupUid) ?? [];
+        if (!s) return null;
+        const DAY = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+        return (
+          <div
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+            onClick={() => setAttPopupUid(null)}
+          >
+            <div style={{ background: "#fff", borderRadius: 14, width: "100%", maxWidth: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.2)", overflow: "hidden" }} onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #e5e7eb" }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>📅 Attendance — {s.name}</div>
+                  <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>{fmtMonth(selectedMonth)} · {dates.length} class{dates.length !== 1 ? "es" : ""} attended</div>
+                </div>
+                <button onClick={() => setAttPopupUid(null)} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1, padding: 4 }}>×</button>
+              </div>
+              {/* Body */}
+              <div style={{ padding: "16px 20px", maxHeight: 340, overflowY: "auto" }}>
+                {dates.length === 0 ? (
+                  <div style={{ textAlign: "center", fontSize: 13, color: "#9ca3af", padding: "24px 0" }}>No attendance recorded for {fmtMonth(selectedMonth)}.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {dates.map((dt, i) => {
+                      const d   = new Date(dt + "T00:00:00");
+                      const day = DAY[d.getDay()];
+                      const num = d.getDate();
+                      return (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 12px", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8 }}>
+                          <span style={{ width: 32, height: 32, borderRadius: "50%", background: "#16a34a", color: "#fff", fontWeight: 800, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{num}</span>
+                          <div>
+                            <div style={{ fontWeight: 600, fontSize: 13, color: "#111827" }}>{day}, {dt}</div>
+                            <div style={{ fontSize: 11, color: "#16a34a" }}>Present</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ══ TRANSACTIONS TAB ═══════════════════════════════════════════════════ */}
       {tab === "transactions" && (
