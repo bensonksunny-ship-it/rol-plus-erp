@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import {
-  collection, getDocs, addDoc, updateDoc,
+  collection, getDocs, addDoc, updateDoc, deleteDoc,
   query, where, doc, serverTimestamp,
   increment,
 } from "firebase/firestore";
@@ -145,6 +145,8 @@ function FinanceContent() {
   const [depositNote, setDepositNote]        = useState<string>("");
   const [depositSubmitting, setDepositSubmitting] = useState(false);
   const depositInputRef                      = useRef<HTMLInputElement>(null);
+  const [feeDueSubmitting, setFeeDueSubmitting]     = useState(false);
+  const [undoFeeDueSubmitting, setUndoFeeDueSubmitting] = useState(false);
 
   // Filters
   const [filterCenter, setFilterCenter]      = useState<string>("all");
@@ -296,26 +298,53 @@ function FinanceContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedMonth]);
 
+  // ── Fee-due generated this month per student ────────────────────────────────
+  const feeDueMap = useMemo(() => {
+    const m = new Map<string, { id: string; amount: number }>();
+    transactions.forEach(tx => {
+      if (!tx.studentUid) return;
+      const raw = tx as unknown as Record<string, unknown>;
+      if ((raw.type as string) === "fee_due") {
+        const bm = (raw.billingMonth as string) ?? (tx.date ?? "").slice(0, 7);
+        if (bm === selectedMonth) m.set(tx.studentUid, { id: tx.id, amount: tx.amount });
+      }
+    });
+    return m;
+  }, [transactions, selectedMonth]);
+
+  // ── Payment recorded this month per student ──────────────────────────────────
+  const paidMap = useMemo(() => {
+    const m = new Set<string>();
+    transactions.forEach(tx => {
+      if (!tx.studentUid) return;
+      if (tx.status !== "completed") return;
+      if (!(tx.date ?? "").startsWith(selectedMonth)) return;
+      const raw    = tx as unknown as Record<string, unknown>;
+      const type   = (raw.type   as string) ?? "";
+      const method = (tx.method  as string) ?? "";
+      if (type === "fee_due" || type === "charge" || method === "auto" || method === "auto-monthly") return;
+      m.add(tx.studentUid);
+    });
+    return m;
+  }, [transactions, selectedMonth]);
+
   // ── Summary ──────────────────────────────────────────────────────────────────
   const summary = useMemo(() => {
     const today      = todayStr();
-    // Filter transactions to the selected month
     const monthTx    = transactions.filter(t =>
       t.status === "completed" && (t.date ?? "").startsWith(selectedMonth)
     );
     const total      = monthTx.reduce((s, t) => s + (t.amount ?? 0), 0);
-    // "Today" only meaningful if viewing current month
     const todayAmt   = isCurrentMonth
       ? transactions.filter(t => t.status === "completed" && t.date?.startsWith(today))
           .reduce((s, t) => s + (t.amount ?? 0), 0)
       : 0;
-    const overdueStudents = students.filter(s => s.balance > 0);
-    const pendingBal      = overdueStudents.reduce((acc, s) => acc + s.balance, 0);
+    const overdueStudents = students.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid));
+    const pendingBal      = overdueStudents.reduce((acc, s) => acc + (feeDueMap.get(s.uid)?.amount ?? 0), 0);
     const activeCount     = students.filter(s => s.status === "active").length;
     const totalEstFee     = students.reduce((acc, s) => acc + s.estimatedFee, 0);
     const groupCount      = students.filter(s => s.classType === "group").length;
     const personalCount   = students.filter(s => s.classType === "personal").length;
-    // Prepay credit (live balance, not month-specific)
     const prepayStudents  = students.filter(s => s.billingMode === "prepay");
     const prepayCredit    = prepayStudents.filter(s => s.balance < 0).reduce((acc, s) => acc + Math.abs(s.balance), 0);
     const prepayCount     = prepayStudents.length;
@@ -324,7 +353,7 @@ function FinanceContent() {
       return s.balance >= -fee;
     }).length;
     return { total, todayAmt, pendingBal, activeCount, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCredit, prepayCount, lowCreditCount };
-  }, [transactions, students, selectedMonth, isCurrentMonth]);
+  }, [transactions, students, selectedMonth, isCurrentMonth, feeDueMap, paidMap]);
 
   // ── Last tx per student (scoped to selected month) ───────────────────────────
   const lastTxMap = useMemo(() => {
@@ -502,6 +531,67 @@ function FinanceContent() {
     }
   }
 
+  // ── Generate fee due record ──────────────────────────────────────────────────
+  async function generateFeeDue(student: StudentFeeRow) {
+    const fee = student.feeCycle === "monthly" ? student.monthlyFee : student.estimatedFee;
+    if (!fee || fee <= 0) {
+      toast(
+        student.feeCycle === "per_class"
+          ? "No attendance recorded yet — cannot generate fee"
+          : "Fee amount is zero",
+        "error"
+      );
+      return;
+    }
+    setFeeDueSubmitting(true);
+    try {
+      await addDoc(collection(db, "transactions"), {
+        studentUid:   student.uid,
+        centerId:     student.centerId,
+        amount:       fee,
+        type:         "fee_due",
+        method:       "manual",
+        billingMonth: selectedMonth,
+        date:         todayStr(),
+        status:       "due",
+        createdAt:    serverTimestamp(),
+        receivedBy:   user?.displayName ?? user?.email ?? "admin",
+      });
+      await updateDoc(doc(db, "users", student.uid), {
+        currentBalance: increment(fee),
+        updatedAt:      new Date().toISOString(),
+      });
+      await fetchAll(selectedMonth);
+      toast(`Fee due of ${fmtINR(fee)} generated for ${student.name}`, "success");
+    } catch (err) {
+      console.error("Generate fee due failed:", err);
+      toast("Failed to generate fee due. Try again.", "error");
+    } finally {
+      setFeeDueSubmitting(false);
+    }
+  }
+
+  // ── Undo generate fee due ────────────────────────────────────────────────────
+  async function undoFeeDue(student: StudentFeeRow) {
+    const entry = feeDueMap.get(student.uid);
+    if (!entry) return;
+    setUndoFeeDueSubmitting(true);
+    try {
+      await deleteDoc(doc(db, "transactions", entry.id));
+      await updateDoc(doc(db, "users", student.uid), {
+        currentBalance: increment(-entry.amount),
+        updatedAt:      new Date().toISOString(),
+      });
+      await fetchAll(selectedMonth);
+      toast(`Fee due removed for ${student.name}`, "success");
+    } catch (err) {
+      console.error("Undo fee due failed:", err);
+      toast("Failed to undo fee due. Try again.", "error");
+    } finally {
+      setUndoFeeDueSubmitting(false);
+    }
+  }
+
   // ── Edit / Delete transaction (admin) ───────────────────────────────────────
   async function handleEditTx(txId: string, patch: EditableTransactionInput) {
     if (!canManageTx) {
@@ -540,7 +630,7 @@ function FinanceContent() {
   // ── Filters ──────────────────────────────────────────────────────────────────
   const filteredTx = useMemo(() => {
     return transactions.filter(tx => {
-      // Always scope to selected month (override-able by specific date filter)
+      if (tx.method === "auto" || tx.method === "auto-monthly") return false;
       if (filterDate) {
         const txDate = (tx.date ?? "").slice(0, 10);
         if (txDate !== filterDate) return false;
@@ -555,6 +645,7 @@ function FinanceContent() {
 
   const filteredStudents = useMemo(() => {
     let list = filterCenter === "all" ? students : students.filter(s => s.centerId === filterCenter);
+    list = list.filter(s => s.monthlyFee > 0 || s.feePerClass > 0);
     if      (filterType === "group")    list = list.filter(s => s.classType   === "group");
     else if (filterType === "personal") list = list.filter(s => s.classType   === "personal");
     else if (filterType === "prepay")   list = list.filter(s => s.billingMode === "prepay");
@@ -761,7 +852,7 @@ function FinanceContent() {
                 <tbody>
                   {filteredStudents.map((s) => {
                     const fee    = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
-                    const isDue  = s.balance > 0;
+                    const isDue  = feeDueMap.has(s.uid) && !paidMap.has(s.uid);
                     return (
                       <tr key={s.uid} style={{ background: isDue ? "#fff7f7" : "var(--color-surface)" }}>
                         <td style={st.td}>{s.name}</td>
@@ -839,7 +930,7 @@ function FinanceContent() {
                 <tbody>
                   {filteredStudents.map((s) => {
                     const isPrepay   = s.billingMode === "prepay";
-                    const overdue    = s.balance > 0;   // owes money
+                    const overdue    = feeDueMap.has(s.uid) && !paidMap.has(s.uid);
                     const hasCredit  = isPrepay && s.balance < 0; // prepay credit remaining
                     const isOpen     = activeUid === s.uid;
                     const month      = selectedMonth;
@@ -915,65 +1006,35 @@ function FinanceContent() {
                             {fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass)}
                           </td>
 
-                          {/* Balance */}
+                          {/* Balance / Status */}
                           <td style={{ ...st.td, fontWeight: 700 }}>
-                            {overdue ? (
+                            {paidMap.has(s.uid) ? (
+                              <span style={{ color: "#16a34a" }}>✓ Paid</span>
+                            ) : feeDueMap.has(s.uid) ? (
                               <span style={{ color: "#dc2626", display: "flex", alignItems: "center", gap: 4 }}>
-                                {fmtINR(s.balance)}
-                                <span style={st.overduePill}>DUE</span>
+                                {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
+                                <span style={st.overduePill}>Due</span>
                               </span>
                             ) : hasCredit ? (
-                              <div>
-                                <span style={{ color: "#16a34a" }}>Credit {fmtINR(creditAmt)}</span>
-                                {lowCredit && (
-                                  <div style={{ fontSize: 10, color: "#b45309", fontWeight: 600, marginTop: 2 }}>
-                                    ⚠ Low credit
-                                  </div>
-                                )}
-                              </div>
+                              <span style={{ color: "#16a34a" }}>Credit {fmtINR(creditAmt)}</span>
                             ) : (
-                              <span style={{ color: "#16a34a" }}>✓ Cleared</span>
+                              <span style={{ color: "#9ca3af" }}>—</span>
                             )}
                           </td>
 
                           {/* Primary action */}
                           <td style={{ ...st.td, whiteSpace: "nowrap" as const }}>
                             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                              {overdue ? (
-                                <button
-                                  onClick={() => openPanel(s.uid, "pay", s)}
-                                  style={{ ...st.actionBtn, background: "#dc2626", color: "#fff", border: "none" }}
-                                >
-                                  💳 Collect
-                                </button>
-                              ) : isPrepay && lowCredit ? (
-                                <button
-                                  onClick={() => openPanel(s.uid, "deposit", s)}
-                                  style={{ ...st.actionBtn, background: "#9d174d", color: "#fff", border: "none" }}
-                                >
-                                  ⬆ Top Up
-                                </button>
-                              ) : isPrepay ? (
-                                <button
-                                  onClick={() => openPanel(s.uid, "deposit", s)}
-                                  style={{
-                                    ...st.actionBtn,
-                                    ...(isOpen && activeAction === "deposit" ? st.actionBtnActive : {}),
-                                  }}
-                                >
-                                  ⬆ Deposit
-                                </button>
-                              ) : (
-                                <button
-                                  onClick={() => openPanel(s.uid, "pay", s)}
-                                  style={{
-                                    ...st.actionBtn,
-                                    ...(isOpen && activeAction === "pay" ? st.actionBtnActive : {}),
-                                  }}
-                                >
-                                  ⋯ More
-                                </button>
-                              )}
+                              <button
+                                onClick={() => openPanel(s.uid, "pay", s)}
+                                style={{
+                                  ...st.actionBtn,
+                                  ...(overdue ? { background: "#dc2626", color: "#fff", border: "none" } : {}),
+                                  ...(isOpen && activeAction === "pay" ? st.actionBtnActive : {}),
+                                }}
+                              >
+                                💳 Payment
+                              </button>
                               {isOpen && (
                                 <button onClick={closePanel} style={st.closePanelBtn} title="Close">✕</button>
                               )}
@@ -1014,8 +1075,7 @@ function FinanceContent() {
                               {/* ── Action tabs (only when opened via action button) ── */}
                               {activeAction !== "history" && (
                                 <div style={{ display: "flex", gap: 4, marginBottom: 14, flexWrap: "wrap" as const }}>
-                                  {(!isPrepay || overdue) && (
-                                    <button
+                                  <button
                                       onClick={() => setActiveAction("pay")}
                                       style={{
                                         ...st.tab, flex: "none" as const, padding: "6px 14px",
@@ -1024,18 +1084,6 @@ function FinanceContent() {
                                     >
                                       💳 Pay
                                     </button>
-                                  )}
-                                  {isPrepay && (
-                                    <button
-                                      onClick={() => setActiveAction("deposit")}
-                                      style={{
-                                        ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                        ...(activeAction === "deposit" ? st.tabActive : {}),
-                                      }}
-                                    >
-                                      ⬆ Deposit
-                                    </button>
-                                  )}
                                   <button
                                     onClick={() => setActiveAction("adjust")}
                                     style={{
@@ -1051,7 +1099,43 @@ function FinanceContent() {
                               {/* ════ PAY PANEL ════════════════════════════════ */}
                               {activeAction === "pay" && (
                                 <div style={st.panel}>
-                                  <div style={st.panelTitle}>💳 Record Payment — {s.name}</div>
+                                  <div style={st.panelTitle}>💳 Payment — {s.name}</div>
+
+                                  {/* ── Generate Fee Due ──────────────────────── */}
+                                  {!feeDueMap.has(s.uid) ? (
+                                    <div style={{ marginBottom: 14, padding: "12px 14px", background: "#fafafa", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                                      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
+                                        No fee due generated for <strong>{fmtMonth(selectedMonth)}</strong>.
+                                      </div>
+                                      <button
+                                        onClick={() => generateFeeDue(s)}
+                                        disabled={feeDueSubmitting}
+                                        style={{ ...st.confirmBtn, background: "#f59e0b", opacity: feeDueSubmitting ? 0.6 : 1, cursor: feeDueSubmitting ? "not-allowed" : "pointer" }}
+                                      >
+                                        {feeDueSubmitting ? "Generating…" : `Generate Fee Due — ${fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.estimatedFee)}`}
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const }}>
+                                      <span style={{
+                                        fontSize: 12, padding: "3px 12px", borderRadius: 99, fontWeight: 700,
+                                        background: paidMap.has(s.uid) ? "#dcfce7" : "#fee2e2",
+                                        color:      paidMap.has(s.uid) ? "#16a34a" : "#dc2626",
+                                      }}>
+                                        {paidMap.has(s.uid) ? "✓ Paid" : `Due — ${fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}`}
+                                      </span>
+                                      <span style={{ fontSize: 11, color: "#9ca3af" }}>Fee generated for {fmtMonth(selectedMonth)}</span>
+                                      {!paidMap.has(s.uid) && (
+                                        <button
+                                          onClick={() => undoFeeDue(s)}
+                                          disabled={undoFeeDueSubmitting}
+                                          style={{ ...st.cancelBtn, fontSize: 11, padding: "3px 10px", opacity: undoFeeDueSubmitting ? 0.6 : 1, cursor: undoFeeDueSubmitting ? "not-allowed" : "pointer" }}
+                                        >
+                                          {undoFeeDueSubmitting ? "Undoing…" : "↩ Undo"}
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
 
                                   {/* Past month notice */}
                                   {!isCurrentMonth && (
@@ -1110,14 +1194,14 @@ function FinanceContent() {
                                           <span style={{ fontSize: 22, fontWeight: 800, color: "#374151", lineHeight: 1 }}>{s.attendanceCount}</span>
                                           <span style={{ fontSize: 11, color: "#6b7280" }}>attended</span>
                                         </div>
-                                        {s.balance > 0 && (
+                                        {feeDueMap.has(s.uid) && s.balance > 0 && (
                                           <>
                                             <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>→</div>
                                             <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
                                               <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>
                                                 {isCurrentMonth ? "Outstanding" : `Balance — ${fmtMonth(selectedMonth)}`}
                                               </span>
-                                              <span style={{ fontSize: 22, fontWeight: 800, color: "#dc2626", lineHeight: 1 }}>{fmtINR(s.balance)}</span>
+                                              <span style={{ fontSize: 22, fontWeight: 800, color: "#dc2626", lineHeight: 1 }}>{fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
                                               <span style={{ fontSize: 11, color: "#dc2626" }}>{isCurrentMonth ? "due now" : "as of that month"}</span>
                                             </div>
                                           </>
@@ -1128,9 +1212,9 @@ function FinanceContent() {
 
                                   {/* Context info */}
                                   <div style={st.panelInfo}>
-                                    {s.balance > 0 && (
+                                    {feeDueMap.has(s.uid) && !paidMap.has(s.uid) && (
                                       <span style={st.infoChipRed}>
-                                        Outstanding: {fmtINR(s.balance)}
+                                        Outstanding: {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
                                       </span>
                                     )}
                                     {lastTxMap.get(s.uid) && (
@@ -1291,116 +1375,10 @@ function FinanceContent() {
                                 </div>
                               )}
 
-                              {/* ════ DEPOSIT PANEL ══════════════════════════════ */}
-                              {activeAction === "deposit" && (
-                                <div style={{ ...st.panel, borderLeft: "3px solid #9d174d" }}>
-                                  <div style={st.panelTitle}>⬆ Add Advance Deposit — {s.name}</div>
-
-                                  <div style={st.panelInfo}>
-                                    {hasCredit && (
-                                      <span style={{ ...st.infoChipGreen }}>
-                                        Current credit: {fmtINR(creditAmt)}
-                                      </span>
-                                    )}
-                                    {overdue && (
-                                      <span style={st.infoChipRed}>
-                                        Outstanding due: {fmtINR(s.balance)}
-                                      </span>
-                                    )}
-                                    {lowCredit && !overdue && (
-                                      <span style={{ ...st.infoChip, color: "#b45309", background: "#fef3c7", border: "1px solid #fde68a" }}>
-                                        ⚠ Credit low — less than one fee cycle remaining
-                                      </span>
-                                    )}
-                                    <span style={st.infoChip}>
-                                      Monthly fee: <strong>{fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass)}</strong>
-                                    </span>
-                                  </div>
-
-                                  <div style={st.panelRow}>
-                                    <div style={st.panelField}>
-                                      <label style={st.panelLabel}>Deposit Amount (₹)</label>
-                                      <input
-                                        ref={depositInputRef}
-                                        type="number" min={1}
-                                        placeholder="0"
-                                        value={depositAmount}
-                                        onChange={e => setDepositAmount(e.target.value)}
-                                        style={st.panelInput}
-                                        onKeyDown={e => { if (e.key === "Enter") submitDeposit(s); if (e.key === "Escape") closePanel(); }}
-                                      />
-                                    </div>
-
-                                    {/* Mode of deposit */}
-                                    <div style={st.panelField}>
-                                      <label style={st.panelLabel}>Mode of Receipt</label>
-                                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
-                                        {(["Cash", "UPI", "Bank"] as PayMethod[]).map(m => (
-                                          <button key={m} onClick={() => setDepositMethod(m)}
-                                            style={{
-                                              ...st.methodChip,
-                                              ...(depositMethod === m
-                                                ? METHOD_STYLES[m] ?? {}
-                                                : { background: "#f3f4f6", color: "#374151" }),
-                                              fontWeight: depositMethod === m ? 700 : 400,
-                                              border: depositMethod === m ? "1.5px solid currentColor" : "1px solid #e5e7eb",
-                                            }}>
-                                            {m}
-                                          </button>
-                                        ))}
-                                      </div>
-                                    </div>
-
-                                    {/* Note */}
-                                    <div style={st.panelField}>
-                                      <label style={st.panelLabel}>Note (optional)</label>
-                                      <input
-                                        type="text"
-                                        placeholder="e.g. Advance for 3 months"
-                                        value={depositNote}
-                                        onChange={e => setDepositNote(e.target.value)}
-                                        style={{ ...st.panelInput, maxWidth: 240 }}
-                                        onKeyDown={e => { if (e.key === "Escape") closePanel(); }}
-                                      />
-                                    </div>
-                                  </div>
-
-                                  {/* Preview */}
-                                  {depositAmount && Number(depositAmount) > 0 && (
-                                    <div style={{ fontSize: 13, color: "#374151", padding: "8px 0", borderTop: "1px solid #e5e7eb", marginTop: 8 }}>
-                                      New credit after deposit:{" "}
-                                      <strong style={{ color: "#16a34a" }}>
-                                        {fmtINR(creditAmt + Number(depositAmount))}
-                                      </strong>
-                                      {overdue && Number(depositAmount) >= s.balance && (
-                                        <span style={{ marginLeft: 8, fontSize: 11, color: "#16a34a" }}>
-                                          (clears outstanding due)
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  <div style={st.panelActions}>
-                                    <button
-                                      onClick={() => submitDeposit(s)}
-                                      disabled={depositSubmitting || !depositAmount || Number(depositAmount) <= 0}
-                                      style={{
-                                        ...st.confirmBtn,
-                                        background: "#9d174d",
-                                        opacity: depositSubmitting || !depositAmount || Number(depositAmount) <= 0 ? 0.6 : 1,
-                                        cursor: depositSubmitting || !depositAmount || Number(depositAmount) <= 0 ? "not-allowed" : "pointer",
-                                      }}>
-                                      {depositSubmitting ? "Saving…" : `⬆ Record Deposit ${depositAmount ? fmtINR(Number(depositAmount)) : ""}`}
-                                    </button>
-                                    <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
-                                  </div>
-                                </div>
-                              )}
-
                               {/* ════ HISTORY PANEL ══════════════════════════════ */}
                               {activeAction === "history" && (() => {
                                 const studentTx = transactions
-                                  .filter(t => t.studentUid === s.uid)
+                                  .filter(t => t.studentUid === s.uid && t.method !== "auto" && t.method !== "auto-monthly")
                                   .sort((a, b) => {
                                     const da = String(a.date ?? a.createdAt ?? "");
                                     const db2 = String(b.date ?? b.createdAt ?? "");
@@ -1539,18 +1517,15 @@ function FinanceContent() {
                 {dates.length === 0 ? (
                   <div style={{ textAlign: "center", fontSize: 13, color: "#9ca3af", padding: "24px 0" }}>No attendance recorded for {fmtMonth(selectedMonth)}.</div>
                 ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                     {dates.map((dt, i) => {
                       const d   = new Date(dt + "T00:00:00");
                       const day = DAY[d.getDay()];
                       const num = d.getDate();
                       return (
-                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 12px", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8 }}>
-                          <span style={{ width: 32, height: 32, borderRadius: "50%", background: "#16a34a", color: "#fff", fontWeight: 800, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{num}</span>
-                          <div>
-                            <div style={{ fontWeight: 600, fontSize: 13, color: "#111827" }}>{day}, {dt}</div>
-                            <div style={{ fontSize: 11, color: "#16a34a" }}>Present</div>
-                          </div>
+                        <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 8, padding: "6px 10px", minWidth: 44 }}>
+                          <span style={{ fontSize: 10, color: "#16a34a", fontWeight: 600 }}>{day}</span>
+                          <span style={{ fontSize: 18, fontWeight: 800, color: "#111827", lineHeight: 1.1 }}>{num}</span>
                         </div>
                       );
                     })}
