@@ -382,7 +382,7 @@ function CentreCard({
                       }
                       if (onBreak && !status) {
                         return (
-                          <td key={date} onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break" })}
+                          <td key={date} onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break", futureOnly: false })}
                             style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...STATUS_COLOR.break }}>
                             {STATUS_SHORT.break}
                           </td>
