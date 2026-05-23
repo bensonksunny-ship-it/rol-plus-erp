@@ -363,6 +363,22 @@ function FinanceContent() {
     return { total, todayAmt, pendingBal, activeCount, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCredit, prepayCount, lowCreditCount };
   }, [transactions, students, selectedMonth, isCurrentMonth, feeDueMap, paidMap]);
 
+  // ── Total amount paid this month per student ────────────────────────────────
+  const paidAmountMap = useMemo(() => {
+    const m = new Map<string, number>();
+    transactions.forEach(tx => {
+      if (!tx.studentUid) return;
+      if (tx.status !== "completed") return;
+      if (!(tx.date ?? "").startsWith(selectedMonth)) return;
+      const raw    = tx as unknown as Record<string, unknown>;
+      const type   = (raw.type   as string) ?? "";
+      const method = (tx.method  as string) ?? "";
+      if (type === "fee_due" || type === "charge" || method === "auto" || method === "auto-monthly") return;
+      m.set(tx.studentUid, (m.get(tx.studentUid) ?? 0) + tx.amount);
+    });
+    return m;
+  }, [transactions, selectedMonth]);
+
   // ── Last tx per student (scoped to selected month) ───────────────────────────
   const lastTxMap = useMemo(() => {
     const m = new Map<string, Transaction>();
@@ -923,7 +939,7 @@ function FinanceContent() {
                   <tr>
                     <th style={st.th}>Student</th>
                     <th style={st.th}>Type</th>
-                    <th style={st.th}>Fee</th>
+                    <th style={st.th}>Amount</th>
                     <th style={st.th}>
                       Balance
                       {!isCurrentMonth && (
@@ -1009,9 +1025,15 @@ function FinanceContent() {
                             </div>
                           </td>
 
-                          {/* Fee */}
+                          {/* Due / Paid */}
                           <td style={{ ...st.td, fontWeight: 600 }}>
-                            {fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass)}
+                            {paidMap.has(s.uid) ? (
+                              <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
+                            ) : feeDueMap.has(s.uid) ? (
+                              <span style={{ color: "#dc2626" }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                            ) : (
+                              <span style={{ color: "#9ca3af" }}>—</span>
+                            )}
                           </td>
 
                           {/* Balance / Status */}
