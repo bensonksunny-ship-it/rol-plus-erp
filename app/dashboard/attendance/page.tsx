@@ -392,7 +392,7 @@ function CentreCard({
                       const sc = status ? STATUS_COLOR[status] : { bg: "#f9fafb", fg: "#d1d5db" };
                       return (
                         <td key={date}
-                          onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status })}
+                          onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status, futureOnly: false })}
                           style={{
                             ...td, textAlign: "center", padding: "5px 3px", minWidth: 38,
                             cursor: "pointer", borderLeft: "1px solid #f3f4f6",
