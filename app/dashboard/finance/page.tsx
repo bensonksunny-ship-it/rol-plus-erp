@@ -328,6 +328,22 @@ function FinanceContent() {
     return m;
   }, [transactions, selectedMonth]);
 
+  // ── Total amount paid this month per student ────────────────────────────────
+  const paidAmountMap = useMemo(() => {
+    const m = new Map<string, number>();
+    transactions.forEach(tx => {
+      if (!tx.studentUid) return;
+      if (tx.status !== "completed") return;
+      if (!(tx.date ?? "").startsWith(selectedMonth)) return;
+      const raw    = tx as unknown as Record<string, unknown>;
+      const type   = (raw.type   as string) ?? "";
+      const method = (tx.method  as string) ?? "";
+      if (type === "fee_due" || type === "charge" || method === "auto" || method === "auto-monthly") return;
+      m.set(tx.studentUid, (m.get(tx.studentUid) ?? 0) + tx.amount);
+    });
+    return m;
+  }, [transactions, selectedMonth]);
+
   // ── Summary ──────────────────────────────────────────────────────────────────
   const summary = useMemo(() => {
     const today      = todayStr();
@@ -354,30 +370,16 @@ function FinanceContent() {
     const groupCount      = students.filter(s => s.classType === "group").length;
     const personalCount   = students.filter(s => s.classType === "personal").length;
     const prepayStudents  = students.filter(s => s.billingMode === "prepay");
-    const prepayCredit    = prepayStudents.filter(s => s.balance < 0).reduce((acc, s) => acc + Math.abs(s.balance), 0);
+    const postpayStudents = students.filter(s => s.billingMode !== "prepay");
     const prepayCount     = prepayStudents.length;
-    const lowCreditCount  = prepayStudents.filter(s => {
-      const fee = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
-      return s.balance >= -fee;
-    }).length;
-    return { total, todayAmt, pendingBal, activeCount, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCredit, prepayCount, lowCreditCount };
-  }, [transactions, students, selectedMonth, isCurrentMonth, feeDueMap, paidMap]);
-
-  // ── Total amount paid this month per student ────────────────────────────────
-  const paidAmountMap = useMemo(() => {
-    const m = new Map<string, number>();
-    transactions.forEach(tx => {
-      if (!tx.studentUid) return;
-      if (tx.status !== "completed") return;
-      if (!(tx.date ?? "").startsWith(selectedMonth)) return;
-      const raw    = tx as unknown as Record<string, unknown>;
-      const type   = (raw.type   as string) ?? "";
-      const method = (tx.method  as string) ?? "";
-      if (type === "fee_due" || type === "charge" || method === "auto" || method === "auto-monthly") return;
-      m.set(tx.studentUid, (m.get(tx.studentUid) ?? 0) + tx.amount);
-    });
-    return m;
-  }, [transactions, selectedMonth]);
+    const postpayCount    = postpayStudents.length;
+    // Collected this month, split by billing mode
+    const prepayCollected  = prepayStudents.reduce((acc, s)  => acc + (paidAmountMap.get(s.uid) ?? 0), 0);
+    const postpayCollected = postpayStudents.reduce((acc, s) => acc + (paidAmountMap.get(s.uid) ?? 0), 0);
+    // Prepay students with fee generated but not yet paid
+    const lowCreditCount   = prepayStudents.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid)).length;
+    return { total, todayAmt, pendingBal, activeCount, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
+  }, [transactions, students, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap]);
 
   // ── Last tx per student (scoped to selected month) ───────────────────────────
   const lastTxMap = useMemo(() => {
@@ -781,13 +783,13 @@ function FinanceContent() {
           hint={loading ? undefined : `${summary.groupCount} group · ${summary.personalCount} personal`}
         />
         <SummaryCard
-          label="Prepay Credit"
-          value={loading ? "…" : fmtINR(summary.prepayCredit)}
+          label="Prepay Collected"
+          value={loading ? "…" : fmtINR(summary.prepayCollected)}
           accent="#9d174d" icon="⬆"
           urgent={summary.lowCreditCount > 0}
           hint={loading ? undefined : summary.lowCreditCount > 0
-            ? `⚠ ${summary.lowCreditCount} low credit`
-            : `${summary.prepayCount} prepay students`}
+            ? `⚠ ${summary.lowCreditCount} due unpaid · ${summary.prepayCount} prepay`
+            : `${summary.prepayCount} prepay · Postpay ${fmtINR(summary.postpayCollected)}`}
         />
       </div>
 
