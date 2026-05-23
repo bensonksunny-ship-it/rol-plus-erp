@@ -9,6 +9,35 @@ import { auth, db } from "@/services/firebase/firebase";
 import type { User, AuthSession } from "@/types";
 import { USER_STATUS } from "@/config/constants";
 
+const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
+
+export function persistSessionToken(token: string): void {
+  if (typeof document === "undefined") return;
+
+  document.cookie = `rol_session=${token}; path=/; SameSite=Lax; max-age=${SESSION_MAX_AGE}`;
+
+  try {
+    localStorage.setItem("rol_session", token);
+    localStorage.setItem("rol_session_expires", String(Date.now() + SESSION_MAX_AGE * 1000));
+  } catch {
+    // localStorage can be blocked in private browsing or hardened mobile browsers.
+  }
+}
+
+export function clearPersistedSession(): void {
+  if (typeof document !== "undefined") {
+    document.cookie = "rol_session=; path=/; max-age=0; SameSite=Lax";
+    document.cookie = "rol_session=; path=/; max-age=0; SameSite=Strict";
+  }
+
+  try {
+    localStorage.removeItem("rol_session");
+    localStorage.removeItem("rol_session_expires");
+  } catch {
+    // Ignore storage access failures.
+  }
+}
+
 /**
  * Fetch the Firestore user profile — cache-first for speed.
  * On mobile this resolves from the local Firestore cache in <5ms after the
@@ -75,9 +104,12 @@ export async function signIn(
 }
 
 /**
- * Sign out the current user.
+ * Sign out the current user and clear all persisted session artifacts.
+ * Clearing here ensures every call site is safe — callers do not need to
+ * manually clear the cookie or localStorage after calling this function.
  */
 export async function signOut(): Promise<void> {
+  clearPersistedSession();
   await firebaseSignOut(auth);
 }
 
@@ -139,6 +171,16 @@ export function subscribeToAuthState(
           // (that would trigger onAuthStateChanged again → infinite loop).
           callback(null);
           return;
+        }
+
+        try {
+          const token = await firebaseUser.getIdToken();
+          if (!cancelled && myGen === generation) {
+            persistSessionToken(token);
+          }
+        } catch {
+          // Best effort only — keep the valid user session in memory even if
+          // token persistence temporarily fails.
         }
 
         callback(profile);

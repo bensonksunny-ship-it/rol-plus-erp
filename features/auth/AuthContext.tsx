@@ -9,8 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-
-import { subscribeToAuthState } from "@/services/firebase/auth.service";
+import { clearPersistedSession, subscribeToAuthState } from "@/services/firebase/auth.service";
 import type { User } from "@/types";
 
 const AUTH_TIMEOUT_MS = 15000;
@@ -42,6 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.warn("Auth timeout reached");
 
       hadUserRef.current = false;
+      clearPersistedSession();
       setUser(null);
       setLoading(false);
     }, AUTH_TIMEOUT_MS);
@@ -83,7 +83,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           console.warn("Auth user lost after debounce");
 
           hadUserRef.current = false;
-
+          clearPersistedSession();
           setUser(null);
           setLoading(false);
         }, 2000);
