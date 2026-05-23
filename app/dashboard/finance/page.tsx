@@ -331,12 +331,20 @@ function FinanceContent() {
   // ── Summary ──────────────────────────────────────────────────────────────────
   const summary = useMemo(() => {
     const today      = todayStr();
+    const isManualPayment = (t: Transaction) => {
+      const raw    = t as unknown as Record<string, unknown>;
+      const type   = (raw.type   as string) ?? "";
+      const method = (t.method   as string) ?? "";
+      return t.status === "completed"
+        && type   !== "fee_due"  && type   !== "charge"
+        && method !== "auto"     && method !== "auto-monthly";
+    };
     const monthTx    = transactions.filter(t =>
-      t.status === "completed" && (t.date ?? "").startsWith(selectedMonth)
+      isManualPayment(t) && (t.date ?? "").startsWith(selectedMonth)
     );
     const total      = monthTx.reduce((s, t) => s + (t.amount ?? 0), 0);
     const todayAmt   = isCurrentMonth
-      ? transactions.filter(t => t.status === "completed" && t.date?.startsWith(today))
+      ? transactions.filter(t => isManualPayment(t) && t.date?.startsWith(today))
           .reduce((s, t) => s + (t.amount ?? 0), 0)
       : 0;
     const overdueStudents = students.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid));
