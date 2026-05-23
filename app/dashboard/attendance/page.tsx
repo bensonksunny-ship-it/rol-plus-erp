@@ -378,6 +378,17 @@ function CentreCard({
                       else if (status === "absent") a++;
 
                       if (isFuture) {
+                        if (date <= maxBreakDate()) {
+                          return (
+                            <td key={date}
+                              onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: onBreak ? "break" : null, futureOnly: true })}
+                              style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...(onBreak ? STATUS_COLOR.break : { background: "#f0f9ff", color: "#bae6fd" }) }}
+                              title="Mark break for this date"
+                            >
+                              {onBreak ? STATUS_SHORT.break : "·"}
+                            </td>
+                          );
+                        }
                         return <td key={date} style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, background: "#fafafa", color: "#e5e7eb", borderLeft: "1px solid #f3f4f6" }}>·</td>;
                       }
                       if (onBreak && !status) {
