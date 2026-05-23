@@ -940,14 +940,6 @@ function FinanceContent() {
                     <th style={st.th}>Student</th>
                     <th style={st.th}>Type</th>
                     <th style={st.th}>Amount</th>
-                    <th style={st.th}>
-                      Balance
-                      {!isCurrentMonth && (
-                        <span style={{ fontSize: 10, fontWeight: 400, color: "#b45309", display: "block" }}>
-                          as of {fmtMonth(selectedMonth)}
-                        </span>
-                      )}
-                    </th>
                     <th style={st.th}>Action</th>
                   </tr>
                 </thead>
@@ -1031,22 +1023,6 @@ function FinanceContent() {
                               <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                             ) : feeDueMap.has(s.uid) ? (
                               <span style={{ color: "#dc2626" }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
-                            ) : (
-                              <span style={{ color: "#9ca3af" }}>—</span>
-                            )}
-                          </td>
-
-                          {/* Balance / Status */}
-                          <td style={{ ...st.td, fontWeight: 700 }}>
-                            {paidMap.has(s.uid) ? (
-                              <span style={{ color: "#16a34a" }}>✓ Paid</span>
-                            ) : feeDueMap.has(s.uid) ? (
-                              <span style={{ color: "#dc2626", display: "flex", alignItems: "center", gap: 4 }}>
-                                {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
-                                <span style={st.overduePill}>Due</span>
-                              </span>
-                            ) : hasCredit ? (
-                              <span style={{ color: "#16a34a" }}>Credit {fmtINR(creditAmt)}</span>
                             ) : (
                               <span style={{ color: "#9ca3af" }}>—</span>
                             )}
