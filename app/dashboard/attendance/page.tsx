@@ -639,7 +639,7 @@ function AttendanceContent() {
             type="month"
             value={month}
             min={minMonth()}
-            max={currentMonth()}
+            max={maxBreakMonth()}
             onChange={e => setMonth(e.target.value)}
             style={inputStyle}
           />
