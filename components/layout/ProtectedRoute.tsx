@@ -51,7 +51,7 @@ export default function ProtectedRoute({ children, allowedRoles }: ProtectedRout
   // would cause a hydration mismatch and a blank flash on SSR.
   if (loading) return (
     <div style={{
-      height: "100vh",
+      height: "100dvh",
       display: "flex",
       alignItems: "center",
       justifyContent: "center",

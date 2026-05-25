@@ -89,6 +89,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const isMobile          = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const redirectingRef    = useRef(false);
+  const hasRestoredRef    = useRef(false);
 
   const canSeeAlerts = user?.role === ROLES.SUPER_ADMIN || user?.role === ROLES.ADMIN;
   const alertCount   = useAlertCount(canSeeAlerts);
@@ -105,6 +106,34 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     if (user.role === ROLES.TEACHER && pathname === "/dashboard") {
       router.replace("/dashboard/teacher");
     }
+  }, [loading, user, pathname, router]);
+
+  // Save current path so admin/super_admin can resume after reopening
+  useEffect(() => {
+    if (!user) return;
+    if (user.role !== ROLES.ADMIN && user.role !== ROLES.SUPER_ADMIN) return;
+    if (pathname === "/dashboard") return;
+    const save = () => localStorage.setItem("rol_nav", JSON.stringify({ path: pathname, ts: Date.now() }));
+    save();
+    const onHide = () => { if (document.visibilityState === "hidden") save(); };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, [pathname, user]);
+
+  // Restore last path if app reopened within 5 minutes
+  useEffect(() => {
+    if (hasRestoredRef.current || loading || !user) return;
+    if (user.role !== ROLES.ADMIN && user.role !== ROLES.SUPER_ADMIN) return;
+    if (pathname !== "/dashboard") return;
+    hasRestoredRef.current = true;
+    try {
+      const raw = localStorage.getItem("rol_nav");
+      if (!raw) return;
+      const { path, ts } = JSON.parse(raw) as { path: string; ts: number };
+      if (path && path !== "/dashboard" && Date.now() - ts < 300_000) {
+        router.replace(path);
+      }
+    } catch { /* ignore */ }
   }, [loading, user, pathname, router]);
 
   async function handleSignOut() {
@@ -341,7 +370,7 @@ const s: Record<string, React.CSSProperties> = {
     animation: "goldPulse 1.6s ease infinite",
   },
 
-  shell:   { display: "flex", height: "100vh", overflow: "hidden", background: "var(--color-bg)" },
+  shell:   { display: "flex", height: "100dvh", overflow: "hidden", background: "var(--color-bg)" },
   sidebar: {
     width: 220, flexShrink: 0,
     display: "flex", flexDirection: "column",
@@ -472,7 +501,7 @@ const s: Record<string, React.CSSProperties> = {
   },
 
   mobileShell:     { display: "flex", flexDirection: "column", height: "100dvh", overflow: "hidden", background: "var(--color-bg)" },
-  mobileTopbar:    { height: 52, flexShrink: 0, background: "var(--color-surface)", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", padding: "0 12px", gap: 10, zIndex: 100 },
+  mobileTopbar:    { flexShrink: 0, background: "var(--color-surface)", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", paddingTop: "max(14px, env(safe-area-inset-top, 14px))", paddingBottom: 10, paddingLeft: "max(12px, env(safe-area-inset-left, 12px))", paddingRight: "max(12px, env(safe-area-inset-right, 12px))", gap: 10, zIndex: 100 },
   hamburger:       { background: "none", border: "none", cursor: "pointer", padding: "6px 4px", display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 },
   hLine:           { display: "block", width: 20, height: 2, background: "var(--color-text-secondary)", borderRadius: 99 },
   mobileCenter:    { flex: 1, display: "flex", flexDirection: "column", gap: 1 },

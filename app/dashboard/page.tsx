@@ -99,6 +99,8 @@ function isoMonthStart(offset = 0): string {
   return d.toISOString().slice(0, 7);
 }
 
+const DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // PAGE SHELL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -286,6 +288,13 @@ function CommandCenter() {
   // Revenue goal (hardcoded target = 1.2× last month or 50000 floor)
   const revGoal = Math.max(50000, Math.round(revLastMonth * 1.2));
 
+  // Today's classes
+  const markedCentreIds = useMemo(() => new Set(todayAtt.map(a => a.centerId)), [todayAtt]);
+  const todayCentres = useMemo(() => {
+    const dow = DAY_ABBR[new Date(today + "T00:00:00").getDay()];
+    return centers.filter(c => ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(dow));
+  }, [centers, today]);
+
   // Alerts (priority issues)
   const alerts = useMemo(() => {
     const list: { icon: string; msg: string; level: "critical" | "warning" }[] = [];
@@ -351,6 +360,39 @@ function CommandCenter() {
           sub={totalPendingFees===0?"Collected":`${pendingFeeStudents} students`}
           color={totalPendingFees===0?"#16a34a":"#f59e0b"} />
       </div>
+
+      {/* ── TODAY'S CLASSES ── */}
+      {todayCentres.length > 0 && (
+        <div style={{ ...s.section, marginBottom: 16 }}>
+          <div style={{ ...s.sectionHeader, marginBottom: 14 }}>
+            <span style={s.sectionTitle}>Today's Classes</span>
+            <span style={s.sectionSub}>{new Date().toLocaleDateString("en-IN", { weekday: "long" })}</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {todayCentres.map(c => {
+              const marked = markedCentreIds.has(c.id);
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => router.push("/dashboard/attendance")}
+                  style={{
+                    background: marked ? "var(--color-success-dim)" : "var(--color-danger-dim)",
+                    border: `1px solid ${marked ? "var(--color-success-border)" : "var(--color-danger-border)"}`,
+                    borderRadius: 10, padding: "12px 16px",
+                    textAlign: "left", cursor: "pointer",
+                    display: "flex", flexDirection: "column", gap: 5, minWidth: 130,
+                  }}
+                >
+                  <div style={{ fontSize: 11, fontWeight: 700, color: marked ? "var(--color-success)" : "var(--color-danger)" }}>
+                    {marked ? "✓ Marked" : "! Pending"}
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── 3. TRENDS ROW ── */}
       <div style={s.twoCol}>
@@ -710,7 +752,8 @@ function AdminDashboard() {
   const [billing,   setBilling]   = useState<Record<string, BillingMonthStatus>>({});
   const [attStats,  setAttStats]  = useState<{ present: number; total: number } | null>(null);
   const [loading,   setLoading]   = useState(true);
-  const [completing, setCompleting] = useState<string | null>(null); // month being marked complete
+  const [completing,      setCompleting]      = useState<string | null>(null); // month being marked complete
+  const [markedCentreIds, setMarkedCentreIds] = useState<Set<string>>(new Set());
 
   // ── Load ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -747,11 +790,15 @@ function AdminDashboard() {
         setCenters(centersData);
 
         let attPresent = 0, attTotal = 0;
+        const markedIds = new Set<string>();
         attSnap.forEach(d => {
           attTotal++;
           if (d.data().status === "present") attPresent++;
+          const cid = d.data().centerId as string | undefined;
+          if (cid) markedIds.add(cid);
         });
         setAttStats({ present: attPresent, total: attTotal });
+        setMarkedCentreIds(markedIds);
 
         const txs = txSnap.docs.map(d => ({
           month:      ((d.data().date as string | undefined) ?? "").slice(0, 7),
@@ -833,6 +880,13 @@ function AdminDashboard() {
   const collectedThisMonth = thisMonthBilling?.collectedAmt ?? 0;
   const unbilledCount    = activeCount - billedThisMonth;
   const unpaidCount      = billedThisMonth - paidThisMonth;
+
+  // Today's classes
+  const todayDow    = useMemo(() => DAY_ABBR[new Date(today + "T00:00:00").getDay()], [today]);
+  const todayCentres = useMemo(() =>
+    centers.filter(c => ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(todayDow)),
+    [centers, todayDow]
+  );
 
   // ── Alerts ───────────────────────────────────────────────────────────────
   const alerts = useMemo(() => {
@@ -918,6 +972,39 @@ function AdminDashboard() {
           valueColor={pendingFeeAmt > 0 ? "var(--color-warning)" : "var(--color-success)"}
         />
       </div>
+
+      {/* ── TODAY'S CLASSES ── */}
+      {todayCentres.length > 0 && (
+        <div style={adm.section}>
+          <div style={adm.secHeader}>
+            <span style={adm.secTitle}>Today's Classes</span>
+            <span style={adm.secSub}>{new Date().toLocaleDateString("en-IN", { weekday: "long" })}</span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {todayCentres.map(c => {
+              const marked = markedCentreIds.has(c.id);
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => router.push("/dashboard/attendance")}
+                  style={{
+                    background: marked ? "var(--color-success-dim)" : "var(--color-danger-dim)",
+                    border: `1px solid ${marked ? "var(--color-success-border)" : "var(--color-danger-border)"}`,
+                    borderRadius: 10, padding: "12px 16px",
+                    textAlign: "left", cursor: "pointer",
+                    display: "flex", flexDirection: "column", gap: 5, minWidth: 130,
+                  }}
+                >
+                  <div style={{ fontSize: 11, fontWeight: 700, color: marked ? "var(--color-success)" : "var(--color-danger)" }}>
+                    {marked ? "✓ Marked" : "! Pending"}
+                  </div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ── MONTHLY FINANCE PANEL ── */}
       <div style={adm.section}>
