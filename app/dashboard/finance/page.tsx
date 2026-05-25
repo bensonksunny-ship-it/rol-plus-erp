@@ -878,16 +878,20 @@ function FinanceContent() {
                 <tbody>
                   {filteredStudents.map((s) => {
                     const fee    = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
-                    const isDue  = feeDueMap.has(s.uid) && !paidMap.has(s.uid);
+                    const hasDue = feeDueMap.has(s.uid);
+                    const isPaid = paidMap.has(s.uid);
+                    const isDue  = hasDue && !isPaid;
                     return (
                       <tr key={s.uid} style={{ background: isDue ? "#fff7f7" : "var(--color-surface)" }}>
                         <td style={st.td}>{s.name}</td>
                         <td style={{ ...st.td, textAlign: "right" }}>{fmtINR(fee)}</td>
                         <td style={{ ...st.td, textAlign: "center" }}>
                           {isDue ? (
-                            <span style={{ color: "#dc2626", fontWeight: 600 }}>Due {fmtINR(s.balance)}</span>
-                          ) : (
+                            <span style={{ color: "#dc2626", fontWeight: 600 }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                          ) : isPaid ? (
                             <span style={{ color: "#16a34a", fontWeight: 600 }}>Paid</span>
+                          ) : (
+                            <span style={{ color: "#9ca3af" }}>—</span>
                           )}
                         </td>
                       </tr>
