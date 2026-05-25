@@ -15,9 +15,9 @@ export interface FeeStructure {
 
 export type CreateFeeStructureInput = Omit<FeeStructure, "id" | "createdAt" | "updatedAt">;
 
-export type PaymentMethod = "UPI" | "Cash" | "Bank" | "auto" | "auto-monthly";
-export type TransactionStatus = "completed" | "pending" | "failed";
-export type TransactionKind = "payment" | "deposit" | "charge";
+export type PaymentMethod = "UPI" | "Cash" | "Bank" | "auto" | "auto-monthly" | "manual";
+export type TransactionStatus = "completed" | "pending" | "failed" | "due";
+export type TransactionKind = "payment" | "deposit" | "charge" | "fee_due";
 
 export interface Transaction {
   id:            string;

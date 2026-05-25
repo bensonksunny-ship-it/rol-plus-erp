@@ -200,14 +200,56 @@ function CommandCenter() {
   const todayPct     = todayTotal > 0 ? Math.round((todayPresent / todayTotal) * 100) : null;
 
   // KPI: revenue this month
-  const completedTx  = useMemo(() => transactions.filter(t => t.status === "completed"), [transactions]);
+  // Only manual payment receipts — excludes fee_due records, auto-charges, and deposits
+  // (mirrors the isManualPayment filter in the finance page summary)
+  const completedTx  = useMemo(() => transactions.filter(t => {
+    const raw = t as unknown as Record<string, unknown>;
+    if (t.status !== "completed") return false;
+    const type   = (raw.type   as string) ?? "";
+    const method = (raw.method as string) ?? "";
+    return type !== "fee_due" && type !== "charge" && method !== "auto" && method !== "auto-monthly";
+  }), [transactions]);
   const revThisMonth = useMemo(() => completedTx.filter(t => t.date?.startsWith(thisMonth)).reduce((s, t) => s + t.amount, 0), [completedTx, thisMonth]);
   const revLastMonth = useMemo(() => completedTx.filter(t => t.date?.startsWith(lastMonth)).reduce((s, t) => s + t.amount, 0), [completedTx, lastMonth]);
   const revGrowthPct = revLastMonth > 0 ? Math.round(((revThisMonth - revLastMonth) / revLastMonth) * 100) : null;
 
-  // KPI: pending fees
-  const totalPendingFees   = useMemo(() => students.filter(s => s.currentBalance > 0).reduce((s, st) => s + st.currentBalance, 0), [students]);
-  const pendingFeeStudents = students.filter(s => s.currentBalance > 0).length;
+  // KPI: pending fees — mirrors finance page: fee_due tx for this month, not yet covered by a manual payment
+  const feeDueMap = useMemo(() => {
+    const m = new Map<string, number>();
+    transactions.forEach(tx => {
+      const raw = tx as unknown as Record<string, unknown>;
+      if (!tx.studentUid || (raw.type as string) !== "fee_due") return;
+      const bm = (raw.billingMonth as string) || tx.date.slice(0, 7);
+      if (bm === thisMonth) m.set(tx.studentUid, Number(raw.amount ?? 0));
+    });
+    return m;
+  }, [transactions, thisMonth]);
+
+  const paidSet = useMemo(() => {
+    const s = new Set<string>();
+    transactions.forEach(tx => {
+      const raw = tx as unknown as Record<string, unknown>;
+      if (!tx.studentUid || tx.status !== "completed") return;
+      if (!tx.date.startsWith(thisMonth)) return;
+      const type   = (raw.type   as string) ?? "";
+      const method = (raw.method as string) ?? "";
+      if (type === "fee_due" || type === "charge" || method === "auto" || method === "auto-monthly") return;
+      s.add(tx.studentUid);
+    });
+    return s;
+  }, [transactions, thisMonth]);
+
+  const totalPendingFees = useMemo(() => {
+    let amt = 0;
+    feeDueMap.forEach((fee, uid) => { if (!paidSet.has(uid)) amt += fee; });
+    return amt;
+  }, [feeDueMap, paidSet]);
+
+  const pendingFeeStudents = useMemo(() => {
+    let n = 0;
+    feeDueMap.forEach((_, uid) => { if (!paidSet.has(uid)) n++; });
+    return n;
+  }, [feeDueMap, paidSet]);
 
   // Centre rows
   const teacherNameMap = useMemo(() => Object.fromEntries(teachers.map(t => [t.uid, t.displayName])), [teachers]);
@@ -217,7 +259,7 @@ function CommandCenter() {
     return centers.map(center => {
       const cStudents         = students.filter(s => s.centerId === center.id);
       const activeCount       = cStudents.filter(s => s.status === "active").length;
-      const pendingFeeCount   = cStudents.filter(s => s.currentBalance > 0).length;
+      const pendingFeeCount   = cStudents.filter(s => feeDueMap.has(s.uid) && !paidSet.has(s.uid)).length;
       const cGroupCount       = cStudents.filter(s => s.classType === "group").length;
       const cPersonalCount    = cStudents.filter(s => s.classType === "personal").length;
       const cAtt7d          = attendance.filter(a => a.centerId === center.id && a.date >= days7ago);
@@ -238,7 +280,7 @@ function CommandCenter() {
         pendingFeeCount, revenue30d: rev30, growthPct,
       };
     }).sort((a, b) => (b.attendancePct ?? -1) - (a.attendancePct ?? -1));
-  }, [centers, students, attendance, completedTx, teacherNameMap, days7ago, days30ago]);
+  }, [centers, students, attendance, completedTx, teacherNameMap, days7ago, days30ago, feeDueMap, paidSet]);
 
   // Teacher leaderboard
   const teacherPerf = useMemo(() => teachers.map(t => {
@@ -748,7 +790,7 @@ function AdminDashboard() {
   const [students,  setStudents]  = useState<AdminStudentDoc[]>([]);
   const [teachers,  setTeachers]  = useState<AdminTeacherDoc[]>([]);
   const [centers,   setCenters]   = useState<Center[]>([]);
-  const [txList,    setTxList]    = useState<{ month: string; amount: number; studentUid: string; status: string }[]>([]);
+  const [txList,    setTxList]    = useState<{ month: string; amount: number; studentUid: string; status: string; type: string; method: string; billingMonth: string }[]>([]);
   const [billing,   setBilling]   = useState<Record<string, BillingMonthStatus>>({});
   const [attStats,  setAttStats]  = useState<{ present: number; total: number } | null>(null);
   const [loading,   setLoading]   = useState(true);
@@ -801,10 +843,13 @@ function AdminDashboard() {
         setMarkedCentreIds(markedIds);
 
         const txs = txSnap.docs.map(d => ({
-          month:      ((d.data().date as string | undefined) ?? "").slice(0, 7),
-          amount:     Number(d.data().amount ?? 0),
-          studentUid: (d.data().studentUid ?? "") as string,
-          status:     (d.data().status ?? "") as string,
+          month:        ((d.data().date as string | undefined) ?? "").slice(0, 7),
+          amount:       Number(d.data().amount ?? 0),
+          studentUid:   (d.data().studentUid   ?? "") as string,
+          status:       (d.data().status        ?? "") as string,
+          type:         (d.data().type          ?? "") as string,
+          method:       (d.data().method        ?? "") as string,
+          billingMonth: (d.data().billingMonth  ?? "") as string,
         }));
         setTxList(txs);
 
@@ -867,8 +912,37 @@ function AdminDashboard() {
   const activeStudents  = students.filter(s => s.status === "active").length;
   const groupStudents   = students.filter(s => s.classType === "group").length;
   const personalStudents = students.filter(s => s.classType === "personal").length;
-  const pendingFeeAmt   = students.filter(s => s.currentBalance > 0).reduce((acc, s) => acc + s.currentBalance, 0);
-  const pendingFeeCount = students.filter(s => s.currentBalance > 0).length;
+  const feeDueMap = useMemo(() => {
+    const m = new Map<string, number>();
+    txList.forEach(tx => {
+      if (!tx.studentUid || tx.type !== "fee_due") return;
+      const bm = tx.billingMonth || tx.month;
+      if (bm === thisMonth) m.set(tx.studentUid, tx.amount);
+    });
+    return m;
+  }, [txList, thisMonth]);
+
+  const paidSet = useMemo(() => {
+    const s = new Set<string>();
+    txList.forEach(tx => {
+      if (!tx.studentUid || tx.status !== "completed" || tx.month !== thisMonth) return;
+      if (tx.type === "fee_due" || tx.type === "charge" || tx.method === "auto" || tx.method === "auto-monthly") return;
+      s.add(tx.studentUid);
+    });
+    return s;
+  }, [txList, thisMonth]);
+
+  const pendingFeeAmt = useMemo(() => {
+    let amt = 0;
+    feeDueMap.forEach((fee, uid) => { if (!paidSet.has(uid)) amt += fee; });
+    return amt;
+  }, [feeDueMap, paidSet]);
+
+  const pendingFeeCount = useMemo(() => {
+    let n = 0;
+    feeDueMap.forEach((_, uid) => { if (!paidSet.has(uid)) n++; });
+    return n;
+  }, [feeDueMap, paidSet]);
   const attPct          = attStats && attStats.total > 0 ? Math.round((attStats.present / attStats.total) * 100) : null;
   const attBad          = attPct !== null && attPct < 60;
 

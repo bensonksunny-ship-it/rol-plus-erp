@@ -1406,21 +1406,24 @@ function FinanceContent() {
                                     ) : (
                                       <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
                                         {studentTx.map(tx => {
-                                          const isPayment  = tx.type === "payment" || (!tx.type && tx.amount > 0 && tx.method !== "auto");
+                                          const isFeedue   = tx.type === "fee_due";
                                           const isDeposit  = tx.type === "deposit";
                                           const isCharge   = tx.type === "charge" || tx.method === "auto";
                                           const isPending  = tx.status === "pending";
                                           const isFailed   = tx.status === "failed";
 
-                                          const typeLabel = isDeposit ? "Deposit" : isCharge ? "Auto-charge" : "Payment";
-                                          const typeColor = isDeposit
+                                          const typeLabel = isFeedue ? "Fee Due" : isDeposit ? "Deposit" : isCharge ? "Auto-charge" : "Payment";
+                                          const typeColor = isFeedue
+                                            ? { bg: "#fffbeb", border: "#fde68a", text: "#b45309" }
+                                            : isDeposit
                                             ? { bg: "#fdf4ff", border: "#e9d5ff", text: "#7e22ce" }
                                             : isCharge
                                             ? { bg: "#fff7ed", border: "#fed7aa", text: "#c2410c" }
                                             : { bg: "#f0fdf4", border: "#86efac", text: "#15803d" };
 
-                                          const methodLabel = tx.method === "auto" || tx.method === "auto-monthly"
-                                            ? "Auto" : tx.method;
+                                          const methodLabel = isFeedue ? "Generated"
+                                            : tx.method === "auto" || tx.method === "auto-monthly" ? "Auto"
+                                            : tx.method;
 
                                           const displayMonth = tx.billingMonth
                                             ? fmtMonth(tx.billingMonth)
@@ -1448,8 +1451,8 @@ function FinanceContent() {
                                               </span>
 
                                               {/* Amount */}
-                                              <span style={{ fontWeight: 700, color: isCharge ? "#c2410c" : "#16a34a", minWidth: 70 }}>
-                                                {isCharge ? "−" : "+"}{fmtINR(tx.amount)}
+                                              <span style={{ fontWeight: 700, color: (isCharge || isFeedue) ? "#c2410c" : "#16a34a", minWidth: 70 }}>
+                                                {(isCharge || isFeedue) ? "−" : "+"}{fmtINR(tx.amount)}
                                               </span>
 
                                               {/* Payment date */}
