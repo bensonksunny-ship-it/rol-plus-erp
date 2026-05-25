@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background -->
+  <rect width="512" height="512" rx="114" ry="114" fill="#0f172a"/>
+  <!-- Amber accent bar top -->
+  <rect x="0" y="0" width="512" height="8" rx="0" fill="#f59e0b" opacity="0.6"/>
+  <!-- R+ text -->
+  <text
+    x="256"
+    y="310"
+    text-anchor="middle"
+    font-family="system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+    font-size="200"
+    font-weight="800"
+    letter-spacing="-8"
+    fill="#f59e0b"
+  >R+</text>
+  <!-- Subtle tagline -->
+  <text
+    x="256"
+    y="390"
+    text-anchor="middle"
+    font-family="system-ui, -apple-system, sans-serif"
+    font-size="42"
+    font-weight="500"
+    fill="#475569"
+    letter-spacing="6"
+  >ROL's PLUS</text>
+</svg>

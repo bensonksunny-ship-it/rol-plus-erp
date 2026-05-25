@@ -133,14 +133,13 @@ export default function AttendancePage() {
 // ─── Modal ────────────────────────────────────────────────────────────────────
 
 interface ModalState {
-  centreId:   string;
-  studentUid: string;
-  studentName:string;
-  date:       string;
-  current:    AttendanceStatus | null;
-  // When true, the modal only allows marking "break" — used for future dates
-  // where Present/Absent/Cancelled don't make sense yet.
-  futureOnly: boolean;
+  centreId:      string;
+  studentUid:    string;
+  studentName:   string;
+  date:          string;
+  current:       AttendanceStatus | null;
+  futureOnly:    boolean;
+  upcomingDates: string[]; // scheduled class dates from today → maxBreakDate
 }
 
 function CellModal({
@@ -150,7 +149,7 @@ function CellModal({
   saving,
 }: {
   state:   ModalState;
-  onSave:  (status: AttendanceStatus) => void;
+  onSave:  (status: AttendanceStatus, dates: string[]) => void;
   onClose: () => void;
   saving:  boolean;
 }) {
@@ -158,10 +157,26 @@ function CellModal({
   const [pick, setPick] = useState<AttendanceStatus>(
     state.current && allowed.includes(state.current) ? state.current : allowed[0],
   );
+  const [breakDates, setBreakDates] = useState<Set<string>>(new Set([state.date]));
+
+  const toggleDate = (d: string) => setBreakDates(prev => {
+    const next = new Set(prev);
+    if (next.has(d)) { next.delete(d); } else { next.add(d); }
+    return next;
+  });
+
+  const handleSaveClick = () => {
+    if (pick === "break" && state.upcomingDates.length > 0) {
+      const selected = new Set([state.date, ...Array.from(breakDates)]);
+      onSave(pick, Array.from(selected));
+    } else {
+      onSave(pick, [state.date]);
+    }
+  };
 
   return (
     <div style={overlay} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={modal}>
+      <div style={{ ...modal, maxHeight: "90vh", overflowY: "auto" }}>
         <div style={{ fontWeight: 700, fontSize: 15, color: "#111827", marginBottom: 4 }}>
           {state.studentName}
         </div>
@@ -193,9 +208,35 @@ function CellModal({
             );
           })}
         </div>
+
+        {/* Multi-date break selector */}
+        {pick === "break" && state.upcomingDates.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#0369a1", marginBottom: 8 }}>
+              Also mark break for upcoming classes:
+            </div>
+            <div style={{ maxHeight: 200, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2, border: "1px solid #bae6fd", borderRadius: 8, padding: 8 }}>
+              {state.upcomingDates.map(d => {
+                const checked = breakDates.has(d);
+                const isClicked = d === state.date;
+                return (
+                  <label key={d} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer", padding: "5px 8px", borderRadius: 6, background: checked ? "#e0f2fe" : "transparent", color: checked ? "#0369a1" : "#374151" }}>
+                    <input type="checkbox" checked={checked} onChange={() => { if (!isClicked) toggleDate(d); }} style={{ cursor: isClicked ? "default" : "pointer", accentColor: "#0369a1" }} />
+                    {new Date(d + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
+                    {isClicked && <span style={{ marginLeft: "auto", fontSize: 10, color: "#9ca3af" }}>this class</span>}
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>
+              {breakDates.size} class{breakDates.size !== 1 ? "es" : ""} selected
+            </div>
+          </div>
+        )}
+
         <div style={{ display: "flex", gap: 8, marginTop: 20 }}>
           <button onClick={onClose} style={btnGhost} disabled={saving}>Cancel</button>
-          <button onClick={() => onSave(pick)} style={btnPrimary} disabled={saving}>
+          <button onClick={handleSaveClick} style={btnPrimary} disabled={saving || (pick === "break" && state.upcomingDates.length > 0 && breakDates.size === 0)}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>
@@ -306,6 +347,22 @@ function CentreCard({
     return m;
   }, [attendance]);
 
+  // upcoming scheduled class dates from today → 90 days ahead (for break multi-select)
+  const upcomingDates = useMemo(() => {
+    const maxD  = maxBreakDate();
+    const dates: string[] = [];
+    const d     = new Date(today + "T00:00:00");
+    const end   = new Date(maxD  + "T00:00:00");
+    while (d <= end) {
+      const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+      if (centre.daysOfWeek.includes(DAY_ABBR[d.getDay()]) || extraDates.has(iso)) {
+        dates.push(iso);
+      }
+      d.setDate(d.getDate() + 1);
+    }
+    return dates;
+  }, [today, centre.daysOfWeek, extraDates]);
+
   if (students.length === 0) return null;
 
   return (
@@ -314,7 +371,7 @@ function CentreCard({
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div>
           <span style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>
-            {centre.code ? `[${centre.code}] ` : ""}{centre.name}
+            {centre.name}
           </span>
           {centre.daysOfWeek.length > 0 && (
             <span style={{ marginLeft: 10, fontSize: 11, color: "#6b7280", background: "#f3f4f6", padding: "2px 8px", borderRadius: 99 }}>
@@ -359,9 +416,30 @@ function CentreCard({
               </tr>
             </thead>
             <tbody>
-              {students.map((st, i) => {
+              {students.flatMap((st, i) => {
                 let p = 0, a = 0;
-                return (
+                const colCount  = scheduledDates.length + 4;
+                const prevType  = i > 0 ? students[i - 1].classType : null;
+                const headers   = [];
+                if (i === 0 && st.classType === "group") {
+                  headers.push(
+                    <tr key="section-group">
+                      <td colSpan={colCount} style={{ background: "#f0fdf4", color: "#166534", fontSize: 11, fontWeight: 700, padding: "4px 10px", letterSpacing: "0.04em" }}>
+                        Group Classes
+                      </td>
+                    </tr>
+                  );
+                } else if (st.classType === "personal" && prevType !== "personal") {
+                  headers.push(
+                    <tr key="section-personal">
+                      <td colSpan={colCount} style={{ background: "#f5f3ff", color: "#6d28d9", fontSize: 11, fontWeight: 700, padding: "4px 10px", letterSpacing: "0.04em" }}>
+                        Individual Classes
+                      </td>
+                    </tr>
+                  );
+                }
+                return [
+                  ...headers,
                   <tr key={st.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
                     <td style={{ ...td, minWidth: 140, whiteSpace: "nowrap" }}>
                       <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
@@ -381,7 +459,7 @@ function CentreCard({
                         if (date <= maxBreakDate()) {
                           return (
                             <td key={date}
-                              onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: onBreak ? "break" : null, futureOnly: true })}
+                              onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: onBreak ? "break" : null, futureOnly: true, upcomingDates })}
                               style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...(onBreak ? STATUS_COLOR.break : { background: "#f0f9ff", color: "#bae6fd" }) }}
                               title="Mark break for this date"
                             >
@@ -393,7 +471,7 @@ function CentreCard({
                       }
                       if (onBreak && !status) {
                         return (
-                          <td key={date} onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break", futureOnly: false })}
+                          <td key={date} onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break", futureOnly: false, upcomingDates })}
                             style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...STATUS_COLOR.break }}>
                             {STATUS_SHORT.break}
                           </td>
@@ -403,7 +481,7 @@ function CentreCard({
                       const sc = status ? STATUS_COLOR[status] : { bg: "#f9fafb", fg: "#d1d5db" };
                       return (
                         <td key={date}
-                          onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status, futureOnly: false })}
+                          onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status, futureOnly: false, upcomingDates })}
                           style={{
                             ...td, textAlign: "center", padding: "5px 3px", minWidth: 38,
                             cursor: "pointer", borderLeft: "1px solid #f3f4f6",
@@ -422,21 +500,13 @@ function CentreCard({
                       {p + a > 0 ? `${Math.round(p/(p+a)*100)}%` : "—"}
                     </td>
                   </tr>
-                );
+                ];
               })}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* Legend */}
-      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-        {ALL_STATUSES.map(s => (
-          <span key={s} style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4, color: STATUS_COLOR[s].fg, background: STATUS_COLOR[s].bg, padding: "2px 8px", borderRadius: 99 }}>
-            <b>{STATUS_SHORT[s]}</b> {STATUS_LABEL[s]}
-          </span>
-        ))}
-      </div>
     </div>
   );
 }
@@ -574,24 +644,28 @@ function AttendanceContent() {
   }, [centres, month, loadAll]);
 
   // ── Save attendance ───────────────────────────────────────────────────────
-  async function handleSave(status: AttendanceStatus) {
+  async function handleSave(status: AttendanceStatus, dates: string[]) {
     if (!modal || !user) return;
     setSaving(true);
+    const datesToSave = dates.length > 0 ? dates : [modal.date];
     try {
-      await saveCentreAttendance({
-        studentUid: modal.studentUid,
-        centerId:   modal.centreId,
-        date:       modal.date,
-        status,
-        markedBy:   user.uid,
-      });
-      // Update local attMap
+      await Promise.all(datesToSave.map(date =>
+        saveCentreAttendance({
+          studentUid: modal.studentUid,
+          centerId:   modal.centreId,
+          date,
+          status,
+          markedBy:   user.uid,
+        })
+      ));
       setAttMap(prev => {
-        const next    = new Map(prev);
-        const recs    = [...(next.get(modal.centreId) ?? [])];
-        const idx     = recs.findIndex(r => r.studentUid === modal.studentUid && r.date === modal.date);
-        if (idx >= 0) recs[idx] = { ...recs[idx], status };
-        else recs.push({ id: `${modal.studentUid}|${modal.date}`, studentUid: modal.studentUid, date: modal.date, status });
+        const next = new Map(prev);
+        const recs = [...(next.get(modal.centreId) ?? [])];
+        datesToSave.forEach(date => {
+          const idx = recs.findIndex(r => r.studentUid === modal.studentUid && r.date === date);
+          if (idx >= 0) recs[idx] = { ...recs[idx], status };
+          else recs.push({ id: `${modal.studentUid}|${date}`, studentUid: modal.studentUid, date, status });
+        });
         next.set(modal.centreId, recs);
         return next;
       });
@@ -661,6 +735,17 @@ function AttendanceContent() {
         <div style={{ textAlign: "center", padding: "64px 0" }}>
           <div style={{ fontSize: 36, marginBottom: 10 }}>🏫</div>
           <p style={{ color: "#6b7280", fontSize: 14 }}>No centres available.</p>
+        </div>
+      )}
+
+      {/* Legend — shown once for the whole page */}
+      {!loading && centres.length > 0 && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
+          {ALL_STATUSES.map(s => (
+            <span key={s} style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4, color: STATUS_COLOR[s].fg, background: STATUS_COLOR[s].bg, padding: "2px 8px", borderRadius: 99 }}>
+              <b>{STATUS_SHORT[s]}</b> {STATUS_LABEL[s]}
+            </span>
+          ))}
         </div>
       )}
 

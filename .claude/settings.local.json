@@ -5,7 +5,8 @@
       "Bash(git commit -m ' *)",
       "Bash(npx tsc *)",
       "Bash(git push *)",
-      "Bash(npx vercel *)"
+      "Bash(npx vercel *)",
+      "Bash(node scripts/generate-icons.js)"
     ]
   }
 }
