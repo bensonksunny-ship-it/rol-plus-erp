@@ -12,7 +12,10 @@
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
       "Bash(grep -v \"^[0-9]*:[ ]*const \\\\|^[0-9]*:[ ]*//\")",
       "Bash(grep -E \"^[0-9]{3,4}:\")",
-      "Bash(awk -F: '{if \\($1+0 > 800\\) print}')"
+      "Bash(awk -F: '{if \\($1+0 > 800\\) print}')",
+      "Bash(taskkill /F /IM node.exe)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Get-NetTCPConnection *)"
     ]
   }
 }

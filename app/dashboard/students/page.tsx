@@ -301,7 +301,7 @@ function StudentsContent() {
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return baseList.filter(s => {
+    const list = baseList.filter(s => {
       if (q && !s.name.toLowerCase().includes(q) && !s.email.toLowerCase().includes(q)
            && !s.studentID.toLowerCase().includes(q) && !s.admissionNo.toLowerCase().includes(q))
         return false;
@@ -313,15 +313,25 @@ function StudentsContent() {
       if (filterClassType !== "all" && s.classType !== filterClassType) return false;
       return true;
     });
-  }, [baseList, search, filterCenter, filterCourse, filterInstrument, filterFeeStatus]);
+    return list;
+  }, [baseList, search, filterCenter, filterCourse, filterInstrument, filterFeeStatus, filterClassType]);
 
-  const groupedByCenter = useMemo(() => {
+  function buildCenterGroups(students: StudentRow[]) {
     const map = new Map<string, { centerId: string; centerName: string; students: StudentRow[] }>();
-    filtered.forEach(s => {
+    students.forEach(s => {
       if (!map.has(s.centerId)) map.set(s.centerId, { centerId: s.centerId, centerName: s.centerName, students: [] });
       map.get(s.centerId)!.students.push(s);
     });
     return Array.from(map.values()).sort((a, b) => a.centerName.localeCompare(b.centerName));
+  }
+
+  const groupedByCenter = useMemo(() => {
+    const groupStudents    = filtered.filter(s => s.classType !== "personal");
+    const personalStudents = filtered.filter(s => s.classType === "personal");
+    return {
+      group:    buildCenterGroups(groupStudents),
+      personal: buildCenterGroups(personalStudents),
+    };
   }, [filtered]);
 
   // ── Create student ─────────────────────────────────────────────────────────
@@ -769,34 +779,55 @@ function StudentsContent() {
         />
       ) : (
         <div>
-          {groupedByCenter.map(group => (
-            <div key={group.centerId} style={{ marginBottom: 28 }}>
-              <div style={{
-                display: "flex", alignItems: "center", gap: 8,
-                marginBottom: 12, paddingBottom: 8,
-                borderBottom: "1px solid #e5e7eb",
-              }}>
-                <span style={{ fontSize: 16 }}>🏫</span>
-                <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{group.centerName}</span>
-                <span style={{
-                  background: "#ede9fe", color: "#6d28d9",
-                  fontSize: 11, fontWeight: 700,
-                  padding: "2px 8px", borderRadius: 99,
-                }}>
-                  {group.students.length}
-                </span>
+          {/* ── Group classes ── */}
+          {groupedByCenter.group.length > 0 && (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#6d28d9", letterSpacing: 0.5, textTransform: "uppercase" as const, marginBottom: 14, paddingBottom: 6, borderBottom: "2px solid #ede9fe" }}>
+                👥 Group Classes
               </div>
-              <div style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
-                gap: 12,
-              }}>
-                {group.students.map(s => (
-                  <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)} />
-                ))}
+              {groupedByCenter.group.map(group => (
+                <div key={group.centerId} style={{ marginBottom: 28 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid #e5e7eb" }}>
+                    <span style={{ fontSize: 16 }}>🏫</span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{group.centerName}</span>
+                    <span style={{ background: "#ede9fe", color: "#6d28d9", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99 }}>
+                      {group.students.length}
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
+                    {group.students.map(s => (
+                      <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* ── Individual classes ── */}
+          {groupedByCenter.personal.length > 0 && (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#92400e", letterSpacing: 0.5, textTransform: "uppercase" as const, marginBottom: 14, marginTop: groupedByCenter.group.length > 0 ? 24 : 0, paddingBottom: 6, borderBottom: "2px solid #fef3c7" }}>
+                👤 Individual Classes
               </div>
-            </div>
-          ))}
+              {groupedByCenter.personal.map(group => (
+                <div key={group.centerId} style={{ marginBottom: 28 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid #e5e7eb" }}>
+                    <span style={{ fontSize: 16 }}>🏫</span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{group.centerName}</span>
+                    <span style={{ background: "#fef3c7", color: "#92400e", fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99 }}>
+                      {group.students.length}
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
+                    {group.students.map(s => (
+                      <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
 
@@ -1114,6 +1145,7 @@ function BreakRequestsPanel({ requests, centerMap, onApprove, onReject }: {
                   <input
                     type="date"
                     value={startDate}
+                    min={todayStr()}
                     onChange={e => setStartDates(prev => ({ ...prev, [s.id]: e.target.value }))}
                     style={{ fontSize: 12, border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", color: "#111827", outline: "none" }}
                   />
@@ -1290,6 +1322,7 @@ function BreakRequestModal({ student, onClose, onRequested, onApprovedDirectly, 
               <input
                 type="date"
                 value={startDate}
+                min={todayStr()}
                 onChange={e => setStartDate(e.target.value)}
                 required
                 style={{ border: "1px solid #d1d5db", borderRadius: 7, padding: "8px 12px", fontSize: 14, outline: "none", color: "#111827" }}

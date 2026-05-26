@@ -140,6 +140,7 @@ interface ModalState {
   current:       AttendanceStatus | null;
   futureOnly:    boolean;
   upcomingDates: string[]; // scheduled class dates from today → maxBreakDate
+  pastBreakDates?: string[]; // unrecorded past break dates for this student
 }
 
 function CellModal({
@@ -157,7 +158,10 @@ function CellModal({
   const [pick, setPick] = useState<AttendanceStatus>(
     state.current && allowed.includes(state.current) ? state.current : allowed[0],
   );
-  const [breakDates, setBreakDates] = useState<Set<string>>(new Set([state.date]));
+  // Pre-select past unrecorded breaks if available, otherwise just the clicked date.
+  const [breakDates, setBreakDates] = useState<Set<string>>(
+    new Set(state.pastBreakDates?.length ? state.pastBreakDates : [state.date])
+  );
 
   const toggleDate = (d: string) => setBreakDates(prev => {
     const next = new Set(prev);
@@ -166,7 +170,10 @@ function CellModal({
   });
 
   const handleSaveClick = () => {
-    if (pick === "break" && state.upcomingDates.length > 0) {
+    if (pick === "break" && state.pastBreakDates?.length) {
+      // Save all selected past break dates (breakDates already seeded from pastBreakDates)
+      onSave(pick, Array.from(breakDates).length > 0 ? Array.from(breakDates) : [state.date]);
+    } else if (pick === "break" && state.upcomingDates.length > 0) {
       const selected = new Set([state.date, ...Array.from(breakDates)]);
       onSave(pick, Array.from(selected));
     } else {
@@ -209,8 +216,35 @@ function CellModal({
           })}
         </div>
 
-        {/* Multi-date break selector */}
-        {pick === "break" && state.upcomingDates.length > 0 && (
+        {/* Past unrecorded break dates — shown when teacher clicks a faded ☕ cell */}
+        {pick === "break" && state.pastBreakDates && state.pastBreakDates.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#b45309", marginBottom: 4 }}>
+              Unrecorded past break dates
+            </div>
+            <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+              These classes were not recorded yet. Uncheck any you don&apos;t want to save.
+            </div>
+            <div style={{ maxHeight: 200, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2, border: "1px solid #fcd34d", borderRadius: 8, padding: 8 }}>
+              {state.pastBreakDates.map(d => {
+                const checked = breakDates.has(d);
+                return (
+                  <label key={d} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer", padding: "5px 8px", borderRadius: 6, background: checked ? "#fef3c7" : "transparent", color: checked ? "#92400e" : "#374151" }}>
+                    <input type="checkbox" checked={checked} onChange={() => toggleDate(d)} style={{ cursor: "pointer", accentColor: "#b45309" }} />
+                    {new Date(d + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
+                    {d === state.date && <span style={{ marginLeft: "auto", fontSize: 10, color: "#9ca3af" }}>this class</span>}
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: "#6b7280", marginTop: 6 }}>
+              {breakDates.size} date{breakDates.size !== 1 ? "s" : ""} will be saved as Break
+            </div>
+          </div>
+        )}
+
+        {/* Multi-date break selector for upcoming classes */}
+        {pick === "break" && state.upcomingDates.length > 0 && !state.pastBreakDates?.length && (
           <div style={{ marginTop: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: "#0369a1", marginBottom: 8 }}>
               Also mark break for upcoming classes:
@@ -236,7 +270,7 @@ function CellModal({
 
         <div style={{ display: "flex", gap: 8, marginTop: 20 }}>
           <button onClick={onClose} style={btnGhost} disabled={saving}>Cancel</button>
-          <button onClick={handleSaveClick} style={btnPrimary} disabled={saving || (pick === "break" && state.upcomingDates.length > 0 && breakDates.size === 0)}>
+          <button onClick={handleSaveClick} style={btnPrimary} disabled={saving || (pick === "break" && (state.pastBreakDates?.length ? breakDates.size === 0 : state.upcomingDates.length > 0 && breakDates.size === 0))}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>
@@ -445,54 +479,80 @@ function CentreCard({
                       <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
                       {st.instrument && <div style={{ fontSize: 10, color: "#9ca3af" }}>{st.instrument}</div>}
                     </td>
-                    {scheduledDates.map(date => {
-                      const onBreak    = !!st.breakStartDate && date >= st.breakStartDate;
-                      const isFuture   = date > today;
-                      const statusKey  = `${st.uid}|${date}`;
-                      const status     = attMap.get(statusKey) ?? null;
+                    {(() => {
+                      // Bug 1 fix: personal students use their own classDays for
+                      // the multi-date break selector, not the center's schedule.
+                      const studentUpcoming =
+                        st.classType === "personal" && st.classDays.length > 0
+                          ? upcomingDates.filter(d => st.classDays.includes(dowOf(d)))
+                          : upcomingDates;
 
-                      // Count for summary
-                      if (status === "present") p++;
-                      else if (status === "absent") a++;
+                      // Bug 2 fix: collect all past unrecorded break dates for this
+                      // student so the modal can offer to save them all at once.
+                      const pastUnrecordedBreaks = st.breakStartDate
+                        ? scheduledDates.filter(d =>
+                            d <= today &&
+                            d >= st.breakStartDate! &&
+                            !attMap.has(`${st.uid}|${d}`)
+                          )
+                        : [];
 
-                      if (isFuture) {
-                        if (date <= maxBreakDate()) {
+                      return scheduledDates.map(date => {
+                        const onBreak   = !!st.breakStartDate && date >= st.breakStartDate;
+                        const isFuture  = date > today;
+                        const statusKey = `${st.uid}|${date}`;
+                        const status    = attMap.get(statusKey) ?? null;
+
+                        // Count for summary
+                        if (status === "present") p++;
+                        else if (status === "absent") a++;
+
+                        if (isFuture) {
+                          if (date <= maxBreakDate()) {
+                            return (
+                              <td key={date}
+                                onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: onBreak ? "break" : null, futureOnly: true, upcomingDates: studentUpcoming })}
+                                style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...(onBreak ? STATUS_COLOR.break : { background: "#f0f9ff", color: "#bae6fd" }) }}
+                                title="Mark break for this date"
+                              >
+                                {onBreak ? STATUS_SHORT.break : "·"}
+                              </td>
+                            );
+                          }
+                          return <td key={date} style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, background: "#fafafa", color: "#e5e7eb", borderLeft: "1px solid #f3f4f6" }}>·</td>;
+                        }
+
+                        // Bug 2 fix: past break cell with no record — show faded
+                        // indicator and pass all unrecorded past break dates so
+                        // the modal can save them all at once.
+                        if (onBreak && !status) {
                           return (
                             <td key={date}
-                              onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: onBreak ? "break" : null, futureOnly: true, upcomingDates })}
-                              style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...(onBreak ? STATUS_COLOR.break : { background: "#f0f9ff", color: "#bae6fd" }) }}
-                              title="Mark break for this date"
+                              onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break", futureOnly: false, upcomingDates: studentUpcoming, pastBreakDates: pastUnrecordedBreaks })}
+                              style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...STATUS_COLOR.break, opacity: 0.5 }}
+                              title="Break (unsaved — click to record)"
                             >
-                              {onBreak ? STATUS_SHORT.break : "·"}
+                              {STATUS_SHORT.break}
                             </td>
                           );
                         }
-                        return <td key={date} style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, background: "#fafafa", color: "#e5e7eb", borderLeft: "1px solid #f3f4f6" }}>·</td>;
-                      }
-                      if (onBreak && !status) {
+
+                        const sc = status ? STATUS_COLOR[status] : { bg: "#f9fafb", fg: "#d1d5db" };
                         return (
-                          <td key={date} onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break", futureOnly: false, upcomingDates })}
-                            style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...STATUS_COLOR.break }}>
-                            {STATUS_SHORT.break}
+                          <td key={date}
+                            onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status, futureOnly: false, upcomingDates: studentUpcoming })}
+                            style={{
+                              ...td, textAlign: "center", padding: "5px 3px", minWidth: 38,
+                              cursor: "pointer", borderLeft: "1px solid #f3f4f6",
+                              background: sc.bg, color: sc.fg,
+                            }}
+                            title={status ? STATUS_LABEL[status] : "Click to mark"}
+                          >
+                            {status ? STATUS_SHORT[status] : <span style={{ color: "#d1d5db" }}>·</span>}
                           </td>
                         );
-                      }
-
-                      const sc = status ? STATUS_COLOR[status] : { bg: "#f9fafb", fg: "#d1d5db" };
-                      return (
-                        <td key={date}
-                          onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status, futureOnly: false, upcomingDates })}
-                          style={{
-                            ...td, textAlign: "center", padding: "5px 3px", minWidth: 38,
-                            cursor: "pointer", borderLeft: "1px solid #f3f4f6",
-                            background: sc.bg, color: sc.fg,
-                          }}
-                          title={status ? STATUS_LABEL[status] : "Click to mark"}
-                        >
-                          {status ? STATUS_SHORT[status] : <span style={{ color: "#d1d5db" }}>·</span>}
-                        </td>
-                      );
-                    })}
+                      });
+                    })()}
                     {/* Summary */}
                     <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#16a34a", minWidth: 36 }}>{p}</td>
                     <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#dc2626", minWidth: 36 }}>{a}</td>

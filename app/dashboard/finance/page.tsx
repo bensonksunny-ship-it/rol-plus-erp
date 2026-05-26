@@ -695,7 +695,10 @@ function FinanceContent() {
 
   function formatDate(value: unknown): string {
     if (!value || typeof value !== "string") return "-";
-    return value.slice(0, 10);
+    const d = value.slice(0, 10); // YYYY-MM-DD
+    const [y, m, day] = d.split("-");
+    if (!y || !m || !day) return d;
+    return `${day}/${m}/${y}`;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1880,7 +1883,7 @@ function TxTable({
                             <div style={st.diffTitle}>Changes</div>
                             <DiffRow label="Amount" before={fmtINR(tx.amount)} after={fmtINR(Number(editAmount) || 0)} />
                             <DiffRow label="Method" before={tx.method}         after={editMethod} />
-                            <DiffRow label="Date"   before={(tx.date ?? "").slice(0, 10)} after={editDate} />
+                            <DiffRow label="Date"   before={formatDate(tx.date ?? "")} after={formatDate(editDate)} />
                             <DiffRow label="Status" before={tx.status}         after={editStatus} />
                             <DiffRow label="Note"   before={tx.note ?? "—"}    after={editNote.trim() || "—"} />
                           </div>
