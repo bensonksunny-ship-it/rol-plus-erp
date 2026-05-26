@@ -2,8 +2,9 @@
   "name": "ROL's Plus",
   "short_name": "ROL+",
   "description": "River of Life Church ERP — attendance, finance, and more.",
-  "start_url": "/",
-  "scope": "/",
+  "id": "https://rol-plus-erp.vercel.app/",
+  "start_url": "https://rol-plus-erp.vercel.app/",
+  "scope": "https://rol-plus-erp.vercel.app/",
   "display": "standalone",
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
@@ -13,31 +14,31 @@
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/icons/icon-192.png",
+      "src": "https://rol-plus-erp.vercel.app/icons/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/icon-512.png",
+      "src": "https://rol-plus-erp.vercel.app/icons/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/icon-maskable-192.png",
+      "src": "https://rol-plus-erp.vercel.app/icons/icon-maskable-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "/icons/icon-maskable-512.png",
+      "src": "https://rol-plus-erp.vercel.app/icons/icon-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
     },
     {
-      "src": "/icons/icon.svg",
+      "src": "https://rol-plus-erp.vercel.app/icons/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
