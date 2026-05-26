@@ -15,7 +15,11 @@
       "Bash(awk -F: '{if \\($1+0 > 800\\) print}')",
       "Bash(taskkill /F /IM node.exe)",
       "PowerShell(Stop-Process *)",
-      "PowerShell(Get-NetTCPConnection *)"
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\User\\\\.claude\\\\skills\\\\\" -ErrorAction SilentlyContinue | Select-Object Name; if \\(-not \\(Test-Path \"C:\\\\Users\\\\User\\\\.claude\\\\skills\\\\\"\\)\\) { \"No user skills directory\" })",
+      "WebSearch",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }
