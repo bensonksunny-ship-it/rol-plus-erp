@@ -19,7 +19,8 @@
       "PowerShell(Get-ChildItem \"C:\\\\Users\\\\User\\\\.claude\\\\skills\\\\\" -ErrorAction SilentlyContinue | Select-Object Name; if \\(-not \\(Test-Path \"C:\\\\Users\\\\User\\\\.claude\\\\skills\\\\\"\\)\\) { \"No user skills directory\" })",
       "WebSearch",
       "WebFetch(domain:deepwiki.com)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }

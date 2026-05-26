@@ -157,6 +157,13 @@ function FinanceContent() {
   const [filterDate, setFilterDate]          = useState<string>("");
   const [studentSearch, setStudentSearch]    = useState<string>("");
   const [filterType, setFilterType] = useState<string>("all"); // "all"|"group"|"personal"|"prepay"|"postpay"
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 640);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
 
   // ── Fetch ────────────────────────────────────────────────────────────────────
   async function fetchAll(month: string = selectedMonth) {
@@ -873,7 +880,7 @@ function FinanceContent() {
             <div style={st.stateRow}>No students found.</div>
           ) : (
             <div style={st.tableWrapper}>
-              <table style={st.table}>
+              <table style={{ ...st.table, minWidth: isMobile ? 240 : 860 }}>
                 <thead>
                   <tr>
                     <th style={st.th}>Student</th>
@@ -946,12 +953,12 @@ function FinanceContent() {
             ) : filteredStudents.length === 0 ? (
               <div style={st.stateRow}>No students found.</div>
             ) : (
-              <table style={st.table}>
+              <table style={{ ...st.table, minWidth: isMobile ? 280 : 860 }}>
                 <thead>
                   <tr>
                     <th style={st.th}>Student</th>
-                    <th style={st.th}>Type</th>
-                    <th style={st.th}>Amount</th>
+                    {!isMobile && <th style={st.th}>Type</th>}
+                    {!isMobile && <th style={st.th}>Amount</th>}
                     <th style={st.th}>Action</th>
                   </tr>
                 </thead>
@@ -989,7 +996,7 @@ function FinanceContent() {
                           }}
                         >
                           {/* Student + center */}
-                          <td style={{ ...st.td, minWidth: 160 }}>
+                          <td style={{ ...st.td, minWidth: isMobile ? 180 : 160 }}>
                             <div style={{ fontWeight: 600 }}>{s.name}</div>
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
                               {s.centerName}{" · "}<span style={st.studentIDChip}>{s.studentID}</span>
@@ -1012,33 +1019,58 @@ function FinanceContent() {
                               }} />
                               {s.attendanceCount} classes
                             </button>
-                          </td>
-
-                          {/* Type */}
-                          <td style={st.td}>
-                            <span style={{
-                              ...st.badge,
-                              ...(s.classType === "personal"
-                                ? { background: "#fef9c3", color: "#92400e" }
-                                : { background: "#dcfce7", color: "#166534" }),
-                            }}>
-                              {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
-                            </span>
-                            <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 3 }}>
-                              {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
-                            </div>
-                          </td>
-
-                          {/* Due / Paid */}
-                          <td style={{ ...st.td, fontWeight: 600 }}>
-                            {paidMap.has(s.uid) ? (
-                              <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
-                            ) : feeDueMap.has(s.uid) ? (
-                              <span style={{ color: "#dc2626" }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
-                            ) : (
-                              <span style={{ color: "#9ca3af" }}>—</span>
+                            {/* Mobile: type badge + paid/due status merged into this cell */}
+                            {isMobile && (
+                              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" as const, alignItems: "center" }}>
+                                <span style={{
+                                  ...st.badge, fontSize: 10,
+                                  ...(s.classType === "personal"
+                                    ? { background: "#fef9c3", color: "#92400e" }
+                                    : { background: "#dcfce7", color: "#166534" }),
+                                }}>
+                                  {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+                                </span>
+                                <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>
+                                  {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
+                                </span>
+                                {paidMap.has(s.uid) ? (
+                                  <span style={{ fontSize: 12, fontWeight: 700, color: "#16a34a" }}>✓ Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
+                                ) : feeDueMap.has(s.uid) ? (
+                                  <span style={{ fontSize: 12, fontWeight: 700, color: "#dc2626" }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                                ) : null}
+                              </div>
                             )}
                           </td>
+
+                          {/* Type — desktop only */}
+                          {!isMobile && (
+                            <td style={st.td}>
+                              <span style={{
+                                ...st.badge,
+                                ...(s.classType === "personal"
+                                  ? { background: "#fef9c3", color: "#92400e" }
+                                  : { background: "#dcfce7", color: "#166534" }),
+                              }}>
+                                {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+                              </span>
+                              <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 3 }}>
+                                {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
+                              </div>
+                            </td>
+                          )}
+
+                          {/* Due / Paid — desktop only */}
+                          {!isMobile && (
+                            <td style={{ ...st.td, fontWeight: 600 }}>
+                              {paidMap.has(s.uid) ? (
+                                <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
+                              ) : feeDueMap.has(s.uid) ? (
+                                <span style={{ color: "#dc2626" }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                              ) : (
+                                <span style={{ color: "#9ca3af" }}>—</span>
+                              )}
+                            </td>
+                          )}
 
                           {/* Primary action */}
                           <td style={{ ...st.td, whiteSpace: "nowrap" as const }}>
@@ -1063,7 +1095,7 @@ function FinanceContent() {
                         {/* ── Inline panel row ──────────────────────────────── */}
                         {isOpen && (
                           <tr key={`${s.uid}-panel`}>
-                            <td colSpan={5} style={{ padding: "0 14px 16px", background: "#fffbeb" }}>
+                            <td colSpan={isMobile ? 2 : 5} style={{ padding: isMobile ? "0 10px 14px" : "0 14px 16px", background: "#fffbeb" }}>
 
                               {/* ── Attendance info strip ─────────────────────── */}
                               <div style={{
@@ -1598,7 +1630,8 @@ function FinanceContent() {
           </div>
           <TxTable transactions={filteredTx} students={students}
             centers={centers} loading={loading} formatDate={formatDate}
-            canManage={canManageTx} onEdit={handleEditTx} onDelete={handleDeleteTx} />
+            canManage={canManageTx} onEdit={handleEditTx} onDelete={handleDeleteTx}
+            isMobile={isMobile} />
         </div>
       )}
     </div>
@@ -1627,7 +1660,7 @@ function SummaryCard({ label, value, accent, icon, hint, urgent }: {
 
 function TxTable({
   transactions, students, centers, loading, formatDate,
-  canManage, onEdit, onDelete,
+  canManage, onEdit, onDelete, isMobile,
 }: {
   transactions: Transaction[];
   students:     StudentFeeRow[];
@@ -1637,6 +1670,7 @@ function TxTable({
   canManage?:   boolean;
   onEdit?:      (txId: string, patch: EditableTransactionInput) => Promise<void>;
   onDelete?:    (txId: string) => Promise<void>;
+  isMobile?:    boolean;
 }) {
   const studentMap = useMemo(() => {
     const m = new Map<string, { name: string; studentID: string }>();
@@ -1718,17 +1752,19 @@ function TxTable({
   if (loading) return <div style={st.stateRow}>Loading…</div>;
   if (transactions.length === 0) return <div style={st.stateRow}>No transactions found.</div>;
 
-  const colCount = canManage ? 8 : 7;
+  const colCount = isMobile
+    ? (canManage ? 5 : 4)
+    : (canManage ? 8 : 7);
 
   return (
     <div style={st.tableWrapper}>
-      <table style={st.table}>
+      <table style={{ ...st.table, minWidth: isMobile ? 360 : 860 }}>
         <thead>
           <tr>
             <th style={st.th}>Student</th>
-            <th style={st.th}>Center</th>
+            {!isMobile && <th style={st.th}>Center</th>}
             <th style={st.th}>Amount</th>
-            <th style={st.th}>Discount</th>
+            {!isMobile && <th style={st.th}>Discount</th>}
             <th style={st.th}>Method</th>
             <th style={st.th}>Status</th>
             <th style={st.th}>Date</th>
@@ -1745,15 +1781,16 @@ function TxTable({
             return (
               <Fragment key={tx.id}>
                 <tr style={i % 2 === 0 ? st.rowEven : st.rowOdd}>
-                  <td style={{ ...st.td, minWidth: 160 }}>
+                  <td style={{ ...st.td, minWidth: 140 }}>
                     <div style={{ fontWeight: 600 }}>{student?.name ?? tx.studentUid ?? "—"}</div>
                     {student?.studentID && (
                       <div style={{ marginTop: 2 }}>
                         <span style={st.studentIDChip}>{student.studentID}</span>
                       </div>
                     )}
+                    {isMobile && <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{centerName}</div>}
                   </td>
-                  <td style={st.td}>{centerName}</td>
+                  {!isMobile && <td style={st.td}>{centerName}</td>}
                   <td style={{ ...st.td, fontWeight: 700 }}>
                     {tx.amount != null ? fmtINR(tx.amount) : "—"}
                     {txData.rawAmount && txData.rawAmount !== tx.amount && (
@@ -1761,16 +1798,21 @@ function TxTable({
                         {fmtINR(txData.rawAmount)}
                       </div>
                     )}
-                  </td>
-                  <td style={st.td}>
-                    {txData.discountAmt && txData.discountAmt > 0 ? (
-                      <span style={{ ...st.badge, background: "#dcfce7", color: "#16a34a" }}>
-                        −{fmtINR(txData.discountAmt)}
-                      </span>
-                    ) : (
-                      <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+                    {isMobile && txData.discountAmt && txData.discountAmt > 0 && (
+                      <div style={{ fontSize: 10, color: "#16a34a" }}>−{fmtINR(txData.discountAmt)} disc.</div>
                     )}
                   </td>
+                  {!isMobile && (
+                    <td style={st.td}>
+                      {txData.discountAmt && txData.discountAmt > 0 ? (
+                        <span style={{ ...st.badge, background: "#dcfce7", color: "#16a34a" }}>
+                          −{fmtINR(txData.discountAmt)}
+                        </span>
+                      ) : (
+                        <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+                      )}
+                    </td>
+                  )}
                   <td style={st.td}>
                     <span style={{ ...st.badge, ...(METHOD_STYLES[tx.method] ?? {}) }}>
                       {tx.method ?? "—"}
@@ -1967,7 +2009,7 @@ const st: Record<string, React.CSSProperties> = {
   heading:     { fontSize: 22, fontWeight: 600, color: "var(--color-text-primary)", marginBottom: 4 },
   overdueAlert:{ fontSize: 12, color: "#dc2626", fontWeight: 600, background: "#fee2e2", display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 99 },
 
-  cardGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 24 },
+  cardGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 20 },
   card:       { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, overflow: "hidden", display: "flex", flexDirection: "column" as const, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" },
   cardAccent: { height: 4, width: "100%" },
   cardBody:   { padding: "14px 18px" },
@@ -1981,11 +2023,11 @@ const st: Record<string, React.CSSProperties> = {
   tabActive: { background: "#ede9fe", color: "#6d28d9", fontWeight: 700 },
 
   filterRow:     { display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" as const, alignItems: "center" },
-  filterSelect:  { padding: "7px 10px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", cursor: "pointer", minWidth: 160 },
+  filterSelect:  { padding: "7px 10px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", cursor: "pointer", minWidth: 130, flex: "1 1 130px" },
   filterDate:    { padding: "7px 10px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)" },
   clearDate:     { background: "none", border: "none", fontSize: 12, color: "#6b7280", cursor: "pointer", padding: "4px 8px" },
   filterSummary: { fontSize: 12, color: "var(--color-text-secondary)", marginBottom: 10 },
-  searchInput:   { padding: "7px 12px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", minWidth: 200 },
+  searchInput:   { padding: "7px 12px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", minWidth: 140, flex: "1 1 140px" },
 
   overdueBanner: { display: "flex", alignItems: "flex-start", gap: 10, background: "#fff1f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", marginBottom: 12, fontSize: 13, color: "#be123c" },
   overduePill:   { display: "inline-block", fontSize: 9, fontWeight: 800, background: "#fee2e2", color: "#dc2626", padding: "2px 6px", borderRadius: 3, letterSpacing: "0.06em" },
@@ -2018,7 +2060,7 @@ const st: Record<string, React.CSSProperties> = {
   infoChipRed: { fontSize: 12, background: "#fee2e2", color: "#dc2626", padding: "3px 10px", borderRadius: 99, fontWeight: 700 },
   infoChipGreen:{ fontSize: 12, background: "#dcfce7", color: "#16a34a", padding: "3px 10px", borderRadius: 99, fontWeight: 700 },
   panelRow:    { display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap" as const, marginBottom: 14 },
-  panelField:  { display: "flex", flexDirection: "column" as const, gap: 5, flex: 1, minWidth: 130 },
+  panelField:  { display: "flex", flexDirection: "column" as const, gap: 5, flex: 1, minWidth: 110 },
   panelLabel:  { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.04em" },
   panelInput:  { padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, background: "#fff", color: "#111" },
   netPreview:  { display: "flex", gap: 16, alignItems: "center", fontSize: 13, padding: "8px 12px", background: "#f0fdf4", borderRadius: 6, marginBottom: 12, flexWrap: "wrap" as const },
