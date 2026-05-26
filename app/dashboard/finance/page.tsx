@@ -147,6 +147,9 @@ function FinanceContent() {
   const depositInputRef                      = useRef<HTMLInputElement>(null);
   const [feeDueSubmitting, setFeeDueSubmitting]     = useState(false);
   const [undoFeeDueSubmitting, setUndoFeeDueSubmitting] = useState(false);
+  const [historyDeletePending, setHistoryDeletePending] = useState<string | null>(null);
+  const [historyDeleteSubmitting, setHistoryDeleteSubmitting] = useState(false);
+  const historyDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Filters
   const [filterCenter, setFilterCenter]      = useState<string>("all");
@@ -524,7 +527,7 @@ function FinanceContent() {
   async function submitDeposit(student: StudentFeeRow) {
     const amt = Number(depositAmount);
     if (!amt || amt <= 0) {
-      toast("Enter a valid deposit amount (> 0)", "error");
+      toast("Enter a valid payment amount (> 0)", "error");
       return;
     }
     setDepositSubmitting(true);
@@ -548,10 +551,10 @@ function FinanceContent() {
       });
       closePanel();
       await fetchAll(selectedMonth);
-      toast(`✓ Advance deposit ${fmtINR(amt)} recorded for ${student.name} via ${depositMethod}`, "success");
+      toast(`✓ Advance payment ${fmtINR(amt)} recorded for ${student.name} via ${depositMethod}`, "success");
     } catch (err) {
       console.error("Deposit failed:", err);
-      toast("Deposit failed. Try again.", "error");
+      toast("Payment failed. Try again.", "error");
     } finally {
       setDepositSubmitting(false);
     }
@@ -929,7 +932,7 @@ function FinanceContent() {
               <span>
                 Showing historical data for <strong>{fmtMonth(selectedMonth)}</strong>.
                 Attendance, balance, and billing status reflect that month.
-                Any actions (pay/bill/deposit) will update the <strong>live balance</strong>.
+                Any actions (pay/bill/payment) will update the <strong>live balance</strong>.
               </span>
             </div>
           )}
@@ -1128,6 +1131,7 @@ function FinanceContent() {
                                       </button>
                                     </div>
                                   ) : (
+                                    <>
                                     <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const }}>
                                       <span style={{
                                         fontSize: 12, padding: "3px 12px", borderRadius: 99, fontWeight: 700,
@@ -1147,7 +1151,6 @@ function FinanceContent() {
                                         </button>
                                       )}
                                     </div>
-                                  )}
 
                                   {/* Past month notice */}
                                   {!isCurrentMonth && (
@@ -1331,6 +1334,8 @@ function FinanceContent() {
                                     </button>
                                     <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
                                   </div>
+                                    </>
+                                  )}
                                 </div>
                               )}
 
@@ -1412,7 +1417,7 @@ function FinanceContent() {
                                           const isPending  = tx.status === "pending";
                                           const isFailed   = tx.status === "failed";
 
-                                          const typeLabel = isFeedue ? "Fee Due" : isDeposit ? "Deposit" : isCharge ? "Auto-charge" : "Payment";
+                                          const typeLabel = isFeedue ? "Fee Due" : isDeposit ? "Payment" : isCharge ? "Auto-charge" : "Payment";
                                           const typeColor = isFeedue
                                             ? { bg: "#fffbeb", border: "#fde68a", text: "#b45309" }
                                             : isDeposit
@@ -1484,6 +1489,35 @@ function FinanceContent() {
                                                 <span style={{ fontSize: 11, color: "#9ca3af", fontStyle: "italic" as const }}>
                                                   {tx.note}
                                                 </span>
+                                              )}
+
+                                              {/* Delete */}
+                                              {canManageTx && (
+                                                <button
+                                                  disabled={historyDeleteSubmitting}
+                                                  onClick={() => {
+                                                    if (historyDeletePending !== tx.id) {
+                                                      setHistoryDeletePending(tx.id);
+                                                      if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
+                                                      historyDeleteTimer.current = setTimeout(() => setHistoryDeletePending(null), 4000);
+                                                    } else {
+                                                      if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
+                                                      setHistoryDeletePending(null);
+                                                      setHistoryDeleteSubmitting(true);
+                                                      handleDeleteTx(tx.id).finally(() => setHistoryDeleteSubmitting(false));
+                                                    }
+                                                  }}
+                                                  style={{
+                                                    marginLeft: "auto", fontSize: 11, fontWeight: 700,
+                                                    padding: "2px 8px", borderRadius: 4, cursor: "pointer",
+                                                    border: `1px solid ${historyDeletePending === tx.id ? "#dc2626" : "#fca5a5"}`,
+                                                    background: historyDeletePending === tx.id ? "#dc2626" : "#fef2f2",
+                                                    color: historyDeletePending === tx.id ? "#fff" : "#dc2626",
+                                                    opacity: historyDeleteSubmitting ? 0.6 : 1,
+                                                  }}
+                                                >
+                                                  {historyDeletePending === tx.id ? "Confirm?" : "Remove"}
+                                                </button>
                                               )}
                                             </div>
                                           );

@@ -604,7 +604,7 @@ function StudentsContent() {
               <Field label="Billing Mode *">
                 <select value={form.billingMode} onChange={e => setForm(f => ({ ...f, billingMode: e.target.value }))} style={p.input}>
                   <option value="postpay">Postpay — billed first, pays after</option>
-                  <option value="prepay">Prepay — deposits advance, fee deducted</option>
+                  <option value="prepay">Prepay — payments advance, fee deducted</option>
                 </select>
               </Field>
               {form.classType === "personal" && (
@@ -1488,7 +1488,7 @@ function EditModal({ student, centerOptions, teacherOptions, onClose, onSaved, c
               <Field label="Billing Mode *">
                 <select name="billingMode" value={form.billingMode} onChange={f} style={p.input}>
                   <option value="postpay">Postpay — billed first, pays after</option>
-                  <option value="prepay">Prepay — deposits advance, fee deducted</option>
+                  <option value="prepay">Prepay — payments advance, fee deducted</option>
                 </select>
               </Field>
               {form.classType === "personal" && (
