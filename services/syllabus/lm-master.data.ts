@@ -3,6 +3,8 @@ import type {
   LittleMozartsTrack,
   LMSyllabusUIConfig,
   HandAllocation,
+  LMProgram,
+  LMCourse,
 } from "@/types/syllabus";
 
 const RH: HandAllocation = "RH Only";
@@ -212,4 +214,13 @@ export const TRACK_UI_CONFIG: Record<LittleMozartsTrack, LMSyllabusUIConfig> = {
     handIntegration: "Hands Together",
     chords:          "Full Triads",
   },
+};
+
+export const PROGRAM_LABELS: Record<LMProgram, string> = {
+  intro_keyboard: "Introduction to Keyboard",
+};
+
+export const COURSE_LABELS: Record<LMCourse, string> = {
+  "course_1_1": "Course 1.1",
+  "course_2_2": "Course 2.2",
 };

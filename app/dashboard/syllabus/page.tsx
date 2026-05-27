@@ -13,12 +13,18 @@ import {
   getLessonsForStudent,
 } from "@/services/lesson/lesson.service";
 import { seedMasterSyllabus } from "@/services/syllabus/lm-syllabus.service";
-import { TRACK_UI_CONFIG } from "@/services/syllabus/lm-master.data";
+import { TRACK_UI_CONFIG, PROGRAM_LABELS, COURSE_LABELS } from "@/services/syllabus/lm-master.data";
 import { parseFile } from "@/lib/xlsx-parser";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import type { Lesson } from "@/types/lesson";
-import type { LittleMozartsTrack, MasterSyllabusItem, LMItemType } from "@/types/syllabus";
+import type {
+  LittleMozartsTrack,
+  MasterSyllabusItem,
+  LMItemType,
+  LMProgram,
+  LMCourse,
+} from "@/types/syllabus";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
@@ -136,7 +142,9 @@ function SyllabusContent() {
 
   // Master tab state
   const masterFileRef                           = useRef<HTMLInputElement>(null);
+  const [masterProgram, setMasterProgram]       = useState<LMProgram>("intro_keyboard");
   const [masterTrack, setMasterTrack]           = useState<LittleMozartsTrack>("epsilon_track");
+  const [masterCourse, setMasterCourse]         = useState<LMCourse>("course_1_1");
   const [masterFile, setMasterFile]             = useState<File | null>(null);
   const [masterRawRows, setMasterRawRows]       = useState<Record<string, string>[]>([]);
   const [masterPreview, setMasterPreview]       = useState<MasterSyllabusItem[]>([]);
@@ -245,9 +253,12 @@ function SyllabusContent() {
     if (masterImporting || !masterValid || masterPreview.length === 0) return;
     setMasterImporting(true);
     try {
-      await seedMasterSyllabus(masterTrack, masterPreview);
+      await seedMasterSyllabus(
+        { program: masterProgram, track: masterTrack, course: masterCourse },
+        masterPreview,
+      );
       toast(
-        `Course 1 & 2 Template Successfully Saved to ${TRACK_LABELS[masterTrack]} Space — ${masterPreview.length} rows imported.`,
+        `${COURSE_LABELS[masterCourse]} template saved — ${PROGRAM_LABELS[masterProgram]} › ${TRACK_LABELS[masterTrack]} · ${masterPreview.length} rows imported.`,
         "success",
       );
       resetMaster();
@@ -265,6 +276,9 @@ function SyllabusContent() {
     setMasterErrors([]);
     setMasterValid(false);
     setMasterDragOver(false);
+    setMasterProgram("intro_keyboard");
+    setMasterTrack("epsilon_track");
+    setMasterCourse("course_1_1");
     if (masterFileRef.current) masterFileRef.current.value = "";
   }
 
@@ -447,9 +461,26 @@ function SyllabusContent() {
           {/* Bento grid — pathway selector + upload zone */}
           <div style={s.bentoGrid}>
 
-            {/* Card 1: Pathway / Track Selector */}
+            {/* Card 1: Program → Track → Course */}
             <div style={s.bentoCard}>
-              <div style={s.bentoCardLabel}>Pathway Slot</div>
+              <div style={s.bentoCardLabel}>Import Target</div>
+
+              {/* 1. Program */}
+              <div style={s.selectorGroup}>
+                <div style={s.selectorLabel}>Program</div>
+                <select
+                  value={masterProgram}
+                  onChange={e => setMasterProgram(e.target.value as LMProgram)}
+                  style={s.selectorSelect}
+                >
+                  {(Object.keys(PROGRAM_LABELS) as LMProgram[]).map(p => (
+                    <option key={p} value={p}>{PROGRAM_LABELS[p]}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 2. Pathway Slot (Track) */}
+              <div style={{ ...s.selectorLabel, marginBottom: 8 }}>Pathway Slot</div>
               {(["delta_track", "epsilon_track", "zeta_track"] as LittleMozartsTrack[]).map(track => {
                 const cfg      = TRACK_UI_CONFIG[track];
                 const isActive = masterTrack === track;
@@ -468,14 +499,31 @@ function SyllabusContent() {
                         )}
                       </div>
                       <div style={s.trackOptionMeta}>
-                        Metronome: {cfg.metronome ? `ON · ${cfg.metronomeBpm} BPM` : "OFF"}
-                        {" · "}Hand: {cfg.handIntegration}
-                        {" · "}Chords: {cfg.chords || "None"}
+                        {cfg.metronome ? `${cfg.metronomeBpm} BPM` : "No metronome"}
+                        {" · "}{cfg.handIntegration}
+                        {" · "}{cfg.chords || "No chords"}
                       </div>
                     </div>
                   </div>
                 );
               })}
+
+              {/* 3. Course — chained to active track */}
+              <div style={{ ...s.selectorGroup, marginTop: 16 }}>
+                <div style={s.selectorLabel}>
+                  Course
+                  <span style={s.selectorContext}> — {TRACK_LABELS[masterTrack]}</span>
+                </div>
+                <select
+                  value={masterCourse}
+                  onChange={e => setMasterCourse(e.target.value as LMCourse)}
+                  style={s.selectorSelect}
+                >
+                  {(Object.keys(COURSE_LABELS) as LMCourse[]).map(c => (
+                    <option key={c} value={c}>{COURSE_LABELS[c]}</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {/* Card 2: Upload zone */}
@@ -545,7 +593,10 @@ function SyllabusContent() {
             <div style={s.successBox}>
               ✓ {masterPreview.length} row{masterPreview.length !== 1 ? "s" : ""} validated
               {" · "}{uniqueLessons.length} lesson{uniqueLessons.length !== 1 ? "s" : ""} ready
-              {" · "}Destination: <strong>{TRACK_LABELS[masterTrack]}</strong>
+              {" · "}Destination:{" "}
+              <strong>
+                {PROGRAM_LABELS[masterProgram]} › {COURSE_LABELS[masterCourse]} › {TRACK_LABELS[masterTrack]}
+              </strong>
             </div>
           )}
 
@@ -605,7 +656,7 @@ function SyllabusContent() {
                 >
                   {masterImporting
                     ? "Saving to Firestore…"
-                    : `Confirm Upload → ${TRACK_LABELS[masterTrack]}`}
+                    : `Confirm Upload → ${PROGRAM_LABELS[masterProgram]} / ${COURSE_LABELS[masterCourse]}`}
                 </button>
               )}
             </div>
@@ -807,6 +858,37 @@ const s: Record<string, React.CSSProperties> = {
     textTransform: "uppercase" as const,
     letterSpacing: "0.12em",
     marginBottom:  16,
+  },
+
+  selectorGroup: {
+    marginBottom: 14,
+  },
+  selectorLabel: {
+    fontSize:      10,
+    fontWeight:    700,
+    color:         "#6b7280",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.1em",
+    marginBottom:  6,
+  },
+  selectorContext: {
+    fontWeight:    400,
+    color:         "#9ca3af",
+    textTransform: "none" as const,
+    letterSpacing: "normal",
+    fontSize:      10,
+  },
+  selectorSelect: {
+    width:        "100%",
+    padding:      "9px 12px",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 8,
+    fontSize:     13,
+    fontWeight:   500,
+    color:        "#111",
+    background:   "#fff",
+    outline:      "none",
+    cursor:       "pointer",
   },
 
   trackOption: {

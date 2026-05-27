@@ -10,11 +10,14 @@ import type {
   MasterSyllabusItem,
   StudentSyllabusItem,
   LMStudentSyllabus,
+  LMSyllabusTarget,
 } from "@/types/syllabus";
 import { MASTER_TRACK_DATA, TRACK_UI_CONFIG } from "./lm-master.data";
 
 const MASTER_COL = "master_syllabuses";
 const STUDENT_COL = "student_syllabus";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 export function scoreToTrack(averageScore: number): LittleMozartsTrack {
   if (averageScore <= 2.5) return "delta_track";
@@ -22,28 +25,47 @@ export function scoreToTrack(averageScore: number): LittleMozartsTrack {
   return "zeta_track";
 }
 
+// Path: master_syllabuses/{program}/tracks/{track}/courses/{course}
+function masterRef(target: LMSyllabusTarget) {
+  return doc(db, MASTER_COL, target.program, "tracks", target.track, "courses", target.course);
+}
+
+// ─── Master syllabus ──────────────────────────────────────────────────────────
+
 export async function seedMasterSyllabus(
-  track: LittleMozartsTrack,
+  target: LMSyllabusTarget,
   items?: MasterSyllabusItem[],
 ): Promise<void> {
-  await setDoc(doc(db, MASTER_COL, track), {
-    track,
-    items: items ?? MASTER_TRACK_DATA[track],
+  await setDoc(masterRef(target), {
+    ...target,
+    items: items ?? MASTER_TRACK_DATA[target.track],
   });
 }
 
-export async function getMasterSyllabus(track: LittleMozartsTrack): Promise<MasterSyllabusItem[]> {
-  const snap = await getDoc(doc(db, MASTER_COL, track));
-  if (!snap.exists()) return MASTER_TRACK_DATA[track];
+export async function getMasterSyllabus(
+  target: LMSyllabusTarget,
+): Promise<MasterSyllabusItem[]> {
+  const snap = await getDoc(masterRef(target));
+  if (!snap.exists()) return MASTER_TRACK_DATA[target.track];
   return (snap.data() as { items: MasterSyllabusItem[] }).items;
 }
+
+// ─── Student syllabus ─────────────────────────────────────────────────────────
 
 export async function initStudentSyllabus(
   studentId: string,
   averageScore: number,
 ): Promise<void> {
   const track = scoreToTrack(averageScore);
-  const masterItems = await getMasterSyllabus(track);
+
+  // Default to course_1_1 on initial enrolment
+  const target: LMSyllabusTarget = {
+    program: "intro_keyboard",
+    track,
+    course:  "course_1_1",
+  };
+
+  const masterItems = await getMasterSyllabus(target);
 
   const items: StudentSyllabusItem[] = masterItems.map(item => ({
     ...item,
@@ -94,7 +116,7 @@ export async function toggleItemProgress(
     );
     tx.update(ref, {
       items,
-      updatedAt: new Date().toISOString(),
+      updatedAt:    new Date().toISOString(),
       lastMarkedBy: teacherId,
     });
   });
