@@ -694,8 +694,14 @@ function FinanceContent() {
       );
     }
     return [...list].sort((a, b) => {
-      if (b.balance > 0 && a.balance <= 0) return 1;
-      if (a.balance > 0 && b.balance <= 0) return -1;
+      // Attended students first; non-attending at bottom
+      const aAttended = a.attendanceCount > 0 ? 0 : 1;
+      const bAttended = b.attendanceCount > 0 ? 0 : 1;
+      if (aAttended !== bAttended) return aAttended - bAttended;
+      // Within attending group: overdue (positive balance) before paid/clear
+      const aOverdue = a.balance > 0 ? 0 : 1;
+      const bOverdue = b.balance > 0 ? 0 : 1;
+      if (aOverdue !== bOverdue) return aOverdue - bOverdue;
       return a.name.localeCompare(b.name);
     });
   }, [students, filterCenter, studentSearch, filterType]);
@@ -999,44 +1005,28 @@ function FinanceContent() {
                           <td style={{ ...st.td, minWidth: isMobile ? 180 : 160 }}>
                             <div style={{ fontWeight: 600 }}>{s.name}</div>
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
-                              {s.centerName}{" · "}<span style={st.studentIDChip}>{s.studentID}</span>
+                              {s.centerName}{" · "}{s.studentID}
                             </div>
                             <button
                               onClick={(e) => { e.stopPropagation(); setAttPopupUid(s.uid); }}
                               title="View attendance this month"
                               style={{
-                                marginTop: 5, display: "inline-flex", alignItems: "center", gap: 4,
-                                background: s.attendanceCount > 0 ? "#dbeafe" : "#f3f4f6",
-                                color:      s.attendanceCount > 0 ? "#1d4ed8" : "#9ca3af",
-                                border: "none", borderRadius: 99, padding: "2px 8px",
-                                fontSize: 11, fontWeight: 700, cursor: "pointer",
+                                marginTop: 4, display: "inline-flex", alignItems: "center", gap: 4,
+                                background: "none", color: "var(--color-text-secondary)",
+                                border: "none", padding: 0,
+                                fontSize: 11, cursor: "pointer",
                               }}
                             >
-                              <span style={{
-                                width: 7, height: 7, borderRadius: "50%",
-                                background: s.attendanceCount > 0 ? "#3b82f6" : "#d1d5db",
-                                display: "inline-block",
-                              }} />
                               {s.attendanceCount} classes
                             </button>
-                            {/* Mobile: type badge + paid/due status merged into this cell */}
+                            {/* Mobile: type + paid/due status as plain text */}
                             {isMobile && (
-                              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" as const, alignItems: "center" }}>
-                                <span style={{
-                                  ...st.badge, fontSize: 10,
-                                  ...(s.classType === "personal"
-                                    ? { background: "#fef9c3", color: "#92400e" }
-                                    : { background: "#dcfce7", color: "#166534" }),
-                                }}>
-                                  {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
-                                </span>
-                                <span style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>
-                                  {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
-                                </span>
+                              <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 4 }}>
+                                {s.classType === "personal" ? "Personal" : "Group"} · {s.feeCycle === "monthly" ? "Monthly" : "Per Class"}
                                 {paidMap.has(s.uid) ? (
-                                  <span style={{ fontSize: 12, fontWeight: 700, color: "#16a34a" }}>✓ Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
+                                  <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                                 ) : feeDueMap.has(s.uid) ? (
-                                  <span style={{ fontSize: 12, fontWeight: 700, color: "#dc2626" }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                                  <span style={{ marginLeft: 6, fontWeight: 600, color: "#dc2626" }}>· Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
                                 ) : null}
                               </div>
                             )}
@@ -1045,15 +1035,10 @@ function FinanceContent() {
                           {/* Type — desktop only */}
                           {!isMobile && (
                             <td style={st.td}>
-                              <span style={{
-                                ...st.badge,
-                                ...(s.classType === "personal"
-                                  ? { background: "#fef9c3", color: "#92400e" }
-                                  : { background: "#dcfce7", color: "#166534" }),
-                              }}>
-                                {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
-                              </span>
-                              <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 3 }}>
+                              <div style={{ fontSize: 13, color: "var(--color-text-primary)" }}>
+                                {s.classType === "personal" ? "Personal" : "Group"}
+                              </div>
+                              <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
                                 {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
                               </div>
                             </td>

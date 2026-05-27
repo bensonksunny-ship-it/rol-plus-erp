@@ -114,6 +114,7 @@ function TeacherDashboardContent() {
   // ── State ─────────────────────────────────────────────────────────────────
   const [centers,          setCenters]          = useState<Center[]>([]);
   const [centreLoading,    setCentreLoading]    = useState(true);
+  const [markedCentreIds,  setMarkedCentreIds]  = useState<Set<string>>(new Set());
 
   // Centre-workspace state (loaded when centreIdParam is set)
   const [students,         setStudents]         = useState<StudentRow[]>([]);
@@ -143,7 +144,26 @@ function TeacherDashboardContent() {
           const snap = await getDocs(collection(db, "centers"));
           mine = snap.docs.map(d => ({ id: d.id, ...d.data() } as Center));
         }
-        setCenters(filterCentres(mine));
+        const filtered = filterCentres(mine);
+        setCenters(filtered);
+        const cIds = filtered.map(c => c.id).filter(Boolean);
+        if (cIds.length > 0) {
+          try {
+            const attSnap = await getDocs(query(
+              collection(db, "attendance"),
+              where("date", "==", today),
+              where("centerId", "in", cIds),
+            ));
+            const marked = new Set<string>();
+            attSnap.docs.forEach(d => {
+              const centerId = d.data().centerId as string | undefined;
+              if (centerId) marked.add(centerId);
+            });
+            setMarkedCentreIds(marked);
+          } catch (err) {
+            console.error("Failed to load today attendance:", err);
+          }
+        }
       } catch (err) {
         console.error("Failed to load centers:", err);
       } finally {
@@ -256,6 +276,31 @@ function TeacherDashboardContent() {
     if (centreIdParam) loadCenterData(centreIdParam);
   }, [centreIdParam, loadCenterData]);
 
+  // Re-fetch markedCentreIds when navigating back to the overview
+  useEffect(() => {
+    if (centreIdParam || centers.length === 0) return;
+    const cIds = centers.map(c => c.id).filter(Boolean);
+    if (cIds.length === 0) return;
+    (async () => {
+      try {
+        const attSnap = await getDocs(query(
+          collection(db, "attendance"),
+          where("date", "==", today),
+          where("centerId", "in", cIds),
+        ));
+        const marked = new Set<string>();
+        attSnap.docs.forEach(d => {
+          const centerId = d.data().centerId as string | undefined;
+          if (centerId) marked.add(centerId);
+        });
+        setMarkedCentreIds(marked);
+      } catch (err) {
+        console.error("Failed to refresh today attendance:", err);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centreIdParam]);
+
   // ── Navigation helpers ────────────────────────────────────────────────────
   function goToCentre(id: string, tab: "attendance" | "students" | "progress" = "attendance") {
     router.push(`/dashboard/teacher?centerId=${id}&tab=${tab}`);
@@ -362,9 +407,15 @@ function TeacherDashboardContent() {
             {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </div>
         </div>
-        <span style={{ background: "rgba(255,255,255,0.15)", borderRadius: 99, padding: "6px 18px", fontSize: 13, fontWeight: 600 }}>
-          🏫 {centers.length} {centers.length === 1 ? "Centre" : "Centres"}
-        </span>
+        {(() => {
+          const todayDayNum = new Date().getDay();
+          const n = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum)).length;
+          return (
+            <span style={{ background: "rgba(255,255,255,0.15)", borderRadius: 99, padding: "6px 18px", fontSize: 13, fontWeight: 600 }}>
+              🏫 {n} {n === 1 ? "Class" : "Classes"} Today
+            </span>
+          );
+        })()}
       </div>
 
       {/* Empty state */}
@@ -377,10 +428,22 @@ function TeacherDashboardContent() {
       ) : (
         <>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>
-            Your Centres
+            Today's Classes
           </div>
+          {(() => {
+            const todayDayNum = new Date().getDay();
+            const todayCentres = centers.filter(c => {
+              const days = parseDaysOfWeek(c.timeSlot ?? "");
+              return days.some(d => DAY_MAP[d] === todayDayNum);
+            });
+            if (todayCentres.length === 0) {
+              return (
+                <div style={s.emptyState}>No classes scheduled for today.</div>
+              );
+            }
+            return (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-            {centers.map(c => (
+            {todayCentres.map(c => (
               <div key={c.id}
                 onClick={() => goToCentre(c.id, "attendance")}
                 style={{
@@ -398,6 +461,19 @@ function TeacherDashboardContent() {
                   </span>
                 </div>
                 <div style={{ fontSize: 12, color: "#6b7280" }}>{c.timeSlot || "—"}</div>
+                {(() => {
+                  const done = markedCentreIds.has(c.id);
+                  return (
+                    <div style={{
+                      borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 600,
+                      textAlign: "center",
+                      background: done ? "#dcfce7" : "#fee2e2",
+                      color: done ? "#15803d" : "#dc2626",
+                    }}>
+                      {done ? "✓ Attendance Done" : "Attendance Pending"}
+                    </div>
+                  );
+                })()}
                 <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                   {(["attendance","students","progress"] as const).map(tab => (
                     <button key={tab}
@@ -412,6 +488,8 @@ function TeacherDashboardContent() {
               </div>
             ))}
           </div>
+            );
+          })()}
         </>
       )}
     </div>
