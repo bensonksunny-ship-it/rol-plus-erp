@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/config/firebase";
@@ -13,7 +13,7 @@ import {
   getLessonsForStudent,
 } from "@/services/lesson/lesson.service";
 import { seedMasterSyllabus } from "@/services/syllabus/lm-syllabus.service";
-import { TRACK_UI_CONFIG, PROGRAM_LABELS, COURSE_LABELS } from "@/services/syllabus/lm-master.data";
+import { TRACK_UI_CONFIG, PROGRAM_LABELS, COURSE_LABELS, MASTER_COURSE_DATA } from "@/services/syllabus/lm-master.data";
 import { parseFile } from "@/lib/xlsx-parser";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -64,6 +64,27 @@ const TRACK_LABELS: Record<LittleMozartsTrack, string> = {
   epsilon_track: "Level 2: Epsilon Track Template",
   zeta_track:    "Level 3: Zeta Track Template",
 };
+
+const TRACK_SHORT: Record<LittleMozartsTrack, string> = {
+  delta_track:   "Delta",
+  epsilon_track: "Epsilon",
+  zeta_track:    "Zeta",
+};
+
+const TRACK_COLORS: Record<LittleMozartsTrack, { bg: string; border: string; accent: string }> = {
+  delta_track:   { bg: "#eff6ff", border: "#bfdbfe", accent: "#2563eb" },
+  epsilon_track: { bg: "#f0fdf4", border: "#bbf7d0", accent: "#15803d" },
+  zeta_track:    { bg: "#faf5ff", border: "#ddd6fe", accent: "#7c3aed" },
+};
+
+const SYLLABUS_SLOTS: Array<{ track: LittleMozartsTrack; course: LMCourse }> = [
+  { track: "delta_track",   course: "course_1_1" },
+  { track: "delta_track",   course: "course_1_2" },
+  { track: "epsilon_track", course: "course_1_1" },
+  { track: "epsilon_track", course: "course_1_2" },
+  { track: "zeta_track",    course: "course_1_1" },
+  { track: "zeta_track",    course: "course_1_2" },
+];
 
 const VALID_ITEM_TYPES = ["concept", "exercise", "songsheet"] as const;
 
@@ -152,6 +173,7 @@ function SyllabusContent() {
   const [masterValid, setMasterValid]           = useState(false);
   const [masterImporting, setMasterImporting]   = useState(false);
   const [masterDragOver, setMasterDragOver]     = useState(false);
+  const [masterTrackPreview, setMasterTrackPreview] = useState<MasterSyllabusItem[] | null>(null);
 
   // ─── Load centers + students ─────────────────────────────────────────────
 
@@ -251,14 +273,15 @@ function SyllabusContent() {
 
   async function handleMasterImport() {
     if (masterImporting || !masterValid || masterPreview.length === 0) return;
+    // Snapshot all state synchronously before any async work or state mutation
+    const target   = { program: masterProgram, track: masterTrack, course: masterCourse } as const;
+    const items    = masterPreview;
+    const rowCount = masterPreview.length;
     setMasterImporting(true);
     try {
-      await seedMasterSyllabus(
-        { program: masterProgram, track: masterTrack, course: masterCourse },
-        masterPreview,
-      );
+      await seedMasterSyllabus(target, items);
       toast(
-        `${COURSE_LABELS[masterCourse]} template saved — ${PROGRAM_LABELS[masterProgram]} › ${TRACK_LABELS[masterTrack]} · ${masterPreview.length} rows imported.`,
+        `${COURSE_LABELS[target.course]} template saved — ${PROGRAM_LABELS[target.program]} › ${TRACK_LABELS[target.track]} · ${rowCount} rows imported.`,
         "success",
       );
       resetMaster();
@@ -276,14 +299,25 @@ function SyllabusContent() {
     setMasterErrors([]);
     setMasterValid(false);
     setMasterDragOver(false);
-    setMasterProgram("intro_keyboard");
-    setMasterTrack("epsilon_track");
-    setMasterCourse("course_1_1");
     if (masterFileRef.current) masterFileRef.current.value = "";
+    // Intentionally not resetting program/track/course — those are user choices
+    // that should persist across uploads in the same session.
   }
 
   const isAdmin       = role === "admin" || role === "super_admin";
   const uniqueLessons = Array.from(new Set(masterPreview.map(r => r.lessonNumber))).sort((a, b) => a - b);
+
+  const previewByLesson = useMemo(() => {
+    if (!masterTrackPreview) return [];
+    const map = new Map<number, { lessonName: string; items: MasterSyllabusItem[] }>();
+    for (const item of masterTrackPreview) {
+      if (!map.has(item.lessonNumber)) map.set(item.lessonNumber, { lessonName: item.lessonName, items: [] });
+      map.get(item.lessonNumber)!.items.push(item);
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([num, { lessonName, items }]) => ({ num, lessonName, items }));
+  }, [masterTrackPreview]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -461,68 +495,45 @@ function SyllabusContent() {
           {/* Bento grid — pathway selector + upload zone */}
           <div style={s.bentoGrid}>
 
-            {/* Card 1: Program → Track → Course */}
+            {/* Card 1: Program + Slot grid */}
             <div style={s.bentoCard}>
               <div style={s.bentoCardLabel}>Import Target</div>
-
-              {/* 1. Program */}
-              <div style={s.selectorGroup}>
-                <div style={s.selectorLabel}>Program</div>
-                <select
-                  value={masterProgram}
-                  onChange={e => setMasterProgram(e.target.value as LMProgram)}
-                  style={s.selectorSelect}
-                >
-                  {(Object.keys(PROGRAM_LABELS) as LMProgram[]).map(p => (
-                    <option key={p} value={p}>{PROGRAM_LABELS[p]}</option>
-                  ))}
-                </select>
+              <div style={s.programHeader}>
+                <span style={s.programIcon}>🎹</span>
+                <span style={s.programTitle}>{PROGRAM_LABELS[masterProgram]}</span>
               </div>
-
-              {/* 2. Pathway Slot (Track) */}
-              <div style={{ ...s.selectorLabel, marginBottom: 8 }}>Pathway Slot</div>
-              {(["delta_track", "epsilon_track", "zeta_track"] as LittleMozartsTrack[]).map(track => {
-                const cfg      = TRACK_UI_CONFIG[track];
-                const isActive = masterTrack === track;
-                return (
-                  <div
-                    key={track}
-                    onClick={() => setMasterTrack(track)}
-                    style={{ ...s.trackOption, ...(isActive ? s.trackOptionActive : {}) }}
-                  >
-                    <div style={{ ...s.dot, ...(isActive ? s.dotActive : {}) }} />
-                    <div style={{ flex: 1 }}>
-                      <div style={s.trackOptionLabel}>
-                        {TRACK_LABELS[track]}
-                        {track === "epsilon_track" && (
-                          <span style={s.defaultBadge}>Default</span>
-                        )}
+              <div style={s.slotGrid}>
+                {SYLLABUS_SLOTS.map(slot => {
+                  const cfg      = TRACK_UI_CONFIG[slot.track];
+                  const isActive = masterTrack === slot.track && masterCourse === slot.course;
+                  const colors   = TRACK_COLORS[slot.track];
+                  return (
+                    <div
+                      key={`${slot.track}_${slot.course}`}
+                      onClick={() => {
+                        setMasterTrack(slot.track);
+                        setMasterCourse(slot.course);
+                        setMasterTrackPreview(MASTER_COURSE_DATA[slot.track][slot.course]);
+                      }}
+                      style={{
+                        ...s.slotCard,
+                        background: isActive ? "#4f46e5" : colors.bg,
+                        border:     `1.5px solid ${isActive ? "#4f46e5" : colors.border}`,
+                      }}
+                    >
+                      <div style={{ ...s.slotTrackName, color: isActive ? "#fff" : colors.accent }}>
+                        {TRACK_SHORT[slot.track]}
                       </div>
-                      <div style={s.trackOptionMeta}>
+                      <div style={{ ...s.slotCourseNum, color: isActive ? "rgba(255,255,255,0.9)" : "#111" }}>
+                        {COURSE_LABELS[slot.course]}
+                      </div>
+                      <div style={{ ...s.slotMeta, color: isActive ? "rgba(255,255,255,0.6)" : "#9ca3af" }}>
                         {cfg.metronome ? `${cfg.metronomeBpm} BPM` : "No metronome"}
                         {" · "}{cfg.handIntegration}
-                        {" · "}{cfg.chords || "No chords"}
                       </div>
                     </div>
-                  </div>
-                );
-              })}
-
-              {/* 3. Course — chained to active track */}
-              <div style={{ ...s.selectorGroup, marginTop: 16 }}>
-                <div style={s.selectorLabel}>
-                  Course
-                  <span style={s.selectorContext}> — {TRACK_LABELS[masterTrack]}</span>
-                </div>
-                <select
-                  value={masterCourse}
-                  onChange={e => setMasterCourse(e.target.value as LMCourse)}
-                  style={s.selectorSelect}
-                >
-                  {(Object.keys(COURSE_LABELS) as LMCourse[]).map(c => (
-                    <option key={c} value={c}>{COURSE_LABELS[c]}</option>
-                  ))}
-                </select>
+                  );
+                })}
               </div>
             </div>
 
@@ -574,6 +585,46 @@ function SyllabusContent() {
               </div>
             </div>
           </div>
+
+          {/* Track syllabus preview */}
+          {masterTrackPreview && previewByLesson.length > 0 && (
+            <div style={s.trackPreviewPanel}>
+              <div style={s.trackPreviewHeader}>
+                <span style={s.trackPreviewTitle}>
+                  {TRACK_LABELS[masterTrack]} — Syllabus Preview
+                </span>
+                <span style={s.trackPreviewCount}>
+                  {masterTrackPreview.length} items · {previewByLesson.length} lessons
+                </span>
+              </div>
+              <div style={s.trackPreviewBody}>
+                {previewByLesson.map(({ num, lessonName, items }) => (
+                  <div key={num} style={s.lessonGroup}>
+                    <div style={s.lessonGroupHeader}>
+                      <span style={s.lessonNum}>Lesson {num}</span>
+                      <span style={s.lessonName}>{lessonName}</span>
+                    </div>
+                    <div style={s.lessonItems}>
+                      {items.map((item, i) => (
+                        <div key={i} style={s.lessonItem}>
+                          <span style={{ ...s.typeBadge, ...(TYPE_COLORS[item.itemType] ?? TYPE_COLORS._other) }}>
+                            {item.itemType}
+                          </span>
+                          <span style={s.lessonItemTitle}>{item.itemTitle}</span>
+                          {item.metronomeBpm && (
+                            <span style={s.lessonItemMeta}>{item.metronomeBpm} BPM</span>
+                          )}
+                          {item.handAllocation && (
+                            <span style={s.lessonItemMeta}>{item.handAllocation}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Validation errors */}
           {masterErrors.length > 0 && (
@@ -860,83 +911,43 @@ const s: Record<string, React.CSSProperties> = {
     marginBottom:  16,
   },
 
-  selectorGroup: {
-    marginBottom: 14,
-  },
-  selectorLabel: {
-    fontSize:      10,
-    fontWeight:    700,
-    color:         "#6b7280",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.1em",
-    marginBottom:  6,
-  },
-  selectorContext: {
-    fontWeight:    400,
-    color:         "#9ca3af",
-    textTransform: "none" as const,
-    letterSpacing: "normal",
-    fontSize:      10,
-  },
-  selectorSelect: {
-    width:        "100%",
-    padding:      "9px 12px",
-    border:       "1px solid #e5e7eb",
-    borderRadius: 8,
-    fontSize:     13,
-    fontWeight:   500,
-    color:        "#111",
-    background:   "#fff",
-    outline:      "none",
-    cursor:       "pointer",
-  },
-
-  trackOption: {
+  programHeader: {
     display:      "flex",
     alignItems:   "center",
-    gap:          12,
-    padding:      "13px 14px",
+    gap:          8,
+    padding:      "9px 13px",
+    background:   "#f9fafb",
+    borderRadius: 8,
+    marginBottom: 14,
+    border:       "1px solid #e5e7eb",
+  },
+  programIcon:  { fontSize: 16 },
+  programTitle: { fontSize: 13, fontWeight: 700, color: "#111" },
+
+  slotGrid: {
+    display:             "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap:                 8,
+  },
+  slotCard: {
     borderRadius: 10,
-    border:       "1.5px solid #e5e7eb",
-    marginBottom: 8,
+    padding:      "13px 14px",
     cursor:       "pointer",
   },
-  trackOptionActive: {
-    border:     "1.5px solid #4f46e5",
-    background: "#f5f3ff",
+  slotTrackName: {
+    fontSize:     15,
+    fontWeight:   800,
+    marginBottom: 2,
+    lineHeight:   1,
   },
-  dot: {
-    width:        14,
-    height:       14,
-    borderRadius: "50%",
-    border:       "2px solid #d1d5db",
-    flexShrink:   0,
+  slotCourseNum: {
+    fontSize:     12,
+    fontWeight:   600,
+    marginBottom: 5,
   },
-  dotActive: {
-    border:     "4px solid #4f46e5",
-    background: "#fff",
-  },
-  trackOptionLabel: {
-    fontSize:   13,
-    fontWeight: 700,
-    color:      "#111",
-    display:    "flex",
-    alignItems: "center",
-    gap:        8,
-    marginBottom: 3,
-  },
-  defaultBadge: {
-    background:   "#4f46e5",
-    color:        "#fff",
-    fontSize:     10,
-    fontWeight:   700,
-    padding:      "1px 7px",
-    borderRadius: 99,
-    letterSpacing: "0.02em",
-  },
-  trackOptionMeta: {
-    fontSize: 11,
-    color:    "#6b7280",
+  slotMeta: {
+    fontSize:   10,
+    lineHeight: 1.3,
   },
 
   dropZone: {
@@ -1002,6 +1013,90 @@ const s: Record<string, React.CSSProperties> = {
   },
 
   typeBadge: { padding: "2px 8px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" as const },
+
+  trackPreviewPanel: {
+    background:   "#fff",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 14,
+    marginBottom: 16,
+    overflow:     "hidden",
+    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
+  },
+  trackPreviewHeader: {
+    display:        "flex",
+    alignItems:     "center",
+    justifyContent: "space-between",
+    padding:        "14px 20px",
+    background:     "#f9fafb",
+    borderBottom:   "1px solid #e5e7eb",
+  },
+  trackPreviewTitle: {
+    fontSize:      11,
+    fontWeight:    700,
+    color:         "#374151",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.07em",
+  },
+  trackPreviewCount: {
+    fontSize: 11,
+    color:    "#9ca3af",
+  },
+  trackPreviewBody: {
+    padding:    "16px 20px",
+    display:    "flex",
+    flexDirection: "column" as const,
+    gap:        12,
+  },
+  lessonGroup: {
+    borderRadius: 8,
+    border:       "1px solid #f3f4f6",
+    overflow:     "hidden",
+  },
+  lessonGroupHeader: {
+    display:     "flex",
+    alignItems:  "center",
+    gap:         10,
+    padding:     "8px 14px",
+    background:  "#f9fafb",
+    borderBottom: "1px solid #f3f4f6",
+  },
+  lessonNum: {
+    fontFamily:  "monospace",
+    fontSize:    10,
+    fontWeight:  700,
+    color:       "#4f46e5",
+    background:  "#ede9fe",
+    padding:     "2px 7px",
+    borderRadius: 99,
+    flexShrink:  0,
+  },
+  lessonName: {
+    fontSize:   12,
+    fontWeight: 600,
+    color:      "#374151",
+  },
+  lessonItems: {
+    display:       "flex",
+    flexDirection: "column" as const,
+  },
+  lessonItem: {
+    display:     "flex",
+    alignItems:  "center",
+    gap:         8,
+    padding:     "7px 14px",
+    borderBottom: "1px solid #f9fafb",
+  },
+  lessonItemTitle: {
+    fontSize:   12,
+    color:      "#111",
+    flex:       1,
+  },
+  lessonItemMeta: {
+    fontSize:   11,
+    color:      "#9ca3af",
+    fontFamily: "monospace",
+    flexShrink: 0,
+  },
 
   actions:    { display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 4 },
   resetBtn:   { background: "#f3f4f6", color: "#374151", border: "none", padding: "10px 20px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" },

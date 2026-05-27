@@ -195,6 +195,22 @@ export const MASTER_TRACK_DATA: Record<LittleMozartsTrack, MasterSyllabusItem[]>
   zeta_track:    ZETA_TRACK_ITEMS,
 };
 
+// Course 1.1 = lessons 1–5 · Course 1.2 = lessons 6–10
+export const MASTER_COURSE_DATA: Record<LittleMozartsTrack, Record<LMCourse, MasterSyllabusItem[]>> = {
+  delta_track: {
+    course_1_1: DELTA_TRACK_ITEMS.filter(i => i.lessonNumber <= 5),
+    course_1_2: DELTA_TRACK_ITEMS.filter(i => i.lessonNumber > 5),
+  },
+  epsilon_track: {
+    course_1_1: EPSILON_TRACK_ITEMS.filter(i => i.lessonNumber <= 5),
+    course_1_2: EPSILON_TRACK_ITEMS.filter(i => i.lessonNumber > 5),
+  },
+  zeta_track: {
+    course_1_1: ZETA_TRACK_ITEMS.filter(i => i.lessonNumber <= 5),
+    course_1_2: ZETA_TRACK_ITEMS.filter(i => i.lessonNumber > 5),
+  },
+};
+
 export const TRACK_UI_CONFIG: Record<LittleMozartsTrack, LMSyllabusUIConfig> = {
   delta_track: {
     metronome:       false,
@@ -222,5 +238,5 @@ export const PROGRAM_LABELS: Record<LMProgram, string> = {
 
 export const COURSE_LABELS: Record<LMCourse, string> = {
   "course_1_1": "Course 1.1",
-  "course_2_2": "Course 2.2",
+  "course_1_2": "Course 1.2",
 };

@@ -84,7 +84,7 @@ export interface LMStudentSyllabus {
 }
 
 export type LMProgram = "intro_keyboard";
-export type LMCourse  = "course_1_1" | "course_2_2";
+export type LMCourse  = "course_1_1" | "course_1_2";
 
 export interface LMSyllabusTarget {
   program: LMProgram;

@@ -12,7 +12,7 @@ import type {
   LMStudentSyllabus,
   LMSyllabusTarget,
 } from "@/types/syllabus";
-import { MASTER_TRACK_DATA, TRACK_UI_CONFIG } from "./lm-master.data";
+import { MASTER_COURSE_DATA, TRACK_UI_CONFIG } from "./lm-master.data";
 
 const MASTER_COL = "master_syllabuses";
 const STUDENT_COL = "student_syllabus";
@@ -38,7 +38,7 @@ export async function seedMasterSyllabus(
 ): Promise<void> {
   await setDoc(masterRef(target), {
     ...target,
-    items: items ?? MASTER_TRACK_DATA[target.track],
+    items: items ?? MASTER_COURSE_DATA[target.track][target.course],
   });
 }
 
@@ -46,7 +46,7 @@ export async function getMasterSyllabus(
   target: LMSyllabusTarget,
 ): Promise<MasterSyllabusItem[]> {
   const snap = await getDoc(masterRef(target));
-  if (!snap.exists()) return MASTER_TRACK_DATA[target.track];
+  if (!snap.exists()) return MASTER_COURSE_DATA[target.track][target.course];
   return (snap.data() as { items: MasterSyllabusItem[] }).items;
 }
 
