@@ -104,6 +104,7 @@ export interface StudentUser extends UserBase {
   breakStartDate: string | null;          // YYYY-MM-DD — date break begins (set on approval)
   breakReason: string | null;
   breakApprovalStatus: ApprovalStatus | null;
+  screening?: ScreeningResult | null;
   // Teacher-specific fields excluded entirely
   centerIds?: never;
 }
@@ -220,6 +221,53 @@ export interface AuditLog {
   targetId: string;
   metadata: Record<string, unknown>;
   createdAt: string;
+}
+
+// ─── Screening ────────────────────────────────────────────────────────────────
+
+export type ScreeningTrack =
+  // Little Mozarts (Ages 3–6)
+  | "Level 1 (Delta Track)"
+  | "Level 2 (Epsilon Track)"
+  | "Level 3 (Zeta Track)"
+  // Fast Track / Rising Stars (Ages 7–30)
+  | "Explorer Track"
+  | "Achiever Track"
+  | "Prodigy Track";
+
+export type ScreeningType = "little-mozarts" | "fast-track";
+
+export interface ScreeningConfig {
+  track:               ScreeningTrack;
+  syllabusStrategy:    string;
+  metronome:           boolean;
+  metronomeBpm:        number | null;
+  handIntegration:     "RH Only" | "Hands Separated" | "Hands Together";
+  chords:              false | "Basic Blocks" | "Full Harmonies" | "Full Harmonies & Inversions";
+  songsheetDifficulty: "Simplified/Rote" | "Standard" | "Standard/Easier" | "Mid-Tier" | "Advanced/16-Bar";
+}
+
+export interface ScreeningResult {
+  id:              string;
+  screeningType:   ScreeningType;
+  childName:       string;
+  // Little Mozarts interview fields
+  languageSkills?: string;
+  coreStrengths?:  string;
+  motorBaseline?:  string;
+  // Fast Track interview fields
+  stageReadiness?:     string;
+  academicGoals?:      string;
+  practiceCommitment?: string;
+  // Practical scores
+  rhythmScore:     number;
+  pitchScore:      number;
+  motorScore:      number;
+  averageScore:    number;
+  config:          ScreeningConfig;
+  screenedBy:      string;
+  screenedAt:      string;
+  studentId:       string | null;
 }
 
 // ─── Auth Session ─────────────────────────────────────────────────────────────

@@ -43,3 +43,42 @@ export interface StudentSyllabus {
   createdAt:  Timestamp | string;
   updatedAt:  Timestamp | string;
 }
+
+// ─── Little Mozarts Flat-Array Syllabus ───────────────────────────────────────
+
+export type LittleMozartsTrack = "delta_track" | "epsilon_track" | "zeta_track";
+
+export type LMItemType = "concept" | "exercise" | "songsheet";
+
+export type HandAllocation = "RH Only" | "Hands Separated" | "Hands Together";
+
+export interface MasterSyllabusItem {
+  lessonNumber:   number;
+  lessonName:     string;
+  itemType:       LMItemType;
+  itemTitle:      string;
+  metronomeBpm:   number | null;        // always null for concepts
+  handAllocation: HandAllocation | null; // always null for concepts
+}
+
+export interface StudentSyllabusItem extends MasterSyllabusItem {
+  completed:   boolean;
+  completedAt: string | null;
+}
+
+export interface LMSyllabusUIConfig {
+  metronome:       boolean;
+  metronomeBpm:    number | null;
+  handIntegration: HandAllocation;
+  chords:          false | "Basic Blocks" | "Full Triads";
+}
+
+export interface LMStudentSyllabus {
+  studentId:    string;
+  track:        LittleMozartsTrack;
+  syllabusType: "little_mozarts";
+  items:        StudentSyllabusItem[];
+  uiConfig:     LMSyllabusUIConfig;
+  createdAt:    string;
+  updatedAt:    string;
+}

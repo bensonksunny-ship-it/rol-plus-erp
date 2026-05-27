@@ -1,10 +1,9 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/config/firebase";
-// Note: useAuth user field no longer needed (assign tab removed)
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuth } from "@/hooks/useAuth";
@@ -13,9 +12,13 @@ import {
   getItemsByLesson,
   getLessonsForStudent,
 } from "@/services/lesson/lesson.service";
+import { seedMasterSyllabus } from "@/services/syllabus/lm-syllabus.service";
+import { TRACK_UI_CONFIG } from "@/services/syllabus/lm-master.data";
+import { parseFile } from "@/lib/xlsx-parser";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import type { Lesson } from "@/types/lesson";
+import type { LittleMozartsTrack, MasterSyllabusItem, LMItemType } from "@/types/syllabus";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
@@ -32,8 +35,8 @@ export default function SyllabusPage() {
 interface StudentOption {
   uid:         string;
   displayName: string;
-  studentID:   string;    // ROL20260001 — preferred display ID
-  admissionNo: string;    // fallback (old records may use admissionNumber)
+  studentID:   string;
+  admissionNo: string;
   centerId:    string;
 }
 
@@ -46,7 +49,71 @@ interface LessonWithCount extends Lesson {
   itemCount: number;
 }
 
-type Tab = "lessons" | "track";
+type Tab = "lessons" | "track" | "master";
+
+// ─── Master tab helpers ───────────────────────────────────────────────────────
+
+const TRACK_LABELS: Record<LittleMozartsTrack, string> = {
+  delta_track:   "Level 1: Delta Track Template",
+  epsilon_track: "Level 2: Epsilon Track Template",
+  zeta_track:    "Level 3: Zeta Track Template",
+};
+
+const VALID_ITEM_TYPES = ["concept", "exercise", "songsheet"] as const;
+
+const TYPE_COLORS: Record<string, React.CSSProperties> = {
+  concept:   { background: "#ede9fe", color: "#4f46e5" },
+  exercise:  { background: "#dcfce7", color: "#15803d" },
+  songsheet: { background: "#fef9c3", color: "#a16207" },
+  _other:    { background: "#fee2e2", color: "#b91c1c" },
+};
+
+function mapToMasterItems(
+  rows: Record<string, string>[],
+  track: LittleMozartsTrack,
+): MasterSyllabusItem[] {
+  const cfg = TRACK_UI_CONFIG[track];
+  return rows.map(r => {
+    const it       = r["itemtype"]?.trim().toLowerCase() as LMItemType;
+    const isConcept = it === "concept";
+    return {
+      lessonNumber:   parseInt(r["lessonnumber"] ?? "0", 10),
+      lessonName:     r["lessonname"]?.trim() ?? "",
+      itemType:       it,
+      itemTitle:      r["itemtitle"]?.trim() ?? "",
+      metronomeBpm:   isConcept ? null : cfg.metronomeBpm,
+      handAllocation: isConcept ? null : cfg.handIntegration,
+    };
+  });
+}
+
+function validateMasterRows(rows: Record<string, string>[]): string[] {
+  const errors: string[] = [];
+  const headers = Object.keys(rows[0] ?? {});
+  const required = ["lessonnumber", "lessonname", "itemtype", "itemtitle"];
+
+  for (const col of required) {
+    if (!headers.includes(col)) errors.push(`Missing required column: "${col}"`);
+  }
+  if (errors.length > 0) return errors;
+
+  rows.forEach((r, i) => {
+    const rowNum = i + 2;
+    if (!r["lessonname"]?.trim()) errors.push(`Row ${rowNum}: lessonName is required`);
+    if (!r["itemtitle"]?.trim())  errors.push(`Row ${rowNum}: itemTitle is required`);
+    const it = r["itemtype"]?.trim().toLowerCase();
+    if (!VALID_ITEM_TYPES.includes(it as typeof VALID_ITEM_TYPES[number])) {
+      errors.push(`Row ${rowNum}: invalid itemType "${it}" — must be concept, exercise, or songsheet`);
+    }
+    const ln = parseInt(r["lessonnumber"] ?? "0", 10);
+    if (isNaN(ln) || ln < 1) errors.push(`Row ${rowNum}: lessonNumber must be a positive integer`);
+    if (ln === 10 && it === "concept") {
+      errors.push(`Row ${rowNum}: Lesson 10 may not contain concept items (pure-exercise rule)`);
+    }
+  });
+
+  return errors;
+}
 
 // ─── Content ──────────────────────────────────────────────────────────────────
 
@@ -63,11 +130,23 @@ function SyllabusContent() {
   const { toasts, toast, remove }             = useToast();
 
   // Track tab state
-  const [trackStudent, setTrackStudent]       = useState<string>("");
-  const [trackLessonCount, setTrackLessonCount] = useState<number | null>(null);
+  const [trackStudent, setTrackStudent]           = useState<string>("");
+  const [trackLessonCount, setTrackLessonCount]   = useState<number | null>(null);
   const [trackLoadingCount, setTrackLoadingCount] = useState(false);
 
-  // Load centers + students on mount
+  // Master tab state
+  const masterFileRef                           = useRef<HTMLInputElement>(null);
+  const [masterTrack, setMasterTrack]           = useState<LittleMozartsTrack>("epsilon_track");
+  const [masterFile, setMasterFile]             = useState<File | null>(null);
+  const [masterRawRows, setMasterRawRows]       = useState<Record<string, string>[]>([]);
+  const [masterPreview, setMasterPreview]       = useState<MasterSyllabusItem[]>([]);
+  const [masterErrors, setMasterErrors]         = useState<string[]>([]);
+  const [masterValid, setMasterValid]           = useState(false);
+  const [masterImporting, setMasterImporting]   = useState(false);
+  const [masterDragOver, setMasterDragOver]     = useState(false);
+
+  // ─── Load centers + students ─────────────────────────────────────────────
+
   useEffect(() => {
     async function init() {
       try {
@@ -95,7 +174,8 @@ function SyllabusContent() {
     init();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load lessons when center changes
+  // ─── Lessons tab ─────────────────────────────────────────────────────────
+
   const loadLessons = useCallback(async (centerId: string) => {
     if (!centerId) { setLessons([]); return; }
     setLoading(true);
@@ -103,15 +183,10 @@ function SyllabusContent() {
     try {
       const data   = await getLessonsByCenter(centerId);
       const counts = await Promise.all(data.map(l => getItemsByLesson(l.id)));
-      const withCounts: LessonWithCount[] = data.map((l, i) => ({
-        ...l,
-        itemCount: counts[i]?.length ?? 0,
-      }));
-      setLessons(withCounts);
-      if (withCounts.length === 0) toast("No lessons found for this center.", "success");
+      setLessons(data.map((l, i) => ({ ...l, itemCount: counts[i]?.length ?? 0 })));
+      if (data.length === 0) toast("No lessons found for this center.", "success");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      toast(`Failed to load lessons: ${msg}`, "error");
+      toast(`Failed to load lessons: ${err instanceof Error ? err.message : String(err)}`, "error");
     } finally {
       setLoading(false);
     }
@@ -123,7 +198,8 @@ function SyllabusContent() {
     loadLessons(centerId);
   }
 
-  // Fetch lesson count for selected track student
+  // ─── Track tab ───────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!trackStudent) { setTrackLessonCount(null); return; }
     setTrackLoadingCount(true);
@@ -133,31 +209,92 @@ function SyllabusContent() {
       .finally(() => setTrackLoadingCount(false));
   }, [trackStudent]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isAdmin = role === "admin" || role === "super_admin";
+  // ─── Master tab ───────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (masterRawRows.length === 0) return;
+    setMasterPreview(mapToMasterItems(masterRawRows, masterTrack));
+  }, [masterTrack]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function handleMasterFile(file: File) {
+    setMasterFile(file);
+    setMasterPreview([]);
+    setMasterErrors([]);
+    setMasterValid(false);
+    setMasterRawRows([]);
+
+    const { rows, error } = await parseFile(file);
+    if (error)          { setMasterErrors([error]); return; }
+    if (rows.length === 0) { setMasterErrors(["File has no data rows."]); return; }
+
+    setMasterRawRows(rows);
+    const errs = validateMasterRows(rows);
+    setMasterErrors(errs);
+    setMasterValid(errs.length === 0);
+    if (errs.length === 0) setMasterPreview(mapToMasterItems(rows, masterTrack));
+  }
+
+  function handleMasterDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setMasterDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleMasterFile(file);
+  }
+
+  async function handleMasterImport() {
+    if (masterImporting || !masterValid || masterPreview.length === 0) return;
+    setMasterImporting(true);
+    try {
+      await seedMasterSyllabus(masterTrack, masterPreview);
+      toast(
+        `Course 1 & 2 Template Successfully Saved to ${TRACK_LABELS[masterTrack]} Space — ${masterPreview.length} rows imported.`,
+        "success",
+      );
+      resetMaster();
+    } catch (err) {
+      toast(`Upload failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    } finally {
+      setMasterImporting(false);
+    }
+  }
+
+  function resetMaster() {
+    setMasterFile(null);
+    setMasterRawRows([]);
+    setMasterPreview([]);
+    setMasterErrors([]);
+    setMasterValid(false);
+    setMasterDragOver(false);
+    if (masterFileRef.current) masterFileRef.current.value = "";
+  }
+
+  const isAdmin       = role === "admin" || role === "super_admin";
+  const uniqueLessons = Array.from(new Set(masterPreview.map(r => r.lessonNumber))).sort((a, b) => a - b);
+
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div style={{ background: "#fff", minHeight: "100%", color: "#111" }}>
       <ToastContainer toasts={toasts} onRemove={remove} />
 
-      {/* Header */}
       <div style={s.header}>
         <h1 style={s.heading}>Syllabus</h1>
       </div>
 
-      {/* Tabs — lessons + track only (no assign) */}
+      {/* Tabs */}
       <div style={s.tabs}>
-        {(["lessons", "track"] as Tab[]).map(t => (
+        {(["lessons", "track", ...(isAdmin ? ["master"] : [])] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
             style={{ ...s.tab, ...(tab === t ? s.tabActive : {}) }}
           >
-            {t === "lessons" ? "📚 Lessons" : "📊 Track"}
+            {t === "lessons" ? "📚 Lessons" : t === "track" ? "📊 Track" : "🎼 Master"}
           </button>
         ))}
       </div>
 
-      {/* ─── LESSONS TAB ───────────────────────────────────────────────────── */}
+      {/* ─── LESSONS TAB ─────────────────────────────────────────────────── */}
       {tab === "lessons" && (
         <>
           <div style={s.filterCard}>
@@ -176,9 +313,7 @@ function SyllabusContent() {
             {loading && <span style={s.loadingText}>Loading lessons…</span>}
             {isAdmin && selectedCenter && (
               <button
-                onClick={() =>
-                  router.push(`/dashboard/lessons/import?scope=center&id=${selectedCenter}`)
-                }
+                onClick={() => router.push(`/dashboard/lessons/import?scope=center&id=${selectedCenter}`)}
                 style={{ ...s.importBtn, marginLeft: "auto" }}
               >
                 ↑ Import Syllabus
@@ -222,20 +357,16 @@ function SyllabusContent() {
             <div style={s.emptyState}>
               <div style={s.emptyIcon}>📚</div>
               <div style={s.emptyText}>
-                {selectedCenter
-                  ? "No lessons found for this center."
-                  : "Select a center above to view its lessons."}
+                {selectedCenter ? "No lessons found for this center." : "Select a center above to view its lessons."}
               </div>
               {isAdmin && (
                 <div style={s.emptyHint}>
                   No lessons yet?{" "}
                   <button
                     onClick={() =>
-                      router.push(
-                        selectedCenter
-                          ? `/dashboard/lessons/import?scope=center&id=${selectedCenter}`
-                          : "/dashboard/lessons/import"
-                      )
+                      router.push(selectedCenter
+                        ? `/dashboard/lessons/import?scope=center&id=${selectedCenter}`
+                        : "/dashboard/lessons/import")
                     }
                     style={s.linkBtn}
                   >
@@ -263,7 +394,8 @@ function SyllabusContent() {
               <option value="">— Select student —</option>
               {students.map(st => (
                 <option key={st.uid} value={st.uid}>
-                  {st.studentID ? `[${st.studentID}] ` : (st.admissionNo ? `[${st.admissionNo}] ` : "")}{st.displayName || st.uid}
+                  {st.studentID ? `[${st.studentID}] ` : (st.admissionNo ? `[${st.admissionNo}] ` : "")}
+                  {st.displayName || st.uid}
                   {st.centerId ? ` · ${centers.find(c => c.id === st.centerId)?.name ?? st.centerId}` : ""}
                 </option>
               ))}
@@ -271,7 +403,6 @@ function SyllabusContent() {
           </div>
           {trackStudent ? (
             <>
-              {/* Lesson count status */}
               <div style={s.trackStatus}>
                 {trackLoadingCount ? (
                   <span style={s.trackStatusChecking}>Checking syllabus…</span>
@@ -309,14 +440,185 @@ function SyllabusContent() {
           )}
         </div>
       )}
+
+      {/* ─── MASTER TAB ──────────────────────────────────────────────────── */}
+      {tab === "master" && isAdmin && (
+        <div>
+          {/* Bento grid — pathway selector + upload zone */}
+          <div style={s.bentoGrid}>
+
+            {/* Card 1: Pathway / Track Selector */}
+            <div style={s.bentoCard}>
+              <div style={s.bentoCardLabel}>Pathway Slot</div>
+              {(["delta_track", "epsilon_track", "zeta_track"] as LittleMozartsTrack[]).map(track => {
+                const cfg      = TRACK_UI_CONFIG[track];
+                const isActive = masterTrack === track;
+                return (
+                  <div
+                    key={track}
+                    onClick={() => setMasterTrack(track)}
+                    style={{ ...s.trackOption, ...(isActive ? s.trackOptionActive : {}) }}
+                  >
+                    <div style={{ ...s.dot, ...(isActive ? s.dotActive : {}) }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={s.trackOptionLabel}>
+                        {TRACK_LABELS[track]}
+                        {track === "epsilon_track" && (
+                          <span style={s.defaultBadge}>Default</span>
+                        )}
+                      </div>
+                      <div style={s.trackOptionMeta}>
+                        Metronome: {cfg.metronome ? `ON · ${cfg.metronomeBpm} BPM` : "OFF"}
+                        {" · "}Hand: {cfg.handIntegration}
+                        {" · "}Chords: {cfg.chords || "None"}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Card 2: Upload zone */}
+            <div style={s.bentoCard}>
+              <div style={s.bentoCardLabel}>Import File</div>
+              <div
+                onDrop={handleMasterDrop}
+                onDragOver={e => { e.preventDefault(); setMasterDragOver(true); }}
+                onDragLeave={() => setMasterDragOver(false)}
+                onClick={() => masterFileRef.current?.click()}
+                style={{ ...s.dropZone, ...(masterDragOver ? s.dropZoneActive : {}) }}
+              >
+                <div style={s.dropIcon}>
+                  {masterFile ? "📄" : "📥"}
+                </div>
+                <div style={s.dropText}>
+                  {masterFile ? masterFile.name : "Drag & drop .xlsx or .csv here"}
+                </div>
+                {masterFile && masterPreview.length > 0 && (
+                  <div style={{ ...s.dropHint, color: "#16a34a", fontWeight: 600 }}>
+                    {masterPreview.length} rows · {uniqueLessons.length} lessons
+                  </div>
+                )}
+                {!masterFile && (
+                  <div style={s.dropHint}>or click to browse</div>
+                )}
+              </div>
+              <input
+                ref={masterFileRef}
+                type="file"
+                accept=".xlsx,.csv"
+                onChange={e => { const f = e.target.files?.[0]; if (f) handleMasterFile(f); }}
+                style={{ display: "none" }}
+              />
+              <button
+                onClick={() => masterFileRef.current?.click()}
+                style={s.uploadBtn}
+              >
+                Import Course Syllabus from Excel
+              </button>
+
+              {/* Required columns hint */}
+              <div style={s.colHint}>
+                Required columns:{" "}
+                {["lessonNumber", "lessonName", "itemType", "itemTitle"].map(c => (
+                  <span key={c} style={s.colChip}>{c}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Validation errors */}
+          {masterErrors.length > 0 && (
+            <div style={s.errorBox}>
+              <div style={s.errorTitle}>✕ {masterErrors.length} error{masterErrors.length !== 1 ? "s" : ""}</div>
+              {masterErrors.slice(0, 15).map((e, i) => (
+                <div key={i} style={s.errorRow}>• {e}</div>
+              ))}
+              {masterErrors.length > 15 && (
+                <div style={s.errorRow}>…and {masterErrors.length - 15} more</div>
+              )}
+            </div>
+          )}
+
+          {/* Validation success banner */}
+          {masterValid && masterPreview.length > 0 && (
+            <div style={s.successBox}>
+              ✓ {masterPreview.length} row{masterPreview.length !== 1 ? "s" : ""} validated
+              {" · "}{uniqueLessons.length} lesson{uniqueLessons.length !== 1 ? "s" : ""} ready
+              {" · "}Destination: <strong>{TRACK_LABELS[masterTrack]}</strong>
+            </div>
+          )}
+
+          {/* Preview table */}
+          {masterValid && masterPreview.length > 0 && (
+            <div style={{ ...s.tableWrapper, marginBottom: 16 }}>
+              <div style={s.tableHeader}>
+                <span style={s.tableTitle}>Preview — first 25 rows</span>
+                {masterPreview.length > 25 && (
+                  <span style={{ fontSize: 11, color: "#9ca3af" }}>
+                    +{masterPreview.length - 25} more rows not shown
+                  </span>
+                )}
+              </div>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    {["#", "Lesson", "Lesson Name", "Type", "Title", "BPM", "Hand"].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {masterPreview.slice(0, 25).map((item, i) => (
+                    <tr key={i} style={i % 2 === 0 ? s.rowEven : s.rowOdd}>
+                      <td style={{ ...s.td, ...s.mono }}>{i + 1}</td>
+                      <td style={{ ...s.td, ...s.mono }}>{item.lessonNumber}</td>
+                      <td style={{ ...s.td, fontSize: 12, color: "#374151" }}>{item.lessonName}</td>
+                      <td style={s.td}>
+                        <span style={{ ...s.typeBadge, ...(TYPE_COLORS[item.itemType] ?? TYPE_COLORS._other) }}>
+                          {item.itemType}
+                        </span>
+                      </td>
+                      <td style={s.td}>{item.itemTitle}</td>
+                      <td style={{ ...s.td, ...s.mono, color: item.metronomeBpm ? "#059669" : "#9ca3af" }}>
+                        {item.metronomeBpm ?? "—"}
+                      </td>
+                      <td style={{ ...s.td, fontSize: 11, color: "#6b7280" }}>
+                        {item.handAllocation ?? "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Actions */}
+          {masterFile && (
+            <div style={s.actions}>
+              <button onClick={resetMaster} style={s.resetBtn}>Reset</button>
+              {masterValid && (
+                <button
+                  onClick={handleMasterImport}
+                  disabled={masterImporting}
+                  style={{ ...s.confirmBtn, opacity: masterImporting ? 0.6 : 1, cursor: masterImporting ? "not-allowed" : "pointer" }}
+                >
+                  {masterImporting
+                    ? "Saving to Firestore…"
+                    : `Confirm Upload → ${TRACK_LABELS[masterTrack]}`}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-// ─── Styles (light-background safe — explicit hex only) ───────────────────────
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
-  // Header
   header:    { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 },
   heading:   { fontSize: 24, fontWeight: 700, color: "#111", margin: 0 },
   importBtn: {
@@ -330,15 +632,14 @@ const s: Record<string, React.CSSProperties> = {
     cursor:       "pointer",
   },
 
-  // Tabs
   tabs: {
-    display:       "flex",
-    gap:           4,
-    marginBottom:  20,
-    background:    "#f3f4f6",
-    borderRadius:  12,
-    padding:       4,
-    border:        "1px solid #e5e7eb",
+    display:      "flex",
+    gap:          4,
+    marginBottom: 20,
+    background:   "#f3f4f6",
+    borderRadius: 12,
+    padding:      4,
+    border:       "1px solid #e5e7eb",
   },
   tab: {
     flex:         1,
@@ -359,7 +660,6 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow:  "0 1px 4px rgba(0,0,0,0.10)",
   },
 
-  // Filter card (lessons tab)
   filterCard: {
     background:   "#fff",
     border:       "1px solid #e5e7eb",
@@ -387,7 +687,6 @@ const s: Record<string, React.CSSProperties> = {
     cursor:       "pointer",
   },
 
-  // Table
   tableWrapper: {
     background:   "#fff",
     border:       "1px solid #e5e7eb",
@@ -397,12 +696,12 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
   },
   tableHeader: {
-    display:         "flex",
-    alignItems:      "center",
-    justifyContent:  "space-between",
-    padding:         "14px 18px",
-    borderBottom:    "1px solid #e5e7eb",
-    background:      "#f9fafb",
+    display:        "flex",
+    alignItems:     "center",
+    justifyContent: "space-between",
+    padding:        "14px 18px",
+    borderBottom:   "1px solid #e5e7eb",
+    background:     "#f9fafb",
   },
   tableTitle:  { fontSize: 11, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.06em" },
   table:       { width: "100%", borderCollapse: "collapse" as const },
@@ -418,22 +717,14 @@ const s: Record<string, React.CSSProperties> = {
     borderBottom:  "1px solid #e5e7eb",
   },
   td: {
-    padding:      "13px 18px",
+    padding:      "12px 18px",
     fontSize:     13,
     color:        "#111",
     borderBottom: "1px solid #f3f4f6",
   },
-  rowEven:  { background: "#fff" },
-  rowOdd:   { background: "#fafafa" },
-  mono:     { fontFamily: "monospace", fontSize: 12, color: "#6b7280" },
-  centerBadge: {
-    background:   "#ede9fe",
-    color:        "#6d28d9",
-    padding:      "2px 10px",
-    borderRadius: 99,
-    fontSize:     11,
-    fontWeight:   700,
-  },
+  rowEven: { background: "#fff" },
+  rowOdd:  { background: "#fafafa" },
+  mono:    { fontFamily: "monospace", fontSize: 12, color: "#6b7280" },
   itemCountBadge: {
     background:   "#fef3c7",
     color:        "#92400e",
@@ -444,11 +735,10 @@ const s: Record<string, React.CSSProperties> = {
     fontFamily:   "monospace",
   },
 
-  // Empty states
-  emptyState:  { padding: "56px 16px", textAlign: "center" as const },
-  emptyIcon:   { fontSize: 44, marginBottom: 14 },
-  emptyText:   { fontSize: 14, color: "#374151", marginBottom: 8 },
-  emptyHint:   { fontSize: 13, color: "#6b7280" },
+  emptyState: { padding: "56px 16px", textAlign: "center" as const },
+  emptyIcon:  { fontSize: 44, marginBottom: 14 },
+  emptyText:  { fontSize: 14, color: "#374151", marginBottom: 8 },
+  emptyHint:  { fontSize: 13, color: "#6b7280" },
   linkBtn: {
     background:     "none",
     border:         "none",
@@ -461,17 +751,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   emptyInline: { padding: "16px 0", fontSize: 13, color: "#6b7280" },
 
-  // Assign tab
-  assignCard: {
-    background:   "#fff",
-    border:       "1px solid #e5e7eb",
-    borderRadius: 12,
-    padding:      "22px",
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
-  },
-  assignTitle: { fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 18 },
-  assignRow:   { display: "flex", gap: 16, marginBottom: 20, flexWrap: "wrap" as const },
-  fieldGroup:  { marginBottom: 18 },
+  fieldGroup: { marginBottom: 18 },
   label: {
     display:       "block",
     fontSize:      11,
@@ -481,68 +761,7 @@ const s: Record<string, React.CSSProperties> = {
     letterSpacing: "0.06em",
     marginBottom:  7,
   },
-  assignedTag: {
-    marginTop:   7,
-    fontSize:    12,
-    color:       "#16a34a",
-    fontWeight:  600,
-    display:     "inline-flex",
-    alignItems:  "center",
-    gap:         5,
-  },
 
-  lessonSelectHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
-  lessonSelectTitle:  { fontSize: 12, fontWeight: 600, color: "#374151" },
-  bulkActions:  { display: "flex", gap: 10 },
-  bulkBtn: {
-    background:   "none",
-    border:       "1px solid #d1d5db",
-    color:        "#4f46e5",
-    fontSize:     11,
-    fontWeight:   700,
-    cursor:       "pointer",
-    padding:      "3px 10px",
-    borderRadius: 6,
-  },
-
-  checkList: {
-    display:        "flex",
-    flexDirection:  "column" as const,
-    gap:            4,
-    marginBottom:   18,
-    maxHeight:      320,
-    overflowY:      "auto" as const,
-    padding:        "4px 0",
-  },
-  checkItem: {
-    display:     "flex",
-    alignItems:  "center",
-    cursor:      "pointer",
-    padding:     "8px 10px",
-    borderRadius: 8,
-    border:      "1px solid transparent",
-  },
-  checkItemActive: {
-    background:  "#ede9fe",
-    borderColor: "#c4b5fd",
-  },
-  checkOrder: { fontSize: 11, fontWeight: 700, color: "#9ca3af", fontFamily: "monospace", minWidth: 30 },
-  checkLabel: { fontSize: 13, fontWeight: 500, color: "#111", flex: 1 },
-  checkMeta:  { fontSize: 11, color: "#6b7280" },
-
-  assignBtn: {
-    background:    "#4f46e5",
-    color:         "#fff",
-    border:        "none",
-    padding:       "11px 28px",
-    borderRadius:  8,
-    fontSize:      14,
-    fontWeight:    700,
-    cursor:        "pointer",
-    letterSpacing: "0.02em",
-  },
-
-  // Track tab
   trackCard: {
     background:   "#fff",
     border:       "1px solid #e5e7eb",
@@ -550,8 +769,8 @@ const s: Record<string, React.CSSProperties> = {
     padding:      "22px",
     boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
   },
-  trackTitle:  { fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 18 },
-  trackStatus: { marginTop: 10, fontSize: 12 },
+  trackTitle:          { fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 18 },
+  trackStatus:         { marginTop: 10, fontSize: 12 },
   trackStatusChecking: { color: "#9ca3af", fontStyle: "italic" as const },
   trackStatusNone:     { color: "#d97706", fontWeight: 600 },
   trackStatusFound:    { color: "#16a34a", fontWeight: 600 },
@@ -565,5 +784,153 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight:   700,
     cursor:       "pointer",
     marginTop:    10,
+  },
+
+  // ─── Master tab ────────────────────────────────────────────────────────────
+  bentoGrid: {
+    display:             "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap:                 16,
+    marginBottom:        16,
+  },
+  bentoCard: {
+    background:   "#fff",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 14,
+    padding:      "22px",
+    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
+  },
+  bentoCardLabel: {
+    fontSize:      10,
+    fontWeight:    700,
+    color:         "#6b7280",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.12em",
+    marginBottom:  16,
+  },
+
+  trackOption: {
+    display:      "flex",
+    alignItems:   "center",
+    gap:          12,
+    padding:      "13px 14px",
+    borderRadius: 10,
+    border:       "1.5px solid #e5e7eb",
+    marginBottom: 8,
+    cursor:       "pointer",
+  },
+  trackOptionActive: {
+    border:     "1.5px solid #4f46e5",
+    background: "#f5f3ff",
+  },
+  dot: {
+    width:        14,
+    height:       14,
+    borderRadius: "50%",
+    border:       "2px solid #d1d5db",
+    flexShrink:   0,
+  },
+  dotActive: {
+    border:     "4px solid #4f46e5",
+    background: "#fff",
+  },
+  trackOptionLabel: {
+    fontSize:   13,
+    fontWeight: 700,
+    color:      "#111",
+    display:    "flex",
+    alignItems: "center",
+    gap:        8,
+    marginBottom: 3,
+  },
+  defaultBadge: {
+    background:   "#4f46e5",
+    color:        "#fff",
+    fontSize:     10,
+    fontWeight:   700,
+    padding:      "1px 7px",
+    borderRadius: 99,
+    letterSpacing: "0.02em",
+  },
+  trackOptionMeta: {
+    fontSize: 11,
+    color:    "#6b7280",
+  },
+
+  dropZone: {
+    border:        "2px dashed #d1d5db",
+    borderRadius:  12,
+    padding:       "30px 16px",
+    textAlign:     "center" as const,
+    cursor:        "pointer",
+    marginBottom:  12,
+    background:    "#fafafa",
+  },
+  dropZoneActive: {
+    border:     "2px dashed #4f46e5",
+    background: "#f5f3ff",
+  },
+  dropIcon: { fontSize: 28, marginBottom: 8 },
+  dropText: { fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 },
+  dropHint: { fontSize: 12, color: "#9ca3af" },
+
+  uploadBtn: {
+    width:        "100%",
+    background:   "#f9fafb",
+    border:       "1px solid #e5e7eb",
+    color:        "#374151",
+    padding:      "10px 0",
+    borderRadius: 8,
+    fontSize:     13,
+    fontWeight:   600,
+    cursor:       "pointer",
+    marginBottom: 12,
+  },
+  colHint: {
+    display:    "flex",
+    flexWrap:   "wrap" as const,
+    alignItems: "center",
+    gap:        5,
+    fontSize:   11,
+    color:      "#9ca3af",
+  },
+  colChip: {
+    background:   "#f3f4f6",
+    color:        "#374151",
+    padding:      "1px 7px",
+    borderRadius: 99,
+    fontFamily:   "monospace",
+    fontSize:     10,
+    fontWeight:   600,
+  },
+
+  errorBox:   { background: "#fff5f5", border: "1px solid #fca5a5", borderRadius: 10, padding: "14px 18px", marginBottom: 14 },
+  errorTitle: { fontSize: 12, fontWeight: 700, color: "#dc2626", marginBottom: 8 },
+  errorRow:   { fontSize: 12, color: "#b91c1c", marginBottom: 3 },
+
+  successBox: {
+    background:   "#f0fdf4",
+    border:       "1px solid #86efac",
+    borderRadius: 10,
+    padding:      "11px 18px",
+    marginBottom: 14,
+    fontSize:     13,
+    fontWeight:   500,
+    color:        "#15803d",
+  },
+
+  typeBadge: { padding: "2px 8px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" as const },
+
+  actions:    { display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 4 },
+  resetBtn:   { background: "#f3f4f6", color: "#374151", border: "none", padding: "10px 20px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  confirmBtn: {
+    background:    "#4f46e5",
+    color:         "#fff",
+    border:        "none",
+    padding:       "11px 28px",
+    borderRadius:  8,
+    fontSize:      13,
+    fontWeight:    700,
+    letterSpacing: "0.02em",
   },
 };

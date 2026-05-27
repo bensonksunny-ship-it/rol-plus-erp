@@ -34,17 +34,20 @@ import type { Center } from "@/types";
 import type { StudentUser } from "@/types";
 import { isTeacher } from "@/types";
 import type { Lesson, LessonItem, StudentLessonProgress } from "@/types/lesson";
-import type { Role } from "@/types";
+import type { Role, ScreeningResult } from "@/types";
+import { getScreeningByStudent } from "@/services/screening/screening.service";
+import { DiagnosticCard } from "@/app/dashboard/screening/page";
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
 interface StudentRow {
-  uid:        string;
-  name:       string;
-  instrument: string;
-  status:     string;
-  centerId:   string;
-  classType?: string;  // "group" | "personal" — present on personal student rows
+  uid:          string;
+  name:         string;
+  instrument:   string;
+  status:       string;
+  centerId:     string;
+  classType?:   string;  // "group" | "personal" — present on personal student rows
+  hasScreening: boolean;
 }
 
 
@@ -197,11 +200,12 @@ function TeacherDashboardContent() {
         .map(d => {
           const u = d.data();
           return {
-            uid:        d.id,
-            name:       (u.displayName ?? u.name ?? "—") as string,
-            instrument: (u.instrument ?? "—") as string,
-            status:     ((u.status ?? u.studentStatus ?? "active") as string),
-            centerId:   (u.centerId ?? "") as string,
+            uid:          d.id,
+            name:         (u.displayName ?? u.name ?? "—") as string,
+            instrument:   (u.instrument ?? "—") as string,
+            status:       ((u.status ?? u.studentStatus ?? "active") as string),
+            centerId:     (u.centerId ?? "") as string,
+            hasScreening: !!u.screening,
           };
         });
       setStudents(rows);
@@ -925,12 +929,15 @@ function StudentsView({ students, teacherUid, onViewProgress }: {
   teacherUid:     string;
   onViewProgress: (s: StudentRow) => void;
 }) {
-  const [progressMap, setProgressMap] = useState<Record<string, number>>({});
-  const [breakTarget, setBreakTarget] = useState<StudentRow | null>(null);
-  const [breakReason, setBreakReason] = useState("");
-  const [breakSaving, setBreakSaving] = useState(false);
-  const [breakError, setBreakError]   = useState("");
-  const [successMsg, setSuccessMsg]   = useState("");
+  const [progressMap,     setProgressMap]     = useState<Record<string, number>>({});
+  const [breakTarget,     setBreakTarget]     = useState<StudentRow | null>(null);
+  const [breakReason,     setBreakReason]     = useState("");
+  const [breakSaving,     setBreakSaving]     = useState(false);
+  const [breakError,      setBreakError]      = useState("");
+  const [successMsg,      setSuccessMsg]      = useState("");
+  const [diagStudent,     setDiagStudent]     = useState<StudentRow | null>(null);
+  const [diagResult,      setDiagResult]      = useState<ScreeningResult | null>(null);
+  const [diagLoading,     setDiagLoading]     = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -988,6 +995,17 @@ function StudentsView({ students, teacherUid, onViewProgress }: {
     }
   }
 
+  async function openDiagnostic(st: StudentRow) {
+    setDiagStudent(st);
+    setDiagResult(null);
+    setDiagLoading(true);
+    try {
+      const result = await getScreeningByStudent(st.uid);
+      setDiagResult(result);
+    } catch { /* show empty */ }
+    finally { setDiagLoading(false); }
+  }
+
   if (students.length === 0) {
     return <div style={s.emptyCard}>No students enrolled in this centre.</div>;
   }
@@ -1025,6 +1043,13 @@ function StudentsView({ students, teacherUid, onViewProgress }: {
                     <button style={s.linkBtn} onClick={() => onViewProgress(st)}>
                       View Progress →
                     </button>
+                    {st.hasScreening && (
+                      <button
+                        onClick={() => openDiagnostic(st)}
+                        style={{ background: "#ede9fe", color: "#4f46e5", border: "1px solid #c4b5fd", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                        🎹 Diagnostic
+                      </button>
+                    )}
                     {st.status === "active" && (
                       <button
                         onClick={() => { setBreakTarget(st); setBreakReason(""); setBreakError(""); }}
@@ -1049,6 +1074,28 @@ function StudentsView({ students, teacherUid, onViewProgress }: {
           </tbody>
         </table>
       </div>
+
+      {/* Diagnostic Modal */}
+      {diagStudent && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "#fff", borderRadius: 14, padding: 24, width: "100%", maxWidth: 480, boxShadow: "0 20px 60px rgba(0,0,0,0.18)", maxHeight: "90dvh", overflowY: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 16, color: "#111" }}>🎹 Screening Diagnostic</div>
+                <div style={{ fontSize: 13, color: "#6b7280" }}>{diagStudent.name}</div>
+              </div>
+              <button onClick={() => { setDiagStudent(null); setDiagResult(null); }} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#9ca3af", padding: 4 }}>✕</button>
+            </div>
+            {diagLoading ? (
+              <div style={{ textAlign: "center", padding: "32px 0", color: "#9ca3af", fontSize: 14 }}>Loading diagnostic…</div>
+            ) : diagResult ? (
+              <DiagnosticCard result={diagResult} compact />
+            ) : (
+              <div style={{ textAlign: "center", padding: "32px 0", color: "#9ca3af", fontSize: 14 }}>No screening record found for this student.</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Break Request Modal */}
       {breakTarget && (

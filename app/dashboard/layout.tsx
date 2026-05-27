@@ -77,6 +77,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Export",       icon: "⬇", href: "/dashboard/export",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Faculty Suite",icon: "🎓", href: "/dashboard/teacher",        roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
+  { label: "Screening",   icon: "🎹", href: "/dashboard/screening",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening,/dashboard/screening/fast-track" },
 ];
 
 const BOTTOM_NAV_LABELS = ["Center Suite", "Attendance", "Syllabus", "Students", "Faculty Suite"];
