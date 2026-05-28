@@ -47,3 +47,17 @@ export async function getAllScreenings(): Promise<ScreeningResult[]> {
     .map(d => d.data() as ScreeningResult)
     .sort((a, b) => b.screenedAt.localeCompare(a.screenedAt));
 }
+
+export async function saveAdmission(data: Record<string, unknown>): Promise<string> {
+  const ref  = doc(collection(db, "admissions"));
+  const full = { ...data, id: ref.id, submittedAt: new Date().toISOString() };
+  await setDoc(ref, full);
+  return ref.id;
+}
+
+export async function getAllAdmissions(): Promise<Record<string, unknown>[]> {
+  const snap = await getDocs(collection(db, "admissions"));
+  return snap.docs
+    .map(d => d.data() as Record<string, unknown>)
+    .sort((a, b) => String(b.submittedAt ?? "").localeCompare(String(a.submittedAt ?? "")));
+}

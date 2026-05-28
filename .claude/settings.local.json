@@ -22,7 +22,9 @@
       "WebFetch(domain:github.com)",
       "mcp__ide__getDiagnostics",
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\app\\\\dashboard\" -Recurse | Select-Object -ExpandProperty FullName | ForEach-Object { $_.Replace\\('C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\', ''\\) } | Sort-Object)",
-      "PowerShell(Remove-Item *)"
+      "PowerShell(Remove-Item *)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\services\\\\firebase\")",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\config\")"
     ]
   }
 }

@@ -2,9 +2,11 @@ import type {
   MasterSyllabusItem,
   LittleMozartsTrack,
   LMSyllabusUIConfig,
+  LMSyllabusTarget,
   HandAllocation,
   LMProgram,
   LMCourse,
+  LMTrackOrBridge,
 } from "@/types/syllabus";
 
 const RH: HandAllocation = "RH Only";
@@ -196,7 +198,8 @@ export const MASTER_TRACK_DATA: Record<LittleMozartsTrack, MasterSyllabusItem[]>
 };
 
 // Course 1.1 = lessons 1–5 · Course 1.2 = lessons 6–10
-export const MASTER_COURSE_DATA: Record<LittleMozartsTrack, Record<LMCourse, MasterSyllabusItem[]>> = {
+// Bridge entries are always [] — they must be imported via Excel
+export const MASTER_COURSE_DATA: Record<LittleMozartsTrack, Partial<Record<LMCourse, MasterSyllabusItem[]>>> = {
   delta_track: {
     course_1_1: DELTA_TRACK_ITEMS.filter(i => i.lessonNumber <= 5),
     course_1_2: DELTA_TRACK_ITEMS.filter(i => i.lessonNumber > 5),
@@ -210,6 +213,36 @@ export const MASTER_COURSE_DATA: Record<LittleMozartsTrack, Record<LMCourse, Mas
     course_1_2: ZETA_TRACK_ITEMS.filter(i => i.lessonNumber > 5),
   },
 };
+
+// ─── Pathway progression rules ────────────────────────────────────────────────
+// Each array is the ordered sequence of LMSyllabusTargets a student must complete.
+
+export const TRACK_PROGRESSION: Record<LittleMozartsTrack, LMSyllabusTarget[]> = {
+  delta_track: [
+    { program: "intro_keyboard", track: "delta_track",   course: "course_1_1"   },
+    { program: "intro_keyboard", track: "delta_track",   course: "course_1_2"   },
+    { program: "intro_keyboard", track: "bridge",        course: "delta_bridge" },
+    { program: "intro_keyboard", track: "bridge",        course: "epsilon_bridge"},
+  ],
+  epsilon_track: [
+    { program: "intro_keyboard", track: "epsilon_track", course: "course_1_1"   },
+    { program: "intro_keyboard", track: "epsilon_track", course: "course_1_2"   },
+    { program: "intro_keyboard", track: "bridge",        course: "epsilon_bridge"},
+  ],
+  zeta_track: [
+    { program: "intro_keyboard", track: "zeta_track",    course: "course_1_1"   },
+    { program: "intro_keyboard", track: "zeta_track",    course: "course_1_2"   },
+  ],
+};
+
+export function getNextCourseTarget(
+  track:   LittleMozartsTrack,
+  current: LMCourse,
+): LMSyllabusTarget | null {
+  const path = TRACK_PROGRESSION[track];
+  const idx  = path.findIndex(t => t.course === current);
+  return idx >= 0 && idx < path.length - 1 ? path[idx + 1]! : null;
+}
 
 export const TRACK_UI_CONFIG: Record<LittleMozartsTrack, LMSyllabusUIConfig> = {
   delta_track: {
@@ -233,10 +266,85 @@ export const TRACK_UI_CONFIG: Record<LittleMozartsTrack, LMSyllabusUIConfig> = {
 };
 
 export const PROGRAM_LABELS: Record<LMProgram, string> = {
-  intro_keyboard: "Introduction to Keyboard",
+  intro_keyboard:        "Introduction to Keyboard",
+  intro_guitar:          "Introduction to Guitar",
+  intermediate_keyboard: "Intermediate Keyboard",
+  intermediate_guitar:   "Intermediate Guitar",
+  advanced_keyboard:     "Advanced Keyboard",
+  advanced_guitar:       "Advanced Guitar",
 };
 
 export const COURSE_LABELS: Record<LMCourse, string> = {
-  "course_1_1": "Course 1.1",
-  "course_1_2": "Course 1.2",
+  course_1_1:    "Course 1.1",
+  course_1_2:    "Course 1.2",
+  delta_bridge:  "Delta Bridge",
+  epsilon_bridge:"Epsilon Bridge",
+  term_1:        "Term 1",
+  term_2:        "Term 2",
+  term_3:        "Term 3",
 };
+
+export const TRACK_LABELS: Record<LMTrackOrBridge, string> = {
+  delta_track:   "Delta Track",
+  epsilon_track: "Epsilon Track",
+  zeta_track:    "Zeta Track",
+  bridge:        "Bridge",
+  standard:      "Standard",
+};
+
+export const TRACK_SHORT: Record<LMTrackOrBridge, string> = {
+  delta_track:   "Delta",
+  epsilon_track: "Epsilon",
+  zeta_track:    "Zeta",
+  bridge:        "Bridge",
+  standard:      "Standard",
+};
+
+// ─── Program slot definitions ─────────────────────────────────────────────────
+
+export interface ProgramSlot { track: LMTrackOrBridge; course: LMCourse }
+
+const INTRO_SLOTS: ProgramSlot[] = [
+  { track: "delta_track",   course: "course_1_1"    },
+  { track: "delta_track",   course: "course_1_2"    },
+  { track: "epsilon_track", course: "course_1_1"    },
+  { track: "epsilon_track", course: "course_1_2"    },
+  { track: "zeta_track",    course: "course_1_1"    },
+  { track: "zeta_track",    course: "course_1_2"    },
+  { track: "bridge",        course: "delta_bridge"  },
+  { track: "bridge",        course: "epsilon_bridge"},
+];
+
+const FLAT_SLOTS: ProgramSlot[] = [
+  { track: "standard", course: "term_1" },
+  { track: "standard", course: "term_2" },
+  { track: "standard", course: "term_3" },
+];
+
+export const PROGRAM_SLOTS: Record<LMProgram, ProgramSlot[]> = {
+  intro_keyboard:        INTRO_SLOTS,
+  intro_guitar:          INTRO_SLOTS,
+  intermediate_keyboard: FLAT_SLOTS,
+  intermediate_guitar:   FLAT_SLOTS,
+  advanced_keyboard:     FLAT_SLOTS,
+  advanced_guitar:       FLAT_SLOTS,
+};
+
+export function isTrackBasedProgram(program: LMProgram): boolean {
+  return program === "intro_keyboard" || program === "intro_guitar";
+}
+
+// Returns per-row pathway data for Card 1 visualization.
+// Track-based programs → one row per LM track. Flat programs → single standard row.
+export function getProgramPathway(program: LMProgram): { track: LMTrackOrBridge; steps: LMSyllabusTarget[] }[] {
+  if (isTrackBasedProgram(program)) {
+    return (Object.entries(TRACK_PROGRESSION) as [LittleMozartsTrack, LMSyllabusTarget[]][]).map(([track, steps]) => ({
+      track: track as LMTrackOrBridge,
+      steps: steps.map(s => ({ ...s, program })),
+    }));
+  }
+  return [{
+    track: "standard" as const,
+    steps: PROGRAM_SLOTS[program].map(s => ({ program, ...s })),
+  }];
+}

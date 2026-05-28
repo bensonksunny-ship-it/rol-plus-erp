@@ -74,20 +74,37 @@ export interface LMSyllabusUIConfig {
 }
 
 export interface LMStudentSyllabus {
-  studentId:    string;
-  track:        LittleMozartsTrack;
-  syllabusType: "little_mozarts";
-  items:        StudentSyllabusItem[];
-  uiConfig:     LMSyllabusUIConfig;
-  createdAt:    string;
-  updatedAt:    string;
+  studentId:     string;
+  track:         LittleMozartsTrack;
+  syllabusType:  "little_mozarts";
+  currentCourse: LMCourse;        // which course the student is currently working on
+  items:         StudentSyllabusItem[];
+  uiConfig:      LMSyllabusUIConfig;
+  createdAt:     string;
+  updatedAt:     string;
 }
 
-export type LMProgram = "intro_keyboard";
-export type LMCourse  = "course_1_1" | "course_1_2";
+export type LMProgram =
+  | "intro_keyboard"
+  | "intro_guitar"
+  | "intermediate_keyboard"
+  | "intermediate_guitar"
+  | "advanced_keyboard"
+  | "advanced_guitar";
+
+export type LMCourse =
+  | "course_1_1"
+  | "course_1_2"
+  | "delta_bridge"
+  | "epsilon_bridge"
+  | "term_1"
+  | "term_2"
+  | "term_3";
+
+export type LMTrackOrBridge = LittleMozartsTrack | "bridge" | "standard";
 
 export interface LMSyllabusTarget {
   program: LMProgram;
-  track:   LittleMozartsTrack;
+  track:   LMTrackOrBridge;
   course:  LMCourse;
 }

@@ -315,6 +315,7 @@ function FinanceContent() {
       if (!tx.studentUid) return;
       const raw = tx as unknown as Record<string, unknown>;
       if ((raw.type as string) === "fee_due") {
+        if (tx.status !== "due") return;
         const bm = (raw.billingMonth as string) ?? (tx.date ?? "").slice(0, 7);
         if (bm === selectedMonth) m.set(tx.studentUid, { id: tx.id, amount: tx.amount });
       }
@@ -488,6 +489,13 @@ function FinanceContent() {
         currentBalance: increment(-net),
         updatedAt:      new Date().toISOString(),
       });
+      const feeDue = feeDueMap.get(student.uid);
+      if (feeDue) {
+        await updateDoc(doc(db, "transactions", feeDue.id), {
+          status: "completed",
+          paidAt: todayStr(),
+        });
+      }
       closePanel();
       await fetchAll(selectedMonth);
       const discMsg = discountAmt > 0

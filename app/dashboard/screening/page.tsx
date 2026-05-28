@@ -1,14 +1,14 @@
 "use client";
 
-import { useState, useEffect, useMemo, Suspense } from "react";
+import { useState, useEffect, useMemo, useRef, Suspense } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
-import { saveScreening } from "@/services/screening/screening.service";
+import { saveScreening, getAllScreenings, saveAdmission, getAllAdmissions } from "@/services/screening/screening.service";
 import Link from "next/link";
-import type { ScreeningConfig, ScreeningTrack } from "@/types";
+import type { ScreeningConfig, ScreeningTrack, ScreeningResult } from "@/types";
 
 // ─── Parent interview option definitions ─────────────────────────────────────
 
@@ -101,6 +101,15 @@ export const TRACK_STYLE: Record<ScreeningTrack, { bg: string; color: string; bo
   "Prodigy Track":           { bg: "#faf5ff", color: "#7e22ce", border: "#e9d5ff", pill: "#9333ea" },
 };
 
+const SCREEN_TRACK_SHORT: Record<ScreeningTrack, string> = {
+  "Level 1 (Delta Track)":   "Delta",
+  "Level 2 (Epsilon Track)": "Epsilon",
+  "Level 3 (Zeta Track)":    "Zeta",
+  "Explorer Track":          "Explorer",
+  "Achiever Track":          "Achiever",
+  "Prodigy Track":           "Prodigy",
+};
+
 function scoreColor(n: number): string {
   if (n <= 2) return "#dc2626";
   if (n === 3) return "#d97706";
@@ -109,11 +118,284 @@ function scoreColor(n: number): string {
 
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
+// ─── Admission applications list ─────────────────────────────────────────────
+
+function AdmissionsList() {
+  const [admissions, setAdmissions] = useState<Record<string, unknown>[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [selected,   setSelected]   = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    getAllAdmissions()
+      .then(setAdmissions)
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  function str(v: unknown): string  { return typeof v === "string" ? v : ""; }
+  function arr(v: unknown): string[] { return Array.isArray(v) ? v.map(String) : []; }
+  function num(v: unknown): number | null { return typeof v === "number" ? v : null; }
+
+  if (loading) {
+    return <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>;
+  }
+
+  if (admissions.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: "48px 0", color: "#9ca3af" }}>
+        <div style={{ fontSize: 36, marginBottom: 10 }}>📋</div>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>No applications yet</div>
+        <div style={{ fontSize: 12, marginTop: 4 }}>Submitted forms will appear here.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {/* ── Detail panel ── */}
+      {selected && (
+        <div style={{
+          background: "#fff", border: "1px solid #e5e7eb", borderRadius: 14,
+          padding: "24px", marginBottom: 20, position: "relative" as const,
+          boxShadow: "0 4px 24px rgba(0,0,0,0.07)",
+        }}>
+          <button
+            onClick={() => setSelected(null)}
+            style={{
+              position: "absolute" as const, top: 16, right: 16,
+              border: "none", background: "#f3f4f6", borderRadius: 6,
+              padding: "4px 10px", cursor: "pointer", fontSize: 13, color: "#374151",
+            }}
+          >
+            ✕ Close
+          </button>
+
+          <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" as const }}>
+            {/* Photo */}
+            <div style={{
+              width: 90, height: 112, flexShrink: 0,
+              border: "2px solid #e5e7eb", borderRadius: 8, overflow: "hidden",
+              background: "#f9fafb", display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {str(selected.photo) ? (
+                <img src={str(selected.photo)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              ) : (
+                <span style={{ fontSize: 28, color: "#d1d5db" }}>👤</span>
+              )}
+            </div>
+
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#111", marginBottom: 2 }}>{str(selected.fullName)}</div>
+              <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>
+                {str(selected.submittedAt) ? new Date(str(selected.submittedAt)).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : ""}
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 20px" }}>
+                {([
+                  ["Age",           str(selected.age)],
+                  ["DOB",           str(selected.dob)],
+                  ["Parent",        str(selected.parentName)],
+                  ["Phone",         str(selected.phone)],
+                  ["Email",         str(selected.email)],
+                  ["Status",        str(selected.workingStatus)],
+                  ["School/Co.",    str(selected.schoolCompany)],
+                  ["Centre",        str(selected.centre)],
+                ] as [string, string][]).filter(([, v]) => v).map(([k, v]) => (
+                  <div key={k}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>{k}</div>
+                    <div style={{ fontSize: 13, color: "#111", fontWeight: 500 }}>{v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Address */}
+          {(str(selected.address1) || str(selected.address2)) && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f3f4f6" }}>
+              <div style={{ fontSize: 10, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", marginBottom: 3 }}>Address</div>
+              <div style={{ fontSize: 13, color: "#374151" }}>
+                {[str(selected.address1), str(selected.address2)].filter(Boolean).join(", ")}
+              </div>
+            </div>
+          )}
+
+          {/* Musical info */}
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f3f4f6", display: "flex", flexDirection: "column" as const, gap: 10 }}>
+            {([
+              ["Purpose of Learning",   str(selected.purposeOfLearning)],
+              ["Previous Experience",   str(selected.previousExperience)],
+              ["Musical Skill",         str(selected.musicalSkill)],
+              ["How Heard About Us",    str(selected.howHeardAboutUs)],
+              ["Parent Partner Program",str(selected.parentPartnerProgram)],
+            ] as [string, string][]).filter(([, v]) => v).map(([k, v]) => (
+              <div key={k} style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>{k}</div>
+                <div style={{ fontSize: 13, color: "#374151" }}>{v}</div>
+              </div>
+            ))}
+            {arr(selected.instrumentsToLearn).length > 0 && (
+              <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>Instruments to Learn</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                  {arr(selected.instrumentsToLearn).map(i => (
+                    <span key={i} style={{ background: "#ede9fe", color: "#4f46e5", fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 99 }}>{i}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {arr(selected.instrumentsPlayed).length > 0 && (
+              <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>Instruments Played</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                  {arr(selected.instrumentsPlayed).map(i => (
+                    <span key={i} style={{ background: "#dcfce7", color: "#15803d", fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 99 }}>{i}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {num(selected.initialExperience) !== null && (
+              <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>Initial Experience</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#4f46e5" }}>{num(selected.initialExperience)} <span style={{ fontSize: 11, color: "#9ca3af", fontWeight: 400 }}>/ 10</span></div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Applications table ── */}
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #f3f4f6", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>
+            Applications
+            <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 400, marginLeft: 8 }}>({admissions.length})</span>
+          </div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
+                {["", "Name", "Age", "Phone", "Instruments", "Centre", "Date"].map(h => (
+                  <th key={h} style={{
+                    padding: "10px 14px", textAlign: "left" as const,
+                    fontSize: 11, fontWeight: 600, color: "#6b7280",
+                    textTransform: "uppercase" as const, letterSpacing: "0.05em",
+                    whiteSpace: "nowrap" as const,
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {admissions.map((rec, i) => {
+                const isSelected = selected === rec;
+                const instruments = arr(rec.instrumentsToLearn);
+                return (
+                  <tr
+                    key={str(rec.id) || i}
+                    onClick={() => setSelected(isSelected ? null : rec)}
+                    style={{
+                      borderBottom: "1px solid #f3f4f6",
+                      background: isSelected ? "#ede9fe" : i % 2 === 0 ? "#fff" : "#fafafa",
+                      cursor: "pointer",
+                      transition: "background 0.1s",
+                    }}
+                  >
+                    {/* Photo thumb */}
+                    <td style={{ padding: "10px 10px 10px 14px", width: 40 }}>
+                      <div style={{
+                        width: 36, height: 36, borderRadius: 6, overflow: "hidden",
+                        background: "#f3f4f6", flexShrink: 0,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>
+                        {str(rec.photo) ? (
+                          <img src={str(rec.photo)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        ) : (
+                          <span style={{ fontSize: 18, lineHeight: 1 }}>👤</span>
+                        )}
+                      </div>
+                    </td>
+                    <td style={{ padding: "10px 14px", fontSize: 13, fontWeight: 600, color: "#111", whiteSpace: "nowrap" as const }}>
+                      {str(rec.fullName)}
+                    </td>
+                    <td style={{ padding: "10px 14px", fontSize: 13, color: "#374151" }}>
+                      {str(rec.age) || "—"}
+                    </td>
+                    <td style={{ padding: "10px 14px", fontSize: 13, color: "#374151", whiteSpace: "nowrap" as const }}>
+                      {str(rec.phone) || "—"}
+                    </td>
+                    <td style={{ padding: "10px 14px" }}>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" as const }}>
+                        {instruments.length > 0
+                          ? instruments.map(inst => (
+                            <span key={inst} style={{ background: "#ede9fe", color: "#4f46e5", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99 }}>{inst}</span>
+                          ))
+                          : <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+                        }
+                      </div>
+                    </td>
+                    <td style={{ padding: "10px 14px", fontSize: 12, color: "#6b7280", whiteSpace: "nowrap" as const }}>
+                      {str(rec.centre) || "—"}
+                    </td>
+                    <td style={{ padding: "10px 14px", fontSize: 12, color: "#9ca3af", whiteSpace: "nowrap" as const }}>
+                      {str(rec.submittedAt) ? new Date(str(rec.submittedAt)).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScreeningHub() {
+  const [view, setView] = useState<"screening" | "admission" | "applications">("screening");
+  return (
+    <>
+      <div style={{ display: "flex", gap: 10, marginBottom: 24 }}>
+        {([
+          { key: "screening"    as const, label: "🎹 Screening",      desc: "Evaluate & assign track" },
+          { key: "admission"    as const, label: "📋 Admission Form",  desc: "Student application"    },
+          { key: "applications" as const, label: "📁 Applications",    desc: "View submitted forms"   },
+        ]).map(tab => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => setView(tab.key)}
+            style={{
+              flex: 1,
+              border:       view === tab.key ? "2px solid #4f46e5" : "1px solid #e5e7eb",
+              borderRadius: 10,
+              padding:      "12px 16px",
+              background:   view === tab.key ? "#ede9fe" : "#fafafa",
+              cursor:       "pointer",
+              textAlign:    "left",
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 800, color: view === tab.key ? "#4f46e5" : "#374151" }}>
+              {tab.label}
+            </div>
+            <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
+              {tab.desc}
+            </div>
+          </button>
+        ))}
+      </div>
+      {view === "screening"    && <ScreeningContent />}
+      {view === "admission"    && <AdmissionFormContent />}
+      {view === "applications" && <AdmissionsList />}
+    </>
+  );
+}
+
 export default function ScreeningPage() {
   return (
     <ProtectedRoute allowedRoles={[ROLES.ADMIN, ROLES.SUPER_ADMIN, ROLES.TEACHER]}>
       <Suspense fallback={<div style={{ padding: "60px 0", textAlign: "center", color: "#9ca3af" }}>Loading…</div>}>
-        <ScreeningContent />
+        <ScreeningHub />
       </Suspense>
     </ProtectedRoute>
   );
@@ -290,6 +572,612 @@ export function DiagnosticCard({
   );
 }
 
+// ─── Admission form helpers ───────────────────────────────────────────────────
+
+function OptionGroup({ options, value, onChange }: {
+  options: string[];
+  value:   string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+      {options.map(opt => {
+        const sel = value === opt;
+        return (
+          <button key={opt} type="button" onClick={() => onChange(sel ? "" : opt)} style={{
+            padding: "7px 16px", borderRadius: 8, cursor: "pointer", fontSize: 13,
+            border:     sel ? "2px solid #4f46e5" : "1px solid #e5e7eb",
+            background: sel ? "#ede9fe" : "#f9fafb",
+            color:      sel ? "#4f46e5" : "#374151",
+            fontWeight: sel ? 700 : 400,
+          }}>
+            {opt}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function MultiOptionGroup({ options, values, onChange }: {
+  options:  string[];
+  values:   string[];
+  onChange: (vals: string[]) => void;
+}) {
+  function toggle(opt: string) {
+    onChange(values.includes(opt) ? values.filter(v => v !== opt) : [...values, opt]);
+  }
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+      {options.map(opt => {
+        const sel = values.includes(opt);
+        return (
+          <button key={opt} type="button" onClick={() => toggle(opt)} style={{
+            padding: "7px 16px", borderRadius: 8, cursor: "pointer", fontSize: 13,
+            border:     sel ? "2px solid #4f46e5" : "1px solid #e5e7eb",
+            background: sel ? "#ede9fe" : "#f9fafb",
+            color:      sel ? "#4f46e5" : "#374151",
+            fontWeight: sel ? 700 : 400,
+          }}>
+            {sel ? "✓ " : ""}{opt}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Admission form content ───────────────────────────────────────────────────
+
+function AdmissionFormContent() {
+  const { user } = useAuthContext();
+
+  // Personal information
+  const [fullName,      setFullName]      = useState("");
+  const [age,           setAge]           = useState("");
+  const [dobDD,         setDobDD]         = useState("");
+  const [dobMM,         setDobMM]         = useState("");
+  const [dobYYYY,       setDobYYYY]       = useState("");
+  const [parentName,    setParentName]    = useState("");
+  const [workingStatus, setWorkingStatus] = useState("");
+  const [schoolCompany, setSchoolCompany] = useState("");
+
+  // Contact information
+  const [phone,    setPhone]    = useState("");
+  const [email,    setEmail]    = useState("");
+  const [address1, setAddress1] = useState("");
+  const [address2, setAddress2] = useState("");
+  const [centre,   setCentre]   = useState("");
+  const [centres,  setCentres]  = useState<{ id: string; name: string }[]>([]);
+
+  // Musical skills
+  const [purposeOfLearning,   setPurposeOfLearning]   = useState("");
+  const [instrumentsToLearn,  setInstrumentsToLearn]  = useState<string[]>([]);
+  const [previousExperience,  setPreviousExperience]  = useState("");
+  const [instrumentsPlayed,   setInstrumentsPlayed]   = useState<string[]>([]);
+  const [musicalSkill,        setMusicalSkill]        = useState("");
+  const [howHeardAboutUs,     setHowHeardAboutUs]     = useState("");
+  const [initialExperience,   setInitialExperience]   = useState<number | null>(null);
+  const [parentPartnerProgram,setParentPartnerProgram]= useState("");
+
+  // Photo
+  const [photoDataUrl,  setPhotoDataUrl]  = useState<string | null>(null);
+  const fileInputRef   = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  // Submit state
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+  const [saveErr, setSaveErr] = useState("");
+
+  useEffect(() => {
+    getDocs(collection(db, "centers"))
+      .then(snap => setCentres(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) ?? d.id }))))
+      .catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const canSubmit = fullName.trim().length > 0 && phone.trim().length > 0;
+
+  function compressImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        const MAX_W = 320, MAX_H = 420;
+        const ratio = Math.min(MAX_W / img.width, MAX_H / img.height, 1);
+        const w = Math.round(img.width * ratio);
+        const h = Math.round(img.height * ratio);
+        const canvas = document.createElement("canvas");
+        canvas.width  = w;
+        canvas.height = h;
+        canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL("image/jpeg", 0.75));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Image load failed")); };
+      img.src = url;
+    });
+  }
+
+  function handlePhotoFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    compressImage(file).then(setPhotoDataUrl).catch(() => {});
+    e.target.value = "";
+  }
+
+  async function handleSubmit() {
+    if (!canSubmit || saving) return;
+    setSaving(true); setSaveErr("");
+    try {
+      await saveAdmission({
+        fullName:            fullName.trim(),
+        age:                 age.trim(),
+        dob:                 `${dobDD}/${dobMM}/${dobYYYY}`,
+        parentName:          parentName.trim(),
+        workingStatus,
+        schoolCompany:       schoolCompany.trim(),
+        phone:               phone.trim(),
+        email:               email.trim(),
+        address1:            address1.trim(),
+        address2:            address2.trim(),
+        centre,
+        purposeOfLearning,
+        instrumentsToLearn,
+        previousExperience,
+        instrumentsPlayed,
+        musicalSkill,
+        howHeardAboutUs:     howHeardAboutUs.trim(),
+        initialExperience,
+        parentPartnerProgram,
+        photo:               photoDataUrl ?? null,
+        submittedBy:         user?.uid ?? "",
+      });
+      setSaved(true);
+    } catch (err) {
+      setSaveErr(err instanceof Error ? err.message : "Failed to save. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function reset() {
+    setFullName(""); setAge(""); setDobDD(""); setDobMM(""); setDobYYYY("");
+    setParentName(""); setWorkingStatus(""); setSchoolCompany("");
+    setPhone(""); setEmail(""); setAddress1(""); setAddress2(""); setCentre("");
+    setPurposeOfLearning(""); setInstrumentsToLearn([]); setPreviousExperience("");
+    setInstrumentsPlayed([]); setMusicalSkill(""); setHowHeardAboutUs("");
+    setInitialExperience(null); setParentPartnerProgram("");
+    setPhotoDataUrl(null);
+    setSaved(false); setSaveErr("");
+  }
+
+  if (saved) {
+    return (
+      <div style={{ maxWidth: 520, margin: "40px auto", textAlign: "center" }}>
+        <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 14, padding: "36px 28px" }}>
+          <div style={{ fontSize: 44, marginBottom: 12 }}>✅</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: "#15803d", marginBottom: 8 }}>Application Submitted</div>
+          <div style={{ fontSize: 14, color: "#166534", marginBottom: 24 }}>
+            <strong>{fullName}</strong>&apos;s admission form has been saved successfully.
+          </div>
+          <button onClick={reset} style={s.primaryBtn}>+ New Application</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 20, fontWeight: 800, color: "#111", marginBottom: 4 }}>📋 Admission Form</div>
+      <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>
+        ROL&apos;s School Of Music — Student Admission Application
+      </div>
+
+      {/* ── Personal Information ─────────────────────────────────────────────── */}
+      <div style={s.card}>
+        <div style={s.sectionTitle}>Personal Information</div>
+
+        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+          <div style={{ flex: 3 }}>
+            <label style={s.label}>Full Name *</label>
+            <input value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Enter full name" style={s.input} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={s.label}>Age</label>
+            <input value={age} onChange={e => setAge(e.target.value)} placeholder="—" style={s.input} type="number" min={0} />
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}>
+            <label style={s.label}>Date of Birth</label>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input value={dobDD} onChange={e => setDobDD(e.target.value)} placeholder="DD"
+                style={{ ...s.input, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={2} />
+              <span style={{ color: "#9ca3af", fontWeight: 700 }}>/</span>
+              <input value={dobMM} onChange={e => setDobMM(e.target.value)} placeholder="MM"
+                style={{ ...s.input, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={2} />
+              <span style={{ color: "#9ca3af", fontWeight: 700 }}>/</span>
+              <input value={dobYYYY} onChange={e => setDobYYYY(e.target.value)} placeholder="YYYY"
+                style={{ ...s.input, width: 68, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={4} />
+            </div>
+          </div>
+          <div style={{ flex: 1.5 }}>
+            <label style={s.label}>Name of Parent / Guardian</label>
+            <input value={parentName} onChange={e => setParentName(e.target.value)} placeholder="Parent or guardian name" style={s.input} />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={s.label}>Working Status</label>
+          <OptionGroup
+            options={["Student", "Working", "Part Time", "Not Working"]}
+            value={workingStatus}
+            onChange={setWorkingStatus}
+          />
+        </div>
+
+        <div>
+          <label style={s.label}>Name of School / Company</label>
+          <input value={schoolCompany} onChange={e => setSchoolCompany(e.target.value)} placeholder="School or company name" style={s.input} />
+        </div>
+      </div>
+
+      {/* ── Contact Information ──────────────────────────────────────────────── */}
+      <div style={{ ...s.card, marginTop: 16 }}>
+        <div style={s.sectionTitle}>Contact Information</div>
+
+        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}>
+            <label style={s.label}>Phone Number *</label>
+            <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+91 00000 00000" style={s.input} type="tel" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={s.label}>Email ID</label>
+            <input value={email} onChange={e => setEmail(e.target.value)} placeholder="email@example.com" style={s.input} type="email" />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={s.label}>Address Line 1</label>
+          <input value={address1} onChange={e => setAddress1(e.target.value)} placeholder="House / Flat no., Street name" style={s.input} />
+        </div>
+
+        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ flex: 2 }}>
+            <label style={s.label}>Address Line 2</label>
+            <input value={address2} onChange={e => setAddress2(e.target.value)} placeholder="Area, Landmark" style={s.input} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={s.label}>Centre</label>
+            {centres.length > 0 ? (
+              <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...s.input, cursor: "pointer" }}>
+                <option value="">— Select —</option>
+                {centres.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            ) : (
+              <input value={centre} onChange={e => setCentre(e.target.value)} placeholder="Centre" style={s.input} />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Musical Skills ───────────────────────────────────────────────────── */}
+      <div style={{ ...s.card, marginTop: 16 }}>
+        <div style={s.sectionTitle}>Information on Musical Skills</div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={s.label}>Purpose of Learning</label>
+          <OptionGroup
+            options={["Formal Music Learning", "Skill Development", "Entertainment"]}
+            value={purposeOfLearning}
+            onChange={setPurposeOfLearning}
+          />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={s.label}>
+            Musical Instrument to Learn{" "}
+            <span style={{ color: "#9ca3af", fontWeight: 400, fontSize: 12 }}>(select all that apply)</span>
+          </label>
+          <MultiOptionGroup
+            options={["Piano", "Keyboard", "Guitar", "Drums", "Violin", "Vocal"]}
+            values={instrumentsToLearn}
+            onChange={setInstrumentsToLearn}
+          />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={s.label}>Previous Experience in Music</label>
+          <OptionGroup
+            options={["Well-Trained", "Average", "No Previous Experience"]}
+            value={previousExperience}
+            onChange={setPreviousExperience}
+          />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={s.label}>
+            Instruments You Already Play{" "}
+            <span style={{ color: "#9ca3af", fontWeight: 400, fontSize: 12 }}>(select all that apply)</span>
+          </label>
+          <MultiOptionGroup
+            options={["Guitar", "Drums", "Keyboard", "None of the Above"]}
+            values={instrumentsPlayed}
+            onChange={setInstrumentsPlayed}
+          />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={s.label}>Explain Your Musical Skill</label>
+          <OptionGroup
+            options={["Excellent", "Average", "Poor"]}
+            value={musicalSkill}
+            onChange={setMusicalSkill}
+          />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={s.label}>How Do You Know About ROL&apos;s School Of Music?</label>
+          <input value={howHeardAboutUs} onChange={e => setHowHeardAboutUs(e.target.value)}
+            placeholder="e.g. Social media, friend referral, walk-in…" style={s.input} />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label style={s.label}>
+            How Do You Describe Your Initial Experience With Us?{" "}
+            <span style={{ color: "#9ca3af", fontWeight: 400 }}>( / 10)</span>
+          </label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
+            {[1,2,3,4,5,6,7,8,9,10].map(n => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setInitialExperience(initialExperience === n ? null : n)}
+                style={{
+                  width: 42, height: 42, borderRadius: 8, cursor: "pointer", fontSize: 14,
+                  border:     "none",
+                  background: initialExperience === n ? "#4f46e5" : "#f3f4f6",
+                  color:      initialExperience === n ? "#fff" : "#374151",
+                  fontWeight: initialExperience === n ? 800 : 500,
+                }}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          {initialExperience !== null && (
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>Selected: {initialExperience} / 10</div>
+          )}
+        </div>
+
+        <div>
+          <label style={s.label}>Would You Like to Participate in Our Parent Partner Program?</label>
+          <OptionGroup
+            options={["Yes", "No", "Want to Know More"]}
+            value={parentPartnerProgram}
+            onChange={setParentPartnerProgram}
+          />
+        </div>
+      </div>
+
+      {/* ── Candidate Photo ──────────────────────────────────────────────────── */}
+      <div style={{ ...s.card, marginTop: 16 }}>
+        <div style={s.sectionTitle}>Candidate Photo</div>
+
+        {/* Hidden inputs */}
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{ display: "none" }}
+          onChange={handlePhotoFile}
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: "none" }}
+          onChange={handlePhotoFile}
+        />
+
+        <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" as const }}>
+          {/* Preview box */}
+          <div style={{
+            width: 120, height: 150, flexShrink: 0,
+            border: "2px dashed #d1d5db", borderRadius: 10,
+            background: "#f9fafb",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            overflow: "hidden",
+          }}>
+            {photoDataUrl ? (
+              <img src={photoDataUrl} alt="Candidate" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (
+              <div style={{ textAlign: "center" as const, color: "#9ca3af" }}>
+                <div style={{ fontSize: 32, marginBottom: 4 }}>📷</div>
+                <div style={{ fontSize: 11 }}>No photo</div>
+              </div>
+            )}
+          </div>
+
+          {/* Action buttons */}
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 10, justifyContent: "center", flex: 1 }}>
+            <button
+              type="button"
+              onClick={() => cameraInputRef.current?.click()}
+              style={{
+                padding: "10px 16px", borderRadius: 8, cursor: "pointer",
+                border: "1px solid #4f46e5", background: "#ede9fe",
+                color: "#4f46e5", fontSize: 13, fontWeight: 600,
+                display: "flex", alignItems: "center", gap: 8,
+              }}
+            >
+              <span style={{ fontSize: 18 }}>📸</span> Take Photo
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              style={{
+                padding: "10px 16px", borderRadius: 8, cursor: "pointer",
+                border: "1px solid #d1d5db", background: "#f9fafb",
+                color: "#374151", fontSize: 13, fontWeight: 600,
+                display: "flex", alignItems: "center", gap: 8,
+              }}
+            >
+              <span style={{ fontSize: 18 }}>🖼️</span> Upload Photo
+            </button>
+            {photoDataUrl && (
+              <button
+                type="button"
+                onClick={() => setPhotoDataUrl(null)}
+                style={{
+                  padding: "8px 16px", borderRadius: 8, cursor: "pointer",
+                  border: "1px solid #fecaca", background: "#fef2f2",
+                  color: "#dc2626", fontSize: 12, fontWeight: 600,
+                }}
+              >
+                Remove Photo
+              </button>
+            )}
+            <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
+              Photo is optional. Compressed automatically.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {saveErr && (
+        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#dc2626", marginTop: 16 }}>
+          {saveErr}
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+        <button type="button" onClick={reset} style={s.secondaryBtn}>Reset</button>
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={!canSubmit || saving}
+          style={{ ...s.primaryBtn, opacity: canSubmit && !saving ? 1 : 0.4, cursor: canSubmit && !saving ? "pointer" : "not-allowed" }}
+        >
+          {saving ? "Submitting…" : "Submit Application"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Screening history list ───────────────────────────────────────────────────
+
+function ScreeningHistory() {
+  const [screenings, setScreenings] = useState<ScreeningResult[]>([]);
+  const [loading,    setLoading]    = useState(true);
+
+  useEffect(() => {
+    getAllScreenings()
+      .then(data => setScreenings(data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div style={{ marginTop: 40 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#111" }}>
+          Screening History
+          {!loading && screenings.length > 0 && (
+            <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 400, marginLeft: 8 }}>
+              ({screenings.length})
+            </span>
+          )}
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", padding: "28px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
+      ) : screenings.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "28px 0", color: "#9ca3af", fontSize: 13 }}>No screenings recorded yet.</div>
+      ) : (
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
+                  {["Name", "Type", "Rhythm", "Pitch", "Motor", "Average", "Track", "Date"].map(h => (
+                    <th key={h} style={{
+                      padding: "10px 14px",
+                      textAlign: "left" as const,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: "#6b7280",
+                      textTransform: "uppercase" as const,
+                      letterSpacing: "0.05em",
+                      whiteSpace: "nowrap" as const,
+                    }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {screenings.map((rec, i) => {
+                  const ts    = TRACK_STYLE[rec.config.track];
+                  const short = SCREEN_TRACK_SHORT[rec.config.track];
+                  return (
+                    <tr key={rec.id} style={{ borderBottom: "1px solid #f3f4f6", background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
+                      <td style={{ padding: "11px 14px", fontSize: 13, fontWeight: 600, color: "#111", whiteSpace: "nowrap" as const }}>
+                        {rec.childName}
+                      </td>
+                      <td style={{ padding: "11px 14px" }}>
+                        <span style={{
+                          fontSize: 10, fontWeight: 700,
+                          padding: "2px 8px", borderRadius: 99,
+                          background: rec.screeningType === "little-mozarts" ? "#ede9fe" : "#fef3c7",
+                          color:      rec.screeningType === "little-mozarts" ? "#4f46e5" : "#92400e",
+                        }}>
+                          {rec.screeningType === "little-mozarts" ? "LM" : "FT"}
+                        </span>
+                      </td>
+                      <td style={{ padding: "11px 14px", textAlign: "center" as const, fontSize: 15, fontWeight: 800, color: scoreColor(rec.rhythmScore) }}>
+                        {rec.rhythmScore}
+                      </td>
+                      <td style={{ padding: "11px 14px", textAlign: "center" as const, fontSize: 15, fontWeight: 800, color: scoreColor(rec.pitchScore) }}>
+                        {rec.pitchScore}
+                      </td>
+                      <td style={{ padding: "11px 14px", textAlign: "center" as const, fontSize: 15, fontWeight: 800, color: scoreColor(rec.motorScore) }}>
+                        {rec.motorScore}
+                      </td>
+                      <td style={{ padding: "11px 14px", fontSize: 16, fontWeight: 900, color: ts.color, whiteSpace: "nowrap" as const }}>
+                        {rec.averageScore.toFixed(2)}
+                        <span style={{ fontSize: 11, fontWeight: 400, color: "#9ca3af", marginLeft: 3 }}>/ 5</span>
+                      </td>
+                      <td style={{ padding: "11px 14px" }}>
+                        <span style={{
+                          background: ts.pill, color: "#fff",
+                          fontSize: 11, fontWeight: 700,
+                          padding: "4px 10px", borderRadius: 99,
+                          whiteSpace: "nowrap" as const,
+                        }}>
+                          {short}
+                        </span>
+                      </td>
+                      <td style={{ padding: "11px 14px", fontSize: 12, color: "#9ca3af", whiteSpace: "nowrap" as const }}>
+                        {new Date(rec.screenedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main content ─────────────────────────────────────────────────────────────
 
 function ScreeningContent() {
@@ -316,9 +1204,10 @@ function ScreeningContent() {
   const [motorScore,  setMotorScore]  = useState<number | null>(null);
 
   // Save
-  const [saving,  setSaving]  = useState(false);
-  const [saved,   setSaved]   = useState(false);
-  const [saveErr, setSaveErr] = useState("");
+  const [saving,     setSaving]     = useState(false);
+  const [saved,      setSaved]      = useState(false);
+  const [saveErr,    setSaveErr]    = useState("");
+  const [historyKey, setHistoryKey] = useState(0);
 
   useEffect(() => {
     setStudsLoading(true);
@@ -374,6 +1263,7 @@ function ScreeningContent() {
         studentId:  linkedStudent?.uid ?? null,
       });
       setSaved(true);
+      setHistoryKey(k => k + 1);
     } catch (err) {
       setSaveErr(err instanceof Error ? err.message : "Failed to save. Please try again.");
     } finally {
@@ -393,24 +1283,27 @@ function ScreeningContent() {
   // ── Success screen ─────────────────────────────────────────────────────────
   if (saved && config && averageScore !== null) {
     return (
-      <div style={{ maxWidth: 560, margin: "0 auto", padding: "32px 0" }}>
-        <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 14, padding: "32px 28px", textAlign: "center" }}>
-          <div style={{ fontSize: 44, marginBottom: 12 }}>🎉</div>
-          <div style={{ fontSize: 20, fontWeight: 800, color: "#15803d", marginBottom: 6 }}>Screening Saved</div>
-          <div style={{ fontSize: 14, color: "#166534", marginBottom: 4 }}>
-            <strong>{childName}</strong> → <strong>{config.track}</strong>
-          </div>
-          {linkedStudent && (
-            <div style={{ fontSize: 13, color: "#166534", marginBottom: 4 }}>
-              Diagnostic saved to student profile: {linkedStudent.name} ({linkedStudent.studentID})
+      <>
+        <div style={{ maxWidth: 560, margin: "0 auto", padding: "32px 0" }}>
+          <div style={{ background: "#f0fdf4", border: "1px solid #86efac", borderRadius: 14, padding: "32px 28px", textAlign: "center" }}>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>🎉</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: "#15803d", marginBottom: 6 }}>Screening Saved</div>
+            <div style={{ fontSize: 14, color: "#166534", marginBottom: 4 }}>
+              <strong>{childName}</strong> → <strong>{config.track}</strong>
             </div>
-          )}
-          <div style={{ fontSize: 13, color: "#166534", marginBottom: 24 }}>
-            Average score: {averageScore.toFixed(2)} / 5
+            {linkedStudent && (
+              <div style={{ fontSize: 13, color: "#166534", marginBottom: 4 }}>
+                Diagnostic saved to student profile: {linkedStudent.name} ({linkedStudent.studentID})
+              </div>
+            )}
+            <div style={{ fontSize: 13, color: "#166534", marginBottom: 24 }}>
+              Average score: {averageScore.toFixed(2)} / 5
+            </div>
+            <button onClick={resetForm} style={s.primaryBtn}>+ New Screening</button>
           </div>
-          <button onClick={resetForm} style={s.primaryBtn}>+ New Screening</button>
         </div>
-      </div>
+        <ScreeningHistory key={historyKey} />
+      </>
     );
   }
 
@@ -422,6 +1315,7 @@ function ScreeningContent() {
   ];
 
   return (
+    <>
     <div style={{ maxWidth: 680, margin: "0 auto" }}>
       {/* Module switcher */}
       <div style={{ display: "flex", gap: 10, marginBottom: 24 }}>
@@ -687,6 +1581,8 @@ function ScreeningContent() {
         </>
       )}
     </div>
+    <ScreeningHistory key={historyKey} />
+    </>
   );
 }
 
