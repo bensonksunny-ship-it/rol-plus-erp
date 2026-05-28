@@ -9,6 +9,12 @@ export const TRACK_STYLE: Record<ScreeningTrack, { bg: string; color: string; bo
   "Explorer Track":          { bg: "#fff7ed", color: "#c2410c", border: "#fed7aa", pill: "#ea580c" },
   "Achiever Track":          { bg: "#f0fdfa", color: "#0f766e", border: "#99f6e4", pill: "#0d9488" },
   "Prodigy Track":           { bg: "#faf5ff", color: "#7e22ce", border: "#e9d5ff", pill: "#9333ea" },
+  "Comfort Level":           { bg: "#fdf2f8", color: "#9d174d", border: "#fbcfe8", pill: "#db2777" },
+  "Harmony Level":           { bg: "#fff7ed", color: "#9a3412", border: "#fed7aa", pill: "#f97316" },
+  "Flow Level":              { bg: "#ecfdf5", color: "#065f46", border: "#6ee7b7", pill: "#059669" },
+  "Sensory-Friendly Level":  { bg: "#f0f9ff", color: "#0369a1", border: "#bae6fd", pill: "#0284c7" },
+  "Adaptive Level":          { bg: "#f5f3ff", color: "#6d28d9", border: "#ddd6fe", pill: "#7c3aed" },
+  "Expression Level":        { bg: "#fff1f2", color: "#be123c", border: "#fecdd3", pill: "#e11d48" },
 };
 
 function scoreColor(n: number): string {
@@ -35,6 +41,12 @@ export function DiagnosticCard({
     stageReadiness?:     string;
     academicGoals?:      string;
     practiceCommitment?: string;
+    learningMotivation?: string;
+    pacingPreference?:   string;
+    musicalBackground?:  string;
+    sensoryProfile?:     string;
+    physicalNeeds?:      string;
+    learningStyle?:      string;
   };
   compact?: boolean;
 }) {
@@ -104,7 +116,20 @@ export function DiagnosticCard({
           { label: "Exam & Certification Drive", val: result.academicGoals      ?? "" },
           { label: "Practice Discipline",        val: result.practiceCommitment ?? "" },
         ];
-        const fields = ftFields.some(f => f.val) ? ftFields : lmFields;
+        const joyfulFields = [
+          { label: "Learning Motivation", val: result.learningMotivation ?? "" },
+          { label: "Pacing Preference",   val: result.pacingPreference   ?? "" },
+          { label: "Musical Background",  val: result.musicalBackground  ?? "" },
+        ];
+        const creativeFields = [
+          { label: "Sensory Profile", val: result.sensoryProfile ?? "" },
+          { label: "Physical Needs",  val: result.physicalNeeds  ?? "" },
+          { label: "Learning Style",  val: result.learningStyle  ?? "" },
+        ];
+        const fields = creativeFields.some(f => f.val) ? creativeFields
+          : joyfulFields.some(f => f.val) ? joyfulFields
+          : ftFields.some(f => f.val) ? ftFields
+          : lmFields;
         const hasAny  = fields.some(f => f.val);
         if (!hasAny) return null;
         return (

@@ -7,92 +7,221 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { saveScreening, getAllScreenings, saveAdmission, getAllAdmissions, updateAdmission, deleteAdmission } from "@/services/screening/screening.service";
-import Link from "next/link";
-import type { ScreeningConfig, ScreeningTrack, ScreeningResult } from "@/types";
+import type { ScreeningConfig, ScreeningTrack, ScreeningResult, ScreeningType } from "@/types";
 import { DiagnosticCard, TRACK_STYLE } from "@/components/DiagnosticCard";
 
-// ─── Parent interview option definitions ─────────────────────────────────────
+// ─── Track definitions ────────────────────────────────────────────────────────
 
-interface InterviewOption {
-  letter: "A" | "B" | "C";
-  text:   string;
-}
-interface InterviewQuestion {
-  key:     "languageSkills" | "coreStrengths" | "motorBaseline";
-  title:   string;
+interface TrackInterviewQuestion {
+  key:      string;
+  title:    string;
   subtitle: string;
-  options: InterviewOption[];
+  options:  Array<{ letter: "A" | "B" | "C"; text: string }>;
 }
 
-const INTERVIEW_QUESTIONS: InterviewQuestion[] = [
-  {
-    key:      "languageSkills",
-    title:    "Language & Listening Style",
-    subtitle: "How does your child best take in and remember information?",
-    options:  [
-      { letter: "A", text: "Learns mostly from pictures. Struggles with long spoken instructions." },
-      { letter: "B", text: "Easily remembers rhymes and songs. Can follow two simple instructions in a row." },
-      { letter: "C", text: "Understands long instructions quickly and talks very clearly." },
-    ],
-  },
-  {
-    key:      "coreStrengths",
-    title:    "Focus & Attention",
-    subtitle: "How does your child stay interested during an activity?",
-    options:  [
-      { letter: "A", text: "Changes activities quickly. Needs new and exciting things to stay interested." },
-      { letter: "B", text: "Can sit and play with one toy (like blocks or puzzles) for 15 minutes or more." },
-      { letter: "C", text: "Loves finding patterns and figuring out how things work." },
-    ],
-  },
-  {
-    key:      "motorBaseline",
-    title:    "Hand Control & Movement",
-    subtitle: "How well does your child handle small, precise movements?",
-    options:  [
-      { letter: "A", text: "Prefers running and jumping. Small finger control is still developing." },
-      { letter: "B", text: "Good hand control. Easily handles coloring, drawing, or playing with small blocks." },
-      { letter: "C", text: "Excellent finger control. Easily picks up and handles very tiny objects." },
-    ],
-  },
-];
+interface TrackGame { icon: string; name: string; hint: string; }
 
-// ─── Logic helpers ────────────────────────────────────────────────────────────
-
-function computeConfig(avg: number): ScreeningConfig {
-  if (avg <= 2.5) {
-    return {
-      track:               "Level 1 (Delta Track)",
-      syllabusStrategy:    "Tactile/Pre-Staff Preparation",
-      metronome:           false,
-      metronomeBpm:        null,
-      handIntegration:     "RH Only",
-      chords:              false,
-      songsheetDifficulty: "Simplified/Rote",
-    };
-  }
-  if (avg <= 4.0) {
-    return {
-      track:               "Level 2 (Epsilon Track)",
-      syllabusStrategy:    "Standard Method Integration",
-      metronome:           true,
-      metronomeBpm:        55,
-      handIntegration:     "Hands Separated",
-      chords:              "Basic Blocks",
-      songsheetDifficulty: "Standard",
-    };
-  }
-  return {
-    track:               "Level 3 (Zeta Track)",
-    syllabusStrategy:    "Accelerated Performance & Early Composition",
-    metronome:           true,
-    metronomeBpm:        70,
-    handIntegration:     "Hands Together",
-    chords:              "Full Harmonies",
-    songsheetDifficulty: "Advanced/16-Bar",
-  };
+interface TrackDef {
+  id:         ScreeningType;
+  icon:       string;
+  label:      string;
+  ageDesc:    string;
+  accent:     string;
+  accentBg:   string;
+  questions:  [TrackInterviewQuestion, TrackInterviewQuestion, TrackInterviewQuestion];
+  iKeys:      [string, string, string];
+  games:      [TrackGame, TrackGame, TrackGame];
+  computeCfg: (avg: number) => ScreeningConfig;
 }
 
+const LM_TRACK: TrackDef = {
+  id: "little-mozarts", icon: "🎹", label: "Little Mozarts", ageDesc: "Ages 3–6",
+  accent: "#4f46e5", accentBg: "#ede9fe",
+  questions: [
+    {
+      key: "languageSkills", title: "Language & Listening Style",
+      subtitle: "How does your child best take in and remember information?",
+      options: [
+        { letter: "A", text: "Learns mostly from pictures. Struggles with long spoken instructions." },
+        { letter: "B", text: "Easily remembers rhymes and songs. Can follow two simple instructions in a row." },
+        { letter: "C", text: "Understands long instructions quickly and talks very clearly." },
+      ],
+    },
+    {
+      key: "coreStrengths", title: "Focus & Attention",
+      subtitle: "How does your child stay interested during an activity?",
+      options: [
+        { letter: "A", text: "Changes activities quickly. Needs new and exciting things to stay interested." },
+        { letter: "B", text: "Can sit and play with one toy (like blocks or puzzles) for 15 minutes or more." },
+        { letter: "C", text: "Loves finding patterns and figuring out how things work." },
+      ],
+    },
+    {
+      key: "motorBaseline", title: "Hand Control & Movement",
+      subtitle: "How well does your child handle small, precise movements?",
+      options: [
+        { letter: "A", text: "Prefers running and jumping. Small finger control is still developing." },
+        { letter: "B", text: "Good hand control. Easily handles coloring, drawing, or playing with small blocks." },
+        { letter: "C", text: "Excellent finger control. Easily picks up and handles very tiny objects." },
+      ],
+    },
+  ],
+  iKeys: ["languageSkills", "coreStrengths", "motorBaseline"],
+  games: [
+    { icon: "🥁", name: "The Heartbeat Sync Game",    hint: "Rhythm Score" },
+    { icon: "🎵", name: "The Bird vs. Bear Game",      hint: "Pitch Score"  },
+    { icon: "🐾", name: "The Animal Footsteps Game",   hint: "Motor Score"  },
+  ],
+  computeCfg: (avg) => {
+    if (avg <= 2.5) return { track: "Level 1 (Delta Track)", syllabusStrategy: "Tactile/Pre-Staff Preparation", metronome: false, metronomeBpm: null, handIntegration: "RH Only", chords: false, songsheetDifficulty: "Simplified/Rote" };
+    if (avg <= 4.0) return { track: "Level 2 (Epsilon Track)", syllabusStrategy: "Standard Method Integration", metronome: true, metronomeBpm: 55, handIntegration: "Hands Separated", chords: "Basic Blocks", songsheetDifficulty: "Standard" };
+    return { track: "Level 3 (Zeta Track)", syllabusStrategy: "Accelerated Performance & Early Composition", metronome: true, metronomeBpm: 70, handIntegration: "Hands Together", chords: "Full Harmonies", songsheetDifficulty: "Advanced/16-Bar" };
+  },
+};
+
+const FT_TRACK: TrackDef = {
+  id: "fast-track", icon: "🎸", label: "Fast Track", ageDesc: "Ages 7–30",
+  accent: "#d97706", accentBg: "#fefce8",
+  questions: [
+    {
+      key: "stageReadiness", title: "Performance Comfort",
+      subtitle: "How does the student feel about performing in front of others?",
+      options: [
+        { letter: "A", text: "Prefers playing in one-on-one settings or small classrooms." },
+        { letter: "B", text: "Excited to perform on stage in front of large audiences." },
+        { letter: "C", text: "Wants to master both stage performances and competitive evaluations." },
+      ],
+    },
+    {
+      key: "academicGoals", title: "Exam & Certification Drive",
+      subtitle: "What are the student's goals with formal music education?",
+      options: [
+        { letter: "A", text: "Wants to learn structured technique without matching strict exam deadlines." },
+        { letter: "B", text: "Highly focused on clearing formal grade examinations and earning certificates." },
+        { letter: "C", text: "Aims to fast-track through grades to reach advanced certification quickly." },
+      ],
+    },
+    {
+      key: "practiceCommitment", title: "Practice Discipline",
+      subtitle: "How much daily practice can the student commit to?",
+      options: [
+        { letter: "A", text: "Can commit to 20–30 minutes of focused technical practice daily." },
+        { letter: "B", text: "Ready for 45 minutes of strict daily practice covering scales and exercises." },
+        { letter: "C", text: "Fully dedicated to rigorous, long-duration practice for top-tier results." },
+      ],
+    },
+  ],
+  iKeys: ["stageReadiness", "academicGoals", "practiceCommitment"],
+  games: [
+    { icon: "🥁", name: "Rhythm Clap & Count Test",   hint: "Rhythm Score" },
+    { icon: "🎵", name: "Ear Pitch Match Test",        hint: "Pitch Score"  },
+    { icon: "🎹", name: "Technical Play Test",         hint: "Motor Score"  },
+  ],
+  computeCfg: (avg) => {
+    if (avg <= 2.5) return { track: "Explorer Track", syllabusStrategy: "Beginner Foundations", metronome: true, metronomeBpm: 55, handIntegration: "Hands Separated", chords: false, songsheetDifficulty: "Standard/Easier" };
+    if (avg <= 4.0) return { track: "Achiever Track", syllabusStrategy: "Intermediate Integration", metronome: true, metronomeBpm: 70, handIntegration: "Hands Together", chords: "Basic Blocks", songsheetDifficulty: "Mid-Tier" };
+    return { track: "Prodigy Track", syllabusStrategy: "Advanced Performance & 16-Bar Composition", metronome: true, metronomeBpm: 80, handIntegration: "Hands Together", chords: "Full Harmonies & Inversions", songsheetDifficulty: "Advanced/16-Bar" };
+  },
+};
+
+const JOYFUL_TRACK: TrackDef = {
+  id: "joyful-track", icon: "🌻", label: "Joyful Track", ageDesc: "Ages 31+",
+  accent: "#db2777", accentBg: "#fdf2f8",
+  questions: [
+    {
+      key: "learningMotivation", title: "Learning Motivation",
+      subtitle: "What brings you to music at this stage of life?",
+      options: [
+        { letter: "A", text: "Looking for a relaxing hobby to unwind and de-stress after work." },
+        { letter: "B", text: "Want to learn songs I love and enjoy playing for myself or family." },
+        { letter: "C", text: "Interested in understanding music theory and developing real skill over time." },
+      ],
+    },
+    {
+      key: "pacingPreference", title: "Pacing Preference",
+      subtitle: "How would you prefer to structure your learning journey?",
+      options: [
+        { letter: "A", text: "Go at my own pace with no strict timeline or syllabus pressure." },
+        { letter: "B", text: "Gentle structure — a loose plan but flexibility to adjust as I go." },
+        { letter: "C", text: "Clear milestones — I like knowing what I'm working toward and when." },
+      ],
+    },
+    {
+      key: "musicalBackground", title: "Musical Background",
+      subtitle: "What is your prior experience with music?",
+      options: [
+        { letter: "A", text: "Completely new to playing any instrument. Starting from scratch." },
+        { letter: "B", text: "Some exposure years ago — school music, casual singing, or basic lessons." },
+        { letter: "C", text: "Had formal training in the past and returning to pick it up again." },
+      ],
+    },
+  ],
+  iKeys: ["learningMotivation", "pacingPreference", "musicalBackground"],
+  games: [
+    { icon: "🥁", name: "Steady Beat Test",      hint: "Rhythm Score" },
+    { icon: "🎵", name: "Melody Recognition",    hint: "Pitch Score"  },
+    { icon: "🎹", name: "Finger Ease & Posture", hint: "Motor Score"  },
+  ],
+  computeCfg: (avg) => {
+    if (avg <= 2.5) return { track: "Comfort Level", syllabusStrategy: "Relaxed Repertoire & Stress-Free Foundations", metronome: false, metronomeBpm: null, handIntegration: "RH Only", chords: false, songsheetDifficulty: "Simplified/Rote" };
+    if (avg <= 4.0) return { track: "Harmony Level", syllabusStrategy: "Balanced Melody & Harmony Integration", metronome: true, metronomeBpm: 55, handIntegration: "Hands Separated", chords: "Basic Blocks", songsheetDifficulty: "Standard/Easier" };
+    return { track: "Flow Level", syllabusStrategy: "Enriched Repertoire with Theory Concepts", metronome: true, metronomeBpm: 65, handIntegration: "Hands Together", chords: "Full Harmonies", songsheetDifficulty: "Standard" };
+  },
+};
+
+const CREATIVE_TRACK: TrackDef = {
+  id: "creative-track", icon: "🎨", label: "The Creative Track", ageDesc: "All Ages",
+  accent: "#7c3aed", accentBg: "#f5f3ff",
+  questions: [
+    {
+      key: "sensoryProfile", title: "Sensory & Focus Profile",
+      subtitle: "How does the student best engage with their environment during learning?",
+      options: [
+        { letter: "A", text: "Benefits from reduced sensory input — prefers quieter spaces and fewer visual distractions." },
+        { letter: "B", text: "Can manage standard classroom settings with occasional breaks or movement." },
+        { letter: "C", text: "Engages well with tactile or visual learning aids and multi-sensory input." },
+      ],
+    },
+    {
+      key: "physicalNeeds", title: "Physical & Motor Considerations",
+      subtitle: "What physical adaptations, if any, are needed to support learning?",
+      options: [
+        { letter: "A", text: "Requires significant adaptation — limited hand or arm mobility, or significant fine motor challenges." },
+        { letter: "B", text: "Some adaptations helpful — keyboard height, finger resistance, or hand positioning guidance." },
+        { letter: "C", text: "Minimal adaptations — can engage with standard instrument setup with minor modifications." },
+      ],
+    },
+    {
+      key: "learningStyle", title: "Preferred Learning Style",
+      subtitle: "How does the student best absorb and retain new musical concepts?",
+      options: [
+        { letter: "A", text: "Responds best to repetition, routine, and consistent structure session to session." },
+        { letter: "B", text: "Learns through imitation and demonstration — watching and copying works well." },
+        { letter: "C", text: "Engages through creativity — improvisation, colour coding, or storytelling works well." },
+      ],
+    },
+  ],
+  iKeys: ["sensoryProfile", "physicalNeeds", "learningStyle"],
+  games: [
+    { icon: "🥁", name: "Adapted Rhythm Activity", hint: "Rhythm Score" },
+    { icon: "🎵", name: "Sound Matching Game",      hint: "Pitch Score"  },
+    { icon: "🎹", name: "Key Press & Response",     hint: "Motor Score"  },
+  ],
+  computeCfg: (avg) => {
+    if (avg <= 2.5) return { track: "Sensory-Friendly Level", syllabusStrategy: "Fully Adapted Sensory-Friendly Foundations", metronome: false, metronomeBpm: null, handIntegration: "RH Only", chords: false, songsheetDifficulty: "Simplified/Rote" };
+    if (avg <= 4.0) return { track: "Adaptive Level", syllabusStrategy: "Adaptive Standard Integration", metronome: true, metronomeBpm: 50, handIntegration: "Hands Separated", chords: false, songsheetDifficulty: "Standard/Easier" };
+    return { track: "Expression Level", syllabusStrategy: "Creative Expression & Adaptive Performance", metronome: true, metronomeBpm: 60, handIntegration: "Hands Separated", chords: "Basic Blocks", songsheetDifficulty: "Standard" };
+  },
+};
+
+const TRACK_LIST: TrackDef[] = [LM_TRACK, FT_TRACK, JOYFUL_TRACK, CREATIVE_TRACK];
+
+const TRACK_DEFS: Record<ScreeningType, TrackDef> = {
+  "little-mozarts": LM_TRACK,
+  "fast-track":     FT_TRACK,
+  "joyful-track":   JOYFUL_TRACK,
+  "creative-track": CREATIVE_TRACK,
+};
 
 const SCREEN_TRACK_SHORT: Record<ScreeningTrack, string> = {
   "Level 1 (Delta Track)":   "Delta",
@@ -101,6 +230,12 @@ const SCREEN_TRACK_SHORT: Record<ScreeningTrack, string> = {
   "Explorer Track":          "Explorer",
   "Achiever Track":          "Achiever",
   "Prodigy Track":           "Prodigy",
+  "Comfort Level":           "Comfort",
+  "Harmony Level":           "Harmony",
+  "Flow Level":              "Flow",
+  "Sensory-Friendly Level":  "Sensory",
+  "Adaptive Level":          "Adaptive",
+  "Expression Level":        "Expression",
 };
 
 function scoreColor(n: number): string {
@@ -739,13 +874,20 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
 
 function ScreeningHub() {
   const [view,          setView]          = useState<"screening" | "admission" | "applications">("screening");
+  const [selectedTrack, setSelectedTrack] = useState<ScreeningType>("little-mozarts");
   const [prefillName,   setPrefillName]   = useState("");
-  const [screeningKey,  setScreeningKey]  = useState(0);
+  const [formKey,       setFormKey]       = useState(0);
 
   function handleStartScreening(name: string) {
     setPrefillName(name);
-    setScreeningKey(k => k + 1);
+    setFormKey(k => k + 1);
     setView("screening");
+  }
+
+  function selectTrack(id: ScreeningType) {
+    setSelectedTrack(id);
+    setFormKey(k => k + 1);
+    setPrefillName("");
   }
 
   return (
@@ -779,7 +921,40 @@ function ScreeningHub() {
           </button>
         ))}
       </div>
-      {view === "screening"    && <ScreeningContent key={screeningKey} initialChildName={prefillName} />}
+
+      {view === "screening" && (
+        <>
+          {/* Track selector — 2×2 grid */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
+            {TRACK_LIST.map(t => {
+              const active = selectedTrack === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => selectTrack(t.id)}
+                  style={{
+                    border:       active ? `2px solid ${t.accent}` : "1px solid #e5e7eb",
+                    borderRadius: 10,
+                    padding:      "12px 16px",
+                    background:   active ? t.accentBg : "#fafafa",
+                    cursor:       "pointer",
+                    textAlign:    "left",
+                  }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 800, color: active ? t.accent : "#374151" }}>
+                    {t.icon} {t.label}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
+                    {t.ageDesc}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <TrackScreeningForm key={formKey} track={TRACK_DEFS[selectedTrack]} initialChildName={prefillName} />
+        </>
+      )}
       {view === "admission"    && <AdmissionFormContent />}
       {view === "applications" && <AdmissionsList onStartScreening={handleStartScreening} />}
     </>
@@ -1398,14 +1573,20 @@ function ScreeningHistory() {
                         {rec.childName}
                       </td>
                       <td style={{ padding: "11px 14px" }}>
-                        <span style={{
-                          fontSize: 10, fontWeight: 700,
-                          padding: "2px 8px", borderRadius: 99,
-                          background: rec.screeningType === "little-mozarts" ? "#ede9fe" : "#fef3c7",
-                          color:      rec.screeningType === "little-mozarts" ? "#4f46e5" : "#92400e",
-                        }}>
-                          {rec.screeningType === "little-mozarts" ? "LM" : "FT"}
-                        </span>
+                        {(() => {
+                          const badge: Record<string, { label: string; bg: string; color: string }> = {
+                            "little-mozarts": { label: "LM", bg: "#ede9fe", color: "#4f46e5" },
+                            "fast-track":     { label: "FT", bg: "#fef3c7", color: "#92400e" },
+                            "joyful-track":   { label: "JT", bg: "#fce7f3", color: "#9d174d" },
+                            "creative-track": { label: "CT", bg: "#f5f3ff", color: "#6d28d9" },
+                          };
+                          const b = badge[rec.screeningType] ?? { label: rec.screeningType.slice(0, 2).toUpperCase(), bg: "#f3f4f6", color: "#374151" };
+                          return (
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: b.bg, color: b.color }}>
+                              {b.label}
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td style={{ padding: "11px 14px", textAlign: "center" as const, fontSize: 15, fontWeight: 800, color: scoreColor(rec.rhythmScore) }}>
                         {rec.rhythmScore}
@@ -1445,11 +1626,16 @@ function ScreeningHistory() {
   );
 }
 
-// ─── Main content ─────────────────────────────────────────────────────────────
+// ─── Generic screening form (all tracks) ─────────────────────────────────────
 
-function ScreeningContent({ initialChildName = "" }: { initialChildName?: string }) {
+function TrackScreeningForm({
+  track,
+  initialChildName = "",
+}: {
+  track:             TrackDef;
+  initialChildName?: string;
+}) {
   const { user } = useAuthContext();
-
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
   // Step 1
@@ -1460,17 +1646,14 @@ function ScreeningContent({ initialChildName = "" }: { initialChildName?: string
   const [studsLoading,  setStudsLoading]  = useState(false);
   const [showDropdown,  setShowDropdown]  = useState(false);
 
-  // Step 2
-  const [languageSkills, setLanguageSkills] = useState("");
-  const [coreStrengths,  setCoreStrengths]  = useState("");
-  const [motorBaseline,  setMotorBaseline]  = useState("");
+  // Step 2 — generic interview answers keyed by question.key
+  const [interviewAnswers, setInterviewAnswers] = useState<Record<string, string>>({});
 
   // Step 3
   const [rhythmScore, setRhythmScore] = useState<number | null>(null);
   const [pitchScore,  setPitchScore]  = useState<number | null>(null);
   const [motorScore,  setMotorScore]  = useState<number | null>(null);
 
-  // Save
   const [saving,     setSaving]     = useState(false);
   const [saved,      setSaved]      = useState(false);
   const [saveErr,    setSaveErr]    = useState("");
@@ -1479,16 +1662,10 @@ function ScreeningContent({ initialChildName = "" }: { initialChildName?: string
   useEffect(() => {
     setStudsLoading(true);
     getDocs(query(collection(db, "users"), where("role", "==", "student")))
-      .then(snap => {
-        setAllStudents(snap.docs.map(d => {
-          const u = d.data();
-          return {
-            uid:       d.id,
-            name:      (u.displayName ?? u.name ?? "—") as string,
-            studentID: (u.studentID ?? "") as string,
-          };
-        }));
-      })
+      .then(snap => setAllStudents(snap.docs.map(d => {
+        const u = d.data();
+        return { uid: d.id, name: (u.displayName ?? u.name ?? "—") as string, studentID: (u.studentID ?? "") as string };
+      })))
       .catch(() => {})
       .finally(() => setStudsLoading(false));
   }, []);
@@ -1496,38 +1673,40 @@ function ScreeningContent({ initialChildName = "" }: { initialChildName?: string
   const filteredStudents = useMemo(() => {
     const q = studentQuery.trim().toLowerCase();
     if (!q || linkedStudent) return [];
-    return allStudents
-      .filter(s => s.name.toLowerCase().includes(q) || s.studentID.toLowerCase().includes(q))
-      .slice(0, 8);
+    return allStudents.filter(s => s.name.toLowerCase().includes(q) || s.studentID.toLowerCase().includes(q)).slice(0, 8);
   }, [studentQuery, allStudents, linkedStudent]);
 
   const allScoresFilled = rhythmScore !== null && pitchScore !== null && motorScore !== null;
-
-  const averageScore = allScoresFilled
-    ? Math.round(((rhythmScore! + pitchScore! + motorScore!) / 3) * 100) / 100
-    : null;
-
-  const config = averageScore !== null ? computeConfig(averageScore) : null;
+  const averageScore    = allScoresFilled ? Math.round(((rhythmScore! + pitchScore! + motorScore!) / 3) * 100) / 100 : null;
+  const config          = averageScore !== null ? track.computeCfg(averageScore) : null;
 
   async function handleSave() {
     if (!allScoresFilled || !config || averageScore === null || !childName.trim()) return;
-    setSaving(true);
-    setSaveErr("");
+    setSaving(true); setSaveErr("");
     try {
       await saveScreening({
-        screeningType:  "little-mozarts",
+        screeningType:  track.id,
         childName:      childName.trim(),
-        languageSkills: languageSkills.trim(),
-        coreStrengths:  coreStrengths.trim(),
-        motorBaseline:  motorBaseline.trim(),
-        rhythmScore:    rhythmScore!,
-        pitchScore:     pitchScore!,
-        motorScore:     motorScore!,
+        languageSkills:     interviewAnswers["languageSkills"]     || undefined,
+        coreStrengths:      interviewAnswers["coreStrengths"]      || undefined,
+        motorBaseline:      interviewAnswers["motorBaseline"]      || undefined,
+        stageReadiness:     interviewAnswers["stageReadiness"]     || undefined,
+        academicGoals:      interviewAnswers["academicGoals"]      || undefined,
+        practiceCommitment: interviewAnswers["practiceCommitment"] || undefined,
+        learningMotivation: interviewAnswers["learningMotivation"] || undefined,
+        pacingPreference:   interviewAnswers["pacingPreference"]   || undefined,
+        musicalBackground:  interviewAnswers["musicalBackground"]  || undefined,
+        sensoryProfile:     interviewAnswers["sensoryProfile"]     || undefined,
+        physicalNeeds:      interviewAnswers["physicalNeeds"]      || undefined,
+        learningStyle:      interviewAnswers["learningStyle"]      || undefined,
+        rhythmScore:  rhythmScore!,
+        pitchScore:   pitchScore!,
+        motorScore:   motorScore!,
         averageScore,
         config,
-        screenedBy: user?.uid ?? "",
-        screenedAt: new Date().toISOString(),
-        studentId:  linkedStudent?.uid ?? null,
+        screenedBy:   user?.uid ?? "",
+        screenedAt:   new Date().toISOString(),
+        studentId:    linkedStudent?.uid ?? null,
       });
       setSaved(true);
       setHistoryKey(k => k + 1);
@@ -1540,14 +1719,12 @@ function ScreeningContent({ initialChildName = "" }: { initialChildName?: string
 
   function resetForm() {
     setStep(1);
-    setChildName(""); setStudentQuery(""); setLinkedStudent(null);
-    setShowDropdown(false);
-    setLanguageSkills(""); setCoreStrengths(""); setMotorBaseline("");
+    setChildName(""); setStudentQuery(""); setLinkedStudent(null); setShowDropdown(false);
+    setInterviewAnswers({});
     setRhythmScore(null); setPitchScore(null); setMotorScore(null);
     setSaved(false); setSaveErr("");
   }
 
-  // ── Success screen ─────────────────────────────────────────────────────────
   if (saved && config && averageScore !== null) {
     return (
       <>
@@ -1574,281 +1751,231 @@ function ScreeningContent({ initialChildName = "" }: { initialChildName?: string
     );
   }
 
-  // ── Step indicator ─────────────────────────────────────────────────────────
   const steps = [
-    { n: 1 as const, label: "Student Info" },
-    { n: 2 as const, label: "Parent Interview" },
+    { n: 1 as const, label: "Student Info"    },
+    { n: 2 as const, label: "Interview"       },
     { n: 3 as const, label: "Practical Scores" },
   ];
 
   return (
     <>
-    <div style={{ maxWidth: 680, margin: "0 auto" }}>
-      {/* Module switcher */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 24 }}>
-        <div style={{ flex: 1, border: "2px solid #4f46e5", borderRadius: 10, padding: "12px 16px", background: "#ede9fe" }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: "#4f46e5" }}>🎹 Little Mozarts</div>
-          <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>Ages 3–6 · Active</div>
-        </div>
-        <Link href="/dashboard/screening/fast-track" style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 10, padding: "12px 16px", background: "#fafafa", textDecoration: "none", display: "block" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#374151" }}>🎸 Fast Track</div>
-          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>Ages 7–30 · Switch →</div>
-        </Link>
-      </div>
-
-      {/* Header */}
-      <div style={{ marginBottom: 28 }}>
-        <div style={{ fontSize: 22, fontWeight: 800, color: "#111", marginBottom: 4 }}>
-          🎹 Pre-Admission Screening
-        </div>
-        <div style={{ fontSize: 13, color: "#6b7280" }}>
-          Little Mozarts — Evaluate raw musical capacity and auto-assign the correct learning track.
-        </div>
-      </div>
-
-      {/* Step indicator */}
-      <div style={{ display: "flex", alignItems: "flex-start", marginBottom: 28 }}>
-        {steps.map(({ n, label }, i) => (
-          <div key={n} style={{ display: "flex", alignItems: "center", flex: 1 }}>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1 }}>
-              <div style={{
-                width: 34, height: 34, borderRadius: "50%",
-                background: step === n ? "#4f46e5" : step > n ? "#22c55e" : "#e5e7eb",
-                color: step >= n ? "#fff" : "#9ca3af",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 13, fontWeight: 700, flexShrink: 0,
-              }}>
-                {step > n ? "✓" : n}
-              </div>
-              <div style={{ fontSize: 11, color: step === n ? "#4f46e5" : "#9ca3af", marginTop: 5, fontWeight: step === n ? 700 : 400, whiteSpace: "nowrap" }}>
-                {label}
-              </div>
-            </div>
-            {i < steps.length - 1 && (
-              <div style={{ height: 2, width: 32, background: step > n ? "#22c55e" : "#e5e7eb", flexShrink: 0, marginBottom: 20, margin: "0 0 20px" }} />
-            )}
+      <div style={{ maxWidth: 680, margin: "0 auto" }}>
+        {/* Header */}
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontSize: 22, fontWeight: 800, color: "#111", marginBottom: 4 }}>
+            {track.icon} Pre-Admission Screening
           </div>
-        ))}
-      </div>
-
-      {/* ── Step 1: Student Info ─────────────────────────────────────────────── */}
-      {step === 1 && (
-        <div style={s.card}>
-          <div style={s.sectionTitle}>Child Information</div>
-
-          <div style={s.field}>
-            <label style={s.label}>Child&apos;s Name *</label>
-            <input
-              value={childName}
-              onChange={e => setChildName(e.target.value)}
-              placeholder="e.g. Aarav Sharma"
-              style={s.input}
-            />
+          <div style={{ fontSize: 13, color: "#6b7280" }}>
+            {track.label} — Evaluate musical capacity and auto-assign the correct learning track.
           </div>
+        </div>
 
-          <div style={s.field}>
-            <label style={s.label}>
-              Link to Enrolled Student{" "}
-              <span style={{ color: "#9ca3af", fontWeight: 400 }}>(optional)</span>
-            </label>
-            <div style={{ position: "relative" }}>
-              {linkedStudent ? (
-                <div style={{ ...s.input, display: "flex", alignItems: "center", justifyContent: "space-between", color: "#374151", boxSizing: "border-box" }}>
-                  <span>{linkedStudent.name} <span style={{ color: "#9ca3af" }}>({linkedStudent.studentID})</span></span>
-                  <button
-                    type="button"
-                    onClick={() => { setLinkedStudent(null); setStudentQuery(""); }}
-                    style={{ background: "none", border: "none", cursor: "pointer", fontSize: 15, color: "#9ca3af", padding: 0, lineHeight: 1 }}>
-                    ✕
-                  </button>
+        {/* Step indicator */}
+        <div style={{ display: "flex", alignItems: "flex-start", marginBottom: 28 }}>
+          {steps.map(({ n, label }, i) => (
+            <div key={n} style={{ display: "flex", alignItems: "center", flex: 1 }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1 }}>
+                <div style={{
+                  width: 34, height: 34, borderRadius: "50%",
+                  background: step === n ? "#4f46e5" : step > n ? "#22c55e" : "#e5e7eb",
+                  color: step >= n ? "#fff" : "#9ca3af",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 13, fontWeight: 700, flexShrink: 0,
+                }}>
+                  {step > n ? "✓" : n}
                 </div>
-              ) : (
-                <input
-                  value={studentQuery}
-                  onChange={e => { setStudentQuery(e.target.value); setShowDropdown(true); }}
-                  onFocus={() => setShowDropdown(true)}
-                  onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
-                  placeholder="Search by name or student ID…"
-                  style={s.input}
-                />
-              )}
-
-              {showDropdown && filteredStudents.length > 0 && !linkedStudent && (
-                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50, border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", boxShadow: "0 6px 18px rgba(0,0,0,0.10)", background: "#fff", marginTop: 2 }}>
-                  {filteredStudents.map(st => (
-                    <div
-                      key={st.uid}
-                      onMouseDown={() => { setLinkedStudent(st); if (!childName.trim()) setChildName(st.name); setStudentQuery(""); setShowDropdown(false); }}
-                      style={{ padding: "10px 14px", cursor: "pointer", fontSize: 13, borderBottom: "1px solid #f3f4f6", display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                      onMouseEnter={e => (e.currentTarget.style.background = "#f9fafb")}
-                      onMouseLeave={e => (e.currentTarget.style.background = "#fff")}
-                    >
-                      <span style={{ fontWeight: 600, color: "#111" }}>{st.name}</span>
-                      <span style={{ fontSize: 12, color: "#9ca3af" }}>{st.studentID}</span>
-                    </div>
-                  ))}
+                <div style={{ fontSize: 11, color: step === n ? "#4f46e5" : "#9ca3af", marginTop: 5, fontWeight: step === n ? 700 : 400, whiteSpace: "nowrap" }}>
+                  {label}
                 </div>
+              </div>
+              {i < steps.length - 1 && (
+                <div style={{ height: 2, width: 32, background: step > n ? "#22c55e" : "#e5e7eb", flexShrink: 0, margin: "0 0 20px" }} />
               )}
             </div>
-            <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 6 }}>
-              {studsLoading ? "Loading students…" : "Links this diagnostic to the student's profile for instructor review."}
-            </div>
-          </div>
-
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-            <button
-              type="button"
-              disabled={!childName.trim()}
-              onClick={() => setStep(2)}
-              style={{ ...s.primaryBtn, opacity: childName.trim() ? 1 : 0.4, cursor: childName.trim() ? "pointer" : "not-allowed" }}>
-              Next: Parent Interview →
-            </button>
-          </div>
+          ))}
         </div>
-      )}
 
-      {/* ── Step 2: Parent Interview ─────────────────────────────────────────── */}
-      {step === 2 && (
-        <div style={s.card}>
-          <div style={s.sectionTitle}>Parent Screening Interview</div>
-          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>
-            Select the option that best describes your child. Ask the parent to help choose.
-          </div>
-
-          {INTERVIEW_QUESTIONS.map((q, qi) => {
-            const currentVal = q.key === "languageSkills" ? languageSkills
-              : q.key === "coreStrengths" ? coreStrengths
-              : motorBaseline;
-            const setter = q.key === "languageSkills" ? setLanguageSkills
-              : q.key === "coreStrengths" ? setCoreStrengths
-              : setMotorBaseline;
-
-            return (
-              <div key={q.key} style={{ marginBottom: qi < 2 ? 28 : 8 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#111", marginBottom: 2 }}>
-                  {qi + 1}. {q.title}
-                </div>
-                <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 12 }}>{q.subtitle}</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {q.options.map(opt => {
-                    const optValue = `Option ${opt.letter}: ${opt.text}`;
-                    const selected = currentVal === optValue;
-                    return (
-                      <div
-                        key={opt.letter}
-                        onClick={() => setter(selected ? "" : optValue)}
-                        style={{
-                          display: "flex", alignItems: "flex-start", gap: 12,
-                          border: selected ? "2px solid #4f46e5" : "1px solid #e5e7eb",
-                          borderRadius: 10, padding: "12px 14px",
-                          background: selected ? "#ede9fe" : "#fafafa",
-                          cursor: "pointer", transition: "all 0.12s",
-                        }}
-                      >
-                        <div style={{
-                          width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
-                          background: selected ? "#4f46e5" : "#e5e7eb",
-                          color: selected ? "#fff" : "#6b7280",
-                          display: "flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 12, fontWeight: 800, marginTop: 1,
-                        }}>
-                          {selected ? "✓" : opt.letter}
-                        </div>
-                        <div style={{ fontSize: 14, color: selected ? "#3730a3" : "#374151", lineHeight: 1.5, fontWeight: selected ? 600 : 400 }}>
-                          {opt.text}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
-            <button type="button" onClick={() => setStep(1)} style={s.secondaryBtn}>← Back</button>
-            <button type="button" onClick={() => setStep(3)} style={s.primaryBtn}>Next: Practical Scores →</button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Step 3: Practical Scores ─────────────────────────────────────────── */}
-      {step === 3 && (
-        <>
+        {/* Step 1: Student Info */}
+        {step === 1 && (
           <div style={s.card}>
-            <div style={s.sectionTitle}>Practical Assessment</div>
-            <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>
-              Score each activity 1–5. Results compute automatically once all three are filled.
+            <div style={s.sectionTitle}>Student Information</div>
+            <div style={s.field}>
+              <label style={s.label}>{track.id === "little-mozarts" ? "Child's Name *" : "Student's Name *"}</label>
+              <input value={childName} onChange={e => setChildName(e.target.value)} placeholder="Full name" style={s.input} />
             </div>
-
-            {([
-              { icon: "🥁", game: "The Heartbeat Sync Game", hint: "Rhythm Score",  value: rhythmScore, set: setRhythmScore },
-              { icon: "🎵", game: "The Bird vs. Bear Game",  hint: "Pitch Score",   value: pitchScore,  set: setPitchScore  },
-              { icon: "🐾", game: "The Animal Footsteps Game", hint: "Motor Score", value: motorScore,  set: setMotorScore  },
-            ]).map((g, i) => (
-              <div key={g.hint} style={{ marginBottom: i < 2 ? 28 : 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                  <span style={{ fontSize: 22, lineHeight: 1 }}>{g.icon}</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>{g.game}</div>
-                    <div style={{ fontSize: 12, color: "#9ca3af" }}>{g.hint}</div>
+            <div style={s.field}>
+              <label style={s.label}>Link to Enrolled Student <span style={{ color: "#9ca3af", fontWeight: 400 }}>(optional)</span></label>
+              <div style={{ position: "relative" }}>
+                {linkedStudent ? (
+                  <div style={{ ...s.input, display: "flex", alignItems: "center", justifyContent: "space-between", color: "#374151", boxSizing: "border-box" }}>
+                    <span>{linkedStudent.name} <span style={{ color: "#9ca3af" }}>({linkedStudent.studentID})</span></span>
+                    <button type="button" onClick={() => { setLinkedStudent(null); setStudentQuery(""); }}
+                      style={{ background: "none", border: "none", cursor: "pointer", fontSize: 15, color: "#9ca3af", padding: 0, lineHeight: 1 }}>✕</button>
                   </div>
-                  {g.value !== null && (
-                    <div style={{ fontSize: 22, fontWeight: 900, color: scoreColor(g.value), minWidth: 36, textAlign: "right" }}>
-                      {g.value}
-                    </div>
-                  )}
+                ) : (
+                  <input
+                    value={studentQuery}
+                    onChange={e => { setStudentQuery(e.target.value); setShowDropdown(true); }}
+                    onFocus={() => setShowDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
+                    placeholder="Search by name or student ID…"
+                    style={s.input}
+                  />
+                )}
+                {showDropdown && filteredStudents.length > 0 && !linkedStudent && (
+                  <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50, border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", boxShadow: "0 6px 18px rgba(0,0,0,0.10)", background: "#fff", marginTop: 2 }}>
+                    {filteredStudents.map(st => (
+                      <div key={st.uid}
+                        onMouseDown={() => { setLinkedStudent(st); if (!childName.trim()) setChildName(st.name); setStudentQuery(""); setShowDropdown(false); }}
+                        style={{ padding: "10px 14px", cursor: "pointer", fontSize: 13, borderBottom: "1px solid #f3f4f6", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                        onMouseEnter={e => (e.currentTarget.style.background = "#f9fafb")}
+                        onMouseLeave={e => (e.currentTarget.style.background = "#fff")}
+                      >
+                        <span style={{ fontWeight: 600, color: "#111" }}>{st.name}</span>
+                        <span style={{ fontSize: 12, color: "#9ca3af" }}>{st.studentID}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 6 }}>
+                {studsLoading ? "Loading students…" : "Links this diagnostic to the student's profile for instructor review."}
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+              <button type="button" disabled={!childName.trim()} onClick={() => setStep(2)}
+                style={{ ...s.primaryBtn, opacity: childName.trim() ? 1 : 0.4, cursor: childName.trim() ? "pointer" : "not-allowed" }}>
+                Next: Interview →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2: Interview */}
+        {step === 2 && (
+          <div style={s.card}>
+            <div style={s.sectionTitle}>Screening Interview</div>
+            <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>
+              Select the option that best describes the student.
+            </div>
+            {track.questions.map((q, qi) => {
+              const currentVal = interviewAnswers[q.key] ?? "";
+              return (
+                <div key={q.key} style={{ marginBottom: qi < 2 ? 28 : 8 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#111", marginBottom: 2 }}>{qi + 1}. {q.title}</div>
+                  <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 12 }}>{q.subtitle}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {q.options.map(opt => {
+                      const optValue = `Option ${opt.letter}: ${opt.text}`;
+                      const selected = currentVal === optValue;
+                      return (
+                        <div key={opt.letter}
+                          onClick={() => setInterviewAnswers(prev => ({ ...prev, [q.key]: selected ? "" : optValue }))}
+                          style={{ display: "flex", alignItems: "flex-start", gap: 12, border: selected ? "2px solid #4f46e5" : "1px solid #e5e7eb", borderRadius: 10, padding: "12px 14px", background: selected ? "#ede9fe" : "#fafafa", cursor: "pointer", transition: "all 0.12s" }}
+                        >
+                          <div style={{ width: 26, height: 26, borderRadius: "50%", flexShrink: 0, background: selected ? "#4f46e5" : "#e5e7eb", color: selected ? "#fff" : "#6b7280", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, marginTop: 1 }}>
+                            {selected ? "✓" : opt.letter}
+                          </div>
+                          <div style={{ fontSize: 14, color: selected ? "#3730a3" : "#374151", lineHeight: 1.5, fontWeight: selected ? 600 : 400 }}>
+                            {opt.text}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <ScoreSelector value={g.value} onChange={g.set} />
-              </div>
-            ))}
+              );
+            })}
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24 }}>
+              <button type="button" onClick={() => setStep(1)} style={s.secondaryBtn}>← Back</button>
+              <button type="button" onClick={() => setStep(3)} style={s.primaryBtn}>Next: Practical Scores →</button>
+            </div>
           </div>
+        )}
 
-          {/* Results panel — auto-shown when all scores filled */}
-          {allScoresFilled && config && averageScore !== null ? (
-            <div style={{ marginTop: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
-                Diagnostic Result
+        {/* Step 3: Practical Scores */}
+        {step === 3 && (
+          <>
+            <div style={s.card}>
+              <div style={s.sectionTitle}>Practical Assessment</div>
+              <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>
+                Score each activity 1–5. Results compute automatically once all three are filled.
               </div>
-              <DiagnosticCard
-                result={{
-                  childName,
-                  rhythmScore: rhythmScore!,
-                  pitchScore:  pitchScore!,
-                  motorScore:  motorScore!,
-                  averageScore,
-                  config,
-                  screenedAt:     new Date().toISOString(),
-                  languageSkills, coreStrengths, motorBaseline,
-                }}
-              />
+              {([
+                { ...track.games[0], value: rhythmScore, set: setRhythmScore },
+                { ...track.games[1], value: pitchScore,  set: setPitchScore  },
+                { ...track.games[2], value: motorScore,  set: setMotorScore  },
+              ]).map((g, i) => (
+                <div key={g.hint} style={{ marginBottom: i < 2 ? 28 : 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                    <span style={{ fontSize: 22, lineHeight: 1 }}>{g.icon}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>{g.name}</div>
+                      <div style={{ fontSize: 12, color: "#9ca3af" }}>{g.hint}</div>
+                    </div>
+                    {g.value !== null && (
+                      <div style={{ fontSize: 22, fontWeight: 900, color: scoreColor(g.value), minWidth: 36, textAlign: "right" as const }}>
+                        {g.value}
+                      </div>
+                    )}
+                  </div>
+                  <ScoreSelector value={g.value} onChange={g.set} />
+                </div>
+              ))}
             </div>
-          ) : (
-            <div style={{ textAlign: "center", padding: "18px 0", fontSize: 13, color: "#9ca3af" }}>
-              Fill all three scores above to see the diagnostic result.
-            </div>
-          )}
 
-          {saveErr && (
-            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#dc2626", marginTop: 14 }}>
-              {saveErr}
-            </div>
-          )}
+            {allScoresFilled && config && averageScore !== null ? (
+              <div style={{ marginTop: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
+                  Diagnostic Result
+                </div>
+                <DiagnosticCard
+                  result={{
+                    childName,
+                    rhythmScore:  rhythmScore!,
+                    pitchScore:   pitchScore!,
+                    motorScore:   motorScore!,
+                    averageScore,
+                    config,
+                    screenedAt:         new Date().toISOString(),
+                    languageSkills:     interviewAnswers["languageSkills"],
+                    coreStrengths:      interviewAnswers["coreStrengths"],
+                    motorBaseline:      interviewAnswers["motorBaseline"],
+                    stageReadiness:     interviewAnswers["stageReadiness"],
+                    academicGoals:      interviewAnswers["academicGoals"],
+                    practiceCommitment: interviewAnswers["practiceCommitment"],
+                    learningMotivation: interviewAnswers["learningMotivation"],
+                    pacingPreference:   interviewAnswers["pacingPreference"],
+                    musicalBackground:  interviewAnswers["musicalBackground"],
+                    sensoryProfile:     interviewAnswers["sensoryProfile"],
+                    physicalNeeds:      interviewAnswers["physicalNeeds"],
+                    learningStyle:      interviewAnswers["learningStyle"],
+                  }}
+                />
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", padding: "18px 0", fontSize: 13, color: "#9ca3af" }}>
+                Fill all three scores above to see the diagnostic result.
+              </div>
+            )}
 
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
-            <button type="button" onClick={() => setStep(2)} style={s.secondaryBtn}>← Back</button>
-            <button
-              type="button"
-              disabled={!allScoresFilled || saving}
-              onClick={handleSave}
-              style={{ ...s.primaryBtn, opacity: allScoresFilled && !saving ? 1 : 0.4, cursor: allScoresFilled && !saving ? "pointer" : "not-allowed" }}>
-              {saving ? "Saving…" : "💾 Save Screening"}
-            </button>
-          </div>
-        </>
-      )}
-    </div>
-    <ScreeningHistory key={historyKey} />
+            {saveErr && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#dc2626", marginTop: 14 }}>
+                {saveErr}
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
+              <button type="button" onClick={() => setStep(2)} style={s.secondaryBtn}>← Back</button>
+              <button type="button" disabled={!allScoresFilled || saving} onClick={handleSave}
+                style={{ ...s.primaryBtn, opacity: allScoresFilled && !saving ? 1 : 0.4, cursor: allScoresFilled && !saving ? "pointer" : "not-allowed" }}>
+                {saving ? "Saving…" : "💾 Save Screening"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+      <ScreeningHistory key={historyKey} />
     </>
   );
 }

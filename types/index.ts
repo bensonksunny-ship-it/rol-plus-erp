@@ -233,9 +233,17 @@ export type ScreeningTrack =
   // Fast Track / Rising Stars (Ages 7–30)
   | "Explorer Track"
   | "Achiever Track"
-  | "Prodigy Track";
+  | "Prodigy Track"
+  // Joyful Track (Ages 31+)
+  | "Comfort Level"
+  | "Harmony Level"
+  | "Flow Level"
+  // The Creative Track (Sensory/physical support)
+  | "Sensory-Friendly Level"
+  | "Adaptive Level"
+  | "Expression Level";
 
-export type ScreeningType = "little-mozarts" | "fast-track";
+export type ScreeningType = "little-mozarts" | "fast-track" | "joyful-track" | "creative-track";
 
 export interface ScreeningConfig {
   track:               ScreeningTrack;
@@ -259,6 +267,14 @@ export interface ScreeningResult {
   stageReadiness?:     string;
   academicGoals?:      string;
   practiceCommitment?: string;
+  // Joyful Track interview fields
+  learningMotivation?: string;
+  pacingPreference?:   string;
+  musicalBackground?:  string;
+  // Creative Track interview fields
+  sensoryProfile?: string;
+  physicalNeeds?:  string;
+  learningStyle?:  string;
   // Practical scores
   rhythmScore:     number;
   pitchScore:      number;
