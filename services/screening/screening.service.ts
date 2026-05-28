@@ -3,6 +3,7 @@ import {
   doc,
   setDoc,
   updateDoc,
+  deleteDoc,
   getDocs,
   query,
   where,
@@ -60,4 +61,12 @@ export async function getAllAdmissions(): Promise<Record<string, unknown>[]> {
   return snap.docs
     .map(d => d.data() as Record<string, unknown>)
     .sort((a, b) => String(b.submittedAt ?? "").localeCompare(String(a.submittedAt ?? "")));
+}
+
+export async function updateAdmission(id: string, data: Record<string, unknown>): Promise<void> {
+  await updateDoc(doc(db, "admissions", id), { ...data, updatedAt: new Date().toISOString() });
+}
+
+export async function deleteAdmission(id: string): Promise<void> {
+  await deleteDoc(doc(db, "admissions", id));
 }

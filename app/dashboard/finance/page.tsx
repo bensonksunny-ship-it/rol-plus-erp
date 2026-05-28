@@ -128,6 +128,7 @@ function FinanceContent() {
   const [payAmount, setPayAmount]            = useState<string>("");
   const [payMethod, setPayMethod]            = useState<PayMethod>("Cash");
   const [payNote, setPayNote]                = useState<string>("");
+  const [payDate, setPayDate]                = useState<string>(todayStr());
   const [discountType, setDiscountType]      = useState<DiscountType>("fixed");
   const [discountValue, setDiscountValue]    = useState<string>("");
   const [paySubmitting, setPaySubmitting]    = useState(false);
@@ -430,6 +431,7 @@ function FinanceContent() {
     setPayAmount(action === "pay" ? (student.balance > 0 ? String(student.balance) : String(student.estimatedFee)) : "");
     setPayMethod("Cash");
     setPayNote("");
+    setPayDate(todayStr());
     setDiscountType("fixed");
     setDiscountValue("");
     setAdjustFee(
@@ -452,6 +454,7 @@ function FinanceContent() {
     setActiveUid(null);
     setPayAmount("");
     setPayNote("");
+    setPayDate(todayStr());
     setDiscountValue("");
     setAdjustFee("");
     setDepositAmount("");
@@ -481,7 +484,7 @@ function FinanceContent() {
         method:       payMethod,
         receivedBy,
         note:         payNote.trim() || null,
-        date:         todayStr(),
+        date:         payDate || todayStr(),
         status:       "completed",
         createdAt:    serverTimestamp(),
       });
@@ -1331,6 +1334,29 @@ function FinanceContent() {
                                         value={payNote} onChange={e => setPayNote(e.target.value)}
                                         style={st.panelInput}
                                         onKeyDown={e => { if (e.key === "Enter") submitPay(s); if (e.key === "Escape") closePanel(); }}
+                                      />
+                                    </div>
+
+                                    {/* Payment date */}
+                                    <div style={st.panelField}>
+                                      <label style={st.panelLabel}>
+                                        Payment Date
+                                        {payDate !== todayStr() && (
+                                          <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#b45309", background: "#fef3c7", padding: "1px 7px", borderRadius: 99 }}>
+                                            Past date
+                                          </span>
+                                        )}
+                                      </label>
+                                      <input
+                                        type="date"
+                                        value={payDate}
+                                        max={todayStr()}
+                                        onChange={e => setPayDate(e.target.value || todayStr())}
+                                        style={{
+                                          ...st.panelInput,
+                                          border: payDate !== todayStr() ? "1.5px solid #f59e0b" : st.panelInput.border,
+                                          background: payDate !== todayStr() ? "#fffbeb" : st.panelInput.background,
+                                        }}
                                       />
                                     </div>
                                   </div>

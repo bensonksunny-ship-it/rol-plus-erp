@@ -6,7 +6,7 @@ import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
-import { saveScreening, getAllScreenings, saveAdmission, getAllAdmissions } from "@/services/screening/screening.service";
+import { saveScreening, getAllScreenings, saveAdmission, getAllAdmissions, updateAdmission, deleteAdmission } from "@/services/screening/screening.service";
 import Link from "next/link";
 import type { ScreeningConfig, ScreeningTrack, ScreeningResult } from "@/types";
 
@@ -118,23 +118,323 @@ function scoreColor(n: number): string {
 
 // ─── Page shell ───────────────────────────────────────────────────────────────
 
+// ─── Edit admission overlay ───────────────────────────────────────────────────
+
+function EditAdmissionOverlay({
+  record,
+  centresList,
+  onSave,
+  onCancel,
+}: {
+  record:      Record<string, unknown>;
+  centresList: { id: string; name: string }[];
+  onSave:      (updated: Record<string, unknown>) => Promise<void>;
+  onCancel:    () => void;
+}) {
+  function rs(v: unknown): string    { return typeof v === "string" ? v : ""; }
+  function ra(v: unknown): string[]  { return Array.isArray(v) ? v.map(String) : []; }
+  function rn(v: unknown): number | null { return typeof v === "number" ? v : null; }
+
+  const dobParts = rs(record.dob).split("/");
+
+  const [fullName,           setFullName]           = useState(rs(record.fullName));
+  const [age,                setAge]                = useState(rs(record.age));
+  const [dobDD,              setDobDD]              = useState(dobParts[0] ?? "");
+  const [dobMM,              setDobMM]              = useState(dobParts[1] ?? "");
+  const [dobYYYY,            setDobYYYY]            = useState(dobParts[2] ?? "");
+  const [parentName,         setParentName]         = useState(rs(record.parentName));
+  const [workingStatus,      setWorkingStatus]      = useState(rs(record.workingStatus));
+  const [schoolCompany,      setSchoolCompany]      = useState(rs(record.schoolCompany));
+  const [phone,              setPhone]              = useState(rs(record.phone));
+  const [email,              setEmail]              = useState(rs(record.email));
+  const [address1,           setAddress1]           = useState(rs(record.address1));
+  const [address2,           setAddress2]           = useState(rs(record.address2));
+  const [centre,             setCentre]             = useState(rs(record.centre));
+  const [purposeOfLearning,  setPurposeOfLearning]  = useState(rs(record.purposeOfLearning));
+  const [instrumentsToLearn, setInstrumentsToLearn] = useState<string[]>(ra(record.instrumentsToLearn));
+  const [previousExperience, setPreviousExperience] = useState(rs(record.previousExperience));
+  const [instrumentsPlayed,  setInstrumentsPlayed]  = useState<string[]>(ra(record.instrumentsPlayed));
+  const [musicalSkill,       setMusicalSkill]       = useState(rs(record.musicalSkill));
+  const [howHeardAboutUs,    setHowHeardAboutUs]    = useState(rs(record.howHeardAboutUs));
+  const [initialExperience,  setInitialExperience]  = useState<number | null>(rn(record.initialExperience));
+  const [parentPartnerProgram, setParentPartnerProgram] = useState(rs(record.parentPartnerProgram));
+  const [photoDataUrl,       setPhotoDataUrl]       = useState<string | null>(rs(record.photo) || null);
+
+  const fileInputRef   = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const [saving,   setSaving]   = useState(false);
+  const [saveErr,  setSaveErr]  = useState("");
+
+  function compressImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        const MAX_W = 320, MAX_H = 420;
+        const ratio = Math.min(MAX_W / img.width, MAX_H / img.height, 1);
+        const w = Math.round(img.width * ratio);
+        const h = Math.round(img.height * ratio);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL("image/jpeg", 0.75));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("load failed")); };
+      img.src = url;
+    });
+  }
+
+  function handlePhotoFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    compressImage(file).then(setPhotoDataUrl).catch(() => {});
+    e.target.value = "";
+  }
+
+  async function handleSave() {
+    if (!fullName.trim() || !phone.trim() || saving) return;
+    setSaving(true); setSaveErr("");
+    try {
+      await onSave({
+        fullName: fullName.trim(), age: age.trim(),
+        dob: `${dobDD}/${dobMM}/${dobYYYY}`,
+        parentName: parentName.trim(), workingStatus, schoolCompany: schoolCompany.trim(),
+        phone: phone.trim(), email: email.trim(),
+        address1: address1.trim(), address2: address2.trim(), centre,
+        purposeOfLearning, instrumentsToLearn, previousExperience,
+        instrumentsPlayed, musicalSkill, howHeardAboutUs: howHeardAboutUs.trim(),
+        initialExperience, parentPartnerProgram, photo: photoDataUrl ?? null,
+      });
+    } catch (err) {
+      setSaveErr(err instanceof Error ? err.message : "Failed to save.");
+      setSaving(false);
+    }
+  }
+
+  const canSave = fullName.trim().length > 0 && phone.trim().length > 0;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "24px 12px" }}>
+      <div style={{ background: "#fff", borderRadius: 16, width: "100%", maxWidth: 640, boxShadow: "0 24px 64px rgba(0,0,0,0.2)" }}>
+        {/* Header */}
+        <div style={{ padding: "18px 24px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 16, fontWeight: 800, color: "#111" }}>✏️ Edit Application</div>
+          <button onClick={onCancel} style={{ border: "none", background: "#f3f4f6", borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontSize: 13, color: "#374151" }}>✕ Cancel</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "20px 24px", maxHeight: "72vh", overflowY: "auto", display: "flex", flexDirection: "column" as const, gap: 20 }}>
+          {/* Personal */}
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 12 }}>Personal Information</div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+              <div style={{ flex: 3 }}>
+                <label style={s.label}>Full Name *</label>
+                <input value={fullName} onChange={e => setFullName(e.target.value)} style={s.input} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={s.label}>Age</label>
+                <input value={age} onChange={e => setAge(e.target.value)} type="number" min={0} style={s.input} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={s.label}>Date of Birth</label>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input value={dobDD} onChange={e => setDobDD(e.target.value)} placeholder="DD" maxLength={2} style={{ ...s.input, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} />
+                  <span style={{ color: "#9ca3af" }}>/</span>
+                  <input value={dobMM} onChange={e => setDobMM(e.target.value)} placeholder="MM" maxLength={2} style={{ ...s.input, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} />
+                  <span style={{ color: "#9ca3af" }}>/</span>
+                  <input value={dobYYYY} onChange={e => setDobYYYY(e.target.value)} placeholder="YYYY" maxLength={4} style={{ ...s.input, width: 68, textAlign: "center" as const, boxSizing: "border-box" as const }} />
+                </div>
+              </div>
+              <div style={{ flex: 1.5 }}>
+                <label style={s.label}>Parent / Guardian</label>
+                <input value={parentName} onChange={e => setParentName(e.target.value)} style={s.input} />
+              </div>
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <label style={s.label}>Working Status</label>
+              <OptionGroup options={["Student","Working","Part Time","Not Working"]} value={workingStatus} onChange={setWorkingStatus} />
+            </div>
+            <div>
+              <label style={s.label}>School / Company</label>
+              <input value={schoolCompany} onChange={e => setSchoolCompany(e.target.value)} style={s.input} />
+            </div>
+          </div>
+
+          {/* Contact */}
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 12 }}>Contact Information</div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={s.label}>Phone *</label>
+                <input value={phone} onChange={e => setPhone(e.target.value)} type="tel" style={s.input} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={s.label}>Email</label>
+                <input value={email} onChange={e => setEmail(e.target.value)} type="email" style={s.input} />
+              </div>
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <label style={s.label}>Address Line 1</label>
+              <input value={address1} onChange={e => setAddress1(e.target.value)} style={s.input} />
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ flex: 2 }}>
+                <label style={s.label}>Address Line 2</label>
+                <input value={address2} onChange={e => setAddress2(e.target.value)} style={s.input} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={s.label}>Centre</label>
+                {centresList.length > 0 ? (
+                  <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...s.input, cursor: "pointer" }}>
+                    <option value="">— Select —</option>
+                    {centresList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                ) : (
+                  <input value={centre} onChange={e => setCentre(e.target.value)} style={s.input} />
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Musical */}
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 12 }}>Musical Skills</div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>Purpose of Learning</label>
+              <OptionGroup options={["Formal Music Learning","Skill Development","Entertainment"]} value={purposeOfLearning} onChange={setPurposeOfLearning} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>Instruments to Learn</label>
+              <MultiOptionGroup options={["Piano","Keyboard","Guitar","Drums","Violin","Vocal"]} values={instrumentsToLearn} onChange={setInstrumentsToLearn} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>Previous Experience</label>
+              <OptionGroup options={["Well-Trained","Average","No Previous Experience"]} value={previousExperience} onChange={setPreviousExperience} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>Instruments Already Playing</label>
+              <MultiOptionGroup options={["Guitar","Drums","Keyboard","None of the Above"]} values={instrumentsPlayed} onChange={setInstrumentsPlayed} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>Musical Skill</label>
+              <OptionGroup options={["Excellent","Average","Poor"]} value={musicalSkill} onChange={setMusicalSkill} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>How Heard About Us</label>
+              <input value={howHeardAboutUs} onChange={e => setHowHeardAboutUs(e.target.value)} style={s.input} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>Initial Experience (/ 10)</label>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                  <button key={n} type="button"
+                    onClick={() => setInitialExperience(initialExperience === n ? null : n)}
+                    style={{ width: 38, height: 38, borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13,
+                      background: initialExperience === n ? "#4f46e5" : "#f3f4f6",
+                      color:      initialExperience === n ? "#fff" : "#374151",
+                      fontWeight: initialExperience === n ? 800 : 500,
+                    }}>
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label style={s.label}>Parent Partner Program</label>
+              <OptionGroup options={["Yes","No","Want to Know More"]} value={parentPartnerProgram} onChange={setParentPartnerProgram} />
+            </div>
+          </div>
+
+          {/* Photo */}
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", marginBottom: 12 }}>Candidate Photo</div>
+            <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handlePhotoFile} />
+            <input ref={fileInputRef}   type="file" accept="image/*"                       style={{ display: "none" }} onChange={handlePhotoFile} />
+            <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+              <div style={{ width: 90, height: 112, flexShrink: 0, border: "2px dashed #d1d5db", borderRadius: 8, background: "#f9fafb", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                {photoDataUrl
+                  ? <img src={photoDataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  : <span style={{ fontSize: 26, color: "#d1d5db" }}>📷</span>}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
+                <button type="button" onClick={() => cameraInputRef.current?.click()} style={{ padding: "8px 14px", borderRadius: 7, border: "1px solid #4f46e5", background: "#ede9fe", color: "#4f46e5", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>📸 Take Photo</button>
+                <button type="button" onClick={() => fileInputRef.current?.click()} style={{ padding: "8px 14px", borderRadius: 7, border: "1px solid #d1d5db", background: "#f9fafb", color: "#374151", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>🖼️ Upload</button>
+                {photoDataUrl && <button type="button" onClick={() => setPhotoDataUrl(null)} style={{ padding: "6px 14px", borderRadius: 7, border: "1px solid #fecaca", background: "#fef2f2", color: "#dc2626", fontSize: 12, cursor: "pointer" }}>Remove</button>}
+              </div>
+            </div>
+          </div>
+
+          {saveErr && <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 7, padding: "9px 13px", fontSize: 13, color: "#dc2626" }}>{saveErr}</div>}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: "14px 24px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <button onClick={onCancel} style={s.secondaryBtn}>Cancel</button>
+          <button onClick={handleSave} disabled={!canSave || saving}
+            style={{ ...s.primaryBtn, opacity: canSave && !saving ? 1 : 0.4, cursor: canSave && !saving ? "pointer" : "not-allowed" }}>
+            {saving ? "Saving…" : "Save Changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Admission applications list ─────────────────────────────────────────────
 
-function AdmissionsList() {
-  const [admissions, setAdmissions] = useState<Record<string, unknown>[]>([]);
-  const [loading,    setLoading]    = useState(true);
-  const [selected,   setSelected]   = useState<Record<string, unknown> | null>(null);
+function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string) => void }) {
+  const [admissions,   setAdmissions]   = useState<Record<string, unknown>[]>([]);
+  const [loading,      setLoading]      = useState(true);
+  const [selected,     setSelected]     = useState<Record<string, unknown> | null>(null);
+  const [editing,      setEditing]      = useState<Record<string, unknown> | null>(null);
+  const [deleteId,     setDeleteId]     = useState<string | null>(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [centresList,  setCentresList]  = useState<{ id: string; name: string }[]>([]);
 
-  useEffect(() => {
+  function str(v: unknown): string   { return typeof v === "string" ? v : ""; }
+  function arr(v: unknown): string[] { return Array.isArray(v) ? v.map(String) : []; }
+  function num(v: unknown): number | null { return typeof v === "number" ? v : null; }
+
+  function reload() {
+    setLoading(true);
     getAllAdmissions()
       .then(setAdmissions)
       .catch(() => {})
       .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    reload();
+    getDocs(collection(db, "centers"))
+      .then(snap => setCentresList(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) ?? d.id }))))
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function str(v: unknown): string  { return typeof v === "string" ? v : ""; }
-  function arr(v: unknown): string[] { return Array.isArray(v) ? v.map(String) : []; }
-  function num(v: unknown): number | null { return typeof v === "number" ? v : null; }
+  async function handleSaveEdit(id: string, updated: Record<string, unknown>) {
+    await updateAdmission(id, updated);
+    setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, ...updated } : a));
+    setSelected(prev => prev && str(prev.id) === id ? { ...prev, ...updated } : prev);
+    setEditing(null);
+  }
+
+  async function handleDelete(id: string) {
+    setDeleteSubmitting(true);
+    try {
+      await deleteAdmission(id);
+      setAdmissions(prev => prev.filter(a => str(a.id) !== id));
+      if (selected && str(selected.id) === id) setSelected(null);
+      setDeleteId(null);
+    } catch (err) {
+      console.error("Delete failed:", err);
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  }
 
   if (loading) {
     return <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>;
@@ -152,6 +452,45 @@ function AdmissionsList() {
 
   return (
     <div>
+      {/* Edit overlay */}
+      {editing && (
+        <EditAdmissionOverlay
+          record={editing}
+          centresList={centresList}
+          onSave={async (updated) => { await handleSaveEdit(str(editing.id), updated); }}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+
+      {/* Delete confirmation overlay */}
+      {deleteId && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div style={{ background: "#fff", borderRadius: 14, padding: "28px 28px", maxWidth: 380, width: "100%", boxShadow: "0 24px 64px rgba(0,0,0,0.2)", textAlign: "center" as const }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>🗑️</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#111", marginBottom: 6 }}>Delete Application?</div>
+            <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 22 }}>
+              This will permanently remove the application. This action cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+              <button
+                onClick={() => setDeleteId(null)}
+                disabled={deleteSubmitting}
+                style={{ ...s.secondaryBtn, minWidth: 90 }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDelete(deleteId)}
+                disabled={deleteSubmitting}
+                style={{ ...s.primaryBtn, background: "#dc2626", minWidth: 90, opacity: deleteSubmitting ? 0.6 : 1, cursor: deleteSubmitting ? "not-allowed" : "pointer" }}
+              >
+                {deleteSubmitting ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Detail panel ── */}
       {selected && (
         <div style={{
@@ -159,16 +498,50 @@ function AdmissionsList() {
           padding: "24px", marginBottom: 20, position: "relative" as const,
           boxShadow: "0 4px 24px rgba(0,0,0,0.07)",
         }}>
-          <button
-            onClick={() => setSelected(null)}
-            style={{
-              position: "absolute" as const, top: 16, right: 16,
-              border: "none", background: "#f3f4f6", borderRadius: 6,
-              padding: "4px 10px", cursor: "pointer", fontSize: 13, color: "#374151",
-            }}
-          >
-            ✕ Close
-          </button>
+          {/* Action row */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" as const }}>
+            <button
+              onClick={() => { onStartScreening(str(selected.fullName)); }}
+              style={{
+                padding: "9px 16px", borderRadius: 8, border: "none",
+                background: "#4f46e5", color: "#fff",
+                fontSize: 13, fontWeight: 700, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 6,
+              }}
+            >
+              🎹 Start Screening
+            </button>
+            <button
+              onClick={() => setEditing(selected)}
+              style={{
+                padding: "9px 16px", borderRadius: 8,
+                border: "1px solid #d1d5db", background: "#f9fafb",
+                color: "#374151", fontSize: 13, fontWeight: 600, cursor: "pointer",
+              }}
+            >
+              ✏️ Edit
+            </button>
+            <button
+              onClick={() => setDeleteId(str(selected.id))}
+              style={{
+                padding: "9px 16px", borderRadius: 8,
+                border: "1px solid #fecaca", background: "#fef2f2",
+                color: "#dc2626", fontSize: 13, fontWeight: 600, cursor: "pointer",
+              }}
+            >
+              🗑️ Delete
+            </button>
+            <button
+              onClick={() => setSelected(null)}
+              style={{
+                marginLeft: "auto", padding: "9px 14px", borderRadius: 8,
+                border: "none", background: "#f3f4f6",
+                color: "#374151", fontSize: 13, cursor: "pointer",
+              }}
+            >
+              ✕ Close
+            </button>
+          </div>
 
           <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" as const }}>
             {/* Photo */}
@@ -192,14 +565,14 @@ function AdmissionsList() {
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 20px" }}>
                 {([
-                  ["Age",           str(selected.age)],
-                  ["DOB",           str(selected.dob)],
-                  ["Parent",        str(selected.parentName)],
-                  ["Phone",         str(selected.phone)],
-                  ["Email",         str(selected.email)],
-                  ["Status",        str(selected.workingStatus)],
-                  ["School/Co.",    str(selected.schoolCompany)],
-                  ["Centre",        str(selected.centre)],
+                  ["Age",        str(selected.age)],
+                  ["DOB",        str(selected.dob)],
+                  ["Parent",     str(selected.parentName)],
+                  ["Phone",      str(selected.phone)],
+                  ["Email",      str(selected.email)],
+                  ["Status",     str(selected.workingStatus)],
+                  ["School/Co.", str(selected.schoolCompany)],
+                  ["Centre",     str(selected.centre)],
                 ] as [string, string][]).filter(([, v]) => v).map(([k, v]) => (
                   <div key={k}>
                     <div style={{ fontSize: 10, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>{k}</div>
@@ -223,11 +596,11 @@ function AdmissionsList() {
           {/* Musical info */}
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f3f4f6", display: "flex", flexDirection: "column" as const, gap: 10 }}>
             {([
-              ["Purpose of Learning",   str(selected.purposeOfLearning)],
-              ["Previous Experience",   str(selected.previousExperience)],
-              ["Musical Skill",         str(selected.musicalSkill)],
-              ["How Heard About Us",    str(selected.howHeardAboutUs)],
-              ["Parent Partner Program",str(selected.parentPartnerProgram)],
+              ["Purpose of Learning",    str(selected.purposeOfLearning)],
+              ["Previous Experience",    str(selected.previousExperience)],
+              ["Musical Skill",          str(selected.musicalSkill)],
+              ["How Heard About Us",     str(selected.howHeardAboutUs)],
+              ["Parent Partner Program", str(selected.parentPartnerProgram)],
             ] as [string, string][]).filter(([, v]) => v).map(([k, v]) => (
               <div key={k} style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>{k}</div>
@@ -266,7 +639,7 @@ function AdmissionsList() {
 
       {/* ── Applications table ── */}
       <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" }}>
-        <div style={{ padding: "14px 18px", borderBottom: "1px solid #f3f4f6", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #f3f4f6" }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>
             Applications
             <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 400, marginLeft: 8 }}>({admissions.length})</span>
@@ -276,8 +649,8 @@ function AdmissionsList() {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ background: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
-                {["", "Name", "Age", "Phone", "Instruments", "Centre", "Date"].map(h => (
-                  <th key={h} style={{
+                {["", "Name", "Age", "Phone", "Instruments", "Centre", "Date", ""].map((h, i) => (
+                  <th key={i} style={{
                     padding: "10px 14px", textAlign: "left" as const,
                     fontSize: 11, fontWeight: 600, color: "#6b7280",
                     textTransform: "uppercase" as const, letterSpacing: "0.05em",
@@ -288,31 +661,21 @@ function AdmissionsList() {
             </thead>
             <tbody>
               {admissions.map((rec, i) => {
-                const isSelected = selected === rec;
+                const isSelected  = selected?.id === rec.id;
                 const instruments = arr(rec.instrumentsToLearn);
                 return (
                   <tr
                     key={str(rec.id) || i}
-                    onClick={() => setSelected(isSelected ? null : rec)}
                     style={{
                       borderBottom: "1px solid #f3f4f6",
                       background: isSelected ? "#ede9fe" : i % 2 === 0 ? "#fff" : "#fafafa",
-                      cursor: "pointer",
-                      transition: "background 0.1s",
                     }}
                   >
-                    {/* Photo thumb */}
                     <td style={{ padding: "10px 10px 10px 14px", width: 40 }}>
-                      <div style={{
-                        width: 36, height: 36, borderRadius: 6, overflow: "hidden",
-                        background: "#f3f4f6", flexShrink: 0,
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                      }}>
-                        {str(rec.photo) ? (
-                          <img src={str(rec.photo)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                        ) : (
-                          <span style={{ fontSize: 18, lineHeight: 1 }}>👤</span>
-                        )}
+                      <div style={{ width: 36, height: 36, borderRadius: 6, overflow: "hidden", background: "#f3f4f6", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {str(rec.photo)
+                          ? <img src={str(rec.photo)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          : <span style={{ fontSize: 18 }}>👤</span>}
                       </div>
                     </td>
                     <td style={{ padding: "10px 14px", fontSize: 13, fontWeight: 600, color: "#111", whiteSpace: "nowrap" as const }}>
@@ -327,11 +690,8 @@ function AdmissionsList() {
                     <td style={{ padding: "10px 14px" }}>
                       <div style={{ display: "flex", gap: 4, flexWrap: "wrap" as const }}>
                         {instruments.length > 0
-                          ? instruments.map(inst => (
-                            <span key={inst} style={{ background: "#ede9fe", color: "#4f46e5", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99 }}>{inst}</span>
-                          ))
-                          : <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
-                        }
+                          ? instruments.map(inst => <span key={inst} style={{ background: "#ede9fe", color: "#4f46e5", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99 }}>{inst}</span>)
+                          : <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>}
                       </div>
                     </td>
                     <td style={{ padding: "10px 14px", fontSize: 12, color: "#6b7280", whiteSpace: "nowrap" as const }}>
@@ -339,6 +699,39 @@ function AdmissionsList() {
                     </td>
                     <td style={{ padding: "10px 14px", fontSize: 12, color: "#9ca3af", whiteSpace: "nowrap" as const }}>
                       {str(rec.submittedAt) ? new Date(str(rec.submittedAt)).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—"}
+                    </td>
+                    {/* Actions */}
+                    <td style={{ padding: "10px 14px", whiteSpace: "nowrap" as const }}>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          onClick={() => setSelected(isSelected ? null : rec)}
+                          title={isSelected ? "Close" : "View details"}
+                          style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #e5e7eb", background: isSelected ? "#ede9fe" : "#f9fafb", cursor: "pointer", fontSize: 12, color: isSelected ? "#4f46e5" : "#374151", fontWeight: 600 }}
+                        >
+                          {isSelected ? "▲" : "▼"}
+                        </button>
+                        <button
+                          onClick={() => { onStartScreening(str(rec.fullName)); }}
+                          title="Start Screening"
+                          style={{ padding: "5px 10px", borderRadius: 6, border: "none", background: "#4f46e5", cursor: "pointer", fontSize: 12, color: "#fff", fontWeight: 700 }}
+                        >
+                          🎹
+                        </button>
+                        <button
+                          onClick={() => { setSelected(rec); setEditing(rec); }}
+                          title="Edit"
+                          style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer", fontSize: 12, color: "#374151" }}
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          onClick={() => setDeleteId(str(rec.id))}
+                          title="Delete"
+                          style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #fecaca", background: "#fef2f2", cursor: "pointer", fontSize: 12, color: "#dc2626" }}
+                        >
+                          🗑️
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -352,7 +745,16 @@ function AdmissionsList() {
 }
 
 function ScreeningHub() {
-  const [view, setView] = useState<"screening" | "admission" | "applications">("screening");
+  const [view,          setView]          = useState<"screening" | "admission" | "applications">("screening");
+  const [prefillName,   setPrefillName]   = useState("");
+  const [screeningKey,  setScreeningKey]  = useState(0);
+
+  function handleStartScreening(name: string) {
+    setPrefillName(name);
+    setScreeningKey(k => k + 1);
+    setView("screening");
+  }
+
   return (
     <>
       <div style={{ display: "flex", gap: 10, marginBottom: 24 }}>
@@ -384,9 +786,9 @@ function ScreeningHub() {
           </button>
         ))}
       </div>
-      {view === "screening"    && <ScreeningContent />}
+      {view === "screening"    && <ScreeningContent key={screeningKey} initialChildName={prefillName} />}
       {view === "admission"    && <AdmissionFormContent />}
-      {view === "applications" && <AdmissionsList />}
+      {view === "applications" && <AdmissionsList onStartScreening={handleStartScreening} />}
     </>
   );
 }
@@ -1180,13 +1582,13 @@ function ScreeningHistory() {
 
 // ─── Main content ─────────────────────────────────────────────────────────────
 
-function ScreeningContent() {
+function ScreeningContent({ initialChildName = "" }: { initialChildName?: string }) {
   const { user } = useAuthContext();
 
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
   // Step 1
-  const [childName,     setChildName]     = useState("");
+  const [childName,     setChildName]     = useState(initialChildName);
   const [studentQuery,  setStudentQuery]  = useState("");
   const [allStudents,   setAllStudents]   = useState<StudentOption[]>([]);
   const [linkedStudent, setLinkedStudent] = useState<StudentOption | null>(null);
