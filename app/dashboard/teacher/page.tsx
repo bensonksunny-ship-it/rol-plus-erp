@@ -36,7 +36,7 @@ import { isTeacher } from "@/types";
 import type { Lesson, LessonItem, StudentLessonProgress } from "@/types/lesson";
 import type { Role, ScreeningResult } from "@/types";
 import { getScreeningByStudent } from "@/services/screening/screening.service";
-import { DiagnosticCard } from "@/app/dashboard/screening/page";
+import { DiagnosticCard } from "@/components/DiagnosticCard";
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 

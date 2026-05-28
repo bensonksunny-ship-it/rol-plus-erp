@@ -8,7 +8,7 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { saveScreening } from "@/services/screening/screening.service";
-import { DiagnosticCard } from "@/app/dashboard/screening/page";
+import { DiagnosticCard } from "@/components/DiagnosticCard";
 import type { ScreeningConfig } from "@/types";
 
 // ─── Interview questions ──────────────────────────────────────────────────────
