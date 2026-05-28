@@ -27,7 +27,8 @@
       "Bash(Get-ChildItem \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\config\")",
       "Bash(vercel whoami *)",
       "Bash(vercel ls *)",
-      "Bash(vercel inspect *)"
+      "Bash(vercel inspect *)",
+      "Bash(npx next *)"
     ]
   }
 }
