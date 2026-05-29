@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useRef, Suspense } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
+import Link from "next/link";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
@@ -28,6 +29,7 @@ interface TrackDef {
   ageDesc:    string;
   accent:     string;
   accentBg:   string;
+  href?:      string;   // if set, tile navigates to this dedicated page instead of inline form
   questions:  [TrackInterviewQuestion, TrackInterviewQuestion, TrackInterviewQuestion];
   iKeys:      [string, string, string];
   games:      [TrackGame, TrackGame, TrackGame];
@@ -81,7 +83,7 @@ const LM_TRACK: TrackDef = {
 
 const FT_TRACK: TrackDef = {
   id: "fast-track", icon: "🎸", label: "Fast Track", ageDesc: "Ages 7–30",
-  accent: "#d97706", accentBg: "#fefce8",
+  accent: "#d97706", accentBg: "#fefce8", href: "/dashboard/screening/fast-track",
   questions: [
     {
       key: "stageReadiness", title: "Performance Comfort",
@@ -126,7 +128,7 @@ const FT_TRACK: TrackDef = {
 
 const JOYFUL_TRACK: TrackDef = {
   id: "joyful-track", icon: "🌻", label: "Joyful Track", ageDesc: "Ages 31+",
-  accent: "#db2777", accentBg: "#fdf2f8",
+  accent: "#db2777", accentBg: "#fdf2f8", href: "/dashboard/screening/joyful-track",
   questions: [
     {
       key: "learningMotivation", title: "Learning Motivation",
@@ -931,31 +933,51 @@ function ScreeningHub() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
             {TRACK_LIST.map(t => {
               const active = selectedTrack === t.id;
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => selectTrack(t.id)}
-                  style={{
-                    border:       active ? `2px solid ${t.accent}` : "1px solid #e5e7eb",
-                    borderRadius: 10,
-                    padding:      "12px 16px",
-                    background:   active ? t.accentBg : "#fafafa",
-                    cursor:       "pointer",
-                    textAlign:    "left",
-                  }}
-                >
+              const tileStyle = {
+                border:       active ? `2px solid ${t.accent}` : "1px solid #e5e7eb",
+                borderRadius: 10,
+                padding:      "12px 16px",
+                background:   active ? t.accentBg : "#fafafa",
+                cursor:       "pointer",
+                textAlign:    "left" as const,
+                display:      "block",
+                textDecoration: "none",
+              };
+              const tileInner = (
+                <>
                   <div style={{ fontSize: 13, fontWeight: 800, color: active ? t.accent : "#374151" }}>
                     {t.icon} {t.label}
                   </div>
                   <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
                     {t.ageDesc}
                   </div>
+                  {t.href && (
+                    <div style={{ fontSize: 10, color: t.accent, marginTop: 4, fontWeight: 600 }}>
+                      Dedicated assessment →
+                    </div>
+                  )}
+                </>
+              );
+              return t.href ? (
+                <Link key={t.id} href={t.href} style={tileStyle}>
+                  {tileInner}
+                </Link>
+              ) : (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => selectTrack(t.id)}
+                  style={tileStyle}
+                >
+                  {tileInner}
                 </button>
               );
             })}
           </div>
-          <TrackScreeningForm key={formKey} track={TRACK_DEFS[selectedTrack]} initialChildName={prefillName} />
+          {/* Only render inline form for tracks without a dedicated page */}
+          {!TRACK_DEFS[selectedTrack].href && (
+            <TrackScreeningForm key={formKey} track={TRACK_DEFS[selectedTrack]} initialChildName={prefillName} />
+          )}
         </>
       )}
       {view === "admission"    && <AdmissionFormContent />}
