@@ -173,7 +173,7 @@ const JOYFUL_TRACK: TrackDef = {
 
 const CREATIVE_TRACK: TrackDef = {
   id: "creative-track", icon: "🎨", label: "The Creative Track", ageDesc: "All Ages",
-  accent: "#7c3aed", accentBg: "#f5f3ff",
+  accent: "#7c3aed", accentBg: "#f5f3ff", href: "/dashboard/screening/creative-track",
   questions: [
     {
       key: "sensoryProfile", title: "Sensory & Focus Profile",
