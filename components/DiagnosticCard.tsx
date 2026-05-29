@@ -15,6 +15,9 @@ export const TRACK_STYLE: Record<ScreeningTrack, { bg: string; color: string; bo
   "Sensory-Friendly Level":  { bg: "#f0f9ff", color: "#0369a1", border: "#bae6fd", pill: "#0284c7" },
   "Adaptive Level":          { bg: "#f5f3ff", color: "#6d28d9", border: "#ddd6fe", pill: "#7c3aed" },
   "Expression Level":        { bg: "#fff1f2", color: "#be123c", border: "#fecdd3", pill: "#e11d48" },
+  "Zeta Slab":               { bg: "#f0fdf4", color: "#15803d", border: "#86efac", pill: "#16a34a" },
+  "Epsilon Slab":            { bg: "#fefce8", color: "#92400e", border: "#fde68a", pill: "#d97706" },
+  "Delta Slab":              { bg: "#fef2f2", color: "#991b1b", border: "#fecaca", pill: "#dc2626" },
 };
 
 function scoreColor(n: number): string {

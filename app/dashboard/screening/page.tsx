@@ -236,6 +236,9 @@ const SCREEN_TRACK_SHORT: Record<ScreeningTrack, string> = {
   "Sensory-Friendly Level":  "Sensory",
   "Adaptive Level":          "Adaptive",
   "Expression Level":        "Expression",
+  "Zeta Slab":               "Zeta",
+  "Epsilon Slab":            "Epsilon",
+  "Delta Slab":              "Delta",
 };
 
 function scoreColor(n: number): string {

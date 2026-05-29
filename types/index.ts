@@ -241,7 +241,11 @@ export type ScreeningTrack =
   // The Creative Track (Sensory/physical support)
   | "Sensory-Friendly Level"
   | "Adaptive Level"
-  | "Expression Level";
+  | "Expression Level"
+  // Fast Track Clinical Slabs (detailed assessment)
+  | "Zeta Slab"
+  | "Epsilon Slab"
+  | "Delta Slab";
 
 export type ScreeningType = "little-mozarts" | "fast-track" | "joyful-track" | "creative-track";
 
@@ -275,6 +279,10 @@ export interface ScreeningResult {
   sensoryProfile?: string;
   physicalNeeds?:  string;
   learningStyle?:  string;
+  // Fast Track clinical assessment grades (H/M/L)
+  rhythmSyncGrade?: string;
+  dexterityGrade?:  string;
+  pitchEchoGrade?:  string;
   // Practical scores
   rhythmScore:     number;
   pitchScore:      number;
