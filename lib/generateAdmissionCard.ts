@@ -135,8 +135,8 @@ export async function generateAdmissionCardPDF(
   doc.text(s(admission.fullName) || "—", IX, y + 7);
 
   let ry = y + 14;
-  ry = lv(doc, "Date of Birth:",     s(admission.dob)         || "—", IX, ry, 30);
-  ry = lv(doc, "Age:",               s(admission.age) ? `${s(admission.age)} yrs` : "—", IX, ry, 30);
+  ry = lv(doc, "Date of Birth:",     s(admission.dob)         || "—", IX, ry, 32);
+  ry = lv(doc, "Age:",               s(admission.age) ? `${s(admission.age)} yrs` : "—", IX, ry, 32);
   ry = lv(doc, "Parent / Guardian:", s(admission.parentName)  || "—", IX, ry, 32);
   ry = lv(doc, "Working Status:",    s(admission.workingStatus)|| "—", IX, ry, 32);
 
@@ -233,19 +233,19 @@ export async function generateAdmissionCardPDF(
     if (grades.length > 0) s1y = lv(doc, "Clinical Scores:", grades.join("  |  "), M, s1y, 32);
 
     let s2y = y;
-    s2y = lv(doc, "Metronome:", metronome, COL2, s2y, 26);
+    s2y = lv(doc, "Metronome:", metronome, COL2, s2y, 34);
     if (config) {
       if (instrument === "guitar") {
-        s2y = lv(doc, "Strum Technique:",  s(config.strumTechnique),  COL2, s2y, 26);
-        s2y = lv(doc, "Chord Complexity:", s(config.chordComplexity), COL2, s2y, 26);
+        s2y = lv(doc, "Strum Technique:",  s(config.strumTechnique),  COL2, s2y, 34);
+        s2y = lv(doc, "Chord Complexity:", s(config.chordComplexity), COL2, s2y, 34);
       }
       if (instrument === "keyboard") {
-        s2y = lv(doc, "Hand Integration:", s(config.handIntegration),            COL2, s2y, 26);
-        s2y = lv(doc, "Chords:",           s(config.chords as string) || "None", COL2, s2y, 26);
+        s2y = lv(doc, "Hand Integration:", s(config.handIntegration),            COL2, s2y, 34);
+        s2y = lv(doc, "Chords:",           s(config.chords as string) || "None", COL2, s2y, 34);
       }
       if (instrument === "drums") {
-        s2y = lv(doc, "Stick Type:",        s(config.stickType),        COL2, s2y, 26);
-        s2y = lv(doc, "Groove Complexity:", s(config.grooveComplexity), COL2, s2y, 26);
+        s2y = lv(doc, "Stick Type:",        s(config.stickType),        COL2, s2y, 34);
+        s2y = lv(doc, "Groove Complexity:", s(config.grooveComplexity), COL2, s2y, 34);
       }
     }
 
@@ -322,7 +322,7 @@ export async function generateAdmissionCardPDF(
     doc.text("(fill manually)", RX + 30 + (RW - 30) / 2, y + 7.8, { align: "center" });
 
     // Director signature line
-    const SIG_Y = y + ROW_H - 9;
+    const SIG_Y = y + ROW_H - 14;
     stroke(doc, CLR.gray300);
     doc.setLineWidth(0.3);
     doc.line(RX + 8, SIG_Y, W - M, SIG_Y);
@@ -333,7 +333,7 @@ export async function generateAdmissionCardPDF(
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7.5);
     color(doc, CLR.gray500);
-    doc.text("ROL's School of Music", MX, SIG_Y + 10.5, { align: "center" });
+    doc.text("ROL's School of Music", MX, SIG_Y + 9.5, { align: "center" });
 
     y += ROW_H;
     hr(doc, y, M, W);
