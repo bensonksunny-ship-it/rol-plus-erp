@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useRef, Suspense } from "react";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import { collection, getDocs, query, where, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import Link from "next/link";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -552,9 +552,16 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
   const [screeningMap, setScreeningMap] = useState<Map<string, Record<string, unknown>>>(new Map());
 
   // Complete-admission modal state
-  const [completing,      setCompleting]      = useState<{ admission: Record<string, unknown>; screening: Record<string, unknown> } | null>(null);
-  const [completingAdmNo, setCompletingAdmNo] = useState("");
-  const [completingSaving,setCompletingSaving]= useState("");
+  const [completing,       setCompleting]       = useState<{ admission: Record<string, unknown>; screening: Record<string, unknown> } | null>(null);
+  const [completingAdmNo,  setCompletingAdmNo]  = useState("");
+  const [completingSaving, setCompletingSaving] = useState("");
+  const [completingPhase,  setCompletingPhase]  = useState<"number" | "success" | "enroll">("number");
+  const [enrollCentre,     setEnrollCentre]     = useState("");
+  const [enrolling,        setEnrolling]        = useState(false);
+
+  function closeCompleting() {
+    setCompleting(null); setCompletingAdmNo(""); setCompletingPhase("number"); setEnrollCentre("");
+  }
 
   function str(v: unknown): string   { return typeof v === "string" ? v : ""; }
   function arr(v: unknown): string[] { return Array.isArray(v) ? v.map(String) : []; }
@@ -641,12 +648,48 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
       setAdmissions(prev => prev.map(a => str(a.id) === id ? updated : a));
       setCompletingSaving("downloading");
       await generateAdmissionCardPDF(updated, completing.screening);
-      setCompleting(null);
-      setCompletingAdmNo("");
+      // Advance to success phase — keep modal open for enroll option
+      setCompleting({ ...completing, admission: updated });
+      setCompletingPhase("success");
     } catch (err) {
       console.error("Complete admission failed:", err);
     } finally {
       setCompletingSaving("");
+    }
+  }
+
+  async function handleEnrollStudent() {
+    if (!completing || !enrollCentre || enrolling) return;
+    setEnrolling(true);
+    try {
+      const adm = completing.admission;
+      await addDoc(collection(db, "users"), {
+        name:            str(adm.fullName),
+        role:            "student",
+        phone:           str(adm.phone),
+        email:           str(adm.email),
+        age:             str(adm.age),
+        dob:             str(adm.dob),
+        parentName:      str(adm.parentName),
+        workingStatus:   str(adm.workingStatus),
+        schoolCompany:   str(adm.schoolCompany),
+        address1:        str(adm.address1),
+        address2:        str(adm.address2),
+        centre:          enrollCentre,
+        admissionNumber: str(adm.admissionNumber),
+        studentID:       str(adm.admissionNumber),
+        instruments:     arr(adm.instrumentsToLearn),
+        musicalSkill:    str(adm.musicalSkill),
+        photo:           str(adm.photo) || null,
+        createdAt:       serverTimestamp(),
+      });
+      await deleteAdmission(str(adm.id));
+      setAdmissions(prev => prev.filter(a => str(a.id) !== str(adm.id)));
+      closeCompleting();
+    } catch (err) {
+      console.error("Enrollment failed:", err);
+    } finally {
+      setEnrolling(false);
     }
   }
 
@@ -716,90 +759,156 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
         </div>
       )}
 
-      {/* ── Complete Admission modal ── */}
+      {/* ── Complete Admission modal (3 phases) ── */}
       {completing && (
         <div style={{ position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div style={{ background: "#fff", borderRadius: 16, width: "100%", maxWidth: 460, boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }}>
-            {/* Header */}
-            <div style={{ background: "#16a34a", borderRadius: "16px 16px 0 0", padding: "18px 24px" }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>✅ Complete Admission</div>
-              <div style={{ fontSize: 12, color: "#bbf7d0", marginTop: 3 }}>{str(completing.admission.fullName)}</div>
-            </div>
 
-            {/* Screening summary */}
-            <div style={{ padding: "16px 24px", background: "#f0fdf4", borderBottom: "1px solid #d1fae5" }}>
-              {(() => {
-                const sc = completing.screening;
-                const cfg = sc.config as Record<string, unknown> | undefined;
-                return (
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
-                    <span style={{ background: "#dcfce7", color: "#15803d", fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99 }}>
-                      {str(sc.instrument).charAt(0).toUpperCase() + str(sc.instrument).slice(1)}
-                    </span>
-                    <span style={{ background: "#f3f4f6", color: "#374151", fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 99 }}>
-                      {str(sc.stream).replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
-                    </span>
-                    {cfg && str(cfg.track) && (
-                      <span style={{ background: "#ede9fe", color: "#4f46e5", fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99 }}>
-                        {str(cfg.track)}
+            {/* ─ PHASE 1: Enter admission number ─ */}
+            {completingPhase === "number" && (<>
+              <div style={{ background: "#16a34a", borderRadius: "16px 16px 0 0", padding: "18px 24px" }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>✅ Complete Admission</div>
+                <div style={{ fontSize: 12, color: "#bbf7d0", marginTop: 3 }}>{str(completing.admission.fullName)}</div>
+              </div>
+              <div style={{ padding: "14px 24px", background: "#f0fdf4", borderBottom: "1px solid #d1fae5" }}>
+                {(() => {
+                  const sc = completing.screening;
+                  const cfg = sc.config as Record<string, unknown> | undefined;
+                  return (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+                      <span style={{ background: "#dcfce7", color: "#15803d", fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99 }}>
+                        {str(sc.instrument).charAt(0).toUpperCase() + str(sc.instrument).slice(1)}
                       </span>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
+                      <span style={{ background: "#f3f4f6", color: "#374151", fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 99 }}>
+                        {str(sc.stream).replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
+                      </span>
+                      {cfg && str(cfg.track) && (
+                        <span style={{ background: "#ede9fe", color: "#4f46e5", fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99 }}>
+                          {str(cfg.track)}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+              <div style={{ padding: "24px 24px 20px" }}>
+                <label style={{ fontSize: 13, fontWeight: 700, color: "#374151", display: "block", marginBottom: 8 }}>
+                  Admission Number <span style={{ fontWeight: 400, color: "#9ca3af" }}>(11 digits)</span>
+                </label>
+                <input
+                  value={completingAdmNo}
+                  onChange={e => setCompletingAdmNo(e.target.value.replace(/\D/g, "").slice(0, 11))}
+                  placeholder="00000000000"
+                  maxLength={11}
+                  autoFocus
+                  style={{
+                    width: "100%", boxSizing: "border-box" as const,
+                    padding: "12px 16px", borderRadius: 10,
+                    border: completingAdmNo.length === 11 ? "2px solid #16a34a" : completingAdmNo.length > 0 ? "2px solid #d97706" : "1px solid #d1d5db",
+                    fontSize: 22, fontFamily: "monospace", fontWeight: 800,
+                    letterSpacing: "0.18em", color: "#111", outline: "none",
+                    background: completingAdmNo.length === 11 ? "#f0fdf4" : "#fff",
+                  }}
+                />
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+                  <span style={{ fontSize: 11, color: completingAdmNo.length === 11 ? "#16a34a" : "#9ca3af" }}>
+                    {completingAdmNo.length}/11 digits{completingAdmNo.length === 11 ? " ✓" : ""}
+                  </span>
+                  {completingAdmNo.length > 0 && completingAdmNo.length < 11 && (
+                    <span style={{ fontSize: 11, color: "#d97706" }}>{11 - completingAdmNo.length} more needed</span>
+                  )}
+                </div>
+              </div>
+              <div style={{ padding: "0 24px 20px", display: "flex", gap: 10 }}>
+                <button onClick={closeCompleting} disabled={!!completingSaving} style={{ ...s.secondaryBtn, flex: 1 }}>Cancel</button>
+                <button
+                  onClick={handleCompleteAdmission}
+                  disabled={completingAdmNo.length !== 11 || !!completingSaving}
+                  style={{ ...s.primaryBtn, flex: 2, background: "#16a34a", opacity: completingAdmNo.length === 11 && !completingSaving ? 1 : 0.45, cursor: completingAdmNo.length === 11 && !completingSaving ? "pointer" : "not-allowed" }}
+                >
+                  {completingSaving === "saving" ? "Saving…" : completingSaving === "downloading" ? "Generating PDF…" : "Save & Download PDF"}
+                </button>
+              </div>
+            </>)}
 
-            {/* Number input */}
-            <div style={{ padding: "24px 24px 20px" }}>
-              <label style={{ fontSize: 13, fontWeight: 700, color: "#374151", display: "block", marginBottom: 8 }}>
-                Admission Number <span style={{ fontWeight: 400, color: "#9ca3af" }}>(11 digits)</span>
-              </label>
-              <input
-                value={completingAdmNo}
-                onChange={e => setCompletingAdmNo(e.target.value.replace(/\D/g, "").slice(0, 11))}
-                placeholder="00000000000"
-                maxLength={11}
-                autoFocus
-                style={{
-                  width: "100%", boxSizing: "border-box" as const,
-                  padding: "12px 16px", borderRadius: 10,
-                  border: completingAdmNo.length === 11 ? "2px solid #16a34a" : completingAdmNo.length > 0 ? "2px solid #d97706" : "1px solid #d1d5db",
-                  fontSize: 22, fontFamily: "monospace", fontWeight: 800,
-                  letterSpacing: "0.18em", color: "#111", outline: "none",
-                  background: completingAdmNo.length === 11 ? "#f0fdf4" : "#fff",
-                }}
-              />
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                <span style={{ fontSize: 11, color: completingAdmNo.length === 11 ? "#16a34a" : "#9ca3af" }}>
-                  {completingAdmNo.length}/11 digits{completingAdmNo.length === 11 ? " ✓" : ""}
-                </span>
-                {completingAdmNo.length > 0 && completingAdmNo.length < 11 && (
-                  <span style={{ fontSize: 11, color: "#d97706" }}>{11 - completingAdmNo.length} more needed</span>
+            {/* ─ PHASE 2: Success — offer enroll ─ */}
+            {completingPhase === "success" && (<>
+              <div style={{ background: "#16a34a", borderRadius: "16px 16px 0 0", padding: "18px 24px" }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>🎉 Admission Complete</div>
+                <div style={{ fontSize: 12, color: "#bbf7d0", marginTop: 3 }}>{str(completing.admission.fullName)}</div>
+              </div>
+              <div style={{ padding: "28px 24px" }}>
+                <div style={{ background: "#f0fdf4", border: "1px solid #d1fae5", borderRadius: 12, padding: "16px 20px", marginBottom: 20, textAlign: "center" as const }}>
+                  <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Admission Number</div>
+                  <div style={{ fontSize: 22, fontFamily: "monospace", fontWeight: 800, color: "#15803d", letterSpacing: "0.14em" }}>
+                    {str(completing.admission.admissionNumber)}
+                  </div>
+                </div>
+                <div style={{ fontSize: 13, color: "#374151", marginBottom: 6 }}>
+                  The Admission Card PDF has been downloaded. Would you like to enroll this student now?
+                </div>
+                <div style={{ fontSize: 12, color: "#9ca3af" }}>
+                  Enrolling will add the student to the Students list and remove them from Applications.
+                </div>
+              </div>
+              <div style={{ padding: "0 24px 24px", display: "flex", gap: 10 }}>
+                <button onClick={closeCompleting} style={{ ...s.secondaryBtn, flex: 1 }}>Close</button>
+                <button
+                  onClick={() => setCompletingPhase("enroll")}
+                  style={{ ...s.primaryBtn, flex: 2, background: "#4f46e5" }}
+                >
+                  Enroll Student →
+                </button>
+              </div>
+            </>)}
+
+            {/* ─ PHASE 3: Select centre & enroll ─ */}
+            {completingPhase === "enroll" && (<>
+              <div style={{ background: "#4f46e5", borderRadius: "16px 16px 0 0", padding: "18px 24px" }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#fff" }}>🏫 Enroll Student</div>
+                <div style={{ fontSize: 12, color: "#c7d2fe", marginTop: 3 }}>{str(completing.admission.fullName)}</div>
+              </div>
+              <div style={{ padding: "28px 24px" }}>
+                <label style={{ fontSize: 13, fontWeight: 700, color: "#374151", display: "block", marginBottom: 10 }}>
+                  Select Centre
+                </label>
+                {centresList.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
+                    {centresList.map(c => {
+                      const sel = enrollCentre === c.id;
+                      return (
+                        <button key={c.id} onClick={() => setEnrollCentre(c.id)}
+                          style={{ textAlign: "left", padding: "12px 16px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
+                            border: sel ? "2px solid #4f46e5" : "1px solid #e5e7eb",
+                            background: sel ? "#ede9fe" : "#f9fafb",
+                            display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
+                            background: sel ? "#4f46e5" : "#d1d5db", transition: "background 0.15s" }} />
+                          <span style={{ fontSize: 13, fontWeight: sel ? 700 : 500, color: sel ? "#4f46e5" : "#374151" }}>
+                            {c.name}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ padding: "16px", background: "#f9fafb", borderRadius: 10, fontSize: 13, color: "#9ca3af", textAlign: "center" as const }}>
+                    No centres found in database.
+                  </div>
                 )}
               </div>
-            </div>
+              <div style={{ padding: "0 24px 24px", display: "flex", gap: 10 }}>
+                <button onClick={() => setCompletingPhase("success")} disabled={enrolling} style={{ ...s.secondaryBtn, flex: 1 }}>← Back</button>
+                <button
+                  onClick={handleEnrollStudent}
+                  disabled={!enrollCentre || enrolling}
+                  style={{ ...s.primaryBtn, flex: 2, background: "#4f46e5", opacity: enrollCentre && !enrolling ? 1 : 0.45, cursor: enrollCentre && !enrolling ? "pointer" : "not-allowed" }}
+                >
+                  {enrolling ? "Enrolling…" : "Confirm Enrollment"}
+                </button>
+              </div>
+            </>)}
 
-            {/* Footer */}
-            <div style={{ padding: "0 24px 20px", display: "flex", gap: 10 }}>
-              <button
-                onClick={() => { setCompleting(null); setCompletingAdmNo(""); }}
-                disabled={!!completingSaving}
-                style={{ ...s.secondaryBtn, flex: 1 }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCompleteAdmission}
-                disabled={completingAdmNo.length !== 11 || !!completingSaving}
-                style={{
-                  ...s.primaryBtn, flex: 2, background: "#16a34a",
-                  opacity: completingAdmNo.length === 11 && !completingSaving ? 1 : 0.45,
-                  cursor:  completingAdmNo.length === 11 && !completingSaving ? "pointer" : "not-allowed",
-                }}
-              >
-                {completingSaving === "saving" ? "Saving…" : completingSaving === "downloading" ? "Generating PDF…" : "Save & Download PDF"}
-              </button>
-            </div>
           </div>
         </div>
       )}
