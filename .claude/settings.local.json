@@ -28,7 +28,17 @@
       "Bash(vercel whoami *)",
       "Bash(vercel ls *)",
       "Bash(vercel inspect *)",
-      "Bash(npx next *)"
+      "Bash(npx next *)",
+      "Bash(New-Item -ItemType Directory -Force \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\app\\\\dashboard\\\\screening\\\\joyful-track\")",
+      "Bash(Out-Null)",
+      "Bash(Write-Output \"done\")",
+      "Bash(Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue)",
+      "Bash(Write-Output \"cleared\")",
+      "Bash(curl -s \"http://localhost:3002/\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\" -Recurse -Directory)",
+      "Bash(Select-Object -First 30)",
+      "Bash(Format-Table FullName)",
+      "Bash(npm install *)"
     ]
   }
 }
