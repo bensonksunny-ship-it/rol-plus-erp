@@ -239,7 +239,7 @@ function SensoryCard({ id, title, sub, procedure, value, onChange, accent }: {
   };
   return (
     <div style={{ ...card, gridColumn: "span 12" }}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }} className="scr-sensory-grid">
         <div>
           <span style={{ fontSize: 10, fontWeight: 800, color: accent, letterSpacing: "0.1em",
             textTransform: "uppercase", background: `${accent}18`, padding: "2px 8px", borderRadius: 6 }}>
@@ -292,7 +292,7 @@ function Stepper({ steps, current, accent }: { steps: string[]; current: number;
                 {done ? "✓" : n}
               </div>
               <div style={{ fontSize: 11, marginTop: 6, fontWeight: active ? 700 : 400,
-                color: active ? accent : done ? "#6b7280" : "#9ca3af", whiteSpace: "nowrap" }}>
+                color: active ? accent : done ? "#6b7280" : "#9ca3af" }}>
                 {label}
               </div>
             </div>
@@ -530,7 +530,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
       <style>{`@keyframes spin{to{transform:translateY(-50%) rotate(360deg)}}`}</style>
 
       {/* Header */}
-      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "0 24px" }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "0 24px" }} className="scr-outer">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 22 }}>
           {onBack
             ? <button onClick={onBack} style={{ ...btnSec, padding: "8px 16px", fontSize: 12 }}>← Back</button>
@@ -544,7 +544,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
         {/* Gradient header card */}
         <div style={{ background: `linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT}cc 100%)`,
           borderRadius: 20, padding: "28px 32px", marginBottom: 22, color: "#fff",
-          boxShadow: `0 8px 32px ${ACCENT}40` }}>
+          boxShadow: `0 8px 32px ${ACCENT}40` }} className="scr-hero">
           <div style={{ fontSize: 11, fontWeight: 800, opacity: 0.75, textTransform: "uppercase",
             letterSpacing: "0.12em", marginBottom: 6 }}>Guitar Screening</div>
           <div style={{ fontSize: 24, fontWeight: 800, marginBottom: 4 }}>{sc.label}</div>
@@ -572,7 +572,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
 
         {/* ── Step 1: Student Info (shared) ────────────────────────────────── */}
         {step === 1 && (
-          <div style={grid12}>
+          <div style={grid12} className="scr-grid">
             <div style={{ ...card, gridColumn: "span 7" }}>
               <div style={{ fontWeight: 700, fontSize: 16, color: "#111", marginBottom: 18 }}>Student Information</div>
               <div style={{ marginBottom: 14 }}>
@@ -623,7 +623,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
           <>
             {/* LITTLE MOZARTS */}
             {stream === "little-mozarts" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Early Development Profile
@@ -682,7 +682,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* FAST TRACK */}
             {stream === "fast-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Background Information
@@ -754,7 +754,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* JOYFUL TRACK */}
             {stream === "joyful-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 7" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Musical Background
@@ -831,7 +831,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* CREATIVE TRACK */}
             {stream === "creative-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Sensory Profile
@@ -920,7 +920,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
           <>
             {/* LITTLE MOZARTS */}
             {stream === "little-mozarts" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Early Guitar Assessment
@@ -997,7 +997,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* FAST TRACK */}
             {stream === "fast-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 {GUITAR_TESTS.map((t, i) => (
                   <GradeCard key={t.code} code={t.code} title={t.title} sub={t.sub}
                     rubric={t.rubric} accent={ACCENT}
@@ -1053,7 +1053,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* JOYFUL TRACK */}
             {stream === "joyful-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Hand Flexibility Check
@@ -1121,7 +1121,7 @@ export function GuitarScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* CREATIVE TRACK */}
             {stream === "creative-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 7" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Teacher Overrides

@@ -243,7 +243,7 @@ function Stepper({ steps, current, accent }: { steps: string[]; current: number;
                 {done ? "✓" : n}
               </div>
               <div style={{ fontSize: 11, marginTop: 6, fontWeight: active ? 700 : 400,
-                color: active ? accent : done ? "#6b7280" : "#9ca3af", whiteSpace: "nowrap" }}>
+                color: active ? accent : done ? "#6b7280" : "#9ca3af" }}>
                 {label}
               </div>
             </div>
@@ -576,7 +576,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
     <div style={{ minHeight: "100vh", background: "#f8f9fa", padding: "24px 0" }}>
       <style>{`@keyframes spin{to{transform:translateY(-50%) rotate(360deg)}}`}</style>
 
-      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "0 24px" }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "0 24px" }} className="scr-outer">
 
         {/* Back + ID row */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 22 }}>
@@ -592,7 +592,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
         {/* Gradient header */}
         <div style={{ background: `linear-gradient(135deg, #0d9488 0%, #0d948899 100%)`,
           borderRadius: 20, padding: "28px 32px", marginBottom: 22, color: "#fff",
-          boxShadow: "0 8px 32px rgba(13,148,136,0.35)" }}>
+          boxShadow: "0 8px 32px rgba(13,148,136,0.35)" }} className="scr-hero">
           <div style={{ fontSize: 11, fontWeight: 800, opacity: 0.75, textTransform: "uppercase",
             letterSpacing: "0.12em", marginBottom: 6 }}>Keyboard Screening</div>
           <div style={{ fontSize: 24, fontWeight: 800, marginBottom: 4 }}>{sc.label}</div>
@@ -622,7 +622,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
 
         {/* ── Step 1: Student Info ─────────────────────────────────────────── */}
         {step === 1 && (
-          <div style={grid12}>
+          <div style={grid12} className="scr-grid">
             <div style={{ ...card, gridColumn: "span 7" }}>
               <div style={{ fontWeight: 700, fontSize: 16, color: "#111", marginBottom: 18 }}>
                 Student Information
@@ -681,7 +681,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
           <>
             {/* LITTLE MOZARTS */}
             {stream === "little-mozarts" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Early Development Profile
@@ -719,7 +719,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* FAST TRACK */}
             {stream === "fast-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Background Information
@@ -794,7 +794,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* JOYFUL TRACK */}
             {stream === "joyful-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 7" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Musical Background
@@ -860,7 +860,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* CREATIVE TRACK */}
             {stream === "creative-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Sensory Profile
@@ -916,7 +916,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
           <>
             {/* LITTLE MOZARTS */}
             {stream === "little-mozarts" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Early Keyboard Assessment
@@ -974,7 +974,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* FAST TRACK */}
             {stream === "fast-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 {KEYBOARD_TESTS.map((t, i) => (
                   <GradeCard key={t.code} code={t.code} title={t.title} sub={t.sub}
                     rubric={t.rubric} accent={ACCENT}
@@ -1033,7 +1033,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* JOYFUL TRACK */}
             {stream === "joyful-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 6" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Hand Flexibility Check
@@ -1074,7 +1074,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
 
             {/* CREATIVE TRACK */}
             {stream === "creative-track" && (
-              <div style={grid12}>
+              <div style={grid12} className="scr-grid">
                 <div style={{ ...card, gridColumn: "span 7" }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111", marginBottom: 16 }}>
                     Teacher Overrides

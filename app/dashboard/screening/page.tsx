@@ -1229,6 +1229,15 @@ function ScreeningHub() {
 
   return (
     <>
+      <style>{`
+        @media(max-width:640px){
+          .scr-inst-grid{grid-template-columns:1fr !important}
+          .scr-outer{padding:0 10px !important}
+          .scr-hero{padding:16px !important}
+          .scr-grid{display:flex !important;flex-direction:column !important;gap:12px !important}
+          .scr-sensory-grid{grid-template-columns:1fr !important;gap:12px !important}
+        }
+      `}</style>
       <div style={{ display: "flex", gap: 10, marginBottom: 24 }}>
         {([
           { key: "screening"    as const, label: "🎹 Screening",    desc: "Evaluate & assign track"        },
@@ -1261,7 +1270,7 @@ function ScreeningHub() {
       {view === "screening" && (
         <>
           {/* Instrument selector */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 24 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 24 }} className="scr-inst-grid">
             {([
               { key: "guitar"   as const, icon: "🎸", label: "Guitar Screening",   accent: "#d97706", accentBg: "#fffbeb" },
               { key: "keyboard" as const, icon: "🎹", label: "Keyboard Screening", accent: "#0d9488", accentBg: "#f0fdfa" },
