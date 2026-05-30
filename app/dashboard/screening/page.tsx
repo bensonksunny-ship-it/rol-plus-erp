@@ -1154,15 +1154,24 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
                           ✏️
                         </button>
                         {str(rec.admissionNumber) ? (
-                          // Already has admission number → re-download
-                          <button
-                            onClick={() => handleRedownload(rec)}
-                            title="Download Admission Card PDF"
-                            disabled={pdfLoading === str(rec.id)}
-                            style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #c7d2fe", background: "#eef2ff", cursor: pdfLoading === str(rec.id) ? "wait" : "pointer", fontSize: 12, color: "#4338ca", fontWeight: 700, opacity: pdfLoading === str(rec.id) ? 0.6 : 1, whiteSpace: "nowrap" as const }}
-                          >
-                            {pdfLoading === str(rec.id) ? "…" : "📄 Card"}
-                          </button>
+                          // Already has admission number → re-download + enroll
+                          <>
+                            <button
+                              onClick={() => handleRedownload(rec)}
+                              title="Download Admission Card PDF"
+                              disabled={pdfLoading === str(rec.id)}
+                              style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #c7d2fe", background: "#eef2ff", cursor: pdfLoading === str(rec.id) ? "wait" : "pointer", fontSize: 12, color: "#4338ca", fontWeight: 700, opacity: pdfLoading === str(rec.id) ? 0.6 : 1, whiteSpace: "nowrap" as const }}
+                            >
+                              {pdfLoading === str(rec.id) ? "…" : "📄 Card"}
+                            </button>
+                            <button
+                              onClick={() => { setCompleting({ admission: rec, screening: getScreening(rec) ?? {} }); setCompletingPhase("success"); }}
+                              title="Enroll Student"
+                              style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #a5b4fc", background: "#ede9fe", cursor: "pointer", fontSize: 12, color: "#4338ca", fontWeight: 700, whiteSpace: "nowrap" as const }}
+                            >
+                              🎓 Enroll
+                            </button>
+                          </>
                         ) : getScreening(rec) ? (
                           // Screened but no admission number → request form download + complete admission
                           <>

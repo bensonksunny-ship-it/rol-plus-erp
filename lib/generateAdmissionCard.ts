@@ -30,27 +30,27 @@ function fill(doc: jsPDF, [r, g, b]: [number, number, number]) { doc.setFillColo
 function stroke(doc: jsPDF, [r, g, b]: [number, number, number]) { doc.setDrawColor(r, g, b); }
 function color(doc: jsPDF, [r, g, b]: [number, number, number]) { doc.setTextColor(r, g, b); }
 
-// Compact section header — 6mm band, returns y after 8mm gap
+// Section header — 8 mm band, returns y + 9
 function sh(doc: jsPDF, label: string, y: number, W: number, M: number): number {
   fill(doc, CLR.primarySoft);
-  doc.rect(M, y, W - M * 2, 6, "F");
+  doc.rect(M, y, W - M * 2, 8, "F");
   color(doc, CLR.primary);
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(7);
-  doc.text(label.toUpperCase(), M + 3, y + 4.2);
-  return y + 8;
+  doc.setFontSize(7.5);
+  doc.text(label.toUpperCase(), M + 3, y + 5.5);
+  return y + 9;
 }
 
-// Compact label+value — 4.5mm line height
-function lv(doc: jsPDF, label: string, value: string, x: number, y: number, lw = 36): number {
+// Label + value row — 5.5 mm line height
+function lv(doc: jsPDF, label: string, value: string, x: number, y: number, lw = 38): number {
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(7);
+  doc.setFontSize(7.5);
   color(doc, CLR.gray500);
   doc.text(label, x, y);
   doc.setFont("helvetica", "normal");
   color(doc, CLR.gray900);
   doc.text(value || "—", x + lw, y);
-  return y + 4.5;
+  return y + 5.5;
 }
 
 function hr(doc: jsPDF, y: number, M: number, W: number) {
@@ -66,52 +66,54 @@ export async function generateAdmissionCardPDF(
 ) {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const W = 210;
-  const M = 13;
+  const M = 14;
+  const GAP = 5;          // standard gap after hr
+  const COL2 = M + (W - M * 2) / 2 + 2;
 
   const admNo  = s(admission.admissionNumber) || "";
   const isCard = admNo.length > 0;
 
-  // ── HEADER BAND (20mm) ────────────────────────────────────────────────────
+  // ── HEADER BAND (26 mm) ───────────────────────────────────────────────────
   fill(doc, CLR.primary);
-  doc.rect(0, 0, W, 20, "F");
+  doc.rect(0, 0, W, 26, "F");
 
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(13);
+  doc.setFontSize(15);
   color(doc, CLR.white);
-  doc.text("ROL+ Music Academy", M, 9);
+  doc.text("ROL+ Music Academy", M, 11);
 
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(7.5);
+  doc.setFontSize(8);
   color(doc, [200, 200, 255]);
-  doc.text("River of Life  •  Bangalore", M, 15);
+  doc.text("River of Life  •  Bangalore", M, 18);
 
   // Badge
   fill(doc, CLR.white);
-  doc.roundedRect(W - 53, 5, 41, 11, 2, 2, "F");
+  doc.roundedRect(W - 54, 7, 42, 12, 2, 2, "F");
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(isCard ? 8.5 : 7);
+  doc.setFontSize(isCard ? 9 : 7.2);
   color(doc, CLR.primary);
-  doc.text(isCard ? "ADMISSION CARD" : "ADMISSION REQUEST FORM", W - 32.5, 12, { align: "center" });
+  doc.text(isCard ? "ADMISSION CARD" : "ADMISSION REQUEST FORM", W - 33, 14.5, { align: "center" });
 
-  // ── ADMISSION NUMBER BAND (8mm) ───────────────────────────────────────────
+  // ── ADMISSION NUMBER BAND (10 mm) ─────────────────────────────────────────
   fill(doc, CLR.gray100);
-  doc.rect(0, 20, W, 8, "F");
+  doc.rect(0, 26, W, 10, "F");
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(7.5);
+  doc.setFontSize(8.5);
   color(doc, CLR.primary);
-  doc.text(`Admission No:  ${admNo || "—"}`, M, 25.2);
+  doc.text(`Admission No:  ${admNo || "—"}`, M, 32.5);
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(7);
+  doc.setFontSize(7.5);
   color(doc, CLR.gray500);
   doc.text(
     new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }),
-    W - M, 25.2, { align: "right" }
+    W - M, 32.5, { align: "right" }
   );
 
   // ── PHOTO + PERSONAL INFO ─────────────────────────────────────────────────
-  let y = 31;
-  const PHOTO_W = 24, PHOTO_H = 30;
-  const COL2 = M + (W - M * 2) / 2 + 2;
+  // Content starts at y = 38 (2 mm gap after bands)
+  let y = 38;
+  const PHOTO_W = 28, PHOTO_H = 36;
 
   stroke(doc, CLR.gray300);
   doc.setLineWidth(0.3);
@@ -122,66 +124,67 @@ export async function generateAdmissionCardPDF(
   } else {
     color(doc, CLR.gray300);
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(6.5);
+    doc.setFontSize(7);
     doc.text("No Photo", M + PHOTO_W / 2, y + PHOTO_H / 2, { align: "center" });
   }
 
-  const IX = M + PHOTO_W + 6;
+  const IX = M + PHOTO_W + 7;
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(12);
+  doc.setFontSize(13);
   color(doc, CLR.gray900);
-  doc.text(s(admission.fullName) || "—", IX, y + 5);
+  doc.text(s(admission.fullName) || "—", IX, y + 7);
 
-  let ry = y + 10;
-  ry = lv(doc, "Date of Birth:",      s(admission.dob)          || "—", IX, ry, 28);
-  ry = lv(doc, "Age:",                s(admission.age) ? `${s(admission.age)} yrs` : "—", IX, ry, 28);
-  ry = lv(doc, "Parent / Guardian:",  s(admission.parentName)   || "—", IX, ry, 30);
-  ry = lv(doc, "Working Status:",     s(admission.workingStatus)|| "—", IX, ry, 30);
+  let ry = y + 14;
+  ry = lv(doc, "Date of Birth:",     s(admission.dob)         || "—", IX, ry, 30);
+  ry = lv(doc, "Age:",               s(admission.age) ? `${s(admission.age)} yrs` : "—", IX, ry, 30);
+  ry = lv(doc, "Parent / Guardian:", s(admission.parentName)  || "—", IX, ry, 32);
+  ry = lv(doc, "Working Status:",    s(admission.workingStatus)|| "—", IX, ry, 32);
 
-  y = Math.max(y + PHOTO_H, ry) + 3;
-  hr(doc, y, M, W); y += 3;
+  y = Math.max(y + PHOTO_H, ry) + GAP;
+  hr(doc, y, M, W);
+  y += GAP;
 
   // ── CONTACT & LOCATION (2-col) ────────────────────────────────────────────
   y = sh(doc, "Contact & Location", y, W, M);
-
   const addr = [s(admission.address1), s(admission.address2)].filter(Boolean).join(", ") || "—";
   let c1y = y;
-  c1y = lv(doc, "Phone:",   s(admission.phone)  || "—", M,    c1y, 20);
-  c1y = lv(doc, "Email:",   s(admission.email)  || "—", M,    c1y, 20);
-  c1y = lv(doc, "Centre:",  s(admission.centre) || "—", M,    c1y, 20);
+  c1y = lv(doc, "Phone:",   s(admission.phone)  || "—", M,    c1y, 22);
+  c1y = lv(doc, "Email:",   s(admission.email)  || "—", M,    c1y, 22);
+  c1y = lv(doc, "Centre:",  s(admission.centre) || "—", M,    c1y, 22);
   let c2y = y;
   c2y = lv(doc, "School / Company:", s(admission.schoolCompany) || "—", COL2, c2y, 34);
   c2y = lv(doc, "Address:",          addr,                               COL2, c2y, 34);
 
-  y = Math.max(c1y, c2y) + 3;
-  hr(doc, y, M, W); y += 3;
+  y = Math.max(c1y, c2y) + GAP;
+  hr(doc, y, M, W);
+  y += GAP;
 
   // ── MUSICAL PROFILE (2-col) ───────────────────────────────────────────────
   y = sh(doc, "Musical Profile", y, W, M);
-
   let m1y = y;
-  m1y = lv(doc, "Instruments to Learn:", arr(admission.instrumentsToLearn).join(", ") || "—", M, m1y, 38);
-  m1y = lv(doc, "Purpose of Learning:",  s(admission.purposeOfLearning)  || "—",              M, m1y, 38);
-  m1y = lv(doc, "Previous Experience:",  s(admission.previousExperience) || "—",              M, m1y, 38);
+  m1y = lv(doc, "Instruments to Learn:", arr(admission.instrumentsToLearn).join(", ") || "—", M, m1y, 40);
+  m1y = lv(doc, "Purpose of Learning:",  s(admission.purposeOfLearning)  || "—",              M, m1y, 40);
+  m1y = lv(doc, "Previous Experience:",  s(admission.previousExperience) || "—",              M, m1y, 40);
   let m2y = y;
-  m2y = lv(doc, "Instruments Played:",  arr(admission.instrumentsPlayed).join(", ") || "—", COL2, m2y, 32);
-  m2y = lv(doc, "Musical Skill Level:", s(admission.musicalSkill)   || "—",                 COL2, m2y, 32);
-  m2y = lv(doc, "How Heard About Us:",  s(admission.howHeardAboutUs)|| "—",                 COL2, m2y, 32);
+  m2y = lv(doc, "Instruments Played:",  arr(admission.instrumentsPlayed).join(", ") || "—", COL2, m2y, 34);
+  m2y = lv(doc, "Musical Skill Level:", s(admission.musicalSkill)   || "—",                 COL2, m2y, 34);
+  m2y = lv(doc, "How Heard About Us:",  s(admission.howHeardAboutUs)|| "—",                 COL2, m2y, 34);
 
-  y = Math.max(m1y, m2y) + 3;
-  hr(doc, y, M, W); y += 3;
+  y = Math.max(m1y, m2y) + GAP;
+  hr(doc, y, M, W);
+  y += GAP;
 
   // ── SCREENING RESULTS ─────────────────────────────────────────────────────
   y = sh(doc, "Screening Results", y, W, M);
 
   if (!screening) {
     fill(doc, [254, 249, 195]);
-    doc.roundedRect(M, y, W - M * 2, 8, 2, 2, "F");
+    doc.roundedRect(M, y, W - M * 2, 10, 2, 2, "F");
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(7.5);
+    doc.setFontSize(8);
     color(doc, [146, 64, 14]);
-    doc.text("Screening Pending — not yet conducted", M + 4, y + 5.5);
-    y += 12;
+    doc.text("Screening Pending — not yet conducted", M + 4, y + 7);
+    y += 15;
   } else {
     const instrument = s(screening.instrument);
     const stream     = s(screening.stream);
@@ -198,27 +201,27 @@ export async function generateAdmissionCardPDF(
 
     // Chips row
     fill(doc, CLR.primarySoft);
-    doc.roundedRect(M, y, 28, 6.5, 1.5, 1.5, "F");
-    doc.setFont("helvetica", "bold"); doc.setFontSize(7);
+    doc.roundedRect(M, y, 30, 7, 1.5, 1.5, "F");
+    doc.setFont("helvetica", "bold"); doc.setFontSize(7.5);
     color(doc, CLR.primary);
-    doc.text(instrLabel, M + 2, y + 4.7);
+    doc.text(instrLabel, M + 2, y + 5);
 
     fill(doc, CLR.gray100);
-    doc.roundedRect(M + 31, y, 38, 6.5, 1.5, 1.5, "F");
+    doc.roundedRect(M + 33, y, 40, 7, 1.5, 1.5, "F");
     color(doc, CLR.gray700);
-    doc.text(streamLabel, M + 33, y + 4.7);
+    doc.text(streamLabel, M + 35, y + 5);
 
     fill(doc, [...trackColor.map(c => Math.min(255, c + 210))] as [number, number, number]);
-    doc.roundedRect(M + 72, y, 50, 6.5, 1.5, 1.5, "F");
+    doc.roundedRect(M + 76, y, 50, 7, 1.5, 1.5, "F");
     color(doc, trackColor);
-    doc.text(trackName, M + 74, y + 4.7);
-    y += 10;
+    doc.text(trackName, M + 78, y + 5);
+    y += 11;
 
-    // 2-column data
+    // 2-col data
     let s1y = y;
-    s1y = lv(doc, "Assessment ID:", assessId,  M, s1y, 30);
-    s1y = lv(doc, "Slab Assigned:", trackName, M, s1y, 30);
-    s1y = lv(doc, "Strategy:",      strategy,  M, s1y, 30);
+    s1y = lv(doc, "Assessment ID:", assessId,  M, s1y, 32);
+    s1y = lv(doc, "Slab Assigned:", trackName, M, s1y, 32);
+    s1y = lv(doc, "Strategy:",      strategy,  M, s1y, 32);
 
     const grades: string[] = [];
     if (screening.ft_rhythmGrade)    grades.push(`Rhythm: ${screening.ft_rhythmGrade}`);
@@ -227,7 +230,7 @@ export async function generateAdmissionCardPDF(
     if (instrument === "keyboard" && screening.ft_pitchGrade)    grades.push(`Pitch Echo: ${screening.ft_pitchGrade}`);
     if (instrument === "drums"    && screening.ft_rudimentGrade) grades.push(`Rudiments: ${screening.ft_rudimentGrade}`);
     if (typeof screening.ft_totalScore === "number") grades.push(`Score: ${screening.ft_totalScore}/15`);
-    if (grades.length > 0) s1y = lv(doc, "Clinical Scores:", grades.join("  |  "), M, s1y, 30);
+    if (grades.length > 0) s1y = lv(doc, "Clinical Scores:", grades.join("  |  "), M, s1y, 32);
 
     let s2y = y;
     s2y = lv(doc, "Metronome:", metronome, COL2, s2y, 26);
@@ -237,8 +240,8 @@ export async function generateAdmissionCardPDF(
         s2y = lv(doc, "Chord Complexity:", s(config.chordComplexity), COL2, s2y, 26);
       }
       if (instrument === "keyboard") {
-        s2y = lv(doc, "Hand Integration:", s(config.handIntegration),             COL2, s2y, 26);
-        s2y = lv(doc, "Chords:",           s(config.chords as string) || "None",  COL2, s2y, 26);
+        s2y = lv(doc, "Hand Integration:", s(config.handIntegration),            COL2, s2y, 26);
+        s2y = lv(doc, "Chords:",           s(config.chords as string) || "None", COL2, s2y, 26);
       }
       if (instrument === "drums") {
         s2y = lv(doc, "Stick Type:",        s(config.stickType),        COL2, s2y, 26);
@@ -246,18 +249,48 @@ export async function generateAdmissionCardPDF(
       }
     }
 
-    y = Math.max(s1y, s2y) + 3;
+    y = Math.max(s1y, s2y) + GAP;
   }
 
-  hr(doc, y, M, W); y += 4;
+  hr(doc, y, M, W);
+  y += GAP;
 
-  // ── ADMISSION REQUEST FORM EXTRAS ─────────────────────────────────────────
+  // ── REQUEST FORM EXTRAS ───────────────────────────────────────────────────
   if (!isCard) {
+    // Acknowledgement — 6 lines when no screening, 2 lines when screened
+    const ackLines = !screening
+      ? [
+          "The student/guardian confirms all information provided in this form is accurate and complete.",
+          "Fees are to be paid as per the schedule communicated by the centre at the time of joining.",
+          "Class attendance must be maintained in accordance with ROL's School of Music policy.",
+          "The student is expected to practise regularly as guided by the assigned faculty member.",
+          "The school reserves the right to modify class schedules, faculty, and course structure.",
+          "This form, once submitted with the admission number, serves as the official admission record.",
+        ]
+      : [
+          "The student/guardian confirms all information provided in this form is accurate and complete.",
+          "All fee, attendance, and academic policies of ROL's School of Music are duly acknowledged.",
+        ];
+
+    y = sh(doc, "Acknowledgement", y, W, M);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    color(doc, CLR.gray700);
+    for (const line of ackLines) {
+      doc.text(`•  ${line}`, M + 2, y, { maxWidth: W - M * 2 - 4 });
+      y += 5.5;
+    }
+    y += GAP;
+    hr(doc, y, M, W);
+    y += GAP;
+
+    // ── SEAL + ADMISSION NUMBER + DIRECTOR (36 mm tall) ───────────────────
+    const ROW_H   = 36;
     const SEAL_R  = 15;
     const SEAL_CX = M + SEAL_R;
-    const SEAL_CY = y + SEAL_R;
+    const SEAL_CY = y + SEAL_R + 2;      // 2 mm top padding
 
-    // Dashed seal circle
+    // Dashed circle seal
     stroke(doc, CLR.gray300);
     doc.setLineWidth(0.35);
     doc.setLineDashPattern([1.2, 1.2], 0);
@@ -265,46 +298,46 @@ export async function generateAdmissionCardPDF(
     doc.setLineDashPattern([], 0);
     color(doc, CLR.gray300);
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(5.5);
+    doc.setFontSize(6.5);
     doc.text("Official Seal",           SEAL_CX, SEAL_CY - 3,   { align: "center" });
-    doc.text("ROL's School of Music",   SEAL_CX, SEAL_CY + 2.5, { align: "center" });
+    doc.text("ROL's School of Music",   SEAL_CX, SEAL_CY + 3.5, { align: "center" });
 
-    // Right panel: admission number box + director signature
-    const RX      = M + SEAL_R * 2 + 8;
-    const RW      = W - M - RX;
-    const MID_RX  = RX + RW / 2;
+    // Right panel layout
+    const RX = M + SEAL_R * 2 + 10;
+    const RW = W - M - RX;
+    const MX = RX + RW / 2;
 
-    // Admission number fill box
+    // Admission number fill box (top of right panel)
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(7);
+    doc.setFontSize(8);
     color(doc, CLR.primary);
-    doc.text("Admission No:", RX, y + 6);
+    doc.text("Admission No:", RX, y + 8);
     stroke(doc, CLR.gray300);
     doc.setLineWidth(0.3);
     fill(doc, CLR.white);
-    doc.roundedRect(RX + 28, y + 1, RW - 28, 8, 1.5, 1.5, "FD");
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(6);
-    color(doc, CLR.gray300);
-    doc.text("(fill manually)", RX + 28 + (RW - 28) / 2, y + 6.5, { align: "center" });
-
-    // Director signature line
-    const SIG_LINE_Y = y + SEAL_R * 2 - 5;
-    stroke(doc, CLR.gray300);
-    doc.setLineWidth(0.3);
-    doc.line(RX, SIG_LINE_Y, W - M, SIG_LINE_Y);
-    color(doc, CLR.gray700);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(7);
-    doc.text("Director", MID_RX, SIG_LINE_Y + 4.5, { align: "center" });
+    doc.roundedRect(RX + 30, y + 2, RW - 30, 9, 1.5, 1.5, "FD");
     doc.setFont("helvetica", "normal");
     doc.setFontSize(6.5);
-    color(doc, CLR.gray500);
-    doc.text("ROL's School of Music", MID_RX, SIG_LINE_Y + 9, { align: "center" });
+    color(doc, CLR.gray300);
+    doc.text("(fill manually)", RX + 30 + (RW - 30) / 2, y + 7.8, { align: "center" });
 
-    y += SEAL_R * 2 + 6;
+    // Director signature line
+    const SIG_Y = y + ROW_H - 9;
+    stroke(doc, CLR.gray300);
+    doc.setLineWidth(0.3);
+    doc.line(RX + 8, SIG_Y, W - M, SIG_Y);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    color(doc, CLR.gray700);
+    doc.text("Director", MX, SIG_Y + 5, { align: "center" });
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    color(doc, CLR.gray500);
+    doc.text("ROL's School of Music", MX, SIG_Y + 10.5, { align: "center" });
+
+    y += ROW_H;
     hr(doc, y, M, W);
-    y += 4;
+    y += GAP;
   }
 
   // ── FOOTER BAND ──────────────────────────────────────────────────────────
