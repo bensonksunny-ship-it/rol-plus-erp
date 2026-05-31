@@ -1,10 +1,5 @@
 "use client";
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ALL LOGIC BELOW IS UNCHANGED — only the `s` style object at the bottom
-// has been updated to the gold/amber theme.
-// ═══════════════════════════════════════════════════════════════════════════════
-
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
@@ -18,14 +13,10 @@ import { ROLES } from "@/config/constants";
 // ─── Alert count hook ──────────────────────────────────────────────────────────
 function useAlertCount(enabled: boolean): number {
   const [count, setCount] = useState(0);
-  // Capture enabled in a ref so the interval callback always uses the latest
-  // value without being listed as an effect dependency — prevents re-subscribing
-  // the interval every time the admin/super_admin role check changes.
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
 
   useEffect(() => {
-    // Only start the polling loop once (on mount). The ref keeps it current.
     async function fetchAlerts() {
       if (!enabledRef.current) { setCount(0); return; }
       try {
@@ -39,7 +30,7 @@ function useAlertCount(enabled: boolean): number {
     const id = setInterval(fetchAlerts, 60_000);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);   // ← intentionally empty: interval starts once, ref tracks enabled
+  }, []);
   return count;
 }
 
@@ -52,32 +43,58 @@ interface NavItem {
   roles:        string[];
 }
 
-const NAV_ITEMS: NavItem[] = [
-  { label: "Center Suite",  icon: "⊞",  href: "/dashboard",               roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT] },
-  { label: "Centers",      icon: "🏫", href: "/dashboard/centers",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Teachers",     icon: "👥", href: "/dashboard/teachers",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Admins",       icon: "👤", href: "/dashboard/admins",         roles: [ROLES.SUPER_ADMIN] },
-  { label: "Students",     icon: "🎓", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Finance",      icon: "₹",  href: "/dashboard/finance",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+interface NavGroup {
+  label: string;
+  icon:  string;
+  items: NavItem[];
+}
+
+const NAV_GROUPS: NavGroup[] = [
   {
-    label: "Syllabus", icon: "📚",
-    href:  (uid, role) =>
-      role === ROLES.STUDENT
-        ? `/dashboard/student-syllabus/${uid}`
-        : "/dashboard/syllabus",
-    matchPrefix: "/dashboard/syllabus,/dashboard/student-syllabus",
-    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT],
+    label: "Academic Suite", icon: "🎓",
+    items: [
+      { label: "Center Suite",  icon: "⊞",  href: "/dashboard",               roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT] },
+      { label: "Centers",       icon: "🏫", href: "/dashboard/centers",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Teachers",      icon: "👥", href: "/dashboard/teachers",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Admins",        icon: "👤", href: "/dashboard/admins",         roles: [ROLES.SUPER_ADMIN] },
+      { label: "Students",      icon: "🎓", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Attendance",    icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      {
+        label: "Syllabus", icon: "📚",
+        href: (uid, role) =>
+          role === ROLES.STUDENT
+            ? `/dashboard/student-syllabus/${uid}`
+            : "/dashboard/syllabus",
+        matchPrefix: "/dashboard/syllabus,/dashboard/student-syllabus",
+        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT],
+      },
+      { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",        roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
+      { label: "Screening",     icon: "🎹", href: "/dashboard/screening",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening,/dashboard/screening/fast-track" },
+    ],
   },
-  { label: "History",      icon: "🕐", href: "/dashboard/history",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Analytics",   icon: "📊", href: "/dashboard/analytics",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Alerts",       icon: "🔔", href: "/dashboard/alerts",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Audit Logs",   icon: "📋", href: "/dashboard/audit-logs",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Export",       icon: "⬇", href: "/dashboard/export",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Faculty Suite",icon: "🎓", href: "/dashboard/teacher",        roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
-  { label: "Screening",   icon: "🎹", href: "/dashboard/screening",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening,/dashboard/screening/fast-track" },
+  {
+    label: "Finance", icon: "₹",
+    items: [
+      { label: "Finance", icon: "₹", href: "/dashboard/finance", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+    ],
+  },
+  {
+    label: "Insights & Reports", icon: "📊",
+    items: [
+      { label: "Analytics",    icon: "📊", href: "/dashboard/analytics",      roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Export",       icon: "⬇", href: "/dashboard/export",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+    ],
+  },
+  {
+    label: "System Admin", icon: "⚙️",
+    items: [
+      { label: "Alerts",     icon: "🔔", href: "/dashboard/alerts",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Audit Logs", icon: "📋", href: "/dashboard/audit-logs", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "History",    icon: "🕐", href: "/dashboard/history",    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+    ],
+  },
 ];
 
 const BOTTOM_NAV_LABELS = ["Center Suite", "Attendance", "Syllabus", "Students", "Faculty Suite"];
@@ -88,9 +105,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const router            = useRouter();
   const pathname          = usePathname();
   const isMobile          = useIsMobile();
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const redirectingRef    = useRef(false);
-  const hasRestoredRef    = useRef(false);
+  const [drawerOpen,  setDrawerOpen]  = useState(false);
+  const [openGroups,  setOpenGroups]  = useState<Set<string>>(new Set());
+  const redirectingRef  = useRef(false);
+  const hasRestoredRef  = useRef(false);
 
   const canSeeAlerts = user?.role === ROLES.SUPER_ADMIN || user?.role === ROLES.ADMIN;
   const alertCount   = useAlertCount(canSeeAlerts);
@@ -137,8 +155,29 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     } catch { /* ignore */ }
   }, [loading, user, pathname, router]);
 
+  // Auto-open the group containing the active item whenever pathname changes
+  useEffect(() => {
+    if (!user) return;
+    const { role, uid } = user;
+    for (const group of NAV_GROUPS) {
+      const hasActive = group.items
+        .filter(item => item.roles.includes(role))
+        .some(item => {
+          const href = typeof item.href === "function" ? item.href(uid, role) : item.href;
+          if (pathname === href) return true;
+          const prefixes = (item.matchPrefix ?? href).split(",");
+          return prefixes.some(p => p !== "/dashboard" && pathname.startsWith(p));
+        });
+      if (hasActive) {
+        setOpenGroups(prev => prev.has(group.label) ? prev : new Set([...prev, group.label]));
+        break;
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname, user?.uid, user?.role]);
+
   async function handleSignOut() {
-    await signOut(); // signOut() now clears the session cookie and localStorage internally
+    await signOut();
     router.replace("/login");
   }
 
@@ -154,7 +193,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     return <div style={{ height: "100dvh", background: "var(--color-bg)" }} />;
   }
 
-  const visibleNav = NAV_ITEMS
+  // ── Derived nav data ────────────────────────────────────────────────────────
+
+  // Flat list — used for pageTitle, bottomNav, isActive
+  const visibleNav = NAV_GROUPS
+    .flatMap(g => g.items)
     .filter(item => item.roles.includes(user.role))
     .map(item => ({
       ...item,
@@ -162,6 +205,21 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         ? item.href(user.uid, user.role)
         : item.href,
     }));
+
+  // Grouped list — used for the accordion sidebar
+  const visibleGroups = NAV_GROUPS
+    .map(group => ({
+      ...group,
+      visibleItems: group.items
+        .filter(item => item.roles.includes(user.role))
+        .map(item => ({
+          ...item,
+          resolvedHref: typeof item.href === "function"
+            ? item.href(user.uid, user.role)
+            : item.href,
+        })),
+    }))
+    .filter(g => g.visibleItems.length > 0);
 
   function isActive(item: (typeof visibleNav)[number]): boolean {
     if (pathname === item.resolvedHref) return true;
@@ -177,28 +235,62 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     .map(label => visibleNav.find(i => i.label === label))
     .filter((i): i is (typeof visibleNav)[number] => i !== undefined);
 
-  // ── Shared nav links ───────────────────────────────────────────────────────
-  function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
+  // ── Accordion nav groups ────────────────────────────────────────────────────
+  function NavGroups({ onNavigate }: { onNavigate?: () => void }) {
     return (
       <>
-        {visibleNav.map(item => {
-          const active = isActive(item);
+        {visibleGroups.map((group) => {
+          const isOpen    = openGroups.has(group.label);
+          const hasActive = group.visibleItems.some(item => isActive(item));
+
           return (
-            <Link
-              key={item.resolvedHref}
-              href={item.resolvedHref}
-              onClick={onNavigate}
-              style={{ ...s.navItem, ...(active ? s.navItemActive : {}) }}
-            >
-              <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>
-                {item.icon}
-              </span>
-              <span style={s.navLabel}>{item.label}</span>
-              {item.label === "Alerts" && alertCount > 0 && (
-                <span style={s.navBadge}>{alertCount}</span>
+            <div key={group.label} style={s.groupWrap}>
+              {/* Group header toggle */}
+              <button
+                onClick={() =>
+                  setOpenGroups(prev => {
+                    const next = new Set(prev);
+                    next.has(group.label) ? next.delete(group.label) : next.add(group.label);
+                    return next;
+                  })
+                }
+                style={{ ...s.groupBtn, ...(hasActive ? s.groupBtnActive : {}) }}
+              >
+                <span style={s.groupIcon}>{group.icon}</span>
+                <span style={{ ...s.groupLabel, ...(hasActive ? s.groupLabelActive : {}) }}>
+                  {group.label}
+                </span>
+                <span style={{ ...s.groupChevron, ...(isOpen ? s.groupChevronOpen : {}) }}>
+                  ›
+                </span>
+              </button>
+
+              {/* Collapsible items */}
+              {isOpen && (
+                <div style={s.groupItems}>
+                  {group.visibleItems.map(item => {
+                    const active = isActive(item);
+                    return (
+                      <Link
+                        key={item.resolvedHref}
+                        href={item.resolvedHref}
+                        onClick={onNavigate}
+                        style={{ ...s.navItem, ...s.navItemSub, ...(active ? s.navItemActive : {}) }}
+                      >
+                        <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>
+                          {item.icon}
+                        </span>
+                        <span style={s.navLabel}>{item.label}</span>
+                        {item.label === "Alerts" && alertCount > 0 && (
+                          <span style={s.navBadge}>{alertCount}</span>
+                        )}
+                        {active && <span style={s.navActivePip} />}
+                      </Link>
+                    );
+                  })}
+                </div>
               )}
-              {active && <span style={s.navActivePip} />}
-            </Link>
+            </div>
           );
         })}
       </>
@@ -246,7 +338,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
             <button onClick={() => setDrawerOpen(false)} style={s.closeBtn}>✕</button>
           </div>
-          <nav style={s.drawerNav}><NavLinks onNavigate={() => setDrawerOpen(false)} /></nav>
+          <nav style={s.drawerNav}>
+            <NavGroups onNavigate={() => setDrawerOpen(false)} />
+          </nav>
           <div style={s.drawerFoot}>
             <div style={s.userRow}>
               <div style={s.avatarLg}>{initials}</div>
@@ -308,8 +402,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
         </div>
 
-        <div style={s.navSectionLabel}>Menu</div>
-        <nav style={s.nav}><NavLinks /></nav>
+        <nav style={s.nav}>
+          <NavGroups />
+        </nav>
 
         <div style={s.sidebarFoot}>
           <div style={s.userRow}>
@@ -373,7 +468,7 @@ const s: Record<string, React.CSSProperties> = {
 
   shell:   { display: "flex", height: "100dvh", overflow: "hidden", background: "var(--color-bg)" },
   sidebar: {
-    width: 220, flexShrink: 0,
+    width: 224, flexShrink: 0,
     display: "flex", flexDirection: "column",
     background: "var(--color-surface)",
     borderRight: "1px solid var(--color-border)",
@@ -388,22 +483,56 @@ const s: Record<string, React.CSSProperties> = {
     padding: "20px 14px 14px",
     borderBottom: "1px solid var(--color-border-subtle)",
   },
-  navSectionLabel: {
-    fontSize: 10, fontWeight: 700, letterSpacing: "0.08em",
-    textTransform: "uppercase", color: "var(--color-text-muted)",
-    padding: "14px 16px 5px",
-  },
-  nav:         { flex: 1, padding: "0 7px", display: "flex", flexDirection: "column", gap: 1, overflowY: "auto" },
-  sidebarFoot: { padding: "12px 9px", borderTop: "1px solid var(--color-border-subtle)", marginTop: "auto" },
 
+  // ── Accordion groups ─────────────────────────────────────────────────────
+  nav: { flex: 1, padding: "10px 7px 6px", overflowY: "auto" },
+
+  groupWrap: {
+    marginBottom: 2,
+  },
+  groupBtn: {
+    width: "100%", display: "flex", alignItems: "center", gap: 6,
+    padding: "7px 9px 7px", background: "none", border: "none",
+    borderRadius: 7, cursor: "pointer", fontFamily: "inherit",
+    transition: "background 0.15s",
+  },
+  groupBtnActive: {
+    background: "var(--color-accent-dim)",
+  },
+  groupIcon: {
+    fontSize: 12, width: 18, textAlign: "center", flexShrink: 0, opacity: 0.55,
+  },
+  groupLabel: {
+    fontSize: 10, fontWeight: 700, letterSpacing: "0.07em",
+    textTransform: "uppercase", color: "var(--color-text-muted)",
+    flex: 1, textAlign: "left",
+  },
+  groupLabelActive: {
+    color: "var(--color-accent)",
+  },
+  groupChevron: {
+    fontSize: 14, color: "var(--color-text-muted)", lineHeight: 1,
+    opacity: 0.45, transition: "transform 0.18s", display: "inline-block",
+  },
+  groupChevronOpen: {
+    transform: "rotate(90deg)",
+  },
+  groupItems: {
+    paddingBottom: 6,
+  },
+
+  // ── Nav items ─────────────────────────────────────────────────────────────
   navItem: {
     display: "flex", alignItems: "center", gap: 9,
-    padding: "8px 9px", borderRadius: 8,
+    padding: "7px 9px", borderRadius: 8,
     fontSize: 13, fontWeight: 400,
     color: "var(--color-text-secondary)",
     textDecoration: "none",
     transition: "background 0.15s, color 0.15s",
     position: "relative",
+  },
+  navItemSub: {
+    paddingLeft: 13,
   },
   navItemActive: {
     background: "var(--color-accent-dim)",
@@ -426,6 +555,8 @@ const s: Record<string, React.CSSProperties> = {
     background: "var(--color-accent)",
     boxShadow: "2px 0 8px var(--color-accent-glow)",
   },
+
+  sidebarFoot: { padding: "12px 9px", borderTop: "1px solid var(--color-border-subtle)", marginTop: "auto" },
 
   rightPanel: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
   topbar: {
@@ -520,7 +651,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   drawerHead: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 14px 14px", borderBottom: "1px solid var(--color-border-subtle)" },
   closeBtn:   { background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "var(--color-text-muted)", padding: 4, lineHeight: 1, borderRadius: 6 },
-  drawerNav:  { flex: 1, padding: "10px 7px", display: "flex", flexDirection: "column", gap: 1, overflowY: "auto" },
+  drawerNav:  { flex: 1, padding: "10px 7px 6px", overflowY: "auto" },
   drawerFoot: { padding: "12px 9px", borderTop: "1px solid var(--color-border-subtle)" },
 
   bottomNav:    { position: "fixed", bottom: 0, left: 0, right: 0, height: 60, background: "var(--color-surface)", borderTop: "1px solid var(--color-border)", display: "flex", zIndex: 100 },
