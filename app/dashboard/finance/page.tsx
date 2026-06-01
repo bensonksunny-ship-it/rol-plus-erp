@@ -1499,7 +1499,7 @@ function FinanceContent() {
 
                                           const displayMonth = tx.billingMonth
                                             ? fmtMonth(tx.billingMonth)
-                                            : formatDate(tx.date ?? tx.createdAt);
+                                            : fmtMonth((tx.date ?? tx.createdAt ?? "").slice(0, 7));
 
                                           return (
                                             <div key={tx.id} style={{

@@ -52,6 +52,15 @@ interface NavGroup {
 const NAV_TOP: NavItem[] = [
   { label: "Center Suite",    icon: "⊞",  href: "/dashboard",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Learner's Suite", icon: "🎓", href: "/dashboard/student", roles: [ROLES.STUDENT] },
+  {
+    label: "Syllabus", icon: "📚",
+    href: (uid) => `/dashboard/student-syllabus/${uid}`,
+    matchPrefix: "/dashboard/student-syllabus",
+    roles: [ROLES.STUDENT],
+  },
+  { label: "My Fees",         icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
+  { label: "My Achievements", icon: "🏆", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
+  { label: "My Attendance",   icon: "📅", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
 ];
 
 const NAV_GROUPS: NavGroup[] = [
@@ -66,19 +75,6 @@ const NAV_GROUPS: NavGroup[] = [
       { label: "Syllabus",      icon: "📚", href: "/dashboard/syllabus",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
       { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",        roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
       { label: "Screening",     icon: "🎹", href: "/dashboard/screening",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening,/dashboard/screening/fast-track" },
-    ],
-  },
-  {
-    label: "My Learning", icon: "📖",
-    items: [
-      {
-        label: "Syllabus", icon: "📚",
-        href: (uid) => `/dashboard/student-syllabus/${uid}`,
-        matchPrefix: "/dashboard/student-syllabus",
-        roles: [ROLES.STUDENT],
-      },
-      { label: "My Fees",         icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
-      { label: "My Achievements", icon: "🏆", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
     ],
   },
   {
@@ -106,7 +102,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Attendance", "Syllabus", "Students", "Faculty Suite"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Syllabus", "My Fees", "My Achievements", "My Attendance", "Attendance", "Students", "Faculty Suite"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -217,7 +213,12 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // Top-level standalone items (rendered above accordion groups)
   const topNavItems = NAV_TOP
     .filter(item => item.roles.includes(user.role))
-    .map(item => ({ ...item, resolvedHref: item.href as string }));
+    .map(item => ({
+      ...item,
+      resolvedHref: typeof item.href === "function"
+        ? item.href(user.uid, user.role)
+        : item.href,
+    }));
 
   // Grouped list — used for the accordion sidebar
   const visibleGroups = NAV_GROUPS
