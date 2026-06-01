@@ -79,7 +79,6 @@ function MyFeesContent() {
       ]);
 
       const userData = userSnap.exists() ? userSnap.data() : {};
-      setBalance((userData.currentBalance as number) ?? 0);
 
       const centerId = (userData.centerId as string) ?? null;
       if (centerId) {
@@ -98,6 +97,14 @@ function MyFeesContent() {
         .filter(t => t.method !== "auto-monthly" && t.method !== "auto")
         .sort((a, b) => (String(b.date ?? b.createdAt ?? "")).localeCompare(String(a.date ?? a.createdAt ?? "")));
       setTx(txList);
+
+      // Compute balance from visible transactions only (excludes hidden system charges)
+      let computedBalance = 0;
+      txList.forEach(tx => {
+        const type = (tx as unknown as Record<string, unknown>).type as string ?? "";
+        computedBalance += (type === "fee_due" || type === "charge") ? tx.amount : -tx.amount;
+      });
+      setBalance(computedBalance);
     } catch {
       setError("Failed to load fee details. Please try again.");
     } finally {
