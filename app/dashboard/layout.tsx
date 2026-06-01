@@ -59,8 +59,8 @@ const NAV_TOP: NavItem[] = [
     roles: [ROLES.STUDENT],
   },
   { label: "My Fees",         icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
-  { label: "My Attendance",   icon: "📅", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
-  { label: "My Achievements", icon: "🏆", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
+  { label: "My Streak",  icon: "🔥", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
+  { label: "My Badges", icon: "🏅", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
 ];
 
 const NAV_GROUPS: NavGroup[] = [
@@ -102,7 +102,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "My Quest", "My Fees", "My Attendance", "My Achievements", "Attendance", "Students", "Faculty Suite"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "My Quest", "My Fees", "My Streak", "My Badges", "Attendance", "Students", "Faculty Suite"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
