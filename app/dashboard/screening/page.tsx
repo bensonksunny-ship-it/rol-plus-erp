@@ -7,7 +7,7 @@ import Link from "next/link";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
-import { saveScreening, getAllScreenings, saveAdmission, getAllAdmissions, updateAdmission, deleteAdmission } from "@/services/screening/screening.service";
+import { saveScreening, getAllScreenings, saveAdmission, getAllAdmissions, getAdmissionsByTeacher, updateAdmission, deleteAdmission } from "@/services/screening/screening.service";
 import { generateAdmissionCardPDF } from "@/lib/generateAdmissionCard";
 import type { ScreeningConfig, ScreeningTrack, ScreeningResult, ScreeningType } from "@/types";
 import { DiagnosticCard, TRACK_STYLE } from "@/components/DiagnosticCard";
@@ -538,6 +538,7 @@ function EditAdmissionOverlay({
 // ─── Admission applications list ─────────────────────────────────────────────
 
 function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string) => void }) {
+  const { user }       = useAuthContext();
   const [admissions,   setAdmissions]   = useState<Record<string, unknown>[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [selected,     setSelected]     = useState<Record<string, unknown> | null>(null);
@@ -569,7 +570,10 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
 
   function reload() {
     setLoading(true);
-    getAllAdmissions()
+    (user?.role === ROLES.TEACHER && user.uid
+      ? getAdmissionsByTeacher(user.uid)
+      : getAllAdmissions()
+    )
       .then(setAdmissions)
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -693,33 +697,41 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
     }
   }
 
-  if (showForm) {
-    return (
-      <AdmissionFormContent
-        onDone={() => { setShowForm(false); reload(); }}
-      />
-    );
-  }
-
   if (loading) {
     return <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>;
   }
 
+  const formModal = showForm ? (
+    <div style={{ position: "fixed", inset: 0, zIndex: 500, background: "rgba(0,0,0,0.55)", overflowY: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "16px" }}>
+      <div style={{ width: "100%", maxWidth: 640, borderRadius: 16, overflow: "hidden", boxShadow: "0 24px 64px rgba(0,0,0,0.25)", background: "#fff", margin: "20px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #e5e7eb", background: "#f9fafb" }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>📋 New Admission Application</div>
+          <button onClick={() => setShowForm(false)} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#6b7280", lineHeight: 1, padding: 4 }}>✕</button>
+        </div>
+        <AdmissionFormContent onDone={() => { setShowForm(false); reload(); }} />
+      </div>
+    </div>
+  ) : null;
+
   if (admissions.length === 0) {
     return (
-      <div style={{ textAlign: "center", padding: "60px 24px", color: "#9ca3af" }}>
-        <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
-        <div style={{ fontSize: 15, fontWeight: 700, color: "#374151", marginBottom: 6 }}>No applications yet</div>
-        <div style={{ fontSize: 13, marginBottom: 24 }}>Submitted forms will appear here.</div>
-        <button onClick={() => setShowForm(true)} style={s.primaryBtn}>
-          + New Admission
-        </button>
-      </div>
+      <>
+        {formModal}
+        <div style={{ textAlign: "center", padding: "60px 24px", color: "#9ca3af" }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#374151", marginBottom: 6 }}>No applications yet</div>
+          <div style={{ fontSize: 13, marginBottom: 24 }}>Submitted forms will appear here.</div>
+          <button onClick={() => setShowForm(true)} style={s.primaryBtn}>
+            + New Admission
+          </button>
+        </div>
+      </>
     );
   }
 
   return (
     <div>
+      {formModal}
       {/* Edit overlay */}
       {editing && (
         <EditAdmissionOverlay

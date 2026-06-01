@@ -50,33 +50,31 @@ interface NavGroup {
 }
 
 const NAV_TOP: NavItem[] = [
-  { label: "Center Suite",    icon: "⊞",  href: "/dashboard",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Learner's Suite", icon: "🎓", href: "/dashboard/student", roles: [ROLES.STUDENT] },
+  // Admin / Super Admin
+  { label: "Center Suite", icon: "⊞", href: "/dashboard",            roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Centers",      icon: "🏫", href: "/dashboard/centers",    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Teachers",     icon: "👥", href: "/dashboard/teachers",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Admins",       icon: "👤", href: "/dashboard/admins",     roles: [ROLES.SUPER_ADMIN] },
+  { label: "Students",     icon: "🎓", href: "/dashboard/students",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Syllabus",     icon: "📚", href: "/dashboard/syllabus",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Screening",    icon: "🎹", href: "/dashboard/screening",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening" },
+  // Teacher
+  { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",    roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
+  { label: "My Classes",    icon: "📋", href: "/dashboard/my-classes", roles: [ROLES.TEACHER] },
+  // Student
   {
-    label: "My Quest", icon: "📚",
+    label: "Quest", icon: "📚",
     href: (uid) => `/dashboard/student-syllabus/${uid}`,
     matchPrefix: "/dashboard/student-syllabus",
     roles: [ROLES.STUDENT],
   },
-  { label: "My Fees",         icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
-  { label: "My Streak",  icon: "🔥", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
-  { label: "My Badges", icon: "🏅", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
+  { label: "Fees",   icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
+  { label: "Streak", icon: "🔥", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
+  { label: "Badges", icon: "🏅", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
 ];
 
 const NAV_GROUPS: NavGroup[] = [
-  {
-    label: "Academic Suite", icon: "🎓",
-    items: [
-      { label: "Centers",       icon: "🏫", href: "/dashboard/centers",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Teachers",      icon: "👥", href: "/dashboard/teachers",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Admins",        icon: "👤", href: "/dashboard/admins",         roles: [ROLES.SUPER_ADMIN] },
-      { label: "Students",      icon: "🎓", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Attendance",    icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Syllabus",      icon: "📚", href: "/dashboard/syllabus",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",        roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
-      { label: "Screening",     icon: "🎹", href: "/dashboard/screening",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening,/dashboard/screening/fast-track" },
-    ],
-  },
   {
     label: "Finance", icon: "₹",
     items: [
@@ -102,7 +100,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "My Quest", "My Fees", "My Streak", "My Badges", "Attendance", "Students", "Faculty Suite"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Students", "Faculty Suite", "My Classes", "Screening"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -129,6 +127,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     }
     if (user.role === ROLES.TEACHER && pathname === "/dashboard") {
       router.replace("/dashboard/teacher");
+    }
+    if (user.role === ROLES.STUDENT && pathname === "/dashboard") {
+      router.replace("/dashboard/student");
     }
   }, [loading, user, pathname, router]);
 

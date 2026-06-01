@@ -38,7 +38,9 @@
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\" -Recurse -Directory)",
       "Bash(Select-Object -First 30)",
       "Bash(Format-Table FullName)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(grep -E \"\\\\.\\(tsx?|jsx?\\)$\")"
     ]
   }
 }

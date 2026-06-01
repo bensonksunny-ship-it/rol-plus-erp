@@ -166,7 +166,7 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
       {/* Student header */}
       <div style={s.header}>
         <div>
-          <h1 style={s.heading}>My Quest</h1>
+          <h1 style={s.heading}>Quest</h1>
           {student && (
             <div style={s.studentMeta}>
               <span style={s.studentName}>{student.name}</span>

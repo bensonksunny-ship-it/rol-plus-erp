@@ -63,6 +63,15 @@ export async function getAllAdmissions(): Promise<Record<string, unknown>[]> {
     .sort((a, b) => String(b.submittedAt ?? "").localeCompare(String(a.submittedAt ?? "")));
 }
 
+export async function getAdmissionsByTeacher(teacherUid: string): Promise<Record<string, unknown>[]> {
+  const snap = await getDocs(
+    query(collection(db, "admissions"), where("submittedBy", "==", teacherUid))
+  );
+  return snap.docs
+    .map(d => d.data() as Record<string, unknown>)
+    .sort((a, b) => String(b.submittedAt ?? "").localeCompare(String(a.submittedAt ?? "")));
+}
+
 export async function updateAdmission(id: string, data: Record<string, unknown>): Promise<void> {
   await updateDoc(doc(db, "admissions", id), { ...data, updatedAt: new Date().toISOString() });
 }

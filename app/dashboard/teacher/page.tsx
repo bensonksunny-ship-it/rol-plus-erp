@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   collection,
@@ -222,16 +223,23 @@ function TeacherDashboardContent() {
       const progressList: StudentProgress[] = await Promise.all(
         rows.map(async st => {
           try {
-            const [prog, { lessons }] = await Promise.all([
+            const [prog, { lessons }, txSnap] = await Promise.all([
               getProgressByStudent(st.uid),
               getLessonsForStudent(st.uid),
+              getDocs(query(collection(db, "transactions"), where("studentUid", "==", st.uid))),
             ]);
             const allItems = lessons.flatMap(l => l.items);
             const pm: Record<string, StudentLessonProgress> = {};
             prog.forEach(p => { pm[p.itemId] = p; });
             const pct = calcOverallPercent(allItems, pm);
-            const raw = studentSnap.docs.find(d => d.id === st.uid)?.data();
-            return { uid: st.uid, name: st.name, instrument: st.instrument, pct, balance: Number(raw?.currentBalance ?? 0), status: st.status };
+            let balance = 0;
+            txSnap.docs.forEach(d => {
+              const tx = d.data() as Record<string, unknown>;
+              if (tx.method === "auto-monthly" || tx.method === "auto") return;
+              const type = (tx.type as string) ?? "";
+              balance += (type === "fee_due" || type === "charge") ? Number(tx.amount ?? 0) : -Number(tx.amount ?? 0);
+            });
+            return { uid: st.uid, name: st.name, instrument: st.instrument, pct, balance, status: st.status };
           } catch {
             return { uid: st.uid, name: st.name, instrument: st.instrument, pct: 0, balance: 0, status: st.status };
           }
@@ -1043,6 +1051,10 @@ function StudentsView({ students, teacherUid, onViewProgress }: {
                     <button style={s.linkBtn} onClick={() => onViewProgress(st)}>
                       View Progress →
                     </button>
+                    <Link href={`/dashboard/student-syllabus/${st.uid}`}
+                      style={{ background: "#ede9fe", color: "#4f46e5", border: "1px solid #c4b5fd", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600, textDecoration: "none" }}>
+                      📚 Quest
+                    </Link>
                     {st.hasScreening && (
                       <button
                         onClick={() => openDiagnostic(st)}

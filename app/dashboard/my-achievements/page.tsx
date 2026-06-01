@@ -166,7 +166,7 @@ function MyAchievementsContent() {
       )}
 
       {/* Badges */}
-      <div style={s.sectionTitle}>My Badges</div>
+      <div style={s.sectionTitle}>Badges</div>
       <div style={s.milestoneGrid}>
         {milestones.map(m => (
           <div key={m.label} style={{ ...s.milestoneCard, opacity: m.earned ? 1 : 0.45, border: m.earned ? "1.5px solid #a5f3fc" : "1px solid #e5e7eb", background: m.earned ? "#f0fdff" : "#f9fafb" }}>
