@@ -59,8 +59,8 @@ const NAV_TOP: NavItem[] = [
     roles: [ROLES.STUDENT],
   },
   { label: "My Fees",         icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
-  { label: "My Achievements", icon: "🏆", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
   { label: "My Attendance",   icon: "📅", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
+  { label: "My Achievements", icon: "🏆", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
 ];
 
 const NAV_GROUPS: NavGroup[] = [
@@ -102,7 +102,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Syllabus", "My Fees", "My Achievements", "My Attendance", "Attendance", "Students", "Faculty Suite"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Syllabus", "My Fees", "My Attendance", "My Achievements", "Attendance", "Students", "Faculty Suite"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -112,7 +112,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const isMobile          = useIsMobile();
   const [drawerOpen,  setDrawerOpen]  = useState(false);
   const [openGroups,  setOpenGroups]  = useState<Set<string>>(new Set());
-  const [bnPressed,   setBnPressed]   = useState<string | null>(null);
   const redirectingRef  = useRef(false);
   const hasRestoredRef  = useRef(false);
 
@@ -392,24 +391,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         <main style={s.mobileMain}>{children}</main>
 
         {bottomNav.length > 0 && (
-          <nav style={s.bottomNav}>
+          <nav className="rl-bn">
             {bottomNav.map(item => {
-              const active   = isActive(item);
-              const pressed  = bnPressed === item.resolvedHref;
-              const iconScale = pressed ? "scale(0.80)" : active ? "scale(1.18)" : "scale(1)";
+              const active = isActive(item);
               return (
                 <Link
                   key={item.resolvedHref}
                   href={item.resolvedHref}
-                  style={{ ...s.bnItem, ...(active ? s.bnItemActive : {}) }}
-                  onPointerDown={() => setBnPressed(item.resolvedHref)}
-                  onPointerUp={() => setBnPressed(null)}
-                  onPointerLeave={() => setBnPressed(null)}
-                  onPointerCancel={() => setBnPressed(null)}
+                  className={`rl-bn-item${active ? " rl-active" : ""}`}
                 >
-                  <span style={{ ...s.bnIcon, transform: iconScale }}>{item.icon}</span>
-                  <span style={{ ...s.bnLabel, ...(active ? s.bnLabelActive : {}) }}>{item.label}</span>
-                  {active && <span style={s.bnPip} />}
+                  <span className="rl-bn-icon">{item.icon}</span>
+                  <span className="rl-bn-label">{item.label}</span>
+                  {active && <span className="rl-bn-pip" />}
                 </Link>
               );
             })}
@@ -690,33 +683,4 @@ const s: Record<string, React.CSSProperties> = {
   drawerNav:  { flex: 1, padding: "10px 7px 6px", overflowY: "auto" },
   drawerFoot: { padding: "12px 9px", borderTop: "1px solid var(--color-border-subtle)" },
 
-  bottomNav: {
-    position: "fixed",
-    bottom: "max(14px, calc(env(safe-area-inset-bottom, 0px) + 10px))",
-    left: 12, right: 12,
-    height: 62,
-    background: "var(--color-surface)",
-    borderRadius: 22,
-    border: "1px solid var(--color-border)",
-    boxShadow: "0 4px 24px rgba(0,0,0,0.11), 0 1px 4px rgba(0,0,0,0.07)",
-    display: "flex",
-    zIndex: 100,
-    overflow: "hidden",
-  },
-  bnItem: {
-    flex: 1, display: "flex", flexDirection: "column" as const,
-    alignItems: "center", justifyContent: "center", gap: 4,
-    textDecoration: "none", color: "var(--color-text-muted)",
-    padding: "6px 2px 8px", position: "relative",
-    transition: "color 0.18s",
-    WebkitTapHighlightColor: "transparent",
-    userSelect: "none" as const,
-    cursor: "pointer",
-  },
-  bnItemActive: { color: "var(--color-accent)" },
-  bnIcon:       { fontSize: 22, lineHeight: 1, display: "block", transition: "transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1)" },
-  bnIconActive: {},
-  bnLabel:      { fontSize: 10, fontWeight: 600, letterSpacing: "0.02em", textAlign: "center" as const, lineHeight: 1.1 },
-  bnLabelActive:{ fontWeight: 700 },
-  bnPip:        { position: "absolute", top: 4, width: 5, height: 5, borderRadius: "50%", background: "var(--color-accent)", boxShadow: "0 0 8px var(--color-accent-glow)" },
 };
