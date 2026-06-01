@@ -116,7 +116,7 @@ function MyAchievementsContent() {
         <div style={s.heroAvatar}>{studentName.charAt(0).toUpperCase()}</div>
         <div style={s.heroInfo}>
           <div style={s.heroName}>{studentName}</div>
-          <div style={s.heroSub}>{earned} of {milestones.length} milestones earned</div>
+          <div style={s.heroSub}>{earned} of {milestones.length} badges earned</div>
           <div style={s.milestoneBar}>
             <div style={{ ...s.milestoneBarFill, width: `${Math.round((earned / milestones.length) * 100)}%` }} />
           </div>
@@ -165,8 +165,8 @@ function MyAchievementsContent() {
         </>
       )}
 
-      {/* Milestones */}
-      <div style={s.sectionTitle}>Milestones</div>
+      {/* Badges */}
+      <div style={s.sectionTitle}>My Badges</div>
       <div style={s.milestoneGrid}>
         {milestones.map(m => (
           <div key={m.label} style={{ ...s.milestoneCard, opacity: m.earned ? 1 : 0.45, border: m.earned ? "1.5px solid #a5f3fc" : "1px solid #e5e7eb", background: m.earned ? "#f0fdff" : "#f9fafb" }}>

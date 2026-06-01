@@ -148,7 +148,7 @@ function MyAttendanceContent() {
       {/* Summary cards */}
       <div style={s.statsGrid}>
         <div style={s.statCard}>
-          <div style={s.statLabel}>Attendance Rate</div>
+          <div style={s.statLabel}>Streak Rate</div>
           <div style={{ ...s.statValue, color: rateColor }}>
             {rate !== null ? `${rate}%` : "—"}
           </div>
