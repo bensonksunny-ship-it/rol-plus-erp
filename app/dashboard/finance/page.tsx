@@ -146,6 +146,7 @@ function FinanceContent() {
   const [depositNote, setDepositNote]        = useState<string>("");
   const [depositSubmitting, setDepositSubmitting] = useState(false);
   const depositInputRef                      = useRef<HTMLInputElement>(null);
+  const [feeDueDate, setFeeDueDate]                 = useState<string>(todayStr());
   const [feeDueSubmitting, setFeeDueSubmitting]     = useState(false);
   const [undoFeeDueSubmitting, setUndoFeeDueSubmitting] = useState(false);
   const [historyDeletePending, setHistoryDeletePending] = useState<string | null>(null);
@@ -446,6 +447,7 @@ function FinanceContent() {
     );
     setDepositMethod("Cash");
     setDepositNote("");
+    setFeeDueDate(selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`);
     if (action === "pay")     setTimeout(() => payInputRef.current?.focus(),     60);
     if (action === "adjust")  setTimeout(() => adjustInputRef.current?.focus(),  60);
     if (action === "deposit") setTimeout(() => depositInputRef.current?.focus(), 60);
@@ -460,6 +462,7 @@ function FinanceContent() {
     setAdjustFee("");
     setDepositAmount("");
     setDepositNote("");
+    setFeeDueDate(selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`);
   }
 
   // ── Submit: record payment ───────────────────────────────────────────────────
@@ -600,7 +603,7 @@ function FinanceContent() {
         type:         "fee_due",
         method:       "manual",
         billingMonth: selectedMonth,
-        date:         selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`,
+        date:         feeDueDate || (selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`),
         status:       "due",
         createdAt:    serverTimestamp(),
         receivedBy:   user?.displayName ?? user?.email ?? "admin",
@@ -1154,10 +1157,19 @@ function FinanceContent() {
                                       <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
                                         No fee due generated for <strong>{fmtMonth(selectedMonth)}</strong>.
                                       </div>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" as const }}>
+                                        <label style={{ fontSize: 11, fontWeight: 600, color: "#374151" }}>Fee Due Date</label>
+                                        <input
+                                          type="date"
+                                          value={feeDueDate}
+                                          onChange={e => setFeeDueDate(e.target.value)}
+                                          style={{ fontSize: 13, border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", color: "#111827" }}
+                                        />
+                                      </div>
                                       <button
                                         onClick={() => generateFeeDue(s)}
-                                        disabled={feeDueSubmitting}
-                                        style={{ ...st.confirmBtn, background: "#f59e0b", opacity: feeDueSubmitting ? 0.6 : 1, cursor: feeDueSubmitting ? "not-allowed" : "pointer" }}
+                                        disabled={feeDueSubmitting || !feeDueDate}
+                                        style={{ ...st.confirmBtn, background: "#f59e0b", opacity: (feeDueSubmitting || !feeDueDate) ? 0.6 : 1, cursor: (feeDueSubmitting || !feeDueDate) ? "not-allowed" : "pointer" }}
                                       >
                                         {feeDueSubmitting ? "Generating…" : `Generate Fee Due — ${fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.estimatedFee)}`}
                                       </button>

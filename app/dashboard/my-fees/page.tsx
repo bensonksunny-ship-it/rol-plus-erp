@@ -209,7 +209,7 @@ function MyFeesContent() {
 
             const displayMonth = tx.billingMonth
               ? fmtMonth(tx.billingMonth)
-              : formatDate(tx.date ?? tx.createdAt as string);
+              : fmtMonth((tx.date ?? tx.createdAt as string ?? "").slice(0, 7));
 
             return (
               <div
@@ -240,7 +240,7 @@ function MyFeesContent() {
                   {(isCharge || isFeedue) ? "−" : "+"}{fmtINR(tx.amount)}
                 </span>
 
-                {/* Payment date */}
+                {/* Payment / fee due date */}
                 <span style={{ color: "#6b7280", fontSize: 12 }}>
                   {formatDate(tx.date ?? tx.createdAt as string)}
                 </span>
