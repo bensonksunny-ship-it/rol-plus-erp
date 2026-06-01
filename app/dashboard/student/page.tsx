@@ -15,6 +15,7 @@ import {
 } from "@/services/lesson/lesson.service";
 import type { Lesson, LessonItem, StudentLessonProgress } from "@/types/lesson";
 import type { AttendanceRecord } from "@/types/attendance";
+import type { Transaction } from "@/types/finance";
 
 export default function StudentDashboardPage() {
   return (
@@ -169,17 +170,33 @@ function StudentDashboardContent() {
     try {
       setLoading(true); setError(null);
 
-      const [{ lessons }, allProgress, userSnap, attSnap, classSnap] = await Promise.all([
+      const [{ lessons }, allProgress, userSnap, attSnap, classSnap, txSnap] = await Promise.all([
         getLessonsForStudent(uid),
         getProgressByStudent(uid),
         getDoc(doc(db, "users", uid)),
         getDocs(query(collection(db, "attendance"), where("studentUid", "==", uid))),
         getDocs(query(collection(db, "classes"), where("status", "==", "scheduled"))),
+        getDocs(query(collection(db, "transactions"), where("studentUid", "==", uid))),
       ]);
 
-      const userData       = userSnap.exists() ? userSnap.data() : {};
-      const studentName    = (userData.displayName as string) || "Student";
-      const currentBalance = (userData.currentBalance as number) ?? 0;
+      const userData    = userSnap.exists() ? userSnap.data() : {};
+      const studentName = (userData.displayName as string) || "Student";
+
+      // Compute balance from student-visible transactions only.
+      // users.currentBalance includes hidden auto/auto-monthly charges (per-class
+      // billing) that students cannot see in their history, making it appear wrong.
+      // Recomputing from visible transactions keeps the dashboard consistent with
+      // what the student sees in My Fees.
+      const visibleTx = txSnap.docs
+        .map(d => ({ id: d.id, ...d.data() }) as Transaction)
+        .filter(t => t.method !== "auto-monthly" && t.method !== "auto");
+      let currentBalance = 0;
+      visibleTx.forEach(tx => {
+        const raw    = tx as unknown as Record<string, unknown>;
+        const type   = (raw.type as string) ?? "";
+        const isDebit = type === "fee_due" || type === "charge";
+        currentBalance += isDebit ? tx.amount : -tx.amount;
+      });
 
       const progressMap: Record<string, StudentLessonProgress> = {};
       allProgress.forEach(p => { progressMap[p.itemId] = p; });

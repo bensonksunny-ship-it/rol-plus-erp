@@ -112,6 +112,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const isMobile          = useIsMobile();
   const [drawerOpen,  setDrawerOpen]  = useState(false);
   const [openGroups,  setOpenGroups]  = useState<Set<string>>(new Set());
+  const [bnPressed,   setBnPressed]   = useState<string | null>(null);
   const redirectingRef  = useRef(false);
   const hasRestoredRef  = useRef(false);
 
@@ -393,15 +394,21 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         {bottomNav.length > 0 && (
           <nav style={s.bottomNav}>
             {bottomNav.map(item => {
-              const active = isActive(item);
+              const active   = isActive(item);
+              const pressed  = bnPressed === item.resolvedHref;
+              const iconScale = pressed ? "scale(0.80)" : active ? "scale(1.18)" : "scale(1)";
               return (
                 <Link
                   key={item.resolvedHref}
                   href={item.resolvedHref}
                   style={{ ...s.bnItem, ...(active ? s.bnItemActive : {}) }}
+                  onPointerDown={() => setBnPressed(item.resolvedHref)}
+                  onPointerUp={() => setBnPressed(null)}
+                  onPointerLeave={() => setBnPressed(null)}
+                  onPointerCancel={() => setBnPressed(null)}
                 >
-                  <span style={{ ...s.bnIcon, ...(active ? s.bnIconActive : {}) }}>{item.icon}</span>
-                  <span style={s.bnLabel}>{item.label}</span>
+                  <span style={{ ...s.bnIcon, transform: iconScale }}>{item.icon}</span>
+                  <span style={{ ...s.bnLabel, ...(active ? s.bnLabelActive : {}) }}>{item.label}</span>
                   {active && <span style={s.bnPip} />}
                 </Link>
               );
@@ -668,7 +675,7 @@ const s: Record<string, React.CSSProperties> = {
   mobileCenter:    { flex: 1, display: "flex", flexDirection: "column", gap: 1 },
   mobileLogo:      { fontSize: 9.5, fontWeight: 700, color: "var(--color-text-muted)", letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1 },
   mobilePageTitle: { fontSize: 14, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.2 },
-  mobileMain:      { flex: 1, overflowY: "auto", padding: "16px 14px 76px", background: "var(--color-bg)" },
+  mobileMain:      { flex: 1, overflowY: "auto", padding: "16px 14px max(96px, calc(env(safe-area-inset-bottom, 0px) + 88px))", background: "var(--color-bg)" },
 
   overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(4px)", zIndex: 200 },
   drawer: {
@@ -683,11 +690,33 @@ const s: Record<string, React.CSSProperties> = {
   drawerNav:  { flex: 1, padding: "10px 7px 6px", overflowY: "auto" },
   drawerFoot: { padding: "12px 9px", borderTop: "1px solid var(--color-border-subtle)" },
 
-  bottomNav:    { position: "fixed", bottom: 0, left: 0, right: 0, height: 60, background: "var(--color-surface)", borderTop: "1px solid var(--color-border)", display: "flex", zIndex: 100 },
-  bnItem:       { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, textDecoration: "none", color: "var(--color-text-muted)", padding: "4px 0 6px", position: "relative", transition: "color 0.15s" },
+  bottomNav: {
+    position: "fixed",
+    bottom: "max(14px, calc(env(safe-area-inset-bottom, 0px) + 10px))",
+    left: 12, right: 12,
+    height: 62,
+    background: "var(--color-surface)",
+    borderRadius: 22,
+    border: "1px solid var(--color-border)",
+    boxShadow: "0 4px 24px rgba(0,0,0,0.11), 0 1px 4px rgba(0,0,0,0.07)",
+    display: "flex",
+    zIndex: 100,
+    overflow: "hidden",
+  },
+  bnItem: {
+    flex: 1, display: "flex", flexDirection: "column" as const,
+    alignItems: "center", justifyContent: "center", gap: 4,
+    textDecoration: "none", color: "var(--color-text-muted)",
+    padding: "6px 2px 8px", position: "relative",
+    transition: "color 0.18s",
+    WebkitTapHighlightColor: "transparent",
+    userSelect: "none" as const,
+    cursor: "pointer",
+  },
   bnItemActive: { color: "var(--color-accent)" },
-  bnIcon:       { fontSize: 18, lineHeight: 1, transition: "transform 0.15s" },
-  bnIconActive: { transform: "scale(1.14)" },
-  bnLabel:      { fontSize: 9, fontWeight: 600, letterSpacing: "0.03em", textAlign: "center" },
-  bnPip:        { position: "absolute", top: 5, width: 4, height: 4, borderRadius: "50%", background: "var(--color-accent)", boxShadow: "0 0 6px var(--color-accent-glow)" },
+  bnIcon:       { fontSize: 22, lineHeight: 1, display: "block", transition: "transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1)" },
+  bnIconActive: {},
+  bnLabel:      { fontSize: 10, fontWeight: 600, letterSpacing: "0.02em", textAlign: "center" as const, lineHeight: 1.1 },
+  bnLabelActive:{ fontWeight: 700 },
+  bnPip:        { position: "absolute", top: 4, width: 5, height: 5, borderRadius: "50%", background: "var(--color-accent)", boxShadow: "0 0 8px var(--color-accent-glow)" },
 };
