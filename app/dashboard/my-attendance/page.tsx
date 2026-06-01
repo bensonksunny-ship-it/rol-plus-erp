@@ -108,7 +108,6 @@ function MyAttendanceContent() {
 
   return (
     <div style={s.page}>
-      <div style={s.heading}>My Attendance</div>
 
       {/* Summary cards */}
       <div style={s.statsGrid}>

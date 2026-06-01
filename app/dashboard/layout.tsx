@@ -53,7 +53,7 @@ const NAV_TOP: NavItem[] = [
   { label: "Center Suite",    icon: "⊞",  href: "/dashboard",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Learner's Suite", icon: "🎓", href: "/dashboard/student", roles: [ROLES.STUDENT] },
   {
-    label: "Syllabus", icon: "📚",
+    label: "My Quest", icon: "📚",
     href: (uid) => `/dashboard/student-syllabus/${uid}`,
     matchPrefix: "/dashboard/student-syllabus",
     roles: [ROLES.STUDENT],
@@ -102,7 +102,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Syllabus", "My Fees", "My Attendance", "My Achievements", "Attendance", "Students", "Faculty Suite"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "My Quest", "My Fees", "My Attendance", "My Achievements", "Attendance", "Students", "Faculty Suite"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {

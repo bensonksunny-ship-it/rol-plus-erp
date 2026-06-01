@@ -118,7 +118,6 @@ function MyFeesContent() {
 
   return (
     <div style={s.page}>
-      <div style={s.heading}>My Fees</div>
 
       {/* Balance hero */}
       <div style={{ ...s.balanceCard, borderColor: balanceOwed ? "#fca5a5" : "#86efac" }}>

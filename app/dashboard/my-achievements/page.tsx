@@ -110,7 +110,6 @@ function MyAchievementsContent() {
 
   return (
     <div style={s.page}>
-      <div style={s.heading}>My Achievements</div>
 
       {/* Hero banner */}
       <div style={s.hero}>
