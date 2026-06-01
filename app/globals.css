@@ -323,6 +323,7 @@ input, textarea, select { font-family: inherit; font-size: inherit; outline: non
   cursor: pointer;
   transition: color 0.18s;
   user-select: none;
+  touch-action: manipulation;
 }
 
 .rl-bn-item.rl-active {

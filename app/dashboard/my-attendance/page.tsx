@@ -20,9 +20,11 @@ export default function MyAttendancePage() {
 // The base AttendanceRecord type only has markedAt — extend it here.
 type AttendanceRow = AttendanceRecord & { date?: string };
 
+function currentYM(): string {
+  return new Date().toISOString().slice(0, 7);
+}
+
 function classDate(rec: AttendanceRow): string {
-  // Prefer `date` (set by admin/teacher via saveCentreAttendance).
-  // Fall back to markedAt slice for QR / class-based records.
   return rec.date ?? (rec.markedAt ?? "").slice(0, 10);
 }
 
@@ -38,6 +40,13 @@ function fmtMonth(ym: string): string {
   const names = ["January","February","March","April","May","June",
                   "July","August","September","October","November","December"];
   return `${names[parseInt(m, 10) - 1] ?? m} ${y}`;
+}
+
+function fmtMonthShort(ym: string): string {
+  const [y, m] = ym.split("-");
+  const names = ["Jan","Feb","Mar","Apr","May","Jun",
+                  "Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${names[parseInt(m, 10) - 1] ?? m} ${y?.slice(2)}`;
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -61,7 +70,7 @@ function MyAttendanceContent() {
   const [records, setRecords]         = useState<AttendanceRow[]>([]);
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState<string | null>(null);
-  const [filterMonth, setFilterMonth] = useState<string>("");
+  const [filterMonth, setFilterMonth] = useState<string>(currentYM());
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -89,43 +98,70 @@ function MyAttendanceContent() {
   if (loading) return <div style={s.state}>Loading attendance…</div>;
   if (error)   return <div style={{ ...s.state, color: "#dc2626" }}>{error}</div>;
 
-  // Only present + absent count toward the rate; break/cancelled are excluded
-  const countable    = records.filter(r => r.status === "present" || r.status === "absent");
-  const totalPresent = records.filter(r => r.status === "present").length;
-  const totalAbsent  = records.filter(r => r.status === "absent").length;
-  const rate         = countable.length > 0 ? Math.round((totalPresent / countable.length) * 100) : null;
-
-  const months = Array.from(
+  // Build month list from data, always include current month
+  const monthsInData = Array.from(
     new Set(records.map(r => classDate(r).slice(0, 7)).filter(Boolean))
   ).sort((a, b) => b.localeCompare(a));
 
-  const displayed = filterMonth
-    ? records.filter(r => classDate(r).startsWith(filterMonth))
-    : records;
+  const cm = currentYM();
+  const allMonths = monthsInData.includes(cm) ? monthsInData : [cm, ...monthsInData];
 
-  const dispPresent = displayed.filter(r => r.status === "present").length;
-  const dispAbsent  = displayed.filter(r => r.status === "absent").length;
+  // Ensure selected month is valid
+  const activeMonth = allMonths.includes(filterMonth) ? filterMonth : cm;
+
+  const displayed = records.filter(r => classDate(r).startsWith(activeMonth));
+
+  // Stats from selected month only
+  const countable   = displayed.filter(r => r.status === "present" || r.status === "absent");
+  const present     = displayed.filter(r => r.status === "present").length;
+  const absent      = displayed.filter(r => r.status === "absent").length;
+  const rate        = countable.length > 0 ? Math.round((present / countable.length) * 100) : null;
+  const rateColor   = rate !== null && rate >= 75 ? "#16a34a" : "#dc2626";
 
   return (
     <div style={s.page}>
+
+      {/* Month chip strip */}
+      <div style={s.chipStrip}>
+        {allMonths.map(ym => {
+          const active = ym === activeMonth;
+          return (
+            <button
+              key={ym}
+              onClick={() => setFilterMonth(ym)}
+              style={{
+                ...s.chip,
+                ...(active ? s.chipActive : s.chipInactive),
+              }}
+            >
+              {ym === cm ? (
+                <><span style={s.chipDot} />This Month</>
+              ) : fmtMonthShort(ym)}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Month title */}
+      <div style={s.monthTitle}>{fmtMonth(activeMonth)}</div>
 
       {/* Summary cards */}
       <div style={s.statsGrid}>
         <div style={s.statCard}>
           <div style={s.statLabel}>Attendance Rate</div>
-          <div style={{ ...s.statValue, color: rate !== null && rate >= 75 ? "#16a34a" : "#dc2626" }}>
+          <div style={{ ...s.statValue, color: rateColor }}>
             {rate !== null ? `${rate}%` : "—"}
           </div>
-          <div style={s.statSub}>{countable.length} classes counted</div>
+          <div style={s.statSub}>{countable.length} classes</div>
         </div>
         <div style={s.statCard}>
           <div style={s.statLabel}>Present</div>
-          <div style={{ ...s.statValue, color: "#16a34a" }}>{totalPresent}</div>
+          <div style={{ ...s.statValue, color: "#16a34a" }}>{present}</div>
           <div style={s.statSub}>of {countable.length} classes</div>
         </div>
         <div style={s.statCard}>
           <div style={s.statLabel}>Absent</div>
-          <div style={{ ...s.statValue, color: "#dc2626" }}>{totalAbsent}</div>
+          <div style={{ ...s.statValue, color: "#dc2626" }}>{absent}</div>
           <div style={s.statSub}>of {countable.length} classes</div>
         </div>
       </div>
@@ -133,35 +169,15 @@ function MyAttendanceContent() {
       {/* Attendance bar */}
       {countable.length > 0 && (
         <div style={s.barWrap}>
-          <div style={{ ...s.barFill, width: `${rate}%`, background: rate !== null && rate >= 75 ? "#16a34a" : "#f59e0b" }} />
-        </div>
-      )}
-
-      {/* Month filter */}
-      {months.length > 0 && (
-        <div style={s.filterRow}>
-          <label style={s.filterLabel}>Filter by month</label>
-          <select
-            value={filterMonth}
-            onChange={e => setFilterMonth(e.target.value)}
-            style={s.select}
-          >
-            <option value="">All months</option>
-            {months.map(m => (
-              <option key={m} value={m}>{fmtMonth(m)}</option>
-            ))}
-          </select>
-          {filterMonth && (
-            <span style={s.filterSummary}>
-              {dispPresent} present · {dispAbsent} absent
-            </span>
-          )}
+          <div style={{ ...s.barFill, width: `${rate}%`, background: rateColor }} />
         </div>
       )}
 
       {/* Records list */}
       {displayed.length === 0 ? (
-        <div style={s.empty}>No attendance records{filterMonth ? ` for ${fmtMonth(filterMonth)}` : " yet"}.</div>
+        <div style={s.empty}>
+          No attendance records for {fmtMonth(activeMonth)}.
+        </div>
       ) : (
         <div style={s.list}>
           {displayed.map(rec => {
@@ -190,9 +206,57 @@ function MyAttendanceContent() {
 }
 
 const s: Record<string, React.CSSProperties> = {
-  page:    { maxWidth: 700, margin: "0 auto", padding: "0 0 40px" },
-  state:   { padding: "60px 0", textAlign: "center", fontSize: 14, color: "#6b7280" },
-  heading: { fontSize: 24, fontWeight: 700, color: "#111111", marginBottom: 24 },
+  page:  { maxWidth: 700, margin: "0 auto", padding: "0 0 40px" },
+  state: { padding: "60px 0", textAlign: "center", fontSize: 14, color: "#6b7280" },
+
+  // Month chip strip
+  chipStrip: {
+    display:       "flex",
+    gap:           8,
+    overflowX:     "auto",
+    paddingBottom: 4,
+    marginBottom:  20,
+    scrollbarWidth: "none",
+  },
+  chip: {
+    flexShrink:    0,
+    display:       "inline-flex",
+    alignItems:    "center",
+    gap:           5,
+    padding:       "7px 16px",
+    borderRadius:  99,
+    fontSize:      13,
+    fontWeight:    600,
+    cursor:        "pointer",
+    border:        "none",
+    transition:    "all 0.15s",
+    whiteSpace:    "nowrap",
+    fontFamily:    "inherit",
+  },
+  chipActive: {
+    background: "#f59e0b",
+    color:      "#0a0a0a",
+    boxShadow:  "0 2px 10px rgba(245,158,11,0.35)",
+  },
+  chipInactive: {
+    background: "#f3f4f6",
+    color:      "#6b7280",
+  },
+  chipDot: {
+    width:        6,
+    height:       6,
+    borderRadius: "50%",
+    background:   "#0a0a0a",
+    display:      "inline-block",
+    flexShrink:   0,
+  },
+
+  monthTitle: {
+    fontSize:     18,
+    fontWeight:   700,
+    color:        "#111111",
+    marginBottom: 16,
+  },
 
   statsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 20 },
   statCard:  { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "18px 20px" },
@@ -202,11 +266,6 @@ const s: Record<string, React.CSSProperties> = {
 
   barWrap: { height: 8, background: "#f3f4f6", borderRadius: 99, overflow: "hidden", marginBottom: 24 },
   barFill: { height: "100%", borderRadius: 99, transition: "width 0.4s ease" },
-
-  filterRow:     { display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" as const },
-  filterLabel:   { fontSize: 12, fontWeight: 600, color: "#6b7280" },
-  select:        { fontSize: 13, border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 8px", color: "#111827" },
-  filterSummary: { fontSize: 12, color: "#9ca3af", fontStyle: "italic" as const },
 
   empty: {
     background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12,
