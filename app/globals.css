@@ -297,7 +297,7 @@ input, textarea, select { font-family: inherit; font-size: inherit; outline: non
   position: fixed;
   left: 12px;
   right: 12px;
-  bottom: max(14px, calc(env(safe-area-inset-bottom, 0px) + 10px));
+  bottom: max(4px, calc(env(safe-area-inset-bottom, 0px) + 2px));
   height: 62px;
   display: flex;
   z-index: 100;

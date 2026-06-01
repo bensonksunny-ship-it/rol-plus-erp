@@ -668,7 +668,7 @@ const s: Record<string, React.CSSProperties> = {
   mobileCenter:    { flex: 1, display: "flex", flexDirection: "column", gap: 1 },
   mobileLogo:      { fontSize: 9.5, fontWeight: 700, color: "var(--color-text-muted)", letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1 },
   mobilePageTitle: { fontSize: 14, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.2 },
-  mobileMain:      { flex: 1, overflowY: "auto", padding: "16px 14px max(96px, calc(env(safe-area-inset-bottom, 0px) + 88px))", background: "var(--color-bg)" },
+  mobileMain:      { flex: 1, overflowY: "auto", padding: "16px 14px max(80px, calc(env(safe-area-inset-bottom, 0px) + 74px))", background: "var(--color-bg)" },
 
   overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(4px)", zIndex: 200 },
   drawer: {
