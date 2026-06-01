@@ -287,7 +287,7 @@ function EditAdmissionOverlay({
   const [email,              setEmail]              = useState(rs(record.email));
   const [address1,           setAddress1]           = useState(rs(record.address1));
   const [address2,           setAddress2]           = useState(rs(record.address2));
-  const [centre,             setCentre]             = useState(rs(record.centre));
+  const [centre,             setCentre]             = useState(() => { const raw = rs(record.centre); const found = centresList.find(c => c.id === raw); return found ? found.name : raw; });
   const [purposeOfLearning,  setPurposeOfLearning]  = useState(rs(record.purposeOfLearning));
   const [instrumentsToLearn, setInstrumentsToLearn] = useState<string[]>(ra(record.instrumentsToLearn));
   const [previousExperience, setPreviousExperience] = useState(rs(record.previousExperience));
@@ -442,7 +442,7 @@ function EditAdmissionOverlay({
                 {centresList.length > 0 ? (
                   <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...s.input, cursor: "pointer" }}>
                     <option value="">— Select —</option>
-                    {centresList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    {centresList.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
                   </select>
                 ) : (
                   <input value={centre} onChange={e => setCentre(e.target.value)} style={s.input} />
@@ -994,7 +994,7 @@ function AdmissionsList({ onStartScreening }: { onStartScreening: (name: string)
                   ["Email",      str(selected.email)],
                   ["Status",     str(selected.workingStatus)],
                   ["School/Co.", str(selected.schoolCompany)],
-                  ["Centre",     str(selected.centre)],
+                  ["Centre",     centresList.find(c => c.id === str(selected.centre))?.name ?? str(selected.centre)],
                 ] as [string, string][]).filter(([, v]) => v).map(([k, v]) => (
                   <div key={k}>
                     <div style={{ fontSize: 10, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>{k}</div>
@@ -1646,7 +1646,7 @@ function AdmissionFormContent({ onDone }: { onDone?: () => void } = {}) {
             {centres.length > 0 ? (
               <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...s.input, cursor: "pointer" }}>
                 <option value="">— Select —</option>
-                {centres.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {centres.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
               </select>
             ) : (
               <input value={centre} onChange={e => setCentre(e.target.value)} placeholder="Centre" style={s.input} />

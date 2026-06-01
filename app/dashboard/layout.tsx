@@ -49,11 +49,14 @@ interface NavGroup {
   items: NavItem[];
 }
 
+const NAV_TOP: NavItem[] = [
+  { label: "Center Suite", icon: "⊞", href: "/dashboard", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+];
+
 const NAV_GROUPS: NavGroup[] = [
   {
-    label: "Academic Suite", icon: "🎓",
+    label: "Learner's Suite", icon: "🎓",
     items: [
-      { label: "Center Suite",  icon: "⊞",  href: "/dashboard",               roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT] },
       { label: "Centers",       icon: "🏫", href: "/dashboard/centers",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
       { label: "Teachers",      icon: "👥", href: "/dashboard/teachers",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
       { label: "Admins",        icon: "👤", href: "/dashboard/admins",         roles: [ROLES.SUPER_ADMIN] },
@@ -196,8 +199,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // ── Derived nav data ────────────────────────────────────────────────────────
 
   // Flat list — used for pageTitle, bottomNav, isActive
-  const visibleNav = NAV_GROUPS
-    .flatMap(g => g.items)
+  const visibleNav = [...NAV_TOP, ...NAV_GROUPS.flatMap(g => g.items)]
     .filter(item => item.roles.includes(user.role))
     .map(item => ({
       ...item,
@@ -205,6 +207,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         ? item.href(user.uid, user.role)
         : item.href,
     }));
+
+  // Top-level standalone items (rendered above accordion groups)
+  const topNavItems = NAV_TOP
+    .filter(item => item.roles.includes(user.role))
+    .map(item => ({ ...item, resolvedHref: item.href as string }));
 
   // Grouped list — used for the accordion sidebar
   const visibleGroups = NAV_GROUPS
@@ -239,6 +246,21 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   function NavGroups({ onNavigate }: { onNavigate?: () => void }) {
     return (
       <>
+        {topNavItems.map(item => {
+          const active = isActive(item);
+          return (
+            <Link
+              key={item.resolvedHref}
+              href={item.resolvedHref}
+              onClick={onNavigate}
+              style={{ ...s.navItem, ...(active ? s.navItemActive : {}), marginBottom: 4 }}
+            >
+              <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>{item.icon}</span>
+              <span style={s.navLabel}>{item.label}</span>
+              {active && <span style={s.navActivePip} />}
+            </Link>
+          );
+        })}
         {visibleGroups.map((group) => {
           const isOpen    = openGroups.has(group.label);
           const hasActive = group.visibleItems.some(item => isActive(item));
