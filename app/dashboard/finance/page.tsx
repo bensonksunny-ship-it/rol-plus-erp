@@ -398,7 +398,8 @@ function FinanceContent() {
     const m = new Map<string, Transaction>();
     // transactions are sorted newest-first; find the newest one in selected month per student
     transactions.forEach(tx => {
-      if (tx.status === "completed" && tx.studentUid && !m.has(tx.studentUid)) {
+      if (tx.status === "completed" && tx.studentUid && !m.has(tx.studentUid)
+          && tx.method !== "auto-monthly" && tx.method !== "auto") {
         if ((tx.date ?? "").startsWith(selectedMonth)) {
           m.set(tx.studentUid, tx);
         }
@@ -599,7 +600,7 @@ function FinanceContent() {
         type:         "fee_due",
         method:       "manual",
         billingMonth: selectedMonth,
-        date:         todayStr(),
+        date:         selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`,
         status:       "due",
         createdAt:    serverTimestamp(),
         receivedBy:   user?.displayName ?? user?.email ?? "admin",

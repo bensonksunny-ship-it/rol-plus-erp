@@ -381,7 +381,7 @@ function CommandCenter() {
       {/* ── 1. HEADER ── */}
       <div style={s.header}>
         <div>
-          <div style={s.eyebrow}>COMMAND CENTER</div>
+          <div style={s.eyebrow}>CENTER SUITE</div>
           <div style={s.date}>{new Date().toLocaleDateString("en-IN", { weekday:"long", day:"numeric", month:"long", year:"numeric" })}</div>
         </div>
         <div style={s.actions}>
@@ -1008,7 +1008,7 @@ function AdminDashboard() {
       {/* ── HEADER ── */}
       <div style={adm.header}>
         <div>
-          <div style={adm.eyebrow}>Admin Dashboard</div>
+          <div style={adm.eyebrow}>Center Suite</div>
           <div style={adm.date}>
             {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </div>

@@ -239,6 +239,7 @@ function StudentDashboardContent() {
         <div style={s.heroLeft}>
           <div style={s.avatar}>{data.studentName.charAt(0).toUpperCase()}</div>
           <div>
+            <div style={s.eyebrow}>Learner&apos;s Suite</div>
             <div style={s.welcomeLabel}>Welcome back,</div>
             <div style={s.heroName}>{data.studentName}</div>
           </div>
@@ -297,98 +298,6 @@ function StudentDashboardContent() {
         <div style={s.allDoneCard}>
           🎉 All lessons completed! Great work.
         </div>
-      )}
-
-      {/* ═══════════════════════════════════════════════════════════
-          PROGRESS OVERVIEW — lesson list
-      ══════════════════════════════════════════════════════════════ */}
-      <SectionTitle>Progress Overview</SectionTitle>
-
-      {data.lessons.length === 0 ? (
-        <div style={s.emptyCard}>No lessons available yet. Check back after your teacher adds content.</div>
-      ) : (
-        <div style={s.lessonList}>
-          {data.lessons.map(lesson => {
-            const items     = lesson.items;
-            const pct       = calcLessonPercent(items, data.progressMap);
-            const allDone   = items.length > 0 && items.every(i => data.progressMap[i.id]?.completed);
-            const anyStarted = items.some(i => (data.progressMap[i.id]?.totalAttempts ?? 0) > 0);
-            const status    = allDone ? "completed" : anyStarted ? "in_progress" : "locked";
-
-            return (
-              <div key={lesson.id} style={s.lessonRow}>
-                <div style={s.lessonLeft}>
-                  <LessonStatusIcon status={status} />
-                  <div>
-                    <div style={s.lessonTitle}>{lesson.title}</div>
-                    <div style={s.lessonSub}>{items.length} activities</div>
-                  </div>
-                </div>
-                <div style={s.lessonRight}>
-                  <div style={s.lessonPct}>{pct}%</div>
-                  <div style={s.lessonBarTrack}>
-                    <div style={{
-                      ...s.lessonBarFill,
-                      width:      `${pct}%`,
-                      background: allDone ? "#16a34a" : anyStarted ? "#f59e0b" : "#d1d5db",
-                    }} />
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* ═══════════════════════════════════════════════════════════
-          ATTEMPTS TRACKER — current lesson breakdown
-      ══════════════════════════════════════════════════════════════ */}
-      {currentLesson && (
-        <>
-          <SectionTitle>Attempts Tracker — {currentLesson.title}</SectionTitle>
-          <div style={s.attemptsCard}>
-            {currentLesson.items.length === 0 ? (
-              <div style={s.emptyMsg}>No activities in this lesson.</div>
-            ) : (
-              currentLesson.items.map(item => {
-                const prog     = data.progressMap[item.id];
-                const attempts = prog?.totalAttempts ?? 0;
-                const done     = prog?.completed ?? false;
-                return (
-                  <div key={item.id} style={s.attemptRow}>
-                    <div style={s.attemptLeft}>
-                      <TypeBadge type={item.type} />
-                      <span style={s.attemptTitle}>{item.title}</span>
-                    </div>
-                    <div style={s.attemptRight}>
-                      {done ? (
-                        <span style={s.attemptDone}>✔ Completed</span>
-                      ) : (
-                        <span style={s.attemptCount}>{attempts}/{item.maxAttempts} attempts</span>
-                      )}
-                      {/* Dot track */}
-                      <div style={s.dotRow}>
-                        {Array.from({ length: item.maxAttempts }).map((_, i) => (
-                          <div
-                            key={i}
-                            style={{
-                              ...s.dot,
-                              background: done
-                                ? "#16a34a"
-                                : i < attempts
-                                  ? "#4f46e5"
-                                  : "#e5e7eb",
-                            }}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </>
       )}
 
       {/* ═══════════════════════════════════════════════════════════
@@ -476,11 +385,6 @@ function TypeBadge({ type }: { type: string }) {
   );
 }
 
-function LessonStatusIcon({ status }: { status: "completed" | "in_progress" | "locked" }) {
-  if (status === "completed")  return <span style={{ ...s.statusIcon, color: "#16a34a" }}>✔</span>;
-  if (status === "in_progress") return <span style={{ ...s.statusIcon, color: "#f59e0b" }}>🔄</span>;
-  return <span style={{ ...s.statusIcon, color: "#9ca3af" }}>🔒</span>;
-}
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -542,6 +446,15 @@ const s: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     flexShrink:     0,
   } as React.CSSProperties,
+
+  eyebrow: {
+    fontSize:      10,
+    fontWeight:    800,
+    letterSpacing: "0.14em",
+    color:         "#4f46e5",
+    textTransform: "uppercase" as const,
+    marginBottom:  2,
+  },
 
   welcomeLabel: {
     fontSize:  12,

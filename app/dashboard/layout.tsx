@@ -50,29 +50,35 @@ interface NavGroup {
 }
 
 const NAV_TOP: NavItem[] = [
-  { label: "Center Suite", icon: "⊞", href: "/dashboard", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Center Suite",    icon: "⊞",  href: "/dashboard",         roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  { label: "Learner's Suite", icon: "🎓", href: "/dashboard/student", roles: [ROLES.STUDENT] },
 ];
 
 const NAV_GROUPS: NavGroup[] = [
   {
-    label: "Learner's Suite", icon: "🎓",
+    label: "Academic Suite", icon: "🎓",
     items: [
       { label: "Centers",       icon: "🏫", href: "/dashboard/centers",        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
       { label: "Teachers",      icon: "👥", href: "/dashboard/teachers",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
       { label: "Admins",        icon: "👤", href: "/dashboard/admins",         roles: [ROLES.SUPER_ADMIN] },
       { label: "Students",      icon: "🎓", href: "/dashboard/students",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
       { label: "Attendance",    icon: "✓",  href: "/dashboard/attendance",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      {
-        label: "Syllabus", icon: "📚",
-        href: (uid, role) =>
-          role === ROLES.STUDENT
-            ? `/dashboard/student-syllabus/${uid}`
-            : "/dashboard/syllabus",
-        matchPrefix: "/dashboard/syllabus,/dashboard/student-syllabus",
-        roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.STUDENT],
-      },
+      { label: "Syllabus",      icon: "📚", href: "/dashboard/syllabus",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
       { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",        roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
       { label: "Screening",     icon: "🎹", href: "/dashboard/screening",       roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening,/dashboard/screening/fast-track" },
+    ],
+  },
+  {
+    label: "My Learning", icon: "📖",
+    items: [
+      {
+        label: "Syllabus", icon: "📚",
+        href: (uid) => `/dashboard/student-syllabus/${uid}`,
+        matchPrefix: "/dashboard/student-syllabus",
+        roles: [ROLES.STUDENT],
+      },
+      { label: "My Fees",         icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
+      { label: "My Achievements", icon: "🏆", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
     ],
   },
   {
@@ -100,7 +106,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Attendance", "Syllabus", "Students", "Faculty Suite"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Attendance", "Syllabus", "Students", "Faculty Suite"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {

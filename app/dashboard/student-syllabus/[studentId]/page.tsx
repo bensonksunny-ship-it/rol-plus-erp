@@ -12,6 +12,7 @@ import {
   getProgressByStudent,
   addAttempt,
   markItemCompleted,
+  calcLessonPercent,
 } from "@/services/lesson/lesson.service";
 import {
   updateLessonTitle,
@@ -273,8 +274,80 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
           </div>
         </div>
       </div>
+
+      {/* ── Progress Overview ── */}
+      <div style={s.poSectionTitle}>Progress Overview</div>
+      <div style={s.poList}>
+        {lessons.map(lesson => {
+          const items      = lesson.items;
+          const pct        = calcLessonPercent(items, progressMap);
+          const allDone    = items.length > 0 && items.every(i => progressMap[i.id]?.completed);
+          const anyStarted = items.some(i => (progressMap[i.id]?.totalAttempts ?? 0) > 0);
+          const status     = allDone ? "completed" : anyStarted ? "in_progress" : "locked";
+          return (
+            <div key={lesson.id} style={s.poRow}>
+              <div style={s.poLeft}>
+                <SyllabusStatusIcon status={status} />
+                <div>
+                  <div style={s.poTitle}>{lesson.title}</div>
+                  <div style={s.poSub}>{items.length} activities</div>
+                </div>
+              </div>
+              <div style={s.poRight}>
+                <div style={s.poPct}>{pct}%</div>
+                <div style={s.poBarTrack}>
+                  <div style={{ ...s.poBarFill, width: `${pct}%`, background: allDone ? "#16a34a" : anyStarted ? "#f59e0b" : "#d1d5db" }} />
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Attempts Tracker ── */}
+      <div style={s.poSectionTitle}>Attempts Tracker — {activeLesson.title}</div>
+      <div style={s.atCard}>
+        {activeLesson.items.length === 0 ? (
+          <div style={s.atEmpty}>No activities in this lesson.</div>
+        ) : (
+          activeLesson.items.map(item => {
+            const prog     = progressMap[item.id];
+            const attempts = prog?.totalAttempts ?? 0;
+            const done     = prog?.completed ?? false;
+            const tc       = { concept: { bg: "#dbeafe", fg: "#1d4ed8" }, exercise: { bg: "#fef3c7", fg: "#b45309" }, songsheet: { bg: "#f3e8ff", fg: "#7c3aed" } }[item.type] ?? { bg: "#f3f4f6", fg: "#374151" };
+            return (
+              <div key={item.id} style={s.atRow}>
+                <div style={s.atLeft}>
+                  <span style={{ ...s.atBadge, background: tc.bg, color: tc.fg }}>{item.type}</span>
+                  <span style={s.atTitle}>{item.title}</span>
+                </div>
+                <div style={s.atRight}>
+                  {done ? (
+                    <span style={s.atDone}>✔ Completed</span>
+                  ) : (
+                    <span style={s.atCount}>{attempts}/{item.maxAttempts} attempts</span>
+                  )}
+                  <div style={s.atDots}>
+                    {Array.from({ length: item.maxAttempts }).map((_, i) => (
+                      <div key={i} style={{ ...s.atDot, background: done ? "#16a34a" : i < attempts ? "#4f46e5" : "#e5e7eb" }} />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
     </div>
   );
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function SyllabusStatusIcon({ status }: { status: "completed" | "in_progress" | "locked" }) {
+  if (status === "completed")  return <span style={{ fontSize: 16, flexShrink: 0, color: "#16a34a" }}>✔</span>;
+  if (status === "in_progress") return <span style={{ fontSize: 16, flexShrink: 0, color: "#f59e0b" }}>🔄</span>;
+  return <span style={{ fontSize: 16, flexShrink: 0, color: "#9ca3af" }}>🔒</span>;
 }
 
 // ─── Item Card ────────────────────────────────────────────────────────────────
@@ -838,4 +911,33 @@ const s: Record<string, React.CSSProperties> = {
     cursor:        "pointer",
     letterSpacing: "0.02em",
   },
+
+  // ── Progress Overview ─────────────────────────────────────────────────────
+  poSectionTitle: {
+    fontSize: 12, fontWeight: 700, color: "#6b7280",
+    textTransform: "uppercase" as const, letterSpacing: "0.06em",
+    marginBottom: 10, marginTop: 28,
+  },
+  poList: { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden" },
+  poRow:  { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: "1px solid #f3f4f6", gap: 12 },
+  poLeft: { display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 },
+  poRight:{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 },
+  poTitle:{ fontSize: 13, fontWeight: 600, color: "#111111", whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis" },
+  poSub:  { fontSize: 11, color: "#9ca3af", marginTop: 1 },
+  poPct:  { fontSize: 12, fontWeight: 700, color: "#4f46e5", minWidth: 32, textAlign: "right" as const },
+  poBarTrack: { width: 100, height: 6, background: "#e5e7eb", borderRadius: 99, overflow: "hidden", flexShrink: 0 },
+  poBarFill:  { height: "100%", borderRadius: 99, transition: "width 0.3s ease" },
+
+  // ── Attempts Tracker ──────────────────────────────────────────────────────
+  atCard:  { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden" },
+  atRow:   { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: "1px solid #f3f4f6", gap: 12, flexWrap: "wrap" as const },
+  atLeft:  { display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 },
+  atRight: { display: "flex", alignItems: "center", gap: 12, flexShrink: 0 },
+  atBadge: { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, flexShrink: 0, textTransform: "capitalize" as const },
+  atTitle: { fontSize: 13, color: "#111111", fontWeight: 500 },
+  atDone:  { fontSize: 12, fontWeight: 600, color: "#16a34a", background: "#dcfce7", borderRadius: 6, padding: "2px 10px" },
+  atCount: { fontSize: 12, color: "#6b7280", fontWeight: 500, minWidth: 70, textAlign: "right" as const },
+  atDots:  { display: "flex", alignItems: "center", gap: 4 },
+  atDot:   { width: 10, height: 10, borderRadius: "50%" },
+  atEmpty: { padding: "20px", fontSize: 13, color: "#9ca3af" },
 };
