@@ -139,9 +139,8 @@ function TeacherDashboardContent() {
   interface OverviewStats {
     totalStudents:    number;
     attendedThisWeek: number;
+    weeklyClassAvg:   number;
     noSyllabus:       number;
-    avgPerCentre:     number;
-    centreBreakdown:  { id: string; name: string; count: number }[];
   }
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(null);
   const [statsLoading,  setStatsLoading]  = useState(false);
@@ -168,17 +167,7 @@ function TeacherDashboardContent() {
         const cIds = filtered.map(c => c.id).filter(Boolean);
         if (cIds.length > 0) {
           try {
-            const attSnap = await getDocs(query(
-              collection(db, "attendance"),
-              where("date", "==", today),
-              where("centerId", "in", cIds),
-            ));
-            const marked = new Set<string>();
-            attSnap.docs.forEach(d => {
-              const centerId = d.data().centerId as string | undefined;
-              if (centerId) marked.add(centerId);
-            });
-            setMarkedCentreIds(marked);
+            setMarkedCentreIds(await fetchMarkedCentreIds(cIds, today));
           } catch (err) {
             console.error("Failed to load today attendance:", err);
           }
@@ -310,17 +299,7 @@ function TeacherDashboardContent() {
     if (cIds.length === 0) return;
     (async () => {
       try {
-        const attSnap = await getDocs(query(
-          collection(db, "attendance"),
-          where("date", "==", today),
-          where("centerId", "in", cIds),
-        ));
-        const marked = new Set<string>();
-        attSnap.docs.forEach(d => {
-          const centerId = d.data().centerId as string | undefined;
-          if (centerId) marked.add(centerId);
-        });
-        setMarkedCentreIds(marked);
+        setMarkedCentreIds(await fetchMarkedCentreIds(cIds, today));
       } catch (err) {
         console.error("Failed to refresh today attendance:", err);
       }
@@ -360,8 +339,12 @@ function TeacherDashboardContent() {
           return d.toISOString().slice(0, 10);
         });
 
-        // 3. Distinct students marked present this week (per centre)
+        // 3. Weekly attendance stats — group-class records only:
+        //    • attendedThisWeek: distinct students marked present at least once this week
+        //    • weeklyClassAvg:   avg present count per session per centre
         const presentUids = new Set<string>();
+        let weeklyAvgSum = 0;
+        let centresWithSessions = 0;
         await Promise.all(
           cIds.map(async cId => {
             const snap = await getDocs(query(
@@ -369,11 +352,24 @@ function TeacherDashboardContent() {
               where("centerId", "==", cId),
               where("date",     "in",  weekDates),
             ));
-            snap.docs.forEach(d => {
-              if (d.data().status === "present") presentUids.add(d.data().studentUid as string);
+            const docs = snap.docs.map(d => d.data() as { date: string; status: string; classType?: string; studentUid?: string });
+            const groupDocs = docs.filter(d => (d.classType ?? "group") !== "personal");
+            if (groupDocs.length === 0) return;
+            const byDate: Record<string, number> = {};
+            groupDocs.forEach(d => {
+              if (d.status === "present") {
+                if (d.studentUid) presentUids.add(d.studentUid);
+                byDate[d.date] = (byDate[d.date] ?? 0) + 1;
+              }
             });
+            const sessionDates = Object.keys(byDate);
+            if (sessionDates.length === 0) return;
+            weeklyAvgSum += sessionDates.reduce((s, dt) => s + byDate[dt], 0) / sessionDates.length;
+            centresWithSessions++;
           })
         );
+        const attendedThisWeek = presentUids.size;
+        const weeklyClassAvg = centresWithSessions > 0 ? Math.round(weeklyAvgSum / centresWithSessions) : 0;
 
         // 4. Centres that have at least one centre-wide lesson → students there have a syllabus
         const centersWithLessons = new Set<string>();
@@ -405,15 +401,7 @@ function TeacherDashboardContent() {
         }
         const noSyllabus = possiblyNoSyllabus.filter(st => !studentSpecificIds.has(st.uid)).length;
 
-        // 5. Per-centre student counts and average
-        const centreCountMap: Record<string, number> = {};
-        allStudents.forEach(st => { centreCountMap[st.centerId] = (centreCountMap[st.centerId] ?? 0) + 1; });
-        const centreBreakdown = centers.map(c => ({ id: c.id, name: c.name, count: centreCountMap[c.id] ?? 0 }));
-        const avgPerCentre = centers.length > 0
-          ? Math.round(centreBreakdown.reduce((sum, c) => sum + c.count, 0) / centers.length)
-          : 0;
-
-        setOverviewStats({ totalStudents: allStudents.length, attendedThisWeek: presentUids.size, noSyllabus, avgPerCentre, centreBreakdown });
+        setOverviewStats({ totalStudents: allStudents.length, attendedThisWeek, weeklyClassAvg, noSyllabus });
       } catch (err) {
         console.error("Failed to load overview stats:", err);
       } finally {
@@ -519,7 +507,7 @@ function TeacherDashboardContent() {
       {(() => {
         const todayDayNum  = new Date().getDay();
         const todayCentres = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum));
-        const pendingCount = todayCentres.filter(c => !markedCentreIds.has(c.id)).length;
+        const pendingCount = todayCentres.filter(c => !markedCentreIds.has(c.id) && classHasEnded(c.timeSlot ?? "")).length;
         return (
           <div style={{
             background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
@@ -593,7 +581,7 @@ function TeacherDashboardContent() {
       {showPending && (() => {
         const todayDayNum  = new Date().getDay();
         const todayCentres = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum));
-        const unmarked     = todayCentres.filter(c => !markedCentreIds.has(c.id));
+        const unmarked     = todayCentres.filter(c => !markedCentreIds.has(c.id) && classHasEnded(c.timeSlot ?? ""));
         return (
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 16, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.07)" }}>
             <div style={{ padding: "14px 20px", borderBottom: "1px solid #f3f4f6", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -639,6 +627,11 @@ function TeacherDashboardContent() {
           {
             label: "Attended This Week",
             value: statsLoading ? "…" : overviewStats ? String(overviewStats.attendedThisWeek) : "—",
+            icon: "📅", color: "#0369a1", bg: "#e0f2fe",
+          },
+          {
+            label: "Weekly Class Avg",
+            value: statsLoading ? "…" : overviewStats ? String(overviewStats.weeklyClassAvg) : "—",
             icon: "✅", color: "#16a34a", bg: "#dcfce7",
           },
           {
@@ -646,11 +639,6 @@ function TeacherDashboardContent() {
             value: statsLoading ? "…" : overviewStats ? String(overviewStats.noSyllabus) : "—",
             icon: "📋", color: overviewStats?.noSyllabus ? "#dc2626" : "#16a34a",
             bg:   overviewStats?.noSyllabus ? "#fef2f2" : "#f0fdf4",
-          },
-          {
-            label: "Avg / Centre",
-            value: statsLoading ? "…" : overviewStats ? String(overviewStats.avgPerCentre) : "—",
-            icon: "📊", color: "#f59e0b", bg: "#fef3c7",
           },
         ].map(card => (
           <div key={card.label} style={{
@@ -668,49 +656,6 @@ function TeacherDashboardContent() {
         ))}
       </div>
 
-      {/* Per-centre student distribution */}
-      {overviewStats && overviewStats.centreBreakdown.length > 1 && (
-        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "16px 20px", marginBottom: 20 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 14 }}>
-            📊 Student Distribution by Centre
-          </div>
-          {(() => {
-            const max = Math.max(...overviewStats.centreBreakdown.map(c => c.count), 1);
-            const avg = overviewStats.avgPerCentre;
-            return overviewStats.centreBreakdown.map(c => {
-              const pct        = Math.round((c.count / max) * 100);
-              const aboveAvg   = c.count >= avg;
-              const barColor   = aboveAvg ? "#4f46e5" : "#f59e0b";
-              return (
-                <div key={c.id} style={{ marginBottom: 12 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{c.name}</span>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{
-                        fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99,
-                        background: aboveAvg ? "#ede9fe" : "#fef3c7",
-                        color:      aboveAvg ? "#4f46e5" : "#b45309",
-                      }}>
-                        {aboveAvg ? "▲ Above avg" : "▼ Below avg"}
-                      </span>
-                      <span style={{ fontSize: 13, fontWeight: 700, color: "#374151", minWidth: 24, textAlign: "right" as const }}>
-                        {c.count}
-                      </span>
-                    </div>
-                  </div>
-                  <div style={{ height: 8, background: "#f3f4f6", borderRadius: 99, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 99, transition: "width 0.4s ease" }} />
-                  </div>
-                </div>
-              );
-            });
-          })()}
-          <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #f3f4f6", display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 11, color: "#9ca3af" }}>Average across all centres:</span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "#f59e0b" }}>{overviewStats.avgPerCentre} students</span>
-          </div>
-        </div>
-      )}
 
       {/* Empty state */}
       {centers.length === 0 ? (
@@ -804,6 +749,79 @@ const DAY_MAP: Record<string, number> = {
 function parseDaysOfWeek(timeSlot: string): string[] {
   const tokens = timeSlot.toLowerCase().split(/[\s/,]+/);
   return tokens.filter(t => t in DAY_MAP);
+}
+
+function parseClassEndMinutes(timeSlot: string): number | null {
+  // 24h format: "17:00–18:30" or "17:00 - 18:30"
+  const m24 = timeSlot.match(/\d{1,2}:\d{2}\s*[–\-]\s*(\d{1,2}):(\d{2})/);
+  if (m24) return parseInt(m24[1]) * 60 + parseInt(m24[2]);
+  // 12h format: "4:00 PM - 5:30 PM"
+  const m12 = timeSlot.match(/\d{1,2}:\d{2}\s*(?:AM|PM)\s*[–\-]\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (m12) {
+    let h = parseInt(m12[1]);
+    const ampm = m12[3].toUpperCase();
+    if (ampm === "PM" && h !== 12) h += 12;
+    if (ampm === "AM" && h === 12) h = 0;
+    return h * 60 + parseInt(m12[2]);
+  }
+  return null;
+}
+
+function classHasEnded(timeSlot: string): boolean {
+  const end = parseClassEndMinutes(timeSlot);
+  if (end === null) return true; // unknown format → treat as ended
+  const n = new Date();
+  return n.getHours() * 60 + n.getMinutes() >= end;
+}
+
+/**
+ * A centre counts as "attendance done" only when every active group-class student
+ * in that centre has a record for today (any status). Personal/individual students
+ * are excluded from this count.
+ */
+async function fetchMarkedCentreIds(cIds: string[], today: string): Promise<Set<string>> {
+  if (cIds.length === 0) return new Set();
+
+  // Fetch today's attendance + group student counts in parallel
+  const attPromise = getDocs(query(
+    collection(db, "attendance"),
+    where("date",     "==", today),
+    where("centerId", "in", cIds),
+  ));
+  const studentPromises = cIds.map(cId => getDocs(query(
+    collection(db, "users"),
+    where("role",     "==", "student"),
+    where("centerId", "==", cId),
+  )));
+  const [attSnap, ...studentSnaps] = await Promise.all([attPromise, ...studentPromises]);
+
+  // Group student count per centre (active, non-personal only)
+  const groupCountMap: Record<string, number> = {};
+  studentSnaps.forEach(snap =>
+    snap.docs.forEach(d => {
+      const u         = d.data();
+      const status    = (u.status ?? u.studentStatus ?? "active") as string;
+      const classType = (u.classType ?? "group") as string;
+      const cId       = u.centerId as string | undefined;
+      if (status === "active" && classType !== "personal" && cId)
+        groupCountMap[cId] = (groupCountMap[cId] ?? 0) + 1;
+    })
+  );
+
+  // Attendance record count per centre today
+  const attCountMap: Record<string, number> = {};
+  attSnap.docs.forEach(d => {
+    const cId = d.data().centerId as string | undefined;
+    if (cId) attCountMap[cId] = (attCountMap[cId] ?? 0) + 1;
+  });
+
+  // Centre is complete only if every group student has a record
+  const marked = new Set<string>();
+  cIds.forEach(cId => {
+    const expected = groupCountMap[cId] ?? 0;
+    if (expected > 0 && (attCountMap[cId] ?? 0) >= expected) marked.add(cId);
+  });
+  return marked;
 }
 
 /** Return all YYYY-MM-DD dates in a month (1-indexed mo) where dayOfWeek matches. */

@@ -101,6 +101,27 @@ function isoMonthStart(offset = 0): string {
 
 const DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+function parseClassEndMinutes(timeSlot: string): number | null {
+  const m24 = timeSlot.match(/\d{1,2}:\d{2}\s*[–\-]\s*(\d{1,2}):(\d{2})/);
+  if (m24) return parseInt(m24[1]) * 60 + parseInt(m24[2]);
+  const m12 = timeSlot.match(/\d{1,2}:\d{2}\s*(?:AM|PM)\s*[–\-]\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (m12) {
+    let h = parseInt(m12[1]);
+    const ampm = m12[3].toUpperCase();
+    if (ampm === "PM" && h !== 12) h += 12;
+    if (ampm === "AM" && h === 12) h = 0;
+    return h * 60 + parseInt(m12[2]);
+  }
+  return null;
+}
+
+function classHasEnded(timeSlot: string): boolean {
+  const end = parseClassEndMinutes(timeSlot);
+  if (end === null) return true;
+  const n = new Date();
+  return n.getHours() * 60 + n.getMinutes() >= end;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // PAGE SHELL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -331,7 +352,21 @@ function CommandCenter() {
   const revGoal = Math.max(50000, Math.round(revLastMonth * 1.2));
 
   // Today's classes
-  const markedCentreIds = useMemo(() => new Set(todayAtt.map(a => a.centerId)), [todayAtt]);
+  const markedCentreIds = useMemo(() => {
+    const attCountMap: Record<string, number> = {};
+    todayAtt.forEach(a => { attCountMap[a.centerId] = (attCountMap[a.centerId] ?? 0) + 1; });
+    const groupCountMap: Record<string, number> = {};
+    students.forEach(s => {
+      if (s.status === "active" && (s.classType ?? "group") !== "personal" && s.centerId)
+        groupCountMap[s.centerId] = (groupCountMap[s.centerId] ?? 0) + 1;
+    });
+    const marked = new Set<string>();
+    Object.keys(attCountMap).forEach(cId => {
+      const expected = groupCountMap[cId] ?? 0;
+      if (expected > 0 && attCountMap[cId] >= expected) marked.add(cId);
+    });
+    return marked;
+  }, [todayAtt, students]);
   const todayCentres = useMemo(() => {
     const dow = DAY_ABBR[new Date(today + "T00:00:00").getDay()];
     return centers.filter(c => ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(dow));
@@ -834,14 +869,26 @@ function AdminDashboard() {
         setCenters(centersData);
 
         let attPresent = 0, attTotal = 0;
-        const markedIds = new Set<string>();
+        const attCountMap: Record<string, number> = {};
         attSnap.forEach(d => {
           attTotal++;
           if (d.data().status === "present") attPresent++;
           const cid = d.data().centerId as string | undefined;
-          if (cid) markedIds.add(cid);
+          if (cid) attCountMap[cid] = (attCountMap[cid] ?? 0) + 1;
         });
         setAttStats({ present: attPresent, total: attTotal });
+
+        // A centre is marked complete only when all its active group students have a record today
+        const groupCountMap: Record<string, number> = {};
+        studs.forEach(s => {
+          if (s.status === "active" && (s.classType ?? "group") !== "personal" && s.centerId)
+            groupCountMap[s.centerId] = (groupCountMap[s.centerId] ?? 0) + 1;
+        });
+        const markedIds = new Set<string>();
+        Object.keys(attCountMap).forEach(cid => {
+          const expected = groupCountMap[cid] ?? 0;
+          if (expected > 0 && attCountMap[cid] >= expected) markedIds.add(cid);
+        });
         setMarkedCentreIds(markedIds);
 
         const txs = txSnap.docs.map(d => ({
@@ -1016,7 +1063,7 @@ function AdminDashboard() {
 
       {/* ── HEADER ── */}
       {(() => {
-        const pendingCentres = todayCentres.filter(c => !markedCentreIds.has(c.id));
+        const pendingCentres = todayCentres.filter(c => !markedCentreIds.has(c.id) && classHasEnded(c.timeSlot ?? ""));
         const pendingCount   = pendingCentres.length;
         return (
           <>
@@ -1087,7 +1134,7 @@ function AdminDashboard() {
 
             {/* Pending panel */}
             {showPending && (() => {
-              const unmarked = todayCentres.filter(c => !markedCentreIds.has(c.id));
+              const unmarked = todayCentres.filter(c => !markedCentreIds.has(c.id) && classHasEnded(c.timeSlot ?? ""));
               // Group by teacher
               const byTeacher: Record<string, { teacherName: string; centres: string[] }> = {};
               unmarked.forEach(c => {
