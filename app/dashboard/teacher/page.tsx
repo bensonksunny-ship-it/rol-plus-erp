@@ -131,6 +131,21 @@ function TeacherDashboardContent() {
   const [progressStudent, setProgressStudent]   = useState<StudentRow | null>(null);
   const [progressFrom,    setProgressFrom]      = useState<"students" | "overview">("overview");
 
+  // Panel toggles
+  const [showPending,       setShowPending]       = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  // Overview stats
+  interface OverviewStats {
+    totalStudents:    number;
+    attendedThisWeek: number;
+    noSyllabus:       number;
+    avgPerCentre:     number;
+    centreBreakdown:  { id: string; name: string; count: number }[];
+  }
+  const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(null);
+  const [statsLoading,  setStatsLoading]  = useState(false);
+
   // ── Load assigned centres ────────────────────────────────────────────────
   useEffect(() => {
     if (!user) return;
@@ -313,6 +328,101 @@ function TeacherDashboardContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [centreIdParam]);
 
+  // ── Overview stats (total students, attended this week, no syllabus) ────────
+  useEffect(() => {
+    if (centreIdParam || centers.length === 0) return;
+    const cIds = centers.map(c => c.id).filter(Boolean);
+    if (cIds.length === 0) return;
+    setStatsLoading(true);
+    setOverviewStats(null);
+    (async () => {
+      try {
+        // 1. All active students across all centres
+        const studentSnaps = await Promise.all(
+          cIds.map(cId => getDocs(query(
+            collection(db, "users"),
+            where("role",     "==", "student"),
+            where("centerId", "==", cId),
+          )))
+        );
+        const allStudents: { uid: string; centerId: string }[] = [];
+        studentSnaps.forEach(snap =>
+          snap.docs.forEach(d => {
+            const u      = d.data();
+            const status = (u.status ?? u.studentStatus ?? "active") as string;
+            if (status === "active") allStudents.push({ uid: d.id, centerId: u.centerId as string });
+          })
+        );
+
+        // 2. This week's dates (last 7 days including today)
+        const weekDates: string[] = Array.from({ length: 7 }, (_, i) => {
+          const d = new Date(); d.setDate(d.getDate() - (6 - i));
+          return d.toISOString().slice(0, 10);
+        });
+
+        // 3. Distinct students marked present this week (per centre)
+        const presentUids = new Set<string>();
+        await Promise.all(
+          cIds.map(async cId => {
+            const snap = await getDocs(query(
+              collection(db, "attendance"),
+              where("centerId", "==", cId),
+              where("date",     "in",  weekDates),
+            ));
+            snap.docs.forEach(d => {
+              if (d.data().status === "present") presentUids.add(d.data().studentUid as string);
+            });
+          })
+        );
+
+        // 4. Centres that have at least one centre-wide lesson → students there have a syllabus
+        const centersWithLessons = new Set<string>();
+        for (let i = 0; i < cIds.length; i += 10) {
+          const batch   = cIds.slice(i, i + 10);
+          const lesSnap = await getDocs(query(
+            collection(db, "lessons"),
+            where("centerId", "in", batch),
+          ));
+          lesSnap.docs.forEach(d => {
+            const cid = d.data().centerId as string | undefined;
+            if (cid) centersWithLessons.add(cid);
+          });
+        }
+
+        // Students in centres without centre-level lessons: check student-specific lessons
+        const possiblyNoSyllabus = allStudents.filter(st => !centersWithLessons.has(st.centerId));
+        const studentSpecificIds = new Set<string>();
+        for (let i = 0; i < possiblyNoSyllabus.length; i += 10) {
+          const batch   = possiblyNoSyllabus.slice(i, i + 10).map(s => s.uid);
+          const lesSnap = await getDocs(query(
+            collection(db, "lessons"),
+            where("studentId", "in", batch),
+          ));
+          lesSnap.docs.forEach(d => {
+            const sid = d.data().studentId as string | undefined;
+            if (sid) studentSpecificIds.add(sid);
+          });
+        }
+        const noSyllabus = possiblyNoSyllabus.filter(st => !studentSpecificIds.has(st.uid)).length;
+
+        // 5. Per-centre student counts and average
+        const centreCountMap: Record<string, number> = {};
+        allStudents.forEach(st => { centreCountMap[st.centerId] = (centreCountMap[st.centerId] ?? 0) + 1; });
+        const centreBreakdown = centers.map(c => ({ id: c.id, name: c.name, count: centreCountMap[c.id] ?? 0 }));
+        const avgPerCentre = centers.length > 0
+          ? Math.round(centreBreakdown.reduce((sum, c) => sum + c.count, 0) / centers.length)
+          : 0;
+
+        setOverviewStats({ totalStudents: allStudents.length, attendedThisWeek: presentUids.size, noSyllabus, avgPerCentre, centreBreakdown });
+      } catch (err) {
+        console.error("Failed to load overview stats:", err);
+      } finally {
+        setStatsLoading(false);
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centreIdParam, centers]);
+
   // ── Navigation helpers ────────────────────────────────────────────────────
   function goToCentre(id: string, tab: "attendance" | "students" | "progress" = "attendance") {
     router.push(`/dashboard/teacher?centerId=${id}&tab=${tab}`);
@@ -406,29 +516,201 @@ function TeacherDashboardContent() {
   return (
     <div style={s.page}>
       {/* Hero */}
-      <div style={{
-        background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
-        borderRadius: 14, padding: "24px 28px", marginBottom: 20,
-        color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16,
-      }}>
-        <div>
-          <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 2 }}>
-            Welcome, {user?.displayName ?? "Teacher"} 👋
+      {(() => {
+        const todayDayNum  = new Date().getDay();
+        const todayCentres = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum));
+        const pendingCount = todayCentres.filter(c => !markedCentreIds.has(c.id)).length;
+        return (
+          <div style={{
+            background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
+            borderRadius: 14, padding: "20px 24px", marginBottom: 16,
+            color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12,
+          }}>
+            <div>
+              <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 2 }}>
+                Welcome, {user?.displayName ?? "Teacher"} 👋
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.8 }}>
+                {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {/* Notifications */}
+              <button
+                onClick={() => { setShowNotifications(v => !v); setShowPending(false); }}
+                title="Notifications"
+                style={{
+                  position: "relative", width: 40, height: 40, borderRadius: "50%", border: "none", cursor: "pointer",
+                  background: showNotifications ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.18)",
+                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0,
+                }}>
+                🔔
+              </button>
+              {/* Pending */}
+              <button
+                onClick={() => { setShowPending(v => !v); setShowNotifications(false); }}
+                title="Pending tasks"
+                style={{
+                  position: "relative", width: 40, height: 40, borderRadius: "50%", border: "none", cursor: "pointer",
+                  background: showPending ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.18)",
+                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0,
+                }}>
+                ⏳
+                {pendingCount > 0 && (
+                  <span style={{
+                    position: "absolute", top: 1, right: 1,
+                    background: "#ef4444", color: "#fff", borderRadius: "50%",
+                    width: 16, height: 16, fontSize: 9, fontWeight: 800,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                    {pendingCount}
+                  </span>
+                )}
+              </button>
+              {/* Classes today */}
+              <span style={{ background: "rgba(255,255,255,0.15)", borderRadius: 99, padding: "6px 14px", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+                🏫 {todayCentres.length} {todayCentres.length === 1 ? "Class" : "Classes"} Today
+              </span>
+            </div>
           </div>
-          <div style={{ fontSize: 13, opacity: 0.85 }}>
-            {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+        );
+      })()}
+
+      {/* Notifications panel */}
+      {showNotifications && (
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 16, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.07)" }}>
+          <div style={{ padding: "14px 20px", borderBottom: "1px solid #f3f4f6", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>🔔 Notifications</span>
+            <button onClick={() => setShowNotifications(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 16 }}>✕</button>
+          </div>
+          <div style={{ padding: "32px 20px", textAlign: "center", fontSize: 13, color: "#9ca3af" }}>
+            No new notifications
           </div>
         </div>
-        {(() => {
-          const todayDayNum = new Date().getDay();
-          const n = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum)).length;
-          return (
-            <span style={{ background: "rgba(255,255,255,0.15)", borderRadius: 99, padding: "6px 18px", fontSize: 13, fontWeight: 600 }}>
-              🏫 {n} {n === 1 ? "Class" : "Classes"} Today
-            </span>
-          );
-        })()}
+      )}
+
+      {/* Pending panel */}
+      {showPending && (() => {
+        const todayDayNum  = new Date().getDay();
+        const todayCentres = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum));
+        const unmarked     = todayCentres.filter(c => !markedCentreIds.has(c.id));
+        return (
+          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 16, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.07)" }}>
+            <div style={{ padding: "14px 20px", borderBottom: "1px solid #f3f4f6", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>⏳ Pending Tasks</span>
+              <button onClick={() => setShowPending(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 16 }}>✕</button>
+            </div>
+            {unmarked.length === 0 ? (
+              <div style={{ padding: "24px 20px", textAlign: "center", fontSize: 13, color: "#16a34a", fontWeight: 600 }}>
+                ✅ All caught up — no pending tasks today!
+              </div>
+            ) : (
+              <div style={{ padding: "0 20px 8px" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", padding: "12px 0 6px" }}>
+                  Attendance not marked today
+                </div>
+                {unmarked.map((c, i) => (
+                  <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 0", borderTop: i === 0 ? "none" : "1px solid #f3f4f6" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{c.name}</div>
+                      {c.timeSlot && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{c.timeSlot}</div>}
+                    </div>
+                    <button
+                      onClick={() => { setShowPending(false); goToCentre(c.id, "attendance"); }}
+                      style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 7, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>
+                      Mark Now →
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Overview stats */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 16 }}>
+        {[
+          {
+            label: "Total Students",
+            value: statsLoading ? "…" : overviewStats ? String(overviewStats.totalStudents) : "—",
+            icon: "👥", color: "#4f46e5", bg: "#ede9fe",
+          },
+          {
+            label: "Attended This Week",
+            value: statsLoading ? "…" : overviewStats ? String(overviewStats.attendedThisWeek) : "—",
+            icon: "✅", color: "#16a34a", bg: "#dcfce7",
+          },
+          {
+            label: "No Syllabus Yet",
+            value: statsLoading ? "…" : overviewStats ? String(overviewStats.noSyllabus) : "—",
+            icon: "📋", color: overviewStats?.noSyllabus ? "#dc2626" : "#16a34a",
+            bg:   overviewStats?.noSyllabus ? "#fef2f2" : "#f0fdf4",
+          },
+          {
+            label: "Avg / Centre",
+            value: statsLoading ? "…" : overviewStats ? String(overviewStats.avgPerCentre) : "—",
+            icon: "📊", color: "#f59e0b", bg: "#fef3c7",
+          },
+        ].map(card => (
+          <div key={card.label} style={{
+            background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12,
+            padding: "14px 16px", display: "flex", flexDirection: "column", gap: 6,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em" }}>
+                {card.label}
+              </span>
+              <span style={{ background: card.bg, borderRadius: 8, padding: "3px 7px", fontSize: 13 }}>{card.icon}</span>
+            </div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: card.color, lineHeight: 1 }}>{card.value}</div>
+          </div>
+        ))}
       </div>
+
+      {/* Per-centre student distribution */}
+      {overviewStats && overviewStats.centreBreakdown.length > 1 && (
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "16px 20px", marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 14 }}>
+            📊 Student Distribution by Centre
+          </div>
+          {(() => {
+            const max = Math.max(...overviewStats.centreBreakdown.map(c => c.count), 1);
+            const avg = overviewStats.avgPerCentre;
+            return overviewStats.centreBreakdown.map(c => {
+              const pct        = Math.round((c.count / max) * 100);
+              const aboveAvg   = c.count >= avg;
+              const barColor   = aboveAvg ? "#4f46e5" : "#f59e0b";
+              return (
+                <div key={c.id} style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{c.name}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{
+                        fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99,
+                        background: aboveAvg ? "#ede9fe" : "#fef3c7",
+                        color:      aboveAvg ? "#4f46e5" : "#b45309",
+                      }}>
+                        {aboveAvg ? "▲ Above avg" : "▼ Below avg"}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#374151", minWidth: 24, textAlign: "right" as const }}>
+                        {c.count}
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ height: 8, background: "#f3f4f6", borderRadius: 99, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 99, transition: "width 0.4s ease" }} />
+                  </div>
+                </div>
+              );
+            });
+          })()}
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #f3f4f6", display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, color: "#9ca3af" }}>Average across all centres:</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "#f59e0b" }}>{overviewStats.avgPerCentre} students</span>
+          </div>
+        </div>
+      )}
 
       {/* Empty state */}
       {centers.length === 0 ? (

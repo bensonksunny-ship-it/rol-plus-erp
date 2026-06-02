@@ -40,7 +40,8 @@
       "Bash(Format-Table FullName)",
       "Bash(npm install *)",
       "Bash(Select-Object -ExpandProperty FullName)",
-      "Bash(grep -E \"\\\\.\\(tsx?|jsx?\\)$\")"
+      "Bash(grep -E \"\\\\.\\(tsx?|jsx?\\)$\")",
+      "Bash(dir \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\services\\\\lesson\")"
     ]
   }
 }

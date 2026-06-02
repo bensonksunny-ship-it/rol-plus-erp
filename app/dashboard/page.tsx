@@ -796,6 +796,8 @@ function AdminDashboard() {
   const [loading,   setLoading]   = useState(true);
   const [completing,      setCompleting]      = useState<string | null>(null); // month being marked complete
   const [markedCentreIds, setMarkedCentreIds] = useState<Set<string>>(new Set());
+  const [showPending,       setShowPending]       = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
 
   // ── Load ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -955,6 +957,13 @@ function AdminDashboard() {
   const unbilledCount    = activeCount - billedThisMonth;
   const unpaidCount      = billedThisMonth - paidThisMonth;
 
+  // Teacher name lookup
+  const adminTeacherMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    teachers.forEach(t => { m[t.uid] = t.displayName; });
+    return m;
+  }, [teachers]);
+
   // Today's classes
   const todayDow    = useMemo(() => DAY_ABBR[new Date(today + "T00:00:00").getDay()], [today]);
   const todayCentres = useMemo(() =>
@@ -1006,23 +1015,124 @@ function AdminDashboard() {
     <div style={adm.page}>
 
       {/* ── HEADER ── */}
-      <div style={adm.header}>
-        <div>
-          <div style={adm.eyebrow}>Center Suite</div>
-          <div style={adm.date}>
-            {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
-          </div>
-          <div style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 2 }}>
-            Welcome back, {user?.displayName}
-          </div>
-        </div>
-        <div style={adm.quickActions}>
-          <button style={adm.qaBtn} onClick={() => router.push("/dashboard/students")}>+ Student</button>
-          <button style={adm.qaBtn} onClick={() => router.push("/dashboard/teachers")}>+ Teacher</button>
-          <button style={adm.qaBtn} onClick={() => router.push("/dashboard/centers")}>+ Centre</button>
-          <button style={{ ...adm.qaBtn, ...adm.qaBtnPrimary }} onClick={() => router.push("/dashboard/finance")}>Finance →</button>
-        </div>
-      </div>
+      {(() => {
+        const pendingCentres = todayCentres.filter(c => !markedCentreIds.has(c.id));
+        const pendingCount   = pendingCentres.length;
+        return (
+          <>
+            <div style={adm.header}>
+              <div>
+                <div style={adm.eyebrow}>Center Suite</div>
+                <div style={adm.date}>
+                  {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+                </div>
+                <div style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 2 }}>
+                  Welcome back, {user?.displayName}
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const }}>
+                {/* Notification icon */}
+                <button
+                  title="Notifications"
+                  onClick={() => { setShowNotifications(v => !v); setShowPending(false); }}
+                  style={{
+                    position: "relative", width: 38, height: 38, borderRadius: "50%", border: "1px solid var(--color-border)",
+                    background: showNotifications ? "var(--color-accent-dim,#ede9fe)" : "var(--color-surface-2)",
+                    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0,
+                  }}>
+                  🔔
+                </button>
+                {/* Pending icon */}
+                <button
+                  title="Pending tasks"
+                  onClick={() => { setShowPending(v => !v); setShowNotifications(false); }}
+                  style={{
+                    position: "relative", width: 38, height: 38, borderRadius: "50%", border: "1px solid var(--color-border)",
+                    background: showPending ? "var(--color-accent-dim,#ede9fe)" : "var(--color-surface-2)",
+                    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0,
+                  }}>
+                  ⏳
+                  {pendingCount > 0 && (
+                    <span style={{
+                      position: "absolute", top: 1, right: 1, background: "#ef4444", color: "#fff",
+                      borderRadius: "50%", width: 15, height: 15, fontSize: 8, fontWeight: 800,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {pendingCount}
+                    </span>
+                  )}
+                </button>
+                <div style={{ width: 1, height: 28, background: "var(--color-border)", margin: "0 2px" }} />
+                <div style={adm.quickActions}>
+                  <button style={adm.qaBtn} onClick={() => router.push("/dashboard/students")}>+ Student</button>
+                  <button style={adm.qaBtn} onClick={() => router.push("/dashboard/teachers")}>+ Teacher</button>
+                  <button style={adm.qaBtn} onClick={() => router.push("/dashboard/centers")}>+ Centre</button>
+                  <button style={{ ...adm.qaBtn, ...adm.qaBtnPrimary }} onClick={() => router.push("/dashboard/finance")}>Finance →</button>
+                </div>
+              </div>
+            </div>
+
+            {/* Notification panel */}
+            {showNotifications && (
+              <div style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, marginBottom: 16, overflow: "hidden", boxShadow: "var(--shadow-sm)" }}>
+                <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text-primary)" }}>🔔 Notifications</span>
+                  <button onClick={() => setShowNotifications(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--color-text-muted)", fontSize: 16 }}>✕</button>
+                </div>
+                <div style={{ padding: "28px 20px", textAlign: "center", fontSize: 13, color: "var(--color-text-muted)" }}>
+                  No new notifications
+                </div>
+              </div>
+            )}
+
+            {/* Pending panel */}
+            {showPending && (() => {
+              const unmarked = todayCentres.filter(c => !markedCentreIds.has(c.id));
+              // Group by teacher
+              const byTeacher: Record<string, { teacherName: string; centres: string[] }> = {};
+              unmarked.forEach(c => {
+                const tUid  = (c as Center & { teacherUid?: string }).teacherUid ?? "";
+                const tName = adminTeacherMap[tUid] ?? "Unassigned";
+                if (!byTeacher[tUid]) byTeacher[tUid] = { teacherName: tName, centres: [] };
+                byTeacher[tUid].centres.push(c.name);
+              });
+              const rows = Object.values(byTeacher);
+              return (
+                <div style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, marginBottom: 16, overflow: "hidden", boxShadow: "var(--shadow-sm)" }}>
+                  <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text-primary)" }}>⏳ Pending Tasks</span>
+                    <button onClick={() => setShowPending(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--color-text-muted)", fontSize: 16 }}>✕</button>
+                  </div>
+                  {rows.length === 0 ? (
+                    <div style={{ padding: "24px 20px", textAlign: "center", fontSize: 13, color: "var(--color-success)", fontWeight: 600 }}>
+                      ✅ All caught up — every centre has attendance marked today!
+                    </div>
+                  ) : (
+                    <div style={{ padding: "0 20px 8px" }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", padding: "12px 0 6px" }}>
+                        Teachers who haven't marked attendance today
+                      </div>
+                      {rows.map((row, i) => (
+                        <div key={row.teacherName} style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "11px 0", borderTop: i === 0 ? "none" : "1px solid var(--color-border)" }}>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)" }}>{row.teacherName}</div>
+                            <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 3 }}>
+                              {row.centres.join(" · ")}
+                            </div>
+                          </div>
+                          <span style={{ fontSize: 11, fontWeight: 700, background: "#fef2f2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 99, padding: "3px 10px", whiteSpace: "nowrap" as const, flexShrink: 0, marginTop: 2 }}>
+                            {row.centres.length} centre{row.centres.length > 1 ? "s" : ""} pending
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </>
+        );
+      })()}
 
       {/* ── KPI STRIP ── */}
       <div style={adm.kpiStrip}>

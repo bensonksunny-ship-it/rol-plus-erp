@@ -58,11 +58,11 @@ const NAV_TOP: NavItem[] = [
   { label: "Students",     icon: "🎓", href: "/dashboard/students",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
   { label: "Syllabus",     icon: "📚", href: "/dashboard/syllabus",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Screening",    icon: "🎹", href: "/dashboard/screening",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening" },
   // Teacher
   { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",    roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
   { label: "My Classes",    icon: "📋", href: "/dashboard/my-classes", roles: [ROLES.TEACHER] },
   // Student
+  { label: "Learner's Suite", icon: "🎓", href: "/dashboard/student", roles: [ROLES.STUDENT] },
   {
     label: "Quest", icon: "📚",
     href: (uid) => `/dashboard/student-syllabus/${uid}`,
@@ -71,7 +71,9 @@ const NAV_TOP: NavItem[] = [
   },
   { label: "Fees",   icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
   { label: "Streak", icon: "🔥", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
-  { label: "Badges", icon: "🏅", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
+  { label: "Badges",     icon: "🏅", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
+  // Screening — last for all roles that can see it
+  { label: "Screening", icon: "🎹", href: "/dashboard/screening",      roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening" },
 ];
 
 const NAV_GROUPS: NavGroup[] = [
@@ -100,7 +102,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Students", "Faculty Suite", "My Classes", "Screening"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Students", "Faculty Suite", "My Classes", "Screening"];
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
