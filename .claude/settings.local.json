@@ -41,7 +41,11 @@
       "Bash(npm install *)",
       "Bash(Select-Object -ExpandProperty FullName)",
       "Bash(grep -E \"\\\\.\\(tsx?|jsx?\\)$\")",
-      "Bash(dir \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\services\\\\lesson\")"
+      "Bash(dir \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\services\\\\lesson\")",
+      "Bash(Start-Sleep -Seconds 5)",
+      "Bash(Get-Content \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\289e5e4c-7fcf-43cc-8ae6-95b0447f6e49\\\\tasks\\\\bigi6y41a.output\" -Tail 20)",
+      "Bash(start *)",
+      "Bash(findstr finance *)"
     ]
   }
 }

@@ -696,7 +696,6 @@ function FinanceContent() {
 
   const filteredStudents = useMemo(() => {
     let list = filterCenter === "all" ? students : students.filter(s => s.centerId === filterCenter);
-    list = list.filter(s => s.monthlyFee > 0 || s.feePerClass > 0);
     if      (filterType === "group")    list = list.filter(s => s.classType   === "group");
     else if (filterType === "personal") list = list.filter(s => s.classType   === "personal");
     else if (filterType === "prepay")   list = list.filter(s => s.billingMode === "prepay");
