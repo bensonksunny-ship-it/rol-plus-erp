@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { collection, getDocs, query, where, orderBy, limit, doc, setDoc, getDoc, serverTimestamp } from "firebase/firestore";
+import { collection, getDocs, query, where, orderBy, limit, doc, setDoc, getDoc, serverTimestamp, onSnapshot } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { ROLES } from "@/config/constants";
@@ -177,7 +177,7 @@ function CommandCenter() {
           getDocs(query(collection(db, "users"), where("role", "==", "student"))),
           getDocs(query(collection(db, "users"), where("role", "==", "teacher"))),
           getCenters(),
-          getDocs(query(collection(db, "attendance"), where("date", ">=", days7ago))),
+          getDocs(query(collection(db, "attendance"), where("date", ">=", thisMonth + "-01"))),
           getDocs(collection(db, "transactions")),
           getAllTeacherQuality(),
         ]);
@@ -344,6 +344,18 @@ function CommandCenter() {
     });
   }, [centreRows, attendance]);
 
+  // Monthly attendance totals — every student remark counts
+  const monthlyTotals = useMemo(() => {
+    const monthRecs = attendance.filter(a => a.date?.startsWith(thisMonth));
+    return {
+      present:   monthRecs.filter(a => a.status === "present").length,
+      absent:    monthRecs.filter(a => a.status === "absent").length,
+      break:     monthRecs.filter(a => (a.status as string) === "break").length,
+      cancelled: monthRecs.filter(a => (a.status as string)?.startsWith("cancelled")).length,
+      total:     monthRecs.length,
+    };
+  }, [attendance, thisMonth]);
+
   // Fee pie
   const feePaid    = completedTx.reduce((s,t) => s + t.amount, 0);
   const feePending = totalPendingFees;
@@ -351,22 +363,12 @@ function CommandCenter() {
   // Revenue goal (hardcoded target = 1.2× last month or 50000 floor)
   const revGoal = Math.max(50000, Math.round(revLastMonth * 1.2));
 
-  // Today's classes
+  // Today's classes — any attendance record with any status = marked
   const markedCentreIds = useMemo(() => {
-    const attCountMap: Record<string, number> = {};
-    todayAtt.forEach(a => { attCountMap[a.centerId] = (attCountMap[a.centerId] ?? 0) + 1; });
-    const groupCountMap: Record<string, number> = {};
-    students.forEach(s => {
-      if (s.status === "active" && (s.classType ?? "group") !== "personal" && s.centerId)
-        groupCountMap[s.centerId] = (groupCountMap[s.centerId] ?? 0) + 1;
-    });
-    const marked = new Set<string>();
-    Object.keys(attCountMap).forEach(cId => {
-      const expected = groupCountMap[cId] ?? 0;
-      if (expected > 0 && attCountMap[cId] >= expected) marked.add(cId);
-    });
-    return marked;
-  }, [todayAtt, students]);
+    const s = new Set<string>();
+    todayAtt.forEach(a => { if (a.centerId) s.add(a.centerId); });
+    return s;
+  }, [todayAtt]);
   const todayCentres = useMemo(() => {
     const dow = DAY_ABBR[new Date(today + "T00:00:00").getDay()];
     return centers.filter(c => ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(dow));
@@ -470,6 +472,28 @@ function CommandCenter() {
           </div>
         </div>
       )}
+
+      {/* ── MONTHLY ATTENDANCE TOTALS ── */}
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "18px 20px", marginBottom: 16 }}>
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Attendance This Month</div>
+          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{monthLabel(thisMonth)} · all student records</div>
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
+          {[
+            { label: "Present",   value: monthlyTotals.present,   color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
+            { label: "Absent",    value: monthlyTotals.absent,     color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
+            { label: "Break",     value: monthlyTotals.break,      color: "#d97706", bg: "#fffbeb", border: "#fde68a" },
+            { label: "Cancelled", value: monthlyTotals.cancelled,  color: "#6b7280", bg: "#f9fafb", border: "#e5e7eb" },
+            { label: "Total",     value: monthlyTotals.total,      color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
+          ].map(({ label, value, color, bg, border }) => (
+            <div key={label} style={{ background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "12px 20px", minWidth: 100, textAlign: "center" as const }}>
+              <div style={{ fontSize: 22, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginTop: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* ── 3. TRENDS ROW ── */}
       <div style={s.twoCol}>
@@ -827,10 +851,9 @@ function AdminDashboard() {
   const [centers,   setCenters]   = useState<Center[]>([]);
   const [txList,    setTxList]    = useState<{ month: string; amount: number; studentUid: string; status: string; type: string; method: string; billingMonth: string }[]>([]);
   const [billing,   setBilling]   = useState<Record<string, BillingMonthStatus>>({});
-  const [attStats,  setAttStats]  = useState<{ present: number; total: number } | null>(null);
+  const [monthAttRecs, setMonthAttRecs] = useState<{ centerId: string; status: string; markedBy: string; markedAt: string; date: string }[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [completing,      setCompleting]      = useState<string | null>(null); // month being marked complete
-  const [markedCentreIds, setMarkedCentreIds] = useState<Set<string>>(new Set());
   const [showPending,       setShowPending]       = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
 
@@ -839,11 +862,10 @@ function AdminDashboard() {
     if (!user) return;
     async function load() {
       try {
-        const [studSnap, teachSnap, centersData, attSnap, txSnap, ...billingSnaps] = await Promise.all([
+        const [studSnap, teachSnap, centersData, txSnap, ...billingSnaps] = await Promise.all([
           getDocs(query(collection(db, "users"), where("role", "==", "student"))),
           getDocs(query(collection(db, "users"), where("role", "==", "teacher"))),
           getCenters(),
-          getDocs(query(collection(db, "attendance"), where("date", "==", today))),
           getDocs(query(collection(db, "transactions"), where("date", ">=", isoMonthStart(2)))),
           ...months3.map(m => getDoc(doc(db, "billing_months", m))),
         ]);
@@ -867,29 +889,6 @@ function AdminDashboard() {
         })));
 
         setCenters(centersData);
-
-        let attPresent = 0, attTotal = 0;
-        const attCountMap: Record<string, number> = {};
-        attSnap.forEach(d => {
-          attTotal++;
-          if (d.data().status === "present") attPresent++;
-          const cid = d.data().centerId as string | undefined;
-          if (cid) attCountMap[cid] = (attCountMap[cid] ?? 0) + 1;
-        });
-        setAttStats({ present: attPresent, total: attTotal });
-
-        // A centre is marked complete only when all its active group students have a record today
-        const groupCountMap: Record<string, number> = {};
-        studs.forEach(s => {
-          if (s.status === "active" && (s.classType ?? "group") !== "personal" && s.centerId)
-            groupCountMap[s.centerId] = (groupCountMap[s.centerId] ?? 0) + 1;
-        });
-        const markedIds = new Set<string>();
-        Object.keys(attCountMap).forEach(cid => {
-          const expected = groupCountMap[cid] ?? 0;
-          if (expected > 0 && attCountMap[cid] >= expected) markedIds.add(cid);
-        });
-        setMarkedCentreIds(markedIds);
 
         const txs = txSnap.docs.map(d => ({
           month:        ((d.data().date as string | undefined) ?? "").slice(0, 7),
@@ -932,6 +931,26 @@ function AdminDashboard() {
     load();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, today]);
+
+  // ── Real-time attendance listener — covers the full current month ─────────
+  useEffect(() => {
+    if (!user) return;
+    const monthStart = thisMonth + "-01";
+    const q = query(collection(db, "attendance"), where("date", ">=", monthStart));
+    const unsub = onSnapshot(q, snap => {
+      setMonthAttRecs(snap.docs
+        .filter(d => ((d.data().date as string | undefined) ?? "").startsWith(thisMonth))
+        .map(d => ({
+          centerId: (d.data().centerId ?? "") as string,
+          status:   (d.data().status   ?? "") as string,
+          markedBy: (d.data().markedBy ?? "") as string,
+          markedAt: (d.data().markedAt ?? "") as string,
+          date:     (d.data().date     ?? "") as string,
+        })));
+    });
+    return () => unsub();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid, thisMonth]);
 
   // ── Mark month complete ──────────────────────────────────────────────────
   async function markMonthComplete(month: string) {
@@ -992,8 +1011,25 @@ function AdminDashboard() {
     feeDueMap.forEach((_, uid) => { if (!paidSet.has(uid)) n++; });
     return n;
   }, [feeDueMap, paidSet]);
+  // Today's records derived from the month listener
+  const todayAttRecs = useMemo(() => monthAttRecs.filter(r => r.date === today), [monthAttRecs, today]);
+
+  const attStats = useMemo(() =>
+    todayAttRecs.length > 0
+      ? { present: todayAttRecs.filter(r => r.status === "present").length, total: todayAttRecs.length }
+      : null,
+  [todayAttRecs]);
   const attPct          = attStats && attStats.total > 0 ? Math.round((attStats.present / attStats.total) * 100) : null;
   const attBad          = attPct !== null && attPct < 60;
+
+  // Monthly attendance totals — every student remark counts
+  const monthlyTotals = useMemo(() => ({
+    present:   monthAttRecs.filter(r => r.status === "present").length,
+    absent:    monthAttRecs.filter(r => r.status === "absent").length,
+    break:     monthAttRecs.filter(r => r.status === "break").length,
+    cancelled: monthAttRecs.filter(r => r.status?.startsWith("cancelled")).length,
+    total:     monthAttRecs.length,
+  }), [monthAttRecs]);
 
   // This month billing
   const thisMonthBilling = billing[thisMonth];
@@ -1010,6 +1046,37 @@ function AdminDashboard() {
     teachers.forEach(t => { m[t.uid] = t.displayName; });
     return m;
   }, [teachers]);
+
+  // Any attendance record for a centre today = marked (regardless of status or count)
+  const markedCentreIds = useMemo(() => {
+    const s = new Set<string>();
+    todayAttRecs.forEach(r => { if (r.centerId) s.add(r.centerId); });
+    return s;
+  }, [todayAttRecs]);
+
+  // Info for the notification panel — one entry per marked centre
+  const markedCentresInfo = useMemo(() => Array.from(markedCentreIds).map(cid => {
+    const centre = centers.find(c => c.id === cid);
+    const recs   = todayAttRecs.filter(r => r.centerId === cid);
+    const first  = [...recs].sort((a, b) => a.markedAt.localeCompare(b.markedAt))[0];
+    const markedTime  = first?.markedAt
+      ? new Date(first.markedAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+      : "";
+    const teacherName = adminTeacherMap[first?.markedBy ?? ""] ?? "";
+    const p  = recs.filter(r => r.status === "present").length;
+    const a  = recs.filter(r => r.status === "absent").length;
+    const br = recs.filter(r => r.status === "break").length;
+    const ca = recs.filter(r => r.status?.startsWith("cancelled")).length;
+    const parts: string[] = [];
+    if (p  > 0) parts.push(`${p} present`);
+    if (a  > 0) parts.push(`${a} absent`);
+    if (br > 0) parts.push(`${br} break`);
+    if (ca > 0) parts.push("cancelled");
+    return {
+      cid, name: centre?.name ?? "Centre", markedTime, teacherName,
+      summary: parts.join(" · ") || `${recs.length} marked`,
+    };
+  }), [markedCentreIds, todayAttRecs, centers, adminTeacherMap]);
 
   // Today's classes
   const todayDow    = useMemo(() => DAY_ABBR[new Date(today + "T00:00:00").getDay()], [today]);
@@ -1088,6 +1155,15 @@ function AdminDashboard() {
                     cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0,
                   }}>
                   🔔
+                  {markedCentreIds.size > 0 && (
+                    <span style={{
+                      position: "absolute", top: 1, right: 1, background: "#16a34a", color: "#fff",
+                      borderRadius: "50%", width: 15, height: 15, fontSize: 8, fontWeight: 800,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {markedCentreIds.size}
+                    </span>
+                  )}
                 </button>
                 {/* Pending icon */}
                 <button
@@ -1123,12 +1199,35 @@ function AdminDashboard() {
             {showNotifications && (
               <div style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, marginBottom: 16, overflow: "hidden", boxShadow: "var(--shadow-sm)" }}>
                 <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--color-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text-primary)" }}>🔔 Notifications</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text-primary)" }}>🔔 Attendance — Today</span>
                   <button onClick={() => setShowNotifications(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--color-text-muted)", fontSize: 16 }}>✕</button>
                 </div>
-                <div style={{ padding: "28px 20px", textAlign: "center", fontSize: 13, color: "var(--color-text-muted)" }}>
-                  No new notifications
-                </div>
+                {markedCentresInfo.length === 0 ? (
+                  <div style={{ padding: "28px 20px", textAlign: "center", fontSize: 13, color: "var(--color-text-muted)" }}>
+                    No attendance marked yet today
+                  </div>
+                ) : (
+                  <div style={{ padding: "0 20px 8px" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text-muted)", textTransform: "uppercase" as const, letterSpacing: "0.05em", padding: "12px 0 6px" }}>
+                      Marked today
+                    </div>
+                    {markedCentresInfo.map((info, i) => (
+                      <div key={info.cid} style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "11px 0", borderTop: i === 0 ? "none" : "1px solid var(--color-border)" }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-success)" }}>✓ {info.name}</div>
+                          <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 3 }}>
+                            {info.summary}{info.teacherName ? ` · by ${info.teacherName}` : ""}
+                          </div>
+                        </div>
+                        {info.markedTime && (
+                          <span style={{ fontSize: 11, fontWeight: 700, background: "#f0fdf4", color: "#16a34a", border: "1px solid #bbf7d0", borderRadius: 99, padding: "3px 10px", whiteSpace: "nowrap" as const, flexShrink: 0, marginTop: 2 }}>
+                            {info.markedTime}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1191,8 +1290,8 @@ function AdminDashboard() {
         <div style={adm.kpiDiv} />
         <KpiTile
           label="Attendance Today"
-          value={loading ? "…" : attStats?.total === 0 ? "—" : `${attPct ?? 0}%`}
-          sub={loading ? "" : attStats?.total === 0 ? "No records yet" : `${attStats?.present ?? 0} / ${attStats?.total ?? 0} present`}
+          value={loading ? "…" : !attStats ? "—" : `${attPct ?? 0}%`}
+          sub={loading ? "" : !attStats ? "No records yet" : `${attStats.present} / ${attStats.total} present`}
           valueColor={attBad ? "var(--color-danger)" : attPct !== null ? "var(--color-success)" : undefined}
         />
         <div style={adm.kpiDiv} />
@@ -1236,6 +1335,28 @@ function AdminDashboard() {
           </div>
         </div>
       )}
+
+      {/* ── MONTHLY ATTENDANCE TOTALS ── */}
+      <div style={adm.section}>
+        <div style={adm.secHeader}>
+          <span style={adm.secTitle}>Attendance This Month</span>
+          <span style={adm.secSub}>{monthLabel(thisMonth)} · all student records</span>
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
+          {[
+            { label: "Present",   value: monthlyTotals.present,   color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
+            { label: "Absent",    value: monthlyTotals.absent,     color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
+            { label: "Break",     value: monthlyTotals.break,      color: "#d97706", bg: "#fffbeb", border: "#fde68a" },
+            { label: "Cancelled", value: monthlyTotals.cancelled,  color: "#6b7280", bg: "#f9fafb", border: "#e5e7eb" },
+            { label: "Total",     value: monthlyTotals.total,      color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
+          ].map(({ label, value, color, bg, border }) => (
+            <div key={label} style={{ background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "12px 20px", minWidth: 100, textAlign: "center" as const }}>
+              <div style={{ fontSize: 22, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginTop: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* ── MONTHLY FINANCE PANEL ── */}
       <div style={adm.section}>
