@@ -7,10 +7,15 @@ import { useAuth } from "@/hooks/useAuth";
 import { ROLE_ROUTES } from "@/config/constants";
 
 const ERROR_MESSAGES: Record<string, string> = {
-  "AUTH/USER_NOT_FOUND":     "Account not found. Contact your administrator.",
-  "AUTH/ACCOUNT_INACTIVE":   "Your account is inactive. Contact your administrator.",
-  "auth/invalid-credential": "Incorrect email or password.",
-  "auth/too-many-requests":  "Too many attempts. Try again later.",
+  "AUTH/USER_NOT_FOUND":         "Account not found. Contact your administrator.",
+  "AUTH/ACCOUNT_INACTIVE":       "Your account is inactive. Contact your administrator.",
+  "auth/invalid-credential":     "Incorrect email or password.",
+  "auth/wrong-password":         "Incorrect email or password.",
+  "auth/user-not-found":         "Incorrect email or password.",
+  "auth/invalid-email":          "Enter a valid email address.",
+  "auth/user-disabled":          "This account has been disabled. Contact your administrator.",
+  "auth/too-many-requests":      "Too many attempts. Try again later.",
+  "auth/network-request-failed": "Network error. Check your connection and try again.",
 };
 
 export default function LoginPage() {
@@ -50,8 +55,13 @@ export default function LoginPage() {
       // browser's cookie jar, causing middleware to see no cookie → /login loop.
       // submitting stays true — the useEffect redirect will unmount this page.
     } catch (err: unknown) {
-      const code = err instanceof Error ? err.message : "unknown";
-      setError(ERROR_MESSAGES[code] ?? "Something went wrong. Please try again.");
+      // Firebase throws FirebaseError, whose short code (e.g. "auth/invalid-credential")
+      // lives on `.code` — `.message` is a full sentence and never matches ERROR_MESSAGES.
+      // Our own custom throws (e.g. "AUTH/USER_NOT_FOUND") are plain Errors with no
+      // `.code`, so they fall back to `.message`, which IS the short key in that case.
+      const errObj = err as { code?: string; message?: string };
+      const key = errObj.code ?? errObj.message ?? "unknown";
+      setError(ERROR_MESSAGES[key] ?? "Something went wrong. Please try again.");
       setSubmitting(false);
     }
   }

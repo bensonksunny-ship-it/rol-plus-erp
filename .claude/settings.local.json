@@ -74,7 +74,9 @@
       "Bash(taskkill //F //PID 14232)",
       "Bash(git -C \"C:/Users/User/Documents/rol-plus-erp\" diff --stat app/dashboard/students/page.tsx)",
       "Bash(git -C \"C:/Users/User/Documents/rol-plus-erp\" log --oneline -1 -- app/dashboard/students/page.tsx)",
-      "Bash(git -C \"C:/Users/User/Documents/rol-plus-erp\" diff app/dashboard/students/page.tsx)"
+      "Bash(git -C \"C:/Users/User/Documents/rol-plus-erp\" diff app/dashboard/students/page.tsx)",
+      "Bash(powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Select-Object ProcessId, CommandLine | Format-List\" 2>&1)",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 6848,28232,2332 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' -or \\\\$_.CommandLine -like '*rol-plus-erp*' } | Select-Object ProcessId,CommandLine\")"
     ]
   }
 }
