@@ -50,7 +50,31 @@
       "Bash(Start-Process *)",
       "PowerShell(Start-Process \"http://localhost:3000\")",
       "Bash(xargs grep -l \"attendance\")",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(timeout 60 bash -c 'until grep -qE \"Ready in|✓ Ready|Error\" \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\b15atgdeu.output\" 2>/dev/null; do sleep 1; done; cat \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\b15atgdeu.output\"')",
+      "Bash(git show *)",
+      "Bash(git fetch *)",
+      "Bash(timeout 30 bash -c 'until grep -qE \"Ready in|Error\" \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\bvhw3wls5.output\" 2>/dev/null; do sleep 1; done; cat \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\bvhw3wls5.output\"')",
+      "PowerShell(Get-Process *)",
+      "Bash(timeout 30 bash -c 'until grep -qE \"Ready in|Error\" \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\bsiy3sey3.output\" 2>/dev/null; do sleep 1; done; cat \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\bsiy3sey3.output\"')",
+      "Bash(cp \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\scratchpad\\\\check_role.mjs\" ./check_role_tmp.mjs)",
+      "Bash(node check_role_tmp.mjs)",
+      "Bash(rm -f check_role_tmp.mjs)",
+      "Bash(vercel --version)",
+      "Bash(timeout 30 bash -c 'until grep -qE \"Ready in|Error\" \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\b1dfuwibh.output\" 2>/dev/null; do sleep 1; done; cat \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\b1dfuwibh.output\"')",
+      "Read(//tmp/**)",
+      "Bash(timeout 30 bash -c 'until grep -qE \"Ready in|Error\" \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\bsu8fx2k3.output\" 2>/dev/null; do sleep 1; done; cat \"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-User-Documents-rol-plus-erp\\\\71b62b25-8b15-45b0-849d-a3637220c6c5\\\\tasks\\\\bsu8fx2k3.output\"')",
+      "Bash(node -e \"require\\('@babel/core'\\)\")",
+      "Bash(npx eslint *)",
+      "Bash(taskkill //PID 22080 //F)",
+      "Skill(claude-in-chrome)",
+      "Bash(netstat -ano)",
+      "Bash(grep -n \"{/\\\\* Tabs \\\\*/}\\\\|GENERAL TAB\\\\|MASTER TAB\\\\|s.tabs\\\\|s.tab\\\\b\" \"C:\\\\Users\\\\User\\\\Documents\\\\rol-plus-erp\\\\app\\\\dashboard\\\\syllabus\\\\page.tsx\")",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 14232 -Force\")",
+      "Bash(taskkill //F //PID 14232)",
+      "Bash(git -C \"C:/Users/User/Documents/rol-plus-erp\" diff --stat app/dashboard/students/page.tsx)",
+      "Bash(git -C \"C:/Users/User/Documents/rol-plus-erp\" log --oneline -1 -- app/dashboard/students/page.tsx)",
+      "Bash(git -C \"C:/Users/User/Documents/rol-plus-erp\" diff app/dashboard/students/page.tsx)"
     ]
   }
 }

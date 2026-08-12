@@ -2,22 +2,13 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { collection, getDocs, query, where } from "firebase/firestore";
-import { db } from "@/config/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuth } from "@/hooks/useAuth";
 import {
-  getLessonsByCenter,
-  getItemsByLesson,
-  getLessonsForStudent,
-} from "@/services/lesson/lesson.service";
-import {
   seedMasterSyllabus,
   getMasterSyllabusWithMeta,
   deleteMasterSyllabus,
-  getStudentSyllabus,
-  updateStudentSyllabusItems,
 } from "@/services/syllabus/lm-syllabus.service";
 import {
   TRACK_UI_CONFIG,
@@ -32,13 +23,10 @@ import {
 import { parseFile } from "@/lib/xlsx-parser";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
-import type { Lesson } from "@/types/lesson";
 import type {
   LittleMozartsTrack,
   LMTrackOrBridge,
   MasterSyllabusItem,
-  StudentSyllabusItem,
-  LMStudentSyllabus,
   LMItemType,
   LMProgram,
   LMCourse,
@@ -55,26 +43,7 @@ export default function SyllabusPage() {
   );
 }
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface StudentOption {
-  uid:         string;
-  displayName: string;
-  studentID:   string;
-  admissionNo: string;
-  centerId:    string;
-}
-
-interface CenterOption {
-  id:   string;
-  name: string;
-}
-
-interface LessonWithCount extends Lesson {
-  itemCount: number;
-}
-
-type Tab = "lessons" | "track" | "master";
+type Tab = "general" | "master";
 
 // ─── Master tab helpers ───────────────────────────────────────────────────────
 
@@ -155,25 +124,8 @@ function validateMasterRows(rows: Record<string, string>[]): string[] {
 function SyllabusContent() {
   const { user, role }                        = useAuth();
   const router                                = useRouter();
-  const [tab, setTab]                         = useState<Tab>("lessons");
-  const [centers, setCenters]                 = useState<CenterOption[]>([]);
-  const [students, setStudents]               = useState<StudentOption[]>([]);
-  const [selectedCenter, setSelectedCenter]   = useState<string>("");
-  const [lessons, setLessons]                 = useState<LessonWithCount[]>([]);
-  const [loading, setLoading]                 = useState(false);
-  const [initialising, setInitialising]       = useState(true);
+  const [tab, setTab]                         = useState<Tab>("general");
   const { toasts, toast, remove }             = useToast();
-
-  // Track tab state
-  const [trackStudent, setTrackStudent]           = useState<string>("");
-  const [trackLessonCount, setTrackLessonCount]   = useState<number | null>(null);
-  const [trackLoadingCount, setTrackLoadingCount] = useState(false);
-
-  // Track tab — LM individual syllabus
-  const [trackLMSyllabus, setTrackLMSyllabus]     = useState<LMStudentSyllabus | null>(null);
-  const [trackLMLoading, setTrackLMLoading]       = useState(false);
-  const [trackLMEditItems, setTrackLMEditItems]   = useState<StudentSyllabusItem[] | null>(null);
-  const [trackLMSaving, setTrackLMSaving]         = useState(false);
 
   // Master tab state
   const masterFileRef                           = useRef<HTMLInputElement>(null);
@@ -188,6 +140,8 @@ function SyllabusContent() {
   const [masterImporting, setMasterImporting]   = useState(false);
   const [masterDragOver, setMasterDragOver]     = useState(false);
   const [masterTrackPreview, setMasterTrackPreview] = useState<MasterSyllabusItem[] | null>(null);
+  const [expandedSlot, setExpandedSlot]         = useState<{ track: LMTrackOrBridge; course: LMCourse } | null>(null);
+  const [importOpen, setImportOpen]             = useState(false);
 
   // Manage existing syllabuses
   const [slotStatuses, setSlotStatuses]         = useState<Record<string, SlotStatus>>({});
@@ -199,132 +153,6 @@ function SyllabusContent() {
   const [editSlot, setEditSlot]                 = useState<{ track: LMTrackOrBridge; course: LMCourse } | null>(null);
   const [editItems, setEditItems]               = useState<MasterSyllabusItem[]>([]);
   const [editSaving, setEditSaving]             = useState(false);
-
-  // ─── Load centers + students ─────────────────────────────────────────────
-
-  useEffect(() => {
-    async function init() {
-      try {
-        const [centersSnap, studentsSnap] = await Promise.all([
-          getDocs(collection(db, "centers")),
-          getDocs(query(collection(db, "users"), where("role", "==", "student"))),
-        ]);
-        setCenters(centersSnap.docs.map(d => ({ id: d.id, name: (d.data().name as string) ?? d.id })));
-        setStudents(studentsSnap.docs.map(d => {
-          const dt = d.data();
-          return {
-            uid:         d.id,
-            displayName: (dt.displayName as string) ?? (dt.name as string) ?? "",
-            studentID:   (dt.studentID  as string) ?? "",
-            admissionNo: (dt.admissionNo as string) ?? (dt.admissionNumber as string) ?? "",
-            centerId:    (dt.centerId   as string) ?? "",
-          };
-        }));
-      } catch {
-        toast("Failed to load centers/students.", "error");
-      } finally {
-        setInitialising(false);
-      }
-    }
-    init();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ─── Lessons tab ─────────────────────────────────────────────────────────
-
-  const loadLessons = useCallback(async (centerId: string) => {
-    if (!centerId) { setLessons([]); return; }
-    setLoading(true);
-    setLessons([]);
-    try {
-      const data   = await getLessonsByCenter(centerId);
-      const counts = await Promise.all(data.map(l => getItemsByLesson(l.id)));
-      setLessons(data.map((l, i) => ({ ...l, itemCount: counts[i]?.length ?? 0 })));
-      if (data.length === 0) toast("No lessons found for this center.", "success");
-    } catch (err) {
-      toast(`Failed to load lessons: ${err instanceof Error ? err.message : String(err)}`, "error");
-    } finally {
-      setLoading(false);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function handleCenterChange(centerId: string) {
-    setSelectedCenter(centerId);
-    setLessons([]);
-    loadLessons(centerId);
-  }
-
-  // ─── Track tab ───────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (!trackStudent) { setTrackLessonCount(null); return; }
-    setTrackLoadingCount(true);
-    getLessonsForStudent(trackStudent)
-      .then(data => setTrackLessonCount(data.lessons.length))
-      .catch(() => setTrackLessonCount(null))
-      .finally(() => setTrackLoadingCount(false));
-  }, [trackStudent]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!trackStudent) { setTrackLMSyllabus(null); setTrackLMEditItems(null); return; }
-    setTrackLMLoading(true);
-    getStudentSyllabus(trackStudent)
-      .then(data => setTrackLMSyllabus(data))
-      .catch(() => setTrackLMSyllabus(null))
-      .finally(() => setTrackLMLoading(false));
-  }, [trackStudent]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function handleStartStudentEdit() {
-    if (!trackLMSyllabus) return;
-    setTrackLMEditItems(trackLMSyllabus.items.map(i => ({ ...i })));
-  }
-
-  function handleCancelStudentEdit() { setTrackLMEditItems(null); }
-
-  async function handleSaveStudentEdit() {
-    if (!trackLMEditItems || !trackStudent || trackLMSaving) return;
-    const items = trackLMEditItems;
-    setTrackLMSaving(true);
-    try {
-      await updateStudentSyllabusItems(trackStudent, items, user?.uid ?? "");
-      toast(`Student syllabus updated — ${items.length} items.`, "success");
-      setTrackLMSyllabus(prev => prev ? { ...prev, items } : prev);
-      setTrackLMEditItems(null);
-    } catch (err) {
-      toast(`Save failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-    } finally {
-      setTrackLMSaving(false);
-    }
-  }
-
-  function updateStudentEditItem(index: number, field: keyof MasterSyllabusItem, value: MasterSyllabusItem[keyof MasterSyllabusItem]) {
-    setTrackLMEditItems(prev => prev ? prev.map((item, i) => i === index ? { ...item, [field]: value } : item) : prev);
-  }
-
-  function updateStudentEditItemType(index: number, type: LMItemType) {
-    setTrackLMEditItems(prev => prev ? prev.map((item, i) => {
-      if (i !== index) return item;
-      return { ...item, itemType: type, metronomeBpm: type === "concept" ? null : item.metronomeBpm, handAllocation: type === "concept" ? null : item.handAllocation };
-    }) : prev);
-  }
-
-  function removeStudentEditItem(index: number) {
-    setTrackLMEditItems(prev => prev ? prev.filter((_, i) => i !== index) : prev);
-  }
-
-  function addStudentEditItem() {
-    const last = trackLMEditItems?.[trackLMEditItems.length - 1];
-    const cfg  = trackLMSyllabus ? TRACK_UI_CONFIG[trackLMSyllabus.track] : null;
-    setTrackLMEditItems(prev => prev ? [...prev, {
-      lessonNumber:   last?.lessonNumber ?? 1,
-      lessonName:     last?.lessonName  ?? "",
-      itemType:       "exercise" as LMItemType,
-      itemTitle:      "",
-      metronomeBpm:   cfg?.metronomeBpm    ?? null,
-      handAllocation: cfg?.handIntegration ?? null,
-      completed:      false,
-      completedAt:    null,
-    }] : prev);
-  }
 
   // ─── Master tab ───────────────────────────────────────────────────────────
 
@@ -467,6 +295,7 @@ function SyllabusContent() {
     setMasterTrackPreview(null);
     setDeleteConfirmKey(null);
     setClearAllConfirm(false);
+    setExpandedSlot(null);
     resetMaster();
     const slots = PROGRAM_SLOTS[prog];
     if (slots.length > 0) {
@@ -475,10 +304,39 @@ function SyllabusContent() {
     }
   }
 
+  function handleToggleSlot(track: LMTrackOrBridge, course: LMCourse) {
+    const isOpen = expandedSlot?.track === track && expandedSlot?.course === course;
+    setMasterTrack(track);
+    setMasterCourse(course);
+    setDeleteConfirmKey(null);
+    setImportOpen(false);
+    if (isOpen) {
+      setMasterTrackPreview(null);
+      setExpandedSlot(null);
+    } else {
+      const selSt = slotStatuses[slotKey(track, course)];
+      setMasterTrackPreview(selSt?.exists ? selSt.items : null);
+      setExpandedSlot({ track, course });
+      resetMaster();
+    }
+  }
+
   function handleStartEdit(track: LMTrackOrBridge, course: LMCourse, items: MasterSyllabusItem[]) {
     setEditSlot({ track, course });
     setEditItems(items.map(i => ({ ...i })));
     setDeleteConfirmKey(null);
+  }
+
+  function handlePreviewSlot(track: LMTrackOrBridge, course: LMCourse, items: MasterSyllabusItem[]) {
+    const key = slotKey(track, course);
+    // Toggle: clicking the currently-previewed slot closes the preview
+    if (previewSlotKey === key) {
+      setMasterTrackPreview(null);
+      return;
+    }
+    setMasterTrack(track);
+    setMasterCourse(course);
+    setMasterTrackPreview(items);
   }
 
   function handleEditCancel() {
@@ -535,6 +393,7 @@ function SyllabusContent() {
 
   const isAdmin       = role === "admin" || role === "super_admin";
   const uniqueLessons = Array.from(new Set(masterPreview.map(r => r.lessonNumber))).sort((a, b) => a - b);
+  const previewSlotKey = masterTrackPreview ? slotKey(masterTrack, masterCourse) : null;
 
   const previewByLesson = useMemo(() => {
     if (!masterTrackPreview) return [];
@@ -560,291 +419,41 @@ function SyllabusContent() {
 
       {/* Tabs */}
       <div style={s.tabs}>
-        {(["lessons", "track", ...(isAdmin ? ["master"] : [])] as Tab[]).map(t => (
+        {(["general", ...(isAdmin ? ["master"] : [])] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
             style={{ ...s.tab, ...(tab === t ? s.tabActive : {}) }}
           >
-            {t === "lessons" ? "📚 Lessons" : t === "track" ? "📊 Track" : "🎼 Master"}
+            {t === "general" ? "📖 General" : "🎼 Master"}
           </button>
         ))}
       </div>
 
-      {/* ─── LESSONS TAB ─────────────────────────────────────────────────── */}
-      {tab === "lessons" && (
-        <>
-          <div style={s.filterCard}>
-            <div style={s.filterTitle}>Select Center</div>
-            <select
-              value={selectedCenter}
-              onChange={e => handleCenterChange(e.target.value)}
-              style={s.select}
-              disabled={initialising}
-            >
-              <option value="">— Select center —</option>
-              {centers.map(c => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-            {loading && <span style={s.loadingText}>Loading lessons…</span>}
-            {isAdmin && selectedCenter && (
-              <button
-                onClick={() => router.push(`/dashboard/lessons/import?scope=center&id=${selectedCenter}`)}
-                style={{ ...s.importBtn, marginLeft: "auto" }}
-              >
-                ↑ Import Syllabus
-              </button>
-            )}
-          </div>
-
-          {lessons.length > 0 && (
-            <div style={s.tableWrapper}>
-              <div style={s.tableHeader}>
-                <span style={s.tableTitle}>
-                  {lessons.length} lesson{lessons.length !== 1 ? "s" : ""}
-                  {" · "}{centers.find(c => c.id === selectedCenter)?.name ?? ""}
-                </span>
-              </div>
-              <table style={s.table}>
-                <thead>
-                  <tr>
-                    {["Order", "No.", "Title", "Items"].map(h => (
-                      <th key={h} style={s.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {lessons.map((lesson, i) => (
-                    <tr key={lesson.id} style={i % 2 === 0 ? s.rowEven : s.rowOdd}>
-                      <td style={{ ...s.td, ...s.mono }}>{lesson.order}</td>
-                      <td style={{ ...s.td, ...s.mono }}>{lesson.lessonNumber}</td>
-                      <td style={{ ...s.td, fontWeight: 600, color: "#111" }}>{lesson.title}</td>
-                      <td style={{ ...s.td, ...s.mono }}>
-                        <span style={s.itemCountBadge}>{lesson.itemCount}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {!loading && lessons.length === 0 && (
-            <div style={s.emptyState}>
-              <div style={s.emptyIcon}>📚</div>
-              <div style={s.emptyText}>
-                {selectedCenter ? "No lessons found for this center." : "Select a center above to view its lessons."}
-              </div>
-              {isAdmin && (
-                <div style={s.emptyHint}>
-                  No lessons yet?{" "}
-                  <button
-                    onClick={() =>
-                      router.push(selectedCenter
-                        ? `/dashboard/lessons/import?scope=center&id=${selectedCenter}`
-                        : "/dashboard/lessons/import")
-                    }
-                    style={s.linkBtn}
-                  >
-                    Import from Excel
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-        </>
-      )}
-
-      {/* ─── TRACK TAB ───────────────────────────────────────────────────── */}
-      {tab === "track" && (
-        <div style={s.trackCard}>
-          <div style={s.trackTitle}>Track Student Progress</div>
-          <div style={s.fieldGroup}>
-            <label style={s.label}>Student</label>
-            <select
-              value={trackStudent}
-              onChange={e => setTrackStudent(e.target.value)}
-              style={s.select}
-              disabled={initialising}
-            >
-              <option value="">— Select student —</option>
-              {students.map(st => (
-                <option key={st.uid} value={st.uid}>
-                  {st.studentID ? `[${st.studentID}] ` : (st.admissionNo ? `[${st.admissionNo}] ` : "")}
-                  {st.displayName || st.uid}
-                  {st.centerId ? ` · ${centers.find(c => c.id === st.centerId)?.name ?? st.centerId}` : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-          {trackStudent ? (
-            <>
-              <div style={s.trackStatus}>
-                {trackLoadingCount ? (
-                  <span style={s.trackStatusChecking}>Checking syllabus…</span>
-                ) : trackLessonCount === null ? null : trackLessonCount === 0 ? (
-                  <span style={s.trackStatusNone}>
-                    ⚠ No lessons assigned to this student yet — import one below
-                  </span>
-                ) : (
-                  <span style={s.trackStatusFound}>
-                    ✓ {trackLessonCount} lesson{trackLessonCount !== 1 ? "s" : ""} found for this student
-                  </span>
-                )}
-              </div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
-                <button
-                  onClick={() => router.push(`/dashboard/student-syllabus/${trackStudent}`)}
-                  style={s.viewProgressBtn}
-                >
-                  View Full Syllabus Progress →
-                </button>
-                {isAdmin && (
-                  <button
-                    onClick={() =>
-                      router.push(`/dashboard/lessons/import?scope=student&id=${trackStudent}`)
-                    }
-                    style={s.importBtn}
-                  >
-                    ↑ Import Custom Lessons
-                  </button>
-                )}
-              </div>
-            </>
-          ) : (
-            <div style={s.emptyInline}>Select a student above to view their progress.</div>
-          )}
-
-          {/* LM individual syllabus */}
-          {trackStudent && (
-            <div style={s.lmSection}>
-              <div style={s.lmSectionHeader}>
-                <span style={s.lmSectionTitle}>Little Mozarts Syllabus</span>
-                {trackLMSyllabus && !trackLMEditItems && isAdmin && (
-                  <button onClick={handleStartStudentEdit} style={{ ...s.mgmtBtn, ...s.editBtn }}>
-                    Edit Syllabus
-                  </button>
-                )}
-              </div>
-
-              {trackLMLoading ? (
-                <div style={s.lmEmpty}>Loading…</div>
-              ) : !trackLMSyllabus ? (
-                <div style={s.lmEmpty}>No Little Mozarts syllabus found for this student.</div>
-              ) : !trackLMEditItems ? (
-                <div style={s.lmInfo}>
-                  <span style={{ ...s.mgmtTrackBadge, ...TRACK_COLORS[trackLMSyllabus.track], border: `1px solid ${TRACK_COLORS[trackLMSyllabus.track].border}` }}>
-                    {TRACK_SHORT[trackLMSyllabus.track]}
-                  </span>
-                  <span style={s.lmStatChip}>{trackLMSyllabus.items.length} items</span>
-                  <span style={{ ...s.lmStatChip, color: "#16a34a" }}>
-                    {trackLMSyllabus.items.filter(i => i.completed).length} completed
-                  </span>
-                  <span style={{ ...s.lmStatChip, color: "#9ca3af" }}>
-                    {trackLMSyllabus.items.filter(i => !i.completed).length} remaining
-                  </span>
-                </div>
-              ) : (
-                <div>
-                  <div style={s.lmEditHeader}>
-                    <div>
-                      <span style={s.lmEditTitle}>
-                        Editing: {TRACK_SHORT[trackLMSyllabus.track]} syllabus — {trackLMEditItems.length} items
-                      </span>
-                      <div style={s.lmEditNote}>Changes apply to this student only, not the master syllabus</div>
-                    </div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button onClick={handleSaveStudentEdit} disabled={trackLMSaving} style={{ ...s.mgmtBtn, ...s.saveBtn }}>
-                        {trackLMSaving ? "Saving…" : "Save changes"}
-                      </button>
-                      <button onClick={handleCancelStudentEdit} style={{ ...s.mgmtBtn, ...s.cancelBtn }}>Cancel</button>
-                    </div>
-                  </div>
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={s.editTable}>
-                      <thead>
-                        <tr>
-                          {["#", "Lesson", "Lesson Name", "Type", "Title", "BPM", "Hand", "Done", ""].map(h => (
-                            <th key={h} style={s.editTh}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {trackLMEditItems.map((item, i) => {
-                          const isConcept = item.itemType === "concept";
-                          return (
-                            <tr key={i} style={i % 2 === 0 ? s.rowEven : s.rowOdd}>
-                              <td style={{ ...s.editTd, ...s.mono, color: "#9ca3af" }}>{i + 1}</td>
-                              <td style={s.editTd}>
-                                <input type="number" value={item.lessonNumber} min={1}
-                                  onChange={e => updateStudentEditItem(i, "lessonNumber", parseInt(e.target.value) || 1)}
-                                  style={{ ...s.editInput, width: 48 }} />
-                              </td>
-                              <td style={s.editTd}>
-                                <input value={item.lessonName}
-                                  onChange={e => updateStudentEditItem(i, "lessonName", e.target.value)}
-                                  style={{ ...s.editInput, minWidth: 130 }} />
-                              </td>
-                              <td style={s.editTd}>
-                                <select value={item.itemType}
-                                  onChange={e => updateStudentEditItemType(i, e.target.value as LMItemType)}
-                                  style={s.editSelect}>
-                                  {VALID_ITEM_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                                </select>
-                              </td>
-                              <td style={s.editTd}>
-                                <input value={item.itemTitle}
-                                  onChange={e => updateStudentEditItem(i, "itemTitle", e.target.value)}
-                                  style={{ ...s.editInput, minWidth: 180 }} />
-                              </td>
-                              <td style={s.editTd}>
-                                <input type="number" value={item.metronomeBpm ?? ""} disabled={isConcept} placeholder="—"
-                                  onChange={e => updateStudentEditItem(i, "metronomeBpm", e.target.value ? parseInt(e.target.value) : null)}
-                                  style={{ ...s.editInput, width: 52, opacity: isConcept ? 0.3 : 1 }} />
-                              </td>
-                              <td style={s.editTd}>
-                                <select value={item.handAllocation ?? ""} disabled={isConcept}
-                                  onChange={e => updateStudentEditItem(i, "handAllocation", (e.target.value || null) as HandAllocation | null)}
-                                  style={{ ...s.editSelect, opacity: isConcept ? 0.3 : 1 }}>
-                                  <option value="">—</option>
-                                  <option value="RH Only">RH Only</option>
-                                  <option value="Hands Separated">Hands Separated</option>
-                                  <option value="Hands Together">Hands Together</option>
-                                </select>
-                              </td>
-                              <td style={{ ...s.editTd, textAlign: "center" as const }}>
-                                {item.completed
-                                  ? <span style={{ color: "#16a34a", fontSize: 13, fontWeight: 700 }}>✓</span>
-                                  : <span style={{ color: "#d1d5db" }}>—</span>}
-                              </td>
-                              <td style={s.editTd}>
-                                <button onClick={() => removeStudentEditItem(i)} style={s.removeRowBtn}>✕</button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  <button onClick={addStudentEditItem} style={s.addRowBtn}>+ Add Row</button>
-                </div>
-              )}
-            </div>
-          )}
+      {/* ─── GENERAL TAB ─────────────────────────────────────────────────── */}
+      {tab === "general" && (
+        <div style={s.emptyState}>
+          <div style={s.emptyIcon}>📖</div>
+          <div style={s.emptyText}>Import a syllabus from an Excel file for a center or a student.</div>
+          <button
+            onClick={() => router.push("/dashboard/lessons/import")}
+            style={s.importBtn}
+          >
+            ↑ Import Syllabus
+          </button>
         </div>
       )}
 
-      {/* ─── MASTER TAB ──────────────────────────────────────────────────── */}
-      {tab === "master" && isAdmin && (
+      {/* ─── MASTER: per-course view & import (each course slot carries its own View/Import actions) ── */}
+      {isAdmin && tab === "master" && (
         <div>
 
           {/* ── Program Selector ── */}
-          <div style={{ padding: "16px 16px 4px" }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 10 }}>
+          <div style={{ padding: "0 0 12px" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 8 }}>
               Program
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
               {(Object.entries(PROGRAM_LABELS) as [LMProgram, string][]).map(([prog, label]) => {
                 const isSelected = prog === masterProgram;
                 const isGuitar   = prog.includes("guitar");
@@ -854,8 +463,8 @@ function SyllabusContent() {
                     type="button"
                     onClick={() => handleProgramChange(prog)}
                     style={{
-                      padding:     "8px 14px",
-                      borderRadius: 8,
+                      padding:     isSelected ? "6px 12px" : "7px 13px",
+                      borderRadius: 7,
                       cursor:       "pointer",
                       border:       isSelected ? "2px solid #4f46e5" : "1px solid #e5e7eb",
                       background:   isSelected ? "#ede9fe" : "#f9fafb",
@@ -875,103 +484,11 @@ function SyllabusContent() {
             </div>
           </div>
 
-          {/* ── Manage existing syllabuses ── */}
-          <div style={s.mgmtSection}>
-            <div style={s.mgmtHeader}>
-              <span style={s.mgmtTitle}>{PROGRAM_LABELS[masterProgram]} — Imported Syllabuses</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {clearAllConfirm ? (
-                  <>
-                    <span style={{ fontSize: 12, color: "#374151", fontWeight: 500 }}>Clear all {PROGRAM_SLOTS[masterProgram].length} syllabuses?</span>
-                    <button
-                      onClick={handleClearAll}
-                      disabled={clearAllProcessing}
-                      style={{ ...s.mgmtBtn, ...s.confirmDeleteBtn }}
-                    >
-                      {clearAllProcessing ? "Clearing…" : "Yes, clear all"}
-                    </button>
-                    <button onClick={() => setClearAllConfirm(false)} style={{ ...s.mgmtBtn, ...s.cancelBtn }}>
-                      Cancel
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button onClick={() => setClearAllConfirm(true)} style={{ ...s.mgmtBtn, ...s.deleteBtn }}>
-                      Clear All
-                    </button>
-                    <button onClick={() => loadSlotStatuses(masterProgram)} disabled={statusLoading} style={s.refreshBtn}>
-                      {statusLoading ? "Loading…" : "↺ Refresh"}
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-
-            {PROGRAM_SLOTS[masterProgram].map(slot => {
-              const key      = slotKey(slot.track, slot.course);
-              const status   = slotStatuses[key];
-              const colors   = TRACK_COLORS[slot.track];
-              const isConfirm = deleteConfirmKey === key;
-              const isEditing = editSlot?.track === slot.track && editSlot?.course === slot.course;
-              return (
-                <div key={key} style={{ ...s.mgmtRow, ...(isEditing ? s.mgmtRowEditing : {}) }}>
-                  <div style={s.mgmtSlotCell}>
-                    <span style={{ ...s.mgmtTrackBadge, background: colors.bg, color: colors.accent, border: `1px solid ${colors.border}` }}>
-                      {TRACK_SHORT[slot.track]}
-                    </span>
-                    <span style={s.mgmtCourseLabel}>{COURSE_LABELS[slot.course]}</span>
-                  </div>
-                  <div style={s.mgmtStatusCell}>
-                    {status === undefined ? (
-                      <span style={s.statusLoading}>…</span>
-                    ) : status.exists ? (
-                      <span style={s.statusLive}>● Live · {status.items.length} items</span>
-                    ) : (
-                      <span style={s.statusEmpty}>○ Empty</span>
-                    )}
-                  </div>
-                  <div style={s.mgmtActionsCell}>
-                    {status?.exists && !isConfirm && (
-                      <>
-                        <button
-                          onClick={() => handleStartEdit(slot.track, slot.course, status.items)}
-                          style={{ ...s.mgmtBtn, ...s.editBtn, ...(isEditing ? s.editBtnActive : {}) }}
-                        >
-                          {isEditing ? "Editing…" : "Edit"}
-                        </button>
-                        <button
-                          onClick={() => setDeleteConfirmKey(key)}
-                          style={{ ...s.mgmtBtn, ...s.deleteBtn }}
-                        >
-                          Delete
-                        </button>
-                      </>
-                    )}
-                    {isConfirm && (
-                      <div style={s.confirmRow}>
-                        <span style={s.confirmText}>Delete this syllabus?</span>
-                        <button
-                          onClick={() => handleDeleteSlot(slot.track, slot.course)}
-                          disabled={deleteProcessing}
-                          style={{ ...s.mgmtBtn, ...s.confirmDeleteBtn }}
-                        >
-                          {deleteProcessing ? "Deleting…" : "Yes, delete"}
-                        </button>
-                        <button onClick={() => setDeleteConfirmKey(null)} style={{ ...s.mgmtBtn, ...s.cancelBtn }}>
-                          Cancel
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-
-            {/* Edit panel */}
-            {editSlot && (
+          {/* Edit panel — opens when you click Edit on a slot in the Import Target pathway below */}
+          {editSlot && (
               <div style={s.editPanel}>
                 <div style={s.masterEditNoteBanner}>
-                  ℹ Editing the master syllabus affects new enrollments only. Students already enrolled keep their own copy — edit those individually from the Track tab.
+                  ℹ Editing the master syllabus affects new enrollments only. Students already enrolled keep their own copy and are not affected.
                 </div>
                 <div style={s.editPanelHeader}>
                   <span style={s.editPanelTitle}>
@@ -1067,271 +584,362 @@ function SyllabusContent() {
                 <button onClick={addEditItem} style={s.addRowBtn}>+ Add Row</button>
               </div>
             )}
-          </div>
 
-          {/* Bento grid — pathway selector + upload zone */}
-          <div style={s.bentoGrid}>
-
-            {/* Card 1: Program + Slot grid */}
-            <div style={s.bentoCard}>
-              <div style={s.bentoCardLabel}>Import Target</div>
-              <div style={s.programHeader}>
-                <span style={s.programIcon}>{masterProgram.includes("guitar") ? "🎸" : "🎹"}</span>
-                <span style={s.programTitle}>{PROGRAM_LABELS[masterProgram]}</span>
+          {/* Import Target — click a course to open it and import/view its syllabus right there */}
+          <div style={s.bentoCard}>
+            <div style={s.bentoCardHead}>
+              <span style={{ ...s.bentoCardLabel, marginBottom: 0 }}>Import Target</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {clearAllConfirm ? (
+                  <>
+                    <span style={{ fontSize: 11, color: "#374151", fontWeight: 500 }}>Clear all {PROGRAM_SLOTS[masterProgram].length}?</span>
+                    <button onClick={handleClearAll} disabled={clearAllProcessing} style={{ ...s.mgmtBtn, ...s.confirmDeleteBtn }}>
+                      {clearAllProcessing ? "Clearing…" : "Yes"}
+                    </button>
+                    <button onClick={() => setClearAllConfirm(false)} style={{ ...s.mgmtBtn, ...s.cancelBtn }}>Cancel</button>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={() => setClearAllConfirm(true)} style={{ ...s.mgmtBtn, ...s.deleteBtn }}>Clear All</button>
+                    <button onClick={() => loadSlotStatuses(masterProgram)} disabled={statusLoading} style={s.refreshBtn} title="Refresh statuses">
+                      {statusLoading ? "…" : "↺"}
+                    </button>
+                  </>
+                )}
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {getProgramPathway(masterProgram).map(({ track, steps }) => {
-                  const trackColors = TRACK_COLORS[track];
-                  return (
-                    <div key={track} style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" as const }}>
+            </div>
+            <div style={s.programHeader}>
+              <span style={s.programIcon}>{masterProgram.includes("guitar") ? "🎸" : "🎹"}</span>
+              <span style={s.programTitle}>{PROGRAM_LABELS[masterProgram]}</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+              {getProgramPathway(masterProgram).map(({ track, steps }) => {
+                const trackColors = TRACK_COLORS[track];
+                const isTrackOpen = expandedSlot?.track === track;
+                return (
+                  <div key={track}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const }}>
                       <div style={{
-                        width:         52,
+                        width:         72,
                         flexShrink:    0,
-                        fontSize:      9,
-                        fontWeight:    700,
+                        fontSize:      11,
+                        fontWeight:    800,
                         color:         trackColors.accent,
                         textTransform: "uppercase" as const,
                         letterSpacing: "0.08em",
                         background:    trackColors.bg,
-                        border:        `1px solid ${trackColors.border}`,
-                        borderRadius:  6,
-                        padding:       "4px 5px",
+                        border:        `1.5px solid ${trackColors.border}`,
+                        borderRadius:  9,
+                        padding:       "9px 6px",
                         textAlign:     "center" as const,
                       }}>
                         {TRACK_SHORT[track]}
                       </div>
                       {steps.map((target, idx) => {
-                        const isActive   = masterTrack === target.track && masterCourse === target.course;
+                        const isOpen     = expandedSlot?.track === target.track && expandedSlot?.course === target.course;
                         const stepColors = TRACK_COLORS[target.track];
                         const slotSt     = slotStatuses[slotKey(target.track, target.course)];
                         return (
                           <div key={`${target.track}__${target.course}`} style={{ display: "contents" }}>
                             {idx > 0 && (
-                              <div style={{ color: "#d1d5db", fontSize: 11, flexShrink: 0 }}>→</div>
+                              <div style={{ color: "#c7cbd3", fontSize: 18, flexShrink: 0 }}>→</div>
                             )}
                             <div
-                              onClick={() => {
-                                setMasterTrack(target.track);
-                                setMasterCourse(target.course);
-                                setMasterTrackPreview(slotSt?.exists ? slotSt.items : null);
-                              }}
+                              onClick={() => handleToggleSlot(target.track, target.course)}
                               style={{
-                                borderRadius: 8,
-                                padding:      "7px 10px",
+                                borderRadius: 12,
+                                padding:      "13px 18px",
                                 cursor:       "pointer",
-                                background:   isActive ? "#4f46e5" : stepColors.bg,
-                                border:       `1.5px solid ${isActive ? "#4f46e5" : (slotSt?.exists ? stepColors.accent : stepColors.border)}`,
+                                background:   isOpen ? "#4f46e5" : stepColors.bg,
+                                border:       `2px solid ${isOpen ? "#4f46e5" : (slotSt?.exists ? stepColors.accent : stepColors.border)}`,
+                                boxShadow:    isOpen ? "0 4px 14px rgba(79,70,229,0.28)" : "0 1px 2px rgba(0,0,0,0.03)",
                                 flexShrink:   0,
                                 textAlign:    "center" as const,
-                                minWidth:     72,
+                                minWidth:     120,
+                                transition:   "box-shadow 0.15s ease",
                               }}
                             >
                               <div style={{
-                                fontSize:     10,
+                                fontSize:     14,
                                 fontWeight:   700,
-                                color:        isActive ? "#fff" : stepColors.accent,
-                                marginBottom: 2,
+                                color:        isOpen ? "#fff" : stepColors.accent,
+                                marginBottom: 4,
                                 whiteSpace:   "nowrap" as const,
                               }}>
                                 {COURSE_LABELS[target.course]}
                               </div>
                               <div style={{
-                                fontSize:   9,
-                                fontWeight: 500,
-                                color:      isActive ? "rgba(255,255,255,0.65)" : (slotSt?.exists ? "#16a34a" : "#9ca3af"),
+                                fontSize:   11.5,
+                                fontWeight: 600,
+                                color:      isOpen ? "rgba(255,255,255,0.75)" : (slotSt?.exists ? "#16a34a" : "#9ca3af"),
                               }}>
-                                {slotSt === undefined ? "…" : slotSt.exists ? `${slotSt.items.length} items` : "Empty"}
+                                {slotSt === undefined ? "…" : slotSt.exists ? `● ${slotSt.items.length} items` : "○ Empty"}
                               </div>
                             </div>
                           </div>
                         );
                       })}
                     </div>
-                  );
-                })}
-              </div>
-            </div>
 
-            {/* Card 2: Upload zone */}
-            <div style={s.bentoCard}>
-              <div style={s.bentoCardLabel}>Import File</div>
-              <div
-                onDrop={handleMasterDrop}
-                onDragOver={e => { e.preventDefault(); setMasterDragOver(true); }}
-                onDragLeave={() => setMasterDragOver(false)}
-                onClick={() => masterFileRef.current?.click()}
-                style={{ ...s.dropZone, ...(masterDragOver ? s.dropZoneActive : {}) }}
-              >
-                <div style={s.dropIcon}>
-                  {masterFile ? "📄" : "📥"}
-                </div>
-                <div style={s.dropText}>
-                  {masterFile ? masterFile.name : "Drag & drop .xlsx or .csv here"}
-                </div>
-                {masterFile && masterPreview.length > 0 && (
-                  <div style={{ ...s.dropHint, color: "#16a34a", fontWeight: 600 }}>
-                    {masterPreview.length} rows · {uniqueLessons.length} lessons
-                  </div>
-                )}
-                {!masterFile && (
-                  <div style={s.dropHint}>or click to browse</div>
-                )}
-              </div>
-              <input
-                ref={masterFileRef}
-                type="file"
-                accept=".xlsx,.csv"
-                onChange={e => { const f = e.target.files?.[0]; if (f) handleMasterFile(f); }}
-                style={{ display: "none" }}
-              />
-              <button
-                onClick={() => masterFileRef.current?.click()}
-                style={s.uploadBtn}
-              >
-                Import Course Syllabus from Excel
-              </button>
+                    {/* Opens inline under the clicked course — view + import scoped to that course only */}
+                    {isTrackOpen && (() => {
+                      const selKey       = slotKey(masterTrack, masterCourse);
+                      const selSt        = slotStatuses[selKey];
+                      const selColors    = TRACK_COLORS[masterTrack];
+                      const isConfirm    = deleteConfirmKey === selKey;
+                      const isEditing    = editSlot?.track === masterTrack && editSlot?.course === masterCourse;
+                      const isPreviewing = previewSlotKey === selKey;
+                      return (
+                        <div style={s.coursePanel}>
+                          <div style={s.slotActionBar}>
+                            <div style={s.slotActionInfo}>
+                              <span style={{ ...s.mgmtTrackBadge, background: selColors.bg, color: selColors.accent, border: `1px solid ${selColors.border}` }}>
+                                {TRACK_SHORT[masterTrack]}
+                              </span>
+                              <span style={s.mgmtCourseLabel}>{COURSE_LABELS[masterCourse]}</span>
+                              {selSt === undefined ? (
+                                <span style={s.statusLoading}>…</span>
+                              ) : selSt.exists ? (
+                                <span style={s.statusLive}>● {selSt.items.length} items</span>
+                              ) : (
+                                <span style={s.statusEmpty}>○ Empty</span>
+                              )}
+                            </div>
+                            <div style={s.slotActionBtns}>
+                              {!isConfirm && (
+                                <>
+                                  {selSt?.exists && (
+                                    <>
+                                      <button
+                                        onClick={() => handlePreviewSlot(masterTrack, masterCourse, selSt.items)}
+                                        style={{ ...s.mgmtBtn, ...s.previewBtn, ...(isPreviewing ? s.previewBtnActive : {}) }}
+                                      >
+                                        {isPreviewing ? "Hide" : "👁 View"}
+                                      </button>
+                                      <button
+                                        onClick={() => handleStartEdit(masterTrack, masterCourse, selSt.items)}
+                                        style={{ ...s.mgmtBtn, ...s.editBtn, ...(isEditing ? s.editBtnActive : {}) }}
+                                      >
+                                        {isEditing ? "Editing…" : "Edit"}
+                                      </button>
+                                      <button onClick={() => setDeleteConfirmKey(selKey)} style={{ ...s.mgmtBtn, ...s.deleteBtn }}>
+                                        Delete
+                                      </button>
+                                    </>
+                                  )}
+                                  <button
+                                    onClick={() => setImportOpen(o => !o)}
+                                    style={{ ...s.mgmtBtn, ...s.importToggleBtn, ...(importOpen ? s.importToggleBtnActive : {}) }}
+                                  >
+                                    {importOpen ? "Close" : "📥 Import"}
+                                  </button>
+                                </>
+                              )}
+                              {isConfirm && (
+                                <div style={s.confirmRow}>
+                                  <span style={s.confirmText}>Delete?</span>
+                                  <button
+                                    onClick={() => handleDeleteSlot(masterTrack, masterCourse)}
+                                    disabled={deleteProcessing}
+                                    style={{ ...s.mgmtBtn, ...s.confirmDeleteBtn }}
+                                  >
+                                    {deleteProcessing ? "Deleting…" : "Yes, delete"}
+                                  </button>
+                                  <button onClick={() => setDeleteConfirmKey(null)} style={{ ...s.mgmtBtn, ...s.cancelBtn }}>Cancel</button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
 
-              {/* Required columns hint */}
-              <div style={s.colHint}>
-                Required:{" "}
-                {["lessonNumber", "lessonName", "itemType", "itemTitle"].map(c => (
-                  <span key={c} style={s.colChip}>{c}</span>
-                ))}
-                <span style={{ margin: "0 3px", color: "#d1d5db" }}>|</span>
-                Optional:{" "}
-                {["metronome", "hands"].map(c => (
-                  <span key={c} style={{ ...s.colChip, opacity: 0.55 }}>{c}</span>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Track syllabus preview */}
-          {masterTrackPreview && previewByLesson.length > 0 && (
-            <div style={s.trackPreviewPanel}>
-              <div style={s.trackPreviewHeader}>
-                <span style={s.trackPreviewTitle}>
-                  {TRACK_LABELS[masterTrack]} — Syllabus Preview
-                </span>
-                <span style={s.trackPreviewCount}>
-                  {masterTrackPreview.length} items · {previewByLesson.length} lessons
-                </span>
-              </div>
-              <div style={s.trackPreviewBody}>
-                {previewByLesson.map(({ num, lessonName, items }) => (
-                  <div key={num} style={s.lessonGroup}>
-                    <div style={s.lessonGroupHeader}>
-                      <span style={s.lessonNum}>Lesson {num}</span>
-                      <span style={s.lessonName}>{lessonName}</span>
-                    </div>
-                    <div style={s.lessonItems}>
-                      {items.map((item, i) => (
-                        <div key={i} style={s.lessonItem}>
-                          <span style={{ ...s.typeBadge, ...(TYPE_COLORS[item.itemType] ?? TYPE_COLORS._other) }}>
-                            {item.itemType}
-                          </span>
-                          <span style={s.lessonItemTitle}>{item.itemTitle}</span>
-                          {item.metronomeBpm && (
-                            <span style={s.lessonItemMeta}>{item.metronomeBpm} BPM</span>
+                          {/* Track syllabus preview — independent of the Import toggle */}
+                          {masterTrackPreview && previewByLesson.length > 0 && (
+                            <div style={s.trackPreviewPanel}>
+                              <div style={s.trackPreviewHeader}>
+                                <span style={s.trackPreviewTitle}>
+                                  {TRACK_LABELS[masterTrack]} — Syllabus Preview
+                                </span>
+                                <span style={s.trackPreviewCount}>
+                                  {masterTrackPreview.length} items · {previewByLesson.length} lessons
+                                </span>
+                              </div>
+                              <div style={s.trackPreviewBody}>
+                                {previewByLesson.map(({ num, lessonName, items }) => (
+                                  <div key={num} style={s.lessonGroup}>
+                                    <div style={s.lessonGroupHeader}>
+                                      <span style={s.lessonNum}>Lesson {num}</span>
+                                      <span style={s.lessonName}>{lessonName}</span>
+                                    </div>
+                                    <div style={s.lessonItems}>
+                                      {items.map((item, i) => (
+                                        <div key={i} style={s.lessonItem}>
+                                          <span style={{ ...s.typeBadge, ...(TYPE_COLORS[item.itemType] ?? TYPE_COLORS._other) }}>
+                                            {item.itemType}
+                                          </span>
+                                          <span style={s.lessonItemTitle}>{item.itemTitle}</span>
+                                          {item.metronomeBpm && (
+                                            <span style={s.lessonItemMeta}>{item.metronomeBpm} BPM</span>
+                                          )}
+                                          {item.handAllocation && (
+                                            <span style={s.lessonItemMeta}>{item.handAllocation}</span>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
                           )}
-                          {item.handAllocation && (
-                            <span style={s.lessonItemMeta}>{item.handAllocation}</span>
+
+                          {/* Import File — only shown once "Import" is pressed */}
+                          {importOpen && (
+                          <>
+                          <div style={s.bentoCardLabel}>Import File — {COURSE_LABELS[masterCourse]}</div>
+                          <div
+                            onDrop={handleMasterDrop}
+                            onDragOver={e => { e.preventDefault(); setMasterDragOver(true); }}
+                            onDragLeave={() => setMasterDragOver(false)}
+                            onClick={() => masterFileRef.current?.click()}
+                            style={{ ...s.dropZone, ...(masterDragOver ? s.dropZoneActive : {}) }}
+                          >
+                            <div style={s.dropIcon}>
+                              {masterFile ? "📄" : "📥"}
+                            </div>
+                            <div style={s.dropText}>
+                              {masterFile ? masterFile.name : "Drag & drop .xlsx or .csv here"}
+                            </div>
+                            {masterFile && masterPreview.length > 0 && (
+                              <div style={{ ...s.dropHint, color: "#16a34a", fontWeight: 600 }}>
+                                {masterPreview.length} rows · {uniqueLessons.length} lessons
+                              </div>
+                            )}
+                            {!masterFile && (
+                              <div style={s.dropHint}>or click to browse</div>
+                            )}
+                          </div>
+                          <input
+                            ref={masterFileRef}
+                            type="file"
+                            accept=".xlsx,.csv"
+                            onChange={e => { const f = e.target.files?.[0]; if (f) handleMasterFile(f); }}
+                            style={{ display: "none" }}
+                          />
+                          <button
+                            onClick={() => masterFileRef.current?.click()}
+                            style={s.uploadBtn}
+                          >
+                            Import Course Syllabus from Excel
+                          </button>
+
+                          {/* Required columns hint */}
+                          <div style={s.colHint}>
+                            Required:{" "}
+                            {["lessonNumber", "lessonName", "itemType", "itemTitle"].map(c => (
+                              <span key={c} style={s.colChip}>{c}</span>
+                            ))}
+                            <span style={{ margin: "0 3px", color: "#d1d5db" }}>|</span>
+                            Optional:{" "}
+                            {["metronome", "hands"].map(c => (
+                              <span key={c} style={{ ...s.colChip, opacity: 0.55 }}>{c}</span>
+                            ))}
+                          </div>
+
+                          {/* Validation errors */}
+                          {masterErrors.length > 0 && (
+                            <div style={s.errorBox}>
+                              <div style={s.errorTitle}>✕ {masterErrors.length} error{masterErrors.length !== 1 ? "s" : ""}</div>
+                              {masterErrors.slice(0, 15).map((e, i) => (
+                                <div key={i} style={s.errorRow}>• {e}</div>
+                              ))}
+                              {masterErrors.length > 15 && (
+                                <div style={s.errorRow}>…and {masterErrors.length - 15} more</div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Validation success banner */}
+                          {masterValid && masterPreview.length > 0 && (
+                            <div style={s.successBox}>
+                              ✓ {masterPreview.length} row{masterPreview.length !== 1 ? "s" : ""} validated
+                              {" · "}{uniqueLessons.length} lesson{uniqueLessons.length !== 1 ? "s" : ""} ready
+                              {" · "}Destination:{" "}
+                              <strong>
+                                {PROGRAM_LABELS[masterProgram]} › {COURSE_LABELS[masterCourse]} › {TRACK_LABELS[masterTrack]}
+                              </strong>
+                            </div>
+                          )}
+
+                          {/* Preview table */}
+                          {masterValid && masterPreview.length > 0 && (
+                            <div style={{ ...s.tableWrapper, marginBottom: 16 }}>
+                              <div style={s.tableHeader}>
+                                <span style={s.tableTitle}>Preview — first 25 rows</span>
+                                {masterPreview.length > 25 && (
+                                  <span style={{ fontSize: 11, color: "#9ca3af" }}>
+                                    +{masterPreview.length - 25} more rows not shown
+                                  </span>
+                                )}
+                              </div>
+                              <table style={s.table}>
+                                <thead>
+                                  <tr>
+                                    {["#", "Lesson", "Lesson Name", "Type", "Title", "BPM", "Hand"].map(h => (
+                                      <th key={h} style={s.th}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {masterPreview.slice(0, 25).map((item, i) => (
+                                    <tr key={i} style={i % 2 === 0 ? s.rowEven : s.rowOdd}>
+                                      <td style={{ ...s.td, ...s.mono }}>{i + 1}</td>
+                                      <td style={{ ...s.td, ...s.mono }}>{item.lessonNumber}</td>
+                                      <td style={{ ...s.td, fontSize: 12, color: "#374151" }}>{item.lessonName}</td>
+                                      <td style={s.td}>
+                                        <span style={{ ...s.typeBadge, ...(TYPE_COLORS[item.itemType] ?? TYPE_COLORS._other) }}>
+                                          {item.itemType}
+                                        </span>
+                                      </td>
+                                      <td style={s.td}>{item.itemTitle}</td>
+                                      <td style={{ ...s.td, ...s.mono, color: item.metronomeBpm ? "#059669" : "#9ca3af" }}>
+                                        {item.metronomeBpm ?? "—"}
+                                      </td>
+                                      <td style={{ ...s.td, fontSize: 11, color: "#6b7280" }}>
+                                        {item.handAllocation ?? "—"}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* Actions */}
+                          {masterFile && (
+                            <div style={s.actions}>
+                              <button onClick={resetMaster} style={s.resetBtn}>Reset</button>
+                              {masterValid && (
+                                <button
+                                  onClick={handleMasterImport}
+                                  disabled={masterImporting}
+                                  style={{ ...s.confirmBtn, opacity: masterImporting ? 0.6 : 1, cursor: masterImporting ? "not-allowed" : "pointer" }}
+                                >
+                                  {masterImporting
+                                    ? "Saving to Firestore…"
+                                    : `Confirm Upload → ${PROGRAM_LABELS[masterProgram]} / ${COURSE_LABELS[masterCourse]}`}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          </>
                           )}
                         </div>
-                      ))}
-                    </div>
+                      );
+                    })()}
                   </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
-          )}
-
-          {/* Validation errors */}
-          {masterErrors.length > 0 && (
-            <div style={s.errorBox}>
-              <div style={s.errorTitle}>✕ {masterErrors.length} error{masterErrors.length !== 1 ? "s" : ""}</div>
-              {masterErrors.slice(0, 15).map((e, i) => (
-                <div key={i} style={s.errorRow}>• {e}</div>
-              ))}
-              {masterErrors.length > 15 && (
-                <div style={s.errorRow}>…and {masterErrors.length - 15} more</div>
-              )}
-            </div>
-          )}
-
-          {/* Validation success banner */}
-          {masterValid && masterPreview.length > 0 && (
-            <div style={s.successBox}>
-              ✓ {masterPreview.length} row{masterPreview.length !== 1 ? "s" : ""} validated
-              {" · "}{uniqueLessons.length} lesson{uniqueLessons.length !== 1 ? "s" : ""} ready
-              {" · "}Destination:{" "}
-              <strong>
-                {PROGRAM_LABELS[masterProgram]} › {COURSE_LABELS[masterCourse]} › {TRACK_LABELS[masterTrack]}
-              </strong>
-            </div>
-          )}
-
-          {/* Preview table */}
-          {masterValid && masterPreview.length > 0 && (
-            <div style={{ ...s.tableWrapper, marginBottom: 16 }}>
-              <div style={s.tableHeader}>
-                <span style={s.tableTitle}>Preview — first 25 rows</span>
-                {masterPreview.length > 25 && (
-                  <span style={{ fontSize: 11, color: "#9ca3af" }}>
-                    +{masterPreview.length - 25} more rows not shown
-                  </span>
-                )}
-              </div>
-              <table style={s.table}>
-                <thead>
-                  <tr>
-                    {["#", "Lesson", "Lesson Name", "Type", "Title", "BPM", "Hand"].map(h => (
-                      <th key={h} style={s.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {masterPreview.slice(0, 25).map((item, i) => (
-                    <tr key={i} style={i % 2 === 0 ? s.rowEven : s.rowOdd}>
-                      <td style={{ ...s.td, ...s.mono }}>{i + 1}</td>
-                      <td style={{ ...s.td, ...s.mono }}>{item.lessonNumber}</td>
-                      <td style={{ ...s.td, fontSize: 12, color: "#374151" }}>{item.lessonName}</td>
-                      <td style={s.td}>
-                        <span style={{ ...s.typeBadge, ...(TYPE_COLORS[item.itemType] ?? TYPE_COLORS._other) }}>
-                          {item.itemType}
-                        </span>
-                      </td>
-                      <td style={s.td}>{item.itemTitle}</td>
-                      <td style={{ ...s.td, ...s.mono, color: item.metronomeBpm ? "#059669" : "#9ca3af" }}>
-                        {item.metronomeBpm ?? "—"}
-                      </td>
-                      <td style={{ ...s.td, fontSize: 11, color: "#6b7280" }}>
-                        {item.handAllocation ?? "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* Actions */}
-          {masterFile && (
-            <div style={s.actions}>
-              <button onClick={resetMaster} style={s.resetBtn}>Reset</button>
-              {masterValid && (
-                <button
-                  onClick={handleMasterImport}
-                  disabled={masterImporting}
-                  style={{ ...s.confirmBtn, opacity: masterImporting ? 0.6 : 1, cursor: masterImporting ? "not-allowed" : "pointer" }}
-                >
-                  {masterImporting
-                    ? "Saving to Firestore…"
-                    : `Confirm Upload → ${PROGRAM_LABELS[masterProgram]} / ${COURSE_LABELS[masterCourse]}`}
-                </button>
-              )}
-            </div>
-          )}
+          </div>
         </div>
       )}
     </div>
@@ -1341,8 +949,8 @@ function SyllabusContent() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
-  header:    { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 },
-  heading:   { fontSize: 24, fontWeight: 700, color: "#111", margin: 0 },
+  header:    { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 },
+  heading:   { fontSize: 19, fontWeight: 700, color: "#111", margin: 0, letterSpacing: "-0.01em" },
   importBtn: {
     background:   "#4f46e5",
     color:        "#fff",
@@ -1356,17 +964,18 @@ const s: Record<string, React.CSSProperties> = {
 
   tabs: {
     display:      "flex",
-    gap:          4,
-    marginBottom: 20,
+    gap:          3,
+    marginBottom: 14,
     background:   "#f3f4f6",
-    borderRadius: 12,
-    padding:      4,
+    borderRadius: 10,
+    padding:      3,
     border:       "1px solid #e5e7eb",
+    maxWidth:     440,
   },
   tab: {
     flex:         1,
-    padding:      "9px 0",
-    borderRadius: 8,
+    padding:      "7px 0",
+    borderRadius: 7,
     border:       "none",
     background:   "transparent",
     fontSize:     13,
@@ -1382,55 +991,28 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow:  "0 1px 4px rgba(0,0,0,0.10)",
   },
 
-  filterCard: {
-    background:   "#fff",
-    border:       "1px solid #e5e7eb",
-    borderRadius: 12,
-    padding:      "16px 20px",
-    marginBottom: 16,
-    display:      "flex",
-    alignItems:   "center",
-    gap:          14,
-    flexWrap:     "wrap" as const,
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
-  },
-  filterTitle: { fontSize: 10, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.1em" },
-  loadingText: { fontSize: 12, color: "#9ca3af", fontStyle: "italic" as const },
-
-  select: {
-    padding:      "9px 12px",
-    border:       "1px solid #d1d5db",
-    borderRadius: 8,
-    fontSize:     13,
-    color:        "#111",
-    background:   "#fff",
-    outline:      "none",
-    minWidth:     200,
-    cursor:       "pointer",
-  },
-
   tableWrapper: {
     background:   "#fff",
     border:       "1px solid #e5e7eb",
-    borderRadius: 12,
+    borderRadius: 10,
     overflow:     "hidden",
-    marginBottom: 16,
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
+    marginBottom: 12,
+    boxShadow:    "0 1px 2px rgba(0,0,0,0.05)",
   },
   tableHeader: {
     display:        "flex",
     alignItems:     "center",
     justifyContent: "space-between",
-    padding:        "14px 18px",
+    padding:        "9px 14px",
     borderBottom:   "1px solid #e5e7eb",
     background:     "#f9fafb",
   },
   tableTitle:  { fontSize: 11, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.06em" },
   table:       { width: "100%", borderCollapse: "collapse" as const },
   th: {
-    padding:       "10px 18px",
+    padding:       "7px 14px",
     textAlign:     "left" as const,
-    fontSize:      11,
+    fontSize:      10,
     fontWeight:    600,
     color:         "#6b7280",
     textTransform: "uppercase" as const,
@@ -1439,7 +1021,7 @@ const s: Record<string, React.CSSProperties> = {
     borderBottom:  "1px solid #e5e7eb",
   },
   td: {
-    padding:      "12px 18px",
+    padding:      "7px 14px",
     fontSize:     13,
     color:        "#111",
     borderBottom: "1px solid #f3f4f6",
@@ -1447,102 +1029,85 @@ const s: Record<string, React.CSSProperties> = {
   rowEven: { background: "#fff" },
   rowOdd:  { background: "#fafafa" },
   mono:    { fontFamily: "monospace", fontSize: 12, color: "#6b7280" },
-  itemCountBadge: {
-    background:   "#fef3c7",
-    color:        "#92400e",
-    padding:      "2px 8px",
-    borderRadius: 99,
-    fontSize:     11,
-    fontWeight:   700,
-    fontFamily:   "monospace",
-  },
 
-  emptyState: { padding: "56px 16px", textAlign: "center" as const },
-  emptyIcon:  { fontSize: 44, marginBottom: 14 },
+  emptyState: { padding: "36px 16px", textAlign: "center" as const },
+  emptyIcon:  { fontSize: 34, marginBottom: 10 },
   emptyText:  { fontSize: 14, color: "#374151", marginBottom: 8 },
-  emptyHint:  { fontSize: 13, color: "#6b7280" },
-  linkBtn: {
-    background:     "none",
-    border:         "none",
-    color:          "#4f46e5",
-    cursor:         "pointer",
-    fontWeight:     700,
-    fontSize:       13,
-    padding:        0,
-    textDecoration: "underline",
-  },
-  emptyInline: { padding: "16px 0", fontSize: 13, color: "#6b7280" },
-
-  fieldGroup: { marginBottom: 18 },
-  label: {
-    display:       "block",
-    fontSize:      11,
-    fontWeight:    600,
-    color:         "#374151",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.06em",
-    marginBottom:  7,
-  },
-
-  trackCard: {
-    background:   "#fff",
-    border:       "1px solid #e5e7eb",
-    borderRadius: 12,
-    padding:      "22px",
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
-  },
-  trackTitle:          { fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 18 },
-  trackStatus:         { marginTop: 10, fontSize: 12 },
-  trackStatusChecking: { color: "#9ca3af", fontStyle: "italic" as const },
-  trackStatusNone:     { color: "#d97706", fontWeight: 600 },
-  trackStatusFound:    { color: "#16a34a", fontWeight: 600 },
-  viewProgressBtn: {
-    background:   "#059669",
-    color:        "#fff",
-    border:       "none",
-    padding:      "11px 24px",
-    borderRadius: 8,
-    fontSize:     13,
-    fontWeight:   700,
-    cursor:       "pointer",
-    marginTop:    10,
-  },
 
   // ─── Master tab ────────────────────────────────────────────────────────────
-  bentoGrid: {
-    display:             "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap:                 16,
-    marginBottom:        16,
-  },
   bentoCard: {
     background:   "#fff",
     border:       "1px solid #e5e7eb",
     borderRadius: 14,
     padding:      "22px",
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
+    boxShadow:    "0 1px 3px rgba(0,0,0,0.05)",
+    marginBottom: 14,
+  },
+  coursePanel: {
+    marginTop:    16,
+    marginBottom: 4,
+    padding:      "22px",
+    background:   "#f9fafb",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 14,
+    display:      "flex",
+    flexDirection: "column" as const,
+    gap:          14,
+    boxShadow:    "inset 0 1px 2px rgba(0,0,0,0.03)",
   },
   bentoCardLabel: {
-    fontSize:      10,
+    fontSize:      11,
     fontWeight:    700,
     color:         "#6b7280",
     textTransform: "uppercase" as const,
     letterSpacing: "0.12em",
-    marginBottom:  16,
+    marginBottom:  14,
+  },
+  bentoCardHead: {
+    display:        "flex",
+    alignItems:     "center",
+    justifyContent: "space-between",
+    gap:            8,
+    marginBottom:   16,
+    minHeight:      24,
+  },
+  slotActionBar: {
+    display:        "flex",
+    alignItems:     "center",
+    justifyContent: "space-between",
+    gap:            12,
+    flexWrap:       "wrap" as const,
+    padding:        "14px 16px",
+    background:     "#fff",
+    border:         "1px solid #e5e7eb",
+    borderRadius:   11,
+  },
+  slotActionInfo: {
+    display:    "flex",
+    alignItems: "center",
+    gap:        10,
+    fontSize:   13,
+    flexWrap:   "wrap" as const,
+  },
+  slotActionBtns: {
+    display:    "flex",
+    alignItems: "center",
+    gap:        8,
+    flexWrap:   "wrap" as const,
   },
 
   programHeader: {
     display:      "flex",
     alignItems:   "center",
-    gap:          8,
-    padding:      "9px 13px",
+    gap:          10,
+    padding:      "12px 16px",
     background:   "#f9fafb",
-    borderRadius: 8,
-    marginBottom: 14,
+    borderRadius: 11,
+    marginBottom: 18,
     border:       "1px solid #e5e7eb",
   },
-  programIcon:  { fontSize: 16 },
-  programTitle: { fontSize: 13, fontWeight: 700, color: "#111" },
+  programIcon:  { fontSize: 22 },
+  programTitle: { fontSize: 16, fontWeight: 700, color: "#111" },
 
   slotGrid: {
     display:             "grid",
@@ -1573,31 +1138,32 @@ const s: Record<string, React.CSSProperties> = {
   dropZone: {
     border:        "2px dashed #d1d5db",
     borderRadius:  12,
-    padding:       "30px 16px",
+    padding:       "30px 20px",
     textAlign:     "center" as const,
     cursor:        "pointer",
     marginBottom:  12,
     background:    "#fafafa",
+    transition:    "border-color 0.15s ease, background 0.15s ease",
   },
   dropZoneActive: {
     border:     "2px dashed #4f46e5",
     background: "#f5f3ff",
   },
-  dropIcon: { fontSize: 28, marginBottom: 8 },
-  dropText: { fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 },
-  dropHint: { fontSize: 12, color: "#9ca3af" },
+  dropIcon: { fontSize: 34, marginBottom: 8 },
+  dropText: { fontSize: 15, fontWeight: 600, color: "#374151", marginBottom: 4 },
+  dropHint: { fontSize: 13, color: "#9ca3af" },
 
   uploadBtn: {
     width:        "100%",
     background:   "#f9fafb",
     border:       "1px solid #e5e7eb",
     color:        "#374151",
-    padding:      "10px 0",
-    borderRadius: 8,
-    fontSize:     13,
-    fontWeight:   600,
+    padding:      "12px 0",
+    borderRadius: 9,
+    fontSize:     14,
+    fontWeight:   700,
     cursor:       "pointer",
-    marginBottom: 12,
+    marginBottom: 10,
   },
   colHint: {
     display:    "flex",
@@ -1632,66 +1198,67 @@ const s: Record<string, React.CSSProperties> = {
     color:        "#15803d",
   },
 
-  typeBadge: { padding: "2px 8px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" as const },
+  typeBadge: { padding: "3px 10px", borderRadius: 99, fontSize: 11.5, fontWeight: 600, textTransform: "capitalize" as const },
 
   trackPreviewPanel: {
     background:   "#fff",
     border:       "1px solid #e5e7eb",
-    borderRadius: 14,
-    marginBottom: 16,
+    borderRadius: 12,
+    marginBottom: 4,
     overflow:     "hidden",
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
+    boxShadow:    "0 1px 2px rgba(0,0,0,0.05)",
   },
   trackPreviewHeader: {
     display:        "flex",
     alignItems:     "center",
     justifyContent: "space-between",
-    padding:        "14px 20px",
+    padding:        "12px 18px",
     background:     "#f9fafb",
     borderBottom:   "1px solid #e5e7eb",
   },
   trackPreviewTitle: {
-    fontSize:      11,
+    fontSize:      12,
     fontWeight:    700,
     color:         "#374151",
     textTransform: "uppercase" as const,
     letterSpacing: "0.07em",
   },
   trackPreviewCount: {
-    fontSize: 11,
+    fontSize: 12,
     color:    "#9ca3af",
   },
   trackPreviewBody: {
-    padding:    "16px 20px",
-    display:    "flex",
-    flexDirection: "column" as const,
-    gap:        12,
+    padding:             "18px",
+    display:             "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+    gap:                 14,
+    alignItems:          "start" as const,
   },
   lessonGroup: {
-    borderRadius: 8,
-    border:       "1px solid #f3f4f6",
+    borderRadius: 10,
+    border:       "1px solid #e5e7eb",
     overflow:     "hidden",
   },
   lessonGroupHeader: {
     display:     "flex",
     alignItems:  "center",
     gap:         10,
-    padding:     "8px 14px",
+    padding:     "10px 14px",
     background:  "#f9fafb",
     borderBottom: "1px solid #f3f4f6",
   },
   lessonNum: {
     fontFamily:  "monospace",
-    fontSize:    10,
+    fontSize:    11,
     fontWeight:  700,
     color:       "#4f46e5",
     background:  "#ede9fe",
-    padding:     "2px 7px",
+    padding:     "3px 9px",
     borderRadius: 99,
     flexShrink:  0,
   },
   lessonName: {
-    fontSize:   12,
+    fontSize:   13,
     fontWeight: 600,
     color:      "#374151",
   },
@@ -1703,16 +1270,16 @@ const s: Record<string, React.CSSProperties> = {
     display:     "flex",
     alignItems:  "center",
     gap:         8,
-    padding:     "7px 14px",
-    borderBottom: "1px solid #f9fafb",
+    padding:     "8px 14px",
+    borderBottom: "1px solid #f6f6f6",
   },
   lessonItemTitle: {
-    fontSize:   12,
+    fontSize:   13,
     color:      "#111",
     flex:       1,
   },
   lessonItemMeta: {
-    fontSize:   11,
+    fontSize:   11.5,
     color:      "#9ca3af",
     fontFamily: "monospace",
     flexShrink: 0,
@@ -1722,16 +1289,16 @@ const s: Record<string, React.CSSProperties> = {
   mgmtSection: {
     background:   "#fff",
     border:       "1px solid #e5e7eb",
-    borderRadius: 14,
+    borderRadius: 10,
     overflow:     "hidden",
-    marginBottom: 16,
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
+    marginBottom: 12,
+    boxShadow:    "0 1px 2px rgba(0,0,0,0.05)",
   },
   mgmtHeader: {
     display:        "flex",
     alignItems:     "center",
     justifyContent: "space-between",
-    padding:        "14px 20px",
+    padding:        "10px 16px",
     background:     "#f9fafb",
     borderBottom:   "1px solid #e5e7eb",
   },
@@ -1755,13 +1322,17 @@ const s: Record<string, React.CSSProperties> = {
   mgmtRow: {
     display:        "flex",
     alignItems:     "center",
-    padding:        "11px 20px",
+    padding:        "8px 16px",
     borderBottom:   "1px solid #f3f4f6",
-    gap:            16,
+    gap:            14,
   },
   mgmtRowEditing: {
     background:  "#f5f3ff",
     borderLeft:  "3px solid #4f46e5",
+  },
+  mgmtRowPreviewing: {
+    background:  "#f0f9ff",
+    borderLeft:  "3px solid #0369a1",
   },
   mgmtSlotCell: {
     display:    "flex",
@@ -1770,25 +1341,28 @@ const s: Record<string, React.CSSProperties> = {
     width:      160,
     flexShrink: 0,
   },
+  mgmtSlotCellClickable: {
+    cursor: "pointer",
+  },
   mgmtTrackBadge: {
-    fontSize:     11,
+    fontSize:     12,
     fontWeight:   700,
-    padding:      "2px 8px",
+    padding:      "4px 11px",
     borderRadius: 99,
     flexShrink:   0,
   },
   mgmtCourseLabel: {
-    fontSize:   12,
-    fontWeight: 600,
-    color:      "#374151",
+    fontSize:   15,
+    fontWeight: 700,
+    color:      "#111827",
   },
   mgmtStatusCell: {
     flex:     1,
-    fontSize: 12,
+    fontSize: 13,
   },
-  statusLoading: { color: "#9ca3af", fontStyle: "italic" as const },
-  statusLive:    { color: "#16a34a", fontWeight: 600 },
-  statusEmpty:   { color: "#9ca3af" },
+  statusLoading: { color: "#9ca3af", fontStyle: "italic" as const, fontSize: 13 },
+  statusLive:    { color: "#16a34a", fontWeight: 600, fontSize: 13 },
+  statusEmpty:   { color: "#9ca3af", fontSize: 13 },
   mgmtActionsCell: {
     display:    "flex",
     alignItems: "center",
@@ -1796,15 +1370,19 @@ const s: Record<string, React.CSSProperties> = {
     flexShrink: 0,
   },
   mgmtBtn: {
-    padding:      "5px 12px",
-    borderRadius: 6,
-    fontSize:     12,
-    fontWeight:   600,
+    padding:      "8px 16px",
+    borderRadius: 8,
+    fontSize:     13,
+    fontWeight:   700,
     cursor:       "pointer",
     border:       "none",
   },
   editBtn:       { background: "#ede9fe", color: "#4f46e5" },
   editBtnActive: { background: "#4f46e5", color: "#fff" },
+  importToggleBtn:       { background: "#fef3c7", color: "#b45309" },
+  importToggleBtnActive: { background: "#b45309", color: "#fff" },
+  previewBtn:       { background: "#e0f2fe", color: "#0369a1" },
+  previewBtnActive: { background: "#0369a1", color: "#fff" },
   deleteBtn:     { background: "#fee2e2", color: "#dc2626" },
   confirmRow:    { display: "flex", alignItems: "center", gap: 8 },
   confirmText:   { fontSize: 12, color: "#374151", fontWeight: 500 },
@@ -1814,7 +1392,7 @@ const s: Record<string, React.CSSProperties> = {
 
   // ─── Edit panel ────────────────────────────────────────────────────────────
   editPanel: {
-    margin:       "0 20px 20px",
+    margin:       "0 0 12px",
     border:       "1px solid #e5e7eb",
     borderRadius: 10,
     overflow:     "hidden",
@@ -1906,62 +1484,14 @@ const s: Record<string, React.CSSProperties> = {
     padding:     "9px 16px",
   },
 
-  // ─── Track tab — LM section ────────────────────────────────────────────────
-  lmSection: {
-    background:   "#fff",
-    border:       "1px solid #e5e7eb",
-    borderRadius: 12,
-    overflow:     "hidden",
-    marginTop:    14,
-    boxShadow:    "0 1px 3px rgba(0,0,0,0.06)",
-  },
-  lmSectionHeader: {
-    display:        "flex",
-    alignItems:     "center",
-    justifyContent: "space-between",
-    padding:        "12px 18px",
-    background:     "#f9fafb",
-    borderBottom:   "1px solid #e5e7eb",
-  },
-  lmSectionTitle: {
-    fontSize:      11,
-    fontWeight:    700,
-    color:         "#374151",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.07em",
-  },
-  lmEmpty: { padding: "18px", fontSize: 13, color: "#9ca3af", fontStyle: "italic" as const },
-  lmInfo:  { display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", flexWrap: "wrap" as const },
-  lmStatChip: {
-    fontSize:   12,
-    fontWeight: 600,
-    color:      "#374151",
-    background: "#f3f4f6",
-    borderRadius: 99,
-    padding:    "3px 10px",
-    border:     "1px solid #e5e7eb",
-  },
-  lmEditHeader: {
-    display:        "flex",
-    alignItems:     "flex-start",
-    justifyContent: "space-between",
-    padding:        "12px 16px",
-    background:     "#f5f3ff",
-    borderBottom:   "1px solid #e5e7eb",
-    gap:            12,
-    flexWrap:       "wrap" as const,
-  },
-  lmEditTitle: { fontSize: 13, fontWeight: 700, color: "#111", display: "block", marginBottom: 3 },
-  lmEditNote:  { fontSize: 11, color: "#7c3aed", fontStyle: "italic" as const },
-
-  actions:    { display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 4 },
-  resetBtn:   { background: "#f3f4f6", color: "#374151", border: "none", padding: "10px 20px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  actions:    { display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 4, marginBottom: 4 },
+  resetBtn:   { background: "#f3f4f6", color: "#374151", border: "none", padding: "9px 18px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: "pointer" },
   confirmBtn: {
     background:    "#4f46e5",
     color:         "#fff",
     border:        "none",
-    padding:       "11px 28px",
-    borderRadius:  8,
+    padding:       "9px 22px",
+    borderRadius:  7,
     fontSize:      13,
     fontWeight:    700,
     letterSpacing: "0.02em",

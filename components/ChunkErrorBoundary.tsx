@@ -21,7 +21,19 @@ import React from "react";
 
 interface State {
   hasError: boolean;
+  isChunkError: boolean;
   reloading: boolean;
+  error: Error | null;
+}
+
+function isChunkLoadError(error: Error): boolean {
+  return (
+    error.name === "ChunkLoadError" ||
+    /Loading chunk \d+ failed/i.test(error.message) ||
+    /loading css chunk/i.test(error.message) ||
+    /Failed to fetch dynamically imported module/i.test(error.message) ||
+    /Importing a module script failed/i.test(error.message)
+  );
 }
 
 function getReloadTimestamp(key: string): number {
@@ -55,35 +67,20 @@ export default class ChunkErrorBoundary extends React.Component<
 > {
   constructor(props: { children: React.ReactNode }) {
     super(props);
-    this.state = { hasError: false, reloading: false };
+    this.state = { hasError: false, isChunkError: false, reloading: false, error: null };
   }
 
   static getDerivedStateFromError(error: Error): Partial<State> {
-    const isChunkError =
-      error.name === "ChunkLoadError" ||
-      /Loading chunk \d+ failed/i.test(error.message) ||
-      /loading css chunk/i.test(error.message) ||
-      /Failed to fetch dynamically imported module/i.test(error.message) ||
-      /Importing a module script failed/i.test(error.message);
-
-    if (isChunkError) {
-      return { hasError: true };
-    }
-    // Not a chunk error — rethrow by NOT returning hasError:true,
-    // but we still need to surface it. Return hasError so the fallback shows,
-    // but we won't auto-reload for non-chunk errors.
-    return { hasError: true };
+    return { hasError: true, isChunkError: isChunkLoadError(error), error };
   }
 
-  componentDidCatch(error: Error) {
-    const isChunkError =
-      error.name === "ChunkLoadError" ||
-      /Loading chunk \d+ failed/i.test(error.message) ||
-      /loading css chunk/i.test(error.message) ||
-      /Failed to fetch dynamically imported module/i.test(error.message) ||
-      /Importing a module script failed/i.test(error.message);
-
-    if (!isChunkError) return;
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    if (!isChunkLoadError(error)) {
+      // A real bug, not a stale-build chunk 404 — log it so it's visible in
+      // the console instead of silently showing a generic fallback.
+      console.error("[ChunkErrorBoundary] Caught render error:", error, info.componentStack);
+      return;
+    }
 
     // Guard: only auto-reload ONCE per 30 seconds to avoid an infinite hard-reload loop
     // if the new deploy itself is broken.
@@ -136,7 +133,7 @@ export default class ChunkErrorBoundary extends React.Component<
       );
     }
 
-    if (this.state.hasError) {
+    if (this.state.hasError && this.state.isChunkError) {
       // Reload guard blocked the auto-reload — show a manual refresh button.
       return (
         <div style={{
@@ -181,6 +178,56 @@ export default class ChunkErrorBoundary extends React.Component<
               }}
             >
               Refresh Now
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (this.state.hasError) {
+      // A genuine render error — don't claim it's a stale-build issue.
+      return (
+        <div style={{
+          height: "100dvh",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#0a0a0a",
+          color: "#f3f4f6",
+          fontFamily: "system-ui, sans-serif",
+          gap: 16,
+          padding: "0 24px",
+          textAlign: "center",
+        }}>
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="#ef4444" strokeWidth="1.5"/>
+            <path d="M12 8v4m0 4h.01" stroke="#ef4444" strokeWidth="1.8"
+              strokeLinecap="round"/>
+          </svg>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>
+              Something went wrong
+            </div>
+            <div style={{ fontSize: 14, color: "#9ca3af", marginBottom: 20, maxWidth: 480 }}>
+              {process.env.NODE_ENV === "development" && this.state.error
+                ? this.state.error.message
+                : "An unexpected error occurred. Try reloading the page."}
+            </div>
+            <button
+              onClick={() => window.location.reload()}
+              style={{
+                padding: "10px 28px",
+                background: "#ef4444",
+                color: "#0a0a0a",
+                border: "none",
+                borderRadius: 8,
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Reload
             </button>
           </div>
         </div>

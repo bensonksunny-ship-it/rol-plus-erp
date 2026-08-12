@@ -14,6 +14,7 @@ import {
   getTransactions,
   editTransaction,
   deleteTransaction,
+  computeStudentBalances,
 } from "@/services/finance/finance.service";
 import type {
   Transaction,
@@ -210,55 +211,20 @@ function FinanceContent() {
       monthDatesMap.forEach(arr => arr.sort());
       setAttDatesMap(monthDatesMap);
 
-      // ── Historical balance reconstruction for past months ─────────────────
-      // For the current month we trust the live `currentBalance` on the student doc.
-      // For past months we replay all transactions up to end-of-that-month to
-      // reconstruct what the balance was at that point in time.
-      //
-      // Sign convention (same as Firestore writes):
-      //   Payment received  → increment(-net)  → reduces balance (good for student)
-      //   Billing charge    → increment(+amt)  → increases balance (student owes more)
-      //   Deposit (prepay)  → increment(-amt)  → reduces balance (credit added)
-      //
-      // Transaction type detection (fields written by this page):
-      //   method === "auto-monthly"  → monthly billing charge  (+balance)
-      //   method === "auto"          → per-class charge         (+balance)
-      //   type   === "deposit"       → prepay deposit           (-balance)
-      //   everything else            → payment received         (-balance)
-
+      // ── Balance: single source of truth ────────────────────────────────────
+      // Derived from the transaction ledger (Total Dues Generated − Total
+      // Payments Received) via computeStudentBalances, not the denormalized
+      // `currentBalance` field on the student doc (which can drift if a
+      // charge is ever applied without a matching transaction record).
+      // For past months, balances are reconstructed as of end-of-month by
+      // replaying only transactions dated on/before that month.
       const isCurrent = month === currentMonth();
       // Last day of the selected month (e.g. "2025-04-30")
       const [yr, mo] = month.split("-").map(Number);
       const lastDayOfMonth = new Date(yr, mo, 0).getDate(); // day 0 of next month = last day of this month
       const monthEnd = `${month}-${String(lastDayOfMonth).padStart(2, "0")}`;
 
-      // Per-student balance as of end of selected month (only needed for past months)
-      const historicalBalanceMap = new Map<string, number>();
-
-      if (!isCurrent) {
-        // We need to replay ALL transactions up to monthEnd
-        txData.forEach(tx => {
-          if (tx.status !== "completed") return;
-          const txDate = (tx.date ?? "").slice(0, 10);
-          if (!tx.studentUid || txDate > monthEnd) return; // skip future tx
-
-          const raw = tx as unknown as Record<string, unknown>;
-          const method = (raw.method ?? "") as string;
-          const type   = (raw.type   ?? "") as string;
-          const amt    = Number(tx.amount ?? 0);
-          const uid    = tx.studentUid;
-
-          const prev = historicalBalanceMap.get(uid) ?? 0;
-
-          if (method === "auto-monthly" || method === "auto") {
-            historicalBalanceMap.set(uid, prev + amt);
-          } else if (type === "deposit") {
-            historicalBalanceMap.set(uid, prev - amt);
-          } else {
-            historicalBalanceMap.set(uid, prev - amt);
-          }
-        });
-      }
+      const balanceMap = computeStudentBalances(txData, isCurrent ? undefined : monthEnd);
 
       setStudents(studentSnap.docs.map(d => {
         const s           = d.data();
@@ -269,10 +235,7 @@ function FinanceContent() {
         const estimatedFee = feePerClass > 0 ? attCount * feePerClass : 0;
 
         // Balance: live for current month, reconstructed for past months
-        const liveBalance = Number(s.currentBalance ?? 0);
-        const balance = isCurrent
-          ? liveBalance
-          : (historicalBalanceMap.get(d.id) ?? 0);
+        const balance = balanceMap.get(d.id) ?? 0;
 
         return {
           uid:             d.id,

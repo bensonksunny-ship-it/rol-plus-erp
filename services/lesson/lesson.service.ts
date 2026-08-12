@@ -499,24 +499,23 @@ export async function markItemCompleted(
       ? (existing.data() as Omit<StudentLessonProgress, "id">)
       : null;
 
-    if (!current || current.attempts.length === 0) {
-      throw new Error(`NO_ATTEMPTS: cannot complete item ${itemId} without at least 1 attempt`);
-    }
-    if (current.completed) throw new Error(`ALREADY_COMPLETED: ${itemId}`);
+    if (current?.completed) throw new Error(`ALREADY_COMPLETED: ${itemId}`);
 
     const today = new Date().toISOString();
-
-    const updatedAttempts: Attempt[] = current.attempts.map((a, idx) =>
-      idx === current.attempts.length - 1 ? { ...a, status: "completed" as const } : a
-    );
+    const updatedAttempts: Attempt[] = current?.attempts ?? [];
 
     await setDoc(progressRef, {
-      attempts:       updatedAttempts,
-      completed:      true,
-      completionDate: today,
+      studentId,
+      lessonId,
+      itemId,
+      attempts:         updatedAttempts,
+      completed:        true,
+      completionDate:   today,
       teacherId,
-      totalAttempts:  updatedAttempts.length,
-      updatedAt:      serverTimestamp(),
+      firstAttemptDate: current?.firstAttemptDate ?? today,
+      totalAttempts:    updatedAttempts.length,
+      createdAt:        current ? current.createdAt : serverTimestamp(),
+      updatedAt:        serverTimestamp(),
     }, { merge: true });
 
     logAction({

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, type ReactNode } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback, type ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { collection, getDocs, query, where } from "firebase/firestore";
@@ -104,6 +104,109 @@ const NAV_GROUPS: NavGroup[] = [
 
 const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Students", "Faculty Suite", "My Classes", "Screening"];
 
+interface ResolvedNavItem extends NavItem {
+  resolvedHref: string;
+}
+
+interface ResolvedNavGroup extends NavGroup {
+  visibleItems: ResolvedNavItem[];
+}
+
+// ─── Accordion nav groups (module-level — must not be redefined per render,
+// otherwise React treats every render as a brand-new component type and
+// unmounts/remounts the whole nav tree on every click, e.g. every navigation) ──
+function NavGroups({
+  topNavItems,
+  visibleGroups,
+  isActive,
+  openGroups,
+  setOpenGroups,
+  alertCount,
+  onNavigate,
+}: {
+  topNavItems:   ResolvedNavItem[];
+  visibleGroups: ResolvedNavGroup[];
+  isActive:      (item: ResolvedNavItem) => boolean;
+  openGroups:    Set<string>;
+  setOpenGroups: (updater: (prev: Set<string>) => Set<string>) => void;
+  alertCount:    number;
+  onNavigate?:   () => void;
+}) {
+  return (
+    <>
+      {topNavItems.map(item => {
+        const active = isActive(item);
+        return (
+          <Link
+            key={item.resolvedHref}
+            href={item.resolvedHref}
+            onClick={onNavigate}
+            style={{ ...s.navItem, ...(active ? s.navItemActive : {}), marginBottom: 4 }}
+          >
+            <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>{item.icon}</span>
+            <span style={s.navLabel}>{item.label}</span>
+            {active && <span style={s.navActivePip} />}
+          </Link>
+        );
+      })}
+      {visibleGroups.map((group) => {
+        const isOpen    = openGroups.has(group.label);
+        const hasActive = group.visibleItems.some(item => isActive(item));
+
+        return (
+          <div key={group.label} style={s.groupWrap}>
+            {/* Group header toggle */}
+            <button
+              onClick={() =>
+                setOpenGroups(prev => {
+                  const next = new Set(prev);
+                  next.has(group.label) ? next.delete(group.label) : next.add(group.label);
+                  return next;
+                })
+              }
+              style={{ ...s.groupBtn, ...(hasActive ? s.groupBtnActive : {}) }}
+            >
+              <span style={s.groupIcon}>{group.icon}</span>
+              <span style={{ ...s.groupLabel, ...(hasActive ? s.groupLabelActive : {}) }}>
+                {group.label}
+              </span>
+              <span style={{ ...s.groupChevron, ...(isOpen ? s.groupChevronOpen : {}) }}>
+                ›
+              </span>
+            </button>
+
+            {/* Collapsible items */}
+            {isOpen && (
+              <div style={s.groupItems}>
+                {group.visibleItems.map(item => {
+                  const active = isActive(item);
+                  return (
+                    <Link
+                      key={item.resolvedHref}
+                      href={item.resolvedHref}
+                      onClick={onNavigate}
+                      style={{ ...s.navItem, ...s.navItemSub, ...(active ? s.navItemActive : {}) }}
+                    >
+                      <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>
+                        {item.icon}
+                      </span>
+                      <span style={s.navLabel}>{item.label}</span>
+                      {item.label === "Alerts" && alertCount > 0 && (
+                        <span style={s.navBadge}>{alertCount}</span>
+                      )}
+                      {active && <span style={s.navActivePip} />}
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -184,6 +287,58 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname, user?.uid, user?.role]);
 
+  // ── Derived nav data ────────────────────────────────────────────────────────
+  // These hooks must run on every render (including the loading/no-user renders
+  // below) — hooks can't be called conditionally, so each guards on `user` internally
+  // rather than living after the early returns.
+
+  // Flat list — used for pageTitle, bottomNav, isActive
+  const visibleNav = useMemo(() => (
+    !user ? [] : [...NAV_TOP, ...NAV_GROUPS.flatMap(g => g.items)]
+      .filter(item => item.roles.includes(user.role))
+      .map(item => ({
+        ...item,
+        resolvedHref: typeof item.href === "function"
+          ? item.href(user.uid, user.role)
+          : item.href,
+      }))
+  ), [user]);
+
+  // Top-level standalone items (rendered above accordion groups)
+  const topNavItems = useMemo(() => (
+    !user ? [] : NAV_TOP
+      .filter(item => item.roles.includes(user.role))
+      .map(item => ({
+        ...item,
+        resolvedHref: typeof item.href === "function"
+          ? item.href(user.uid, user.role)
+          : item.href,
+      }))
+  ), [user]);
+
+  // Grouped list — used for the accordion sidebar
+  const visibleGroups: ResolvedNavGroup[] = useMemo(() => (
+    !user ? [] : NAV_GROUPS
+      .map(group => ({
+        ...group,
+        visibleItems: group.items
+          .filter(item => item.roles.includes(user.role))
+          .map(item => ({
+            ...item,
+            resolvedHref: typeof item.href === "function"
+              ? item.href(user.uid, user.role)
+              : item.href,
+          })),
+      }))
+      .filter(g => g.visibleItems.length > 0)
+  ), [user]);
+
+  const isActive = useCallback((item: ResolvedNavItem): boolean => {
+    if (pathname === item.resolvedHref) return true;
+    const prefixes = (item.matchPrefix ?? item.resolvedHref).split(",");
+    return prefixes.some(p => p !== "/dashboard" && pathname.startsWith(p));
+  }, [pathname]);
+
   async function handleSignOut() {
     await signOut();
     router.replace("/login");
@@ -201,49 +356,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     return <div style={{ height: "100dvh", background: "var(--color-bg)" }} />;
   }
 
-  // ── Derived nav data ────────────────────────────────────────────────────────
-
-  // Flat list — used for pageTitle, bottomNav, isActive
-  const visibleNav = [...NAV_TOP, ...NAV_GROUPS.flatMap(g => g.items)]
-    .filter(item => item.roles.includes(user.role))
-    .map(item => ({
-      ...item,
-      resolvedHref: typeof item.href === "function"
-        ? item.href(user.uid, user.role)
-        : item.href,
-    }));
-
-  // Top-level standalone items (rendered above accordion groups)
-  const topNavItems = NAV_TOP
-    .filter(item => item.roles.includes(user.role))
-    .map(item => ({
-      ...item,
-      resolvedHref: typeof item.href === "function"
-        ? item.href(user.uid, user.role)
-        : item.href,
-    }));
-
-  // Grouped list — used for the accordion sidebar
-  const visibleGroups = NAV_GROUPS
-    .map(group => ({
-      ...group,
-      visibleItems: group.items
-        .filter(item => item.roles.includes(user.role))
-        .map(item => ({
-          ...item,
-          resolvedHref: typeof item.href === "function"
-            ? item.href(user.uid, user.role)
-            : item.href,
-        })),
-    }))
-    .filter(g => g.visibleItems.length > 0);
-
-  function isActive(item: (typeof visibleNav)[number]): boolean {
-    if (pathname === item.resolvedHref) return true;
-    const prefixes = (item.matchPrefix ?? item.resolvedHref).split(",");
-    return prefixes.some(p => p !== "/dashboard" && pathname.startsWith(p));
-  }
-
   const pageTitle = visibleNav.find(isActive)?.label ?? "Dashboard";
   const initials  = user.displayName.charAt(0).toUpperCase();
   const roleLabel = user.role.replace(/_/g, " ");
@@ -251,83 +363,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const bottomNav = BOTTOM_NAV_LABELS
     .map(label => visibleNav.find(i => i.label === label))
     .filter((i): i is (typeof visibleNav)[number] => i !== undefined);
-
-  // ── Accordion nav groups ────────────────────────────────────────────────────
-  function NavGroups({ onNavigate }: { onNavigate?: () => void }) {
-    return (
-      <>
-        {topNavItems.map(item => {
-          const active = isActive(item);
-          return (
-            <Link
-              key={item.resolvedHref}
-              href={item.resolvedHref}
-              onClick={onNavigate}
-              style={{ ...s.navItem, ...(active ? s.navItemActive : {}), marginBottom: 4 }}
-            >
-              <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>{item.icon}</span>
-              <span style={s.navLabel}>{item.label}</span>
-              {active && <span style={s.navActivePip} />}
-            </Link>
-          );
-        })}
-        {visibleGroups.map((group) => {
-          const isOpen    = openGroups.has(group.label);
-          const hasActive = group.visibleItems.some(item => isActive(item));
-
-          return (
-            <div key={group.label} style={s.groupWrap}>
-              {/* Group header toggle */}
-              <button
-                onClick={() =>
-                  setOpenGroups(prev => {
-                    const next = new Set(prev);
-                    next.has(group.label) ? next.delete(group.label) : next.add(group.label);
-                    return next;
-                  })
-                }
-                style={{ ...s.groupBtn, ...(hasActive ? s.groupBtnActive : {}) }}
-              >
-                <span style={s.groupIcon}>{group.icon}</span>
-                <span style={{ ...s.groupLabel, ...(hasActive ? s.groupLabelActive : {}) }}>
-                  {group.label}
-                </span>
-                <span style={{ ...s.groupChevron, ...(isOpen ? s.groupChevronOpen : {}) }}>
-                  ›
-                </span>
-              </button>
-
-              {/* Collapsible items */}
-              {isOpen && (
-                <div style={s.groupItems}>
-                  {group.visibleItems.map(item => {
-                    const active = isActive(item);
-                    return (
-                      <Link
-                        key={item.resolvedHref}
-                        href={item.resolvedHref}
-                        onClick={onNavigate}
-                        style={{ ...s.navItem, ...s.navItemSub, ...(active ? s.navItemActive : {}) }}
-                      >
-                        <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>
-                          {item.icon}
-                        </span>
-                        <span style={s.navLabel}>{item.label}</span>
-                        {item.label === "Alerts" && alertCount > 0 && (
-                          <span style={s.navBadge}>{alertCount}</span>
-                        )}
-                        {active && <span style={s.navActivePip} />}
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </>
-    );
-  }
 
   // ── MOBILE ─────────────────────────────────────────────────────────────────
   if (isMobile) {
@@ -371,7 +406,15 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             <button onClick={() => setDrawerOpen(false)} style={s.closeBtn}>✕</button>
           </div>
           <nav style={s.drawerNav}>
-            <NavGroups onNavigate={() => setDrawerOpen(false)} />
+            <NavGroups
+              topNavItems={topNavItems}
+              visibleGroups={visibleGroups}
+              isActive={isActive}
+              openGroups={openGroups}
+              setOpenGroups={setOpenGroups}
+              alertCount={alertCount}
+              onNavigate={() => setDrawerOpen(false)}
+            />
           </nav>
           <div style={s.drawerFoot}>
             <div style={s.userRow}>
@@ -435,7 +478,14 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         </div>
 
         <nav style={s.nav}>
-          <NavGroups />
+          <NavGroups
+            topNavItems={topNavItems}
+            visibleGroups={visibleGroups}
+            isActive={isActive}
+            openGroups={openGroups}
+            setOpenGroups={setOpenGroups}
+            alertCount={alertCount}
+          />
         </nav>
 
         <div style={s.sidebarFoot}>

@@ -24,6 +24,7 @@ import { db } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
 import type { Center } from "@/types";
 import { deleteUser as deleteUserRecord } from "@/services/admin/delete.service";
+import { changeAdminPassword } from "@/services/admin/password.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ function AdminsContent() {
   const [loading, setLoading]       = useState(true);
   const [showForm, setShowForm]     = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AdminRow | null>(null);
+  const [pwTarget, setPwTarget]     = useState<AdminRow | null>(null);
 
   // Form fields
   const [name, setName]           = useState("");
@@ -257,6 +259,30 @@ function AdminsContent() {
         </div>
       )}
 
+      {/* ── Change Password Modal ── */}
+      {pwTarget && (
+        <div style={s.overlay} onClick={() => setPwTarget(null)}>
+          <div style={s.modal} onClick={e => e.stopPropagation()}>
+            <div style={s.modalHeader}>
+              <span style={s.modalTitle}>🔑 Change Password — {pwTarget.displayName}</span>
+              <button onClick={() => setPwTarget(null)} style={s.closeBtn}>×</button>
+            </div>
+            <div style={s.modalBody}>
+              <ChangePasswordForm
+                target={pwTarget}
+                currentUserUid={user?.uid ?? ""}
+                onChanged={() => {
+                  setPwTarget(null);
+                  setSuccessMsg(`Password updated for "${pwTarget.displayName}".`);
+                }}
+                onError={msg => { setErrorMsg(msg); setPwTarget(null); }}
+                onClose={() => setPwTarget(null)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header row */}
       <div style={s.headerRow}>
         <div>
@@ -389,11 +415,16 @@ function AdminsContent() {
                       </span>
                     </td>
                     <td style={s.td}>
-                      {a.uid !== user?.uid && (
-                        <button style={s.deleteBtn} onClick={() => setDeleteTarget(a)}>
-                          ✕ Delete
+                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                        <button style={s.pwBtn} onClick={() => setPwTarget(a)}>
+                          🔑 Change Password
                         </button>
-                      )}
+                        {a.uid !== user?.uid && (
+                          <button style={s.deleteBtn} onClick={() => setDeleteTarget(a)}>
+                            ✕ Delete
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -453,6 +484,99 @@ function DeleteConfirm({ name, uid, role, currentUserUid, onDeleted, onError, on
   );
 }
 
+// ─── Change Password inline ───────────────────────────────────────────────────
+
+function ChangePasswordForm({ target, currentUserUid, onChanged, onError, onClose }: {
+  target: AdminRow; currentUserUid: string;
+  onChanged: () => void; onError: (m: string) => void; onClose: () => void;
+}) {
+  const [newPassword, setNewPassword]     = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPw, setShowPw]               = useState(false);
+  const [busy, setBusy]                   = useState(false);
+  const [localError, setLocalError]       = useState<string | null>(null);
+
+  const canSubmit = newPassword.length >= 6 && newPassword === confirmPassword;
+
+  async function doChange() {
+    if (!canSubmit) return;
+    setLocalError(null);
+    setBusy(true);
+    try {
+      const res = await changeAdminPassword(target.uid, newPassword);
+      if (res.success) {
+        await logAction({
+          action:        "ADMIN_PASSWORD_CHANGED",
+          initiatorId:   currentUserUid,
+          initiatorRole: ROLES.SUPER_ADMIN,
+          approverId:    null,
+          approverRole:  null,
+          reason:        null,
+          metadata:      { targetUid: target.uid, targetEmail: target.email },
+        });
+        onChanged();
+      } else {
+        setLocalError(res.error ?? "Failed to change password.");
+      }
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      {localError && (
+        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#991b1b", marginBottom: 14 }}>
+          {localError}
+        </div>
+      )}
+
+      <div style={s.field}>
+        <label style={s.label}>New Password</label>
+        <div style={{ position: "relative" }}>
+          <input
+            style={{ ...s.input, paddingRight: 52 }}
+            type={showPw ? "text" : "password"}
+            value={newPassword}
+            onChange={e => setNewPassword(e.target.value)}
+            placeholder="Min. 6 characters"
+            minLength={6}
+            autoFocus
+          />
+          <button type="button" tabIndex={-1} onClick={() => setShowPw(v => !v)} style={s.showHide}>
+            {showPw ? "Hide" : "Show"}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ ...s.field, marginTop: 14 }}>
+        <label style={s.label}>Confirm New Password</label>
+        <input
+          style={s.input}
+          type={showPw ? "text" : "password"}
+          value={confirmPassword}
+          onChange={e => setConfirmPassword(e.target.value)}
+          placeholder="Re-enter password"
+        />
+        {confirmPassword.length > 0 && confirmPassword !== newPassword && (
+          <span style={{ fontSize: 11.5, color: "#dc2626" }}>Passwords do not match.</span>
+        )}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 }}>
+        <button onClick={onClose} style={s.btnGhost}>Cancel</button>
+        <button onClick={doChange} disabled={!canSubmit || busy}
+          style={{ ...s.btnPrimary, opacity: canSubmit && !busy ? 1 : 0.6, cursor: canSubmit && !busy ? "pointer" : "not-allowed" }}>
+          {busy ? "Updating…" : "Update Password"}
+        </button>
+      </div>
+    </>
+  );
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
@@ -486,6 +610,7 @@ const s: Record<string, React.CSSProperties> = {
 
   emptyState:    { textAlign: "center", padding: "40px 0", color: "var(--color-text-secondary)", fontSize: 14 },
   deleteBtn:     { padding: "5px 12px", background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  pwBtn:         { padding: "5px 12px", background: "#ede9fe", color: "#4f46e5", border: "1px solid #ddd6fe", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" as const },
 
   // Modal
   overlay:       { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" },

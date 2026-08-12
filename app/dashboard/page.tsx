@@ -98,6 +98,18 @@ function isoMonthStart(offset = 0): string {
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - offset);
   return d.toISOString().slice(0, 7);
 }
+function mondayOf(dateISO: string): string {
+  const d = new Date(dateISO + "T00:00:00");
+  const day = d.getDay();            // 0=Sun..6=Sat
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d.toISOString().slice(0, 10);
+}
+function addDaysISO(dateISO: string, n: number): string {
+  const d = new Date(dateISO + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
 
 const DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -495,6 +507,9 @@ function CommandCenter() {
         </div>
       </div>
 
+      {/* ── WEEKLY ATTENDANCE BREAKDOWN (Class-1 vs Class-2) ── */}
+      <WeeklyClassBreakdown />
+
       {/* ── 3. TRENDS ROW ── */}
       <div style={s.twoCol}>
         <ChartCard title="Revenue Trend" sub="6 months">
@@ -767,6 +782,301 @@ function GaugeChart({ value, goal }: { value:number; goal:number }) {
     </svg>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WEEKLY ATTENDANCE BREAKDOWN — Class-1 vs Class-2
+// Groups each active student's scheduled classes for a Mon–Sun week; their
+// chronologically-first scheduled class = Class-1, second = Class-2.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface WeeklyStudentDoc {
+  uid:       string;
+  name:      string;
+  centerId:  string;
+  status:    string;
+  classType: string;
+  classDays: string[];
+}
+
+interface WeeklyAttendanceDoc {
+  studentUid: string;
+  date:       string;
+  status:     string;
+}
+
+interface ClassBucket {
+  present:        number;
+  absent:         number;
+  pending:        number;
+  cancelledBreak: number;
+  total:          number;
+}
+
+function emptyBucket(): ClassBucket {
+  return { present: 0, absent: 0, pending: 0, cancelledBreak: 0, total: 0 };
+}
+
+// A status bucket, minus "total" (which has no single matching attendance record).
+type BucketKey = "present" | "absent" | "pending" | "cancelledBreak";
+
+const BUCKET_LABEL: Record<BucketKey, string> = {
+  present: "Present", absent: "Absent", pending: "Pending", cancelledBreak: "Cancelled/Break",
+};
+const BUCKET_COLOR: Record<BucketKey, { bg: string; fg: string; border: string }> = {
+  present:        { bg: "#f0fdf4", fg: "#16a34a", border: "#bbf7d0" },
+  absent:         { bg: "#fef2f2", fg: "#dc2626", border: "#fecaca" },
+  pending:        { bg: "#fffbeb", fg: "#f59e0b", border: "#fde68a" },
+  cancelledBreak: { bg: "#f9fafb", fg: "#6b7280", border: "#e5e7eb" },
+};
+
+// One scheduled class-slot occurrence for one student in the selected week.
+interface WeeklyEntry {
+  studentUid:   string;
+  studentName:  string;
+  centerName:   string;
+  date:         string;
+  classSlot:    1 | 2;
+  bucket:       BucketKey;
+}
+
+function WeeklyClassBreakdown() {
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [centers,  setCenters]  = useState<Center[]>([]);
+  const [students, setStudents] = useState<WeeklyStudentDoc[]>([]);
+  const [records,  setRecords]  = useState<WeeklyAttendanceDoc[]>([]);
+  const [loading,  setLoading]  = useState(true);
+  const [drill,    setDrill]    = useState<{ classSlot: 1 | 2; bucket: BucketKey } | null>(null);
+
+  const weekStart = useMemo(() => addDaysISO(mondayOf(isoToday()), weekOffset * 7), [weekOffset]);
+  const weekEnd   = useMemo(() => addDaysISO(weekStart, 6), [weekStart]);
+  const weekDates = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysISO(weekStart, i)), [weekStart]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const [centersData, studentsSnap, attSnap] = await Promise.all([
+          getCenters(),
+          getDocs(query(collection(db, "users"), where("role", "==", "student"))),
+          getDocs(query(collection(db, "attendance"), where("date", ">=", weekStart), where("date", "<=", weekEnd))),
+        ]);
+        if (cancelled) return;
+        setCenters(centersData);
+        setStudents(studentsSnap.docs.map(d => {
+          const data = d.data();
+          return {
+            uid:       d.id,
+            name:      (data.displayName ?? data.name ?? "—") as string,
+            centerId:  (data.centerId ?? "") as string,
+            status:    (data.status ?? data.studentStatus ?? "active") as string,
+            classType: (data.classType ?? "group") as string,
+            classDays: Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
+          };
+        }));
+        setRecords(attSnap.docs.map(d => {
+          const data = d.data();
+          return {
+            studentUid: (data.studentUid ?? "") as string,
+            date:       (data.date ?? "") as string,
+            status:     (data.status ?? "") as string,
+          };
+        }));
+      } catch (err) {
+        console.error("[WeeklyClassBreakdown] load error:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [weekStart, weekEnd]);
+
+  const centerDaysMap = useMemo(() => {
+    const m = new Map<string, string[]>();
+    centers.forEach(c => m.set(c.id, ((c as Center & { daysOfWeek?: string[] }).daysOfWeek) ?? []));
+    return m;
+  }, [centers]);
+
+  const centerNameMap = useMemo(() => {
+    const m = new Map<string, string>();
+    centers.forEach(c => m.set(c.id, c.name));
+    return m;
+  }, [centers]);
+
+  const attMap = useMemo(() => {
+    const m = new Map<string, string>();
+    records.forEach(r => m.set(`${r.studentUid}|${r.date}`, r.status));
+    return m;
+  }, [records]);
+
+  const { class1, class2, entries } = useMemo(() => {
+    const class1 = emptyBucket();
+    const class2 = emptyBucket();
+    const entries: WeeklyEntry[] = [];
+
+    const activeStudents = students.filter(s => s.status !== "inactive" && s.status !== "deactivation_requested");
+
+    activeStudents.forEach(st => {
+      const scheduleDays = st.classType === "personal" && st.classDays.length > 0
+        ? st.classDays
+        : (centerDaysMap.get(st.centerId) ?? []);
+      if (scheduleDays.length === 0) return;
+
+      const scheduledDates = weekDates.filter(d => scheduleDays.includes(DAY_ABBR[new Date(d + "T00:00:00").getDay()]));
+
+      scheduledDates.slice(0, 2).forEach((date, idx) => {
+        const classSlot: 1 | 2 = idx === 0 ? 1 : 2;
+        const bucketObj = idx === 0 ? class1 : class2;
+        const status = attMap.get(`${st.uid}|${date}`);
+        let bucket: BucketKey;
+        if (status === "present") bucket = "present";
+        else if (status === "absent") bucket = "absent";
+        else if (status === "break" || status?.startsWith("cancelled")) bucket = "cancelledBreak";
+        else bucket = "pending";
+
+        bucketObj.total++;
+        bucketObj[bucket]++;
+        entries.push({
+          studentUid:  st.uid,
+          studentName: st.name,
+          centerName:  centerNameMap.get(st.centerId) ?? "—",
+          date,
+          classSlot,
+          bucket,
+        });
+      });
+    });
+
+    return { class1, class2, entries };
+  }, [students, centerDaysMap, centerNameMap, attMap, weekDates]);
+
+  const weekLabel = `${new Date(weekStart + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })} – ${new Date(weekEnd + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`;
+  const isCurrentWeek = weekOffset === 0;
+  const weekBtn: React.CSSProperties = { fontSize: 12, fontWeight: 600, color: "#374151", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: "6px 12px", cursor: "pointer" };
+
+  const tiles = (m: ClassBucket) => [
+    { label: "Present",         value: m.present,        color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0", bucket: "present"        as BucketKey | null },
+    { label: "Absent",          value: m.absent,          color: "#dc2626", bg: "#fef2f2", border: "#fecaca", bucket: "absent"         as BucketKey | null },
+    { label: "Pending",         value: m.pending,         color: "#f59e0b", bg: "#fffbeb", border: "#fde68a", bucket: "pending"        as BucketKey | null },
+    { label: "Cancelled/Break", value: m.cancelledBreak,  color: "#6b7280", bg: "#f9fafb", border: "#e5e7eb", bucket: "cancelledBreak" as BucketKey | null },
+    { label: "Total",           value: m.total,           color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe", bucket: null },
+  ];
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "18px 20px", marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap" as const, gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Weekly Attendance Breakdown</div>
+          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
+            {weekLabel} · Class-1 vs Class-2 · all active students{loading ? " · loading…" : ""}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button style={weekBtn} onClick={() => setWeekOffset(o => o - 1)}>‹ Prev</button>
+          <button style={{ ...weekBtn, ...(isCurrentWeek ? { opacity: 0.5, cursor: "default" } : {}) }} disabled={isCurrentWeek} onClick={() => setWeekOffset(0)}>This Week</button>
+          <button style={weekBtn} onClick={() => setWeekOffset(o => o + 1)}>Next ›</button>
+        </div>
+      </div>
+
+      {[{ title: "Class-1", data: class1, classSlot: 1 as const }, { title: "Class-2", data: class2, classSlot: 2 as const }].map(({ title, data, classSlot }, i) => (
+        <div key={title} style={{ marginTop: i === 0 ? 0 : 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 8 }}>{title}</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
+            {tiles(data).map(({ label, value, color, bg, border, bucket }) => {
+              const clickable = bucket !== null;
+              return (
+                <button
+                  key={label}
+                  type="button"
+                  disabled={!clickable}
+                  onClick={clickable ? () => setDrill({ classSlot, bucket }) : undefined}
+                  title={clickable ? `View students — ${title} · ${label}` : undefined}
+                  style={{
+                    background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "12px 20px", minWidth: 100,
+                    textAlign: "center" as const, font: "inherit", cursor: clickable ? "pointer" : "default",
+                  }}
+                >
+                  <div style={{ fontSize: 22, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginTop: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {drill && (
+        <WeeklyDrillDownModal
+          classSlot={drill.classSlot}
+          bucket={drill.bucket}
+          entries={entries}
+          onClose={() => setDrill(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Drill-down: student list for one Class-1/Class-2 × status combination ──────
+function WeeklyDrillDownModal({ classSlot, bucket, entries, onClose }: {
+  classSlot: 1 | 2; bucket: BucketKey; entries: WeeklyEntry[]; onClose: () => void;
+}) {
+  const rows = useMemo(
+    () => entries
+      .filter(e => e.classSlot === classSlot && e.bucket === bucket)
+      .sort((a, b) => a.studentName.localeCompare(b.studentName)),
+    [entries, classSlot, bucket]
+  );
+  const color = BUCKET_COLOR[bucket];
+
+  return (
+    <div style={dmodal.overlay} onClick={onClose}>
+      <div style={dmodal.box} onClick={e => e.stopPropagation()}>
+        <div style={dmodal.header}>
+          <div>
+            <div style={dmodal.title}>Class-{classSlot} · {BUCKET_LABEL[bucket]}</div>
+            <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 4 }}>{rows.length} student{rows.length === 1 ? "" : "s"}</div>
+          </div>
+          <button onClick={onClose} style={dmodal.closeBtn}>✕</button>
+        </div>
+        <div style={dmodal.body}>
+          {rows.length === 0 ? (
+            <div style={{ fontSize: 13, color: "#9ca3af", textAlign: "center" as const, padding: "30px 0" }}>No students in this category.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
+              {rows.map(r => (
+                <div key={`${r.studentUid}|${r.date}`} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", border: "1px solid #f3f4f6", borderRadius: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>{r.studentName}</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{r.centerName}</div>
+                  </div>
+                  <div style={{ textAlign: "right" as const }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: color.fg, background: color.bg, border: `1px solid ${color.border}`, borderRadius: 99, padding: "3px 10px" }}>
+                      {BUCKET_LABEL[bucket]}
+                    </span>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>
+                      {new Date(r.date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" })}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const dmodal: Record<string, React.CSSProperties> = {
+  overlay:  { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
+  box:      { background: "#fff", borderRadius: 16, width: "100%", maxWidth: 480, maxHeight: "80vh", display: "flex", flexDirection: "column" as const, boxShadow: "0 20px 60px rgba(0,0,0,0.2)", overflow: "hidden" },
+  header:   { display: "flex", alignItems: "flex-start", justifyContent: "space-between", padding: "18px 20px", borderBottom: "1px solid #e5e7eb", flexShrink: 0 },
+  title:    { fontSize: 15, fontWeight: 700, color: "#111827" },
+  closeBtn: { background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#9ca3af", lineHeight: 1, padding: 4 },
+  body:     { padding: "16px 20px", overflowY: "auto" as const, flex: 1 },
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TEACHER ROW SUB-COMPONENT
@@ -1357,6 +1667,9 @@ function AdminDashboard() {
           ))}
         </div>
       </div>
+
+      {/* ── WEEKLY ATTENDANCE BREAKDOWN (Class-1 vs Class-2) ── */}
+      <WeeklyClassBreakdown />
 
       {/* ── MONTHLY FINANCE PANEL ── */}
       <div style={adm.section}>

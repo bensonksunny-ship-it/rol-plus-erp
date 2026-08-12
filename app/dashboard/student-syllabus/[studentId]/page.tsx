@@ -10,7 +10,6 @@ import { db } from "@/config/firebase";
 import {
   getLessonsForStudent,
   getProgressByStudent,
-  addAttempt,
   markItemCompleted,
   calcLessonPercent,
 } from "@/services/lesson/lesson.service";
@@ -20,7 +19,7 @@ import {
   deleteLessonItem,
   deleteLesson,
 } from "@/services/admin/delete.service";
-import type { Lesson, LessonItem, StudentLessonProgress, Attempt } from "@/types/lesson";
+import type { Lesson, LessonItem, StudentLessonProgress } from "@/types/lesson";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
@@ -377,34 +376,8 @@ function ItemCard({
 }) {
   const [busy, setBusy]     = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
-  const [notes, setNotes]   = useState("");
 
-  const attempts     = progress?.attempts ?? [];
-  const attemptCount = attempts.length;
-  const isCompleted  = progress?.completed ?? false;
-
-  async function handleAttempt() {
-    if (!canModify) return;
-    setBusy(true);
-    setErrMsg(null);
-    try {
-      await addAttempt(
-        studentId,
-        lessonId,
-        item.id,
-        teacherId,
-        teacherRole as import("@/types").Role,
-        notes.trim() || null,
-      );
-      setNotes("");
-      onUpdated();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrMsg(msg);
-    } finally {
-      setBusy(false);
-    }
-  }
+  const isCompleted = progress?.completed ?? false;
 
   async function handleComplete() {
     if (!canModify) return;
@@ -456,39 +429,6 @@ function ItemCard({
       {/* Title */}
       <div style={s.itemTitle}>{item.title}</div>
 
-      {/* Attempt dots (slots = item.maxAttempts) */}
-      <div style={s.attemptsRow}>
-        {Array.from({ length: item.maxAttempts }).map((_, i) => (
-          <span
-            key={i}
-            style={{
-              ...s.dot,
-              background: i < attemptCount ? "#e2b96f" : "rgba(255,255,255,0.08)",
-              boxShadow: i < attemptCount ? "0 0 8px rgba(226,185,111,0.45)" : "none",
-            }}
-            title={i < attemptCount ? `Attempt ${i + 1} done` : `Attempt ${i + 1} not done`}
-          />
-        ))}
-        <span style={s.attemptsLabel}>{attemptCount}/{item.maxAttempts} attempts</span>
-      </div>
-
-      {/* Attempt history */}
-      {attempts.length > 0 && (
-        <div style={s.attemptHistory}>
-          <div style={s.historyLabel}>Attempt history</div>
-          {attempts.map((a: Attempt) => (
-            <div key={a.attemptNo} style={{ ...s.attemptRow, ...(a.status === "completed" ? s.attemptDone : {}) }}>
-              <span style={s.attemptNo}>#{a.attemptNo}</span>
-              <span style={s.attemptDate}>{a.date}</span>
-              <span style={{ ...s.attemptStatus, color: a.status === "completed" ? "#6ee7b7" : "#94a3b8" }}>
-                {a.status}
-              </span>
-              {a.notes && <span style={s.attemptNotes}>"{a.notes}"</span>}
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Analytics */}
       {progress?.firstAttemptDate && (
         <div style={s.analyticsRow}>
@@ -507,31 +447,13 @@ function ItemCard({
       {/* Actions — teachers/admins only, and only when not completed */}
       {canModify && !isCompleted && (
         <div style={s.itemActions}>
-          <input
-            value={notes}
-            onChange={e => setNotes(e.target.value)}
-            placeholder="Notes (optional)…"
-            style={s.notesInput}
-            disabled={busy || attemptCount >= item.maxAttempts}
-          />
-          <button
-            onClick={handleAttempt}
-            disabled={busy || attemptCount >= item.maxAttempts}
-            style={{
-              ...s.attemptBtn,
-              opacity: (busy || attemptCount >= item.maxAttempts) ? 0.5 : 1,
-              cursor:  (busy || attemptCount >= item.maxAttempts) ? "not-allowed" : "pointer",
-            }}
-          >
-            + Add Attempt
-          </button>
           <button
             onClick={handleComplete}
-            disabled={busy || attemptCount === 0}
+            disabled={busy}
             style={{
               ...s.doneBtn,
-              opacity: (busy || attemptCount === 0) ? 0.5 : 1,
-              cursor:  (busy || attemptCount === 0) ? "not-allowed" : "pointer",
+              opacity: busy ? 0.5 : 1,
+              cursor:  busy ? "not-allowed" : "pointer",
             }}
           >
             Mark Done
@@ -802,47 +724,6 @@ const s: Record<string, React.CSSProperties> = {
 
   itemTitle: { fontSize: 14, fontWeight: 600, color: "#111111", marginBottom: 12 },
 
-  // Attempt dots
-  attemptsRow:  { display: "flex", alignItems: "center", gap: 7, marginBottom: 10 },
-  dot: {
-    width:        13,
-    height:       13,
-    borderRadius: "50%",
-    display:      "inline-block",
-    transition:   "background 0.2s",
-  },
-  attemptsLabel: { fontSize: 11, color: "#6b7280", marginLeft: 6 },
-
-  // Attempt history
-  attemptHistory: {
-    background:   "#f9fafb",
-    border:       "1px solid #e5e7eb",
-    borderRadius: 8,
-    padding:      "10px 14px",
-    marginBottom: 10,
-  },
-  historyLabel: {
-    fontSize:      10,
-    fontWeight:    700,
-    color:         "#374151",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.08em",
-    marginBottom:  6,
-  },
-  attemptRow: {
-    display:      "flex",
-    gap:          10,
-    alignItems:   "center",
-    fontSize:     12,
-    padding:      "4px 0",
-    borderBottom: "1px solid #f3f4f6",
-  },
-  attemptDone:   { background: "#dcfce7", borderRadius: 4, padding: "4px 6px" },
-  attemptNo:     { fontFamily: "monospace", fontWeight: 700, color: "#111111", minWidth: 28 },
-  attemptDate:   { color: "#6b7280", minWidth: 80 },
-  attemptStatus: { fontWeight: 600, minWidth: 70 },
-  attemptNotes:  { color: "#374151", fontStyle: "italic" as const, flex: 1 },
-
   analyticsRow: { display: "flex", gap: 8, flexWrap: "wrap" as const, marginBottom: 10 },
   analyticChip: {
     fontSize:     11,
@@ -878,27 +759,6 @@ const s: Record<string, React.CSSProperties> = {
     marginTop:  6,
     alignItems: "center",
     flexWrap:   "wrap" as const,
-  },
-  notesInput: {
-    flex:         1,
-    minWidth:     160,
-    padding:      "7px 12px",
-    border:       "1px solid #d1d5db",
-    borderRadius: 8,
-    fontSize:     12,
-    color:        "#111111",
-    background:   "#fff",
-    outline:      "none",
-  },
-  attemptBtn: {
-    background:   "#f3f4f6",
-    color:        "#374151",
-    border:       "1px solid #d1d5db",
-    padding:      "7px 14px",
-    borderRadius: 8,
-    fontSize:     12,
-    fontWeight:   700,
-    cursor:       "pointer",
   },
   doneBtn: {
     background:    "#16a34a",

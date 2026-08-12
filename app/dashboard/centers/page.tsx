@@ -328,73 +328,61 @@ function CentersContent() {
         </form>
       )}
 
-      {/* Table */}
-      <div style={styles.tableWrapper}>
-        {loading ? (
-          <div style={styles.stateRow}>Loading…</div>
-        ) : centers.length === 0 ? (
-          <div style={styles.stateRow}>No centers available.</div>
-        ) : (
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Code</th>
-                <th style={styles.th}>Name</th>
-                <th style={styles.th}>Teacher</th>
-                <th style={styles.th}>Schedule</th>
-                <th style={styles.th}>Status</th>
-                <th style={styles.th}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {centers.map((center, i) => (
-                <CenterRow key={center.id} center={center} index={i}
-                  teachers={teachers}
-                  onView={() => setViewTarget(center)}
-                  onEdit={() => openEdit(center)}
-                  onDelete={() => setDeleteTarget(center)} />
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {/* Grid */}
+      {loading ? (
+        <div style={styles.stateRow}>Loading…</div>
+      ) : centers.length === 0 ? (
+        <div style={styles.stateRow}>No centers available.</div>
+      ) : (
+        <div style={styles.grid}>
+          {centers.map(center => (
+            <CenterCard key={center.id} center={center}
+              teachers={teachers}
+              onView={() => setViewTarget(center)}
+              onEdit={() => openEdit(center)}
+              onDelete={() => setDeleteTarget(center)} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-// ─── Row ───────────────────────────────────────────────────────────────────────
+// ─── Card ──────────────────────────────────────────────────────────────────────
 
-function CenterRow({ center, index, teachers, onView, onEdit, onDelete }: {
-  center: Center; index: number; teachers: TeacherUser[];
+function CenterCard({ center, teachers, onView, onEdit, onDelete }: {
+  center: Center; teachers: TeacherUser[];
   onView: () => void; onEdit: () => void; onDelete: () => void;
 }) {
   const [hover, setHover] = useState(false);
   const raw = center as Center & { centerCode?: string };
   const teacher = teachers.find(t => t.uid === center.teacherUid);
   return (
-    <tr style={{ ...(index % 2 === 0 ? styles.rowEven : styles.rowOdd), ...(hover ? styles.rowHover : {}) }}
+    <div style={{ ...styles.card, ...(hover ? styles.cardHover : {}) }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
-      <td style={{ ...styles.td, ...styles.mono }}>
+      <div style={styles.cardHeader}>
         <span style={styles.codeChip}>{raw.centerCode || "-"}</span>
-      </td>
-      <td style={styles.tdBold}>{center.name}</td>
-      <td style={styles.td}>
+        <StatusBadge status={center.status} />
+      </div>
+      <div style={styles.cardName}>{center.name}</div>
+      <div style={styles.cardMeta}>
+        <span style={styles.cardMetaLabel}>Teacher</span>
         {teacher
           ? <span>{teacher.displayName}</span>
           : <span style={{ color: "#9ca3af", fontSize: 12 }}>Unassigned</span>}
-      </td>
-      <td style={styles.td}>{center.timeSlot || "-"}</td>
-      <td style={styles.td}><StatusBadge status={center.status} /></td>
-      <td style={styles.td}>
-        <div style={actionStyles.row}>
-          <ActionButton label="View" variant="ghost"   onClick={onView} />
-          <ActionButton label="Edit" variant="primary" onClick={onEdit} />
-          <button onClick={onDelete} style={actionStyles.deleteBtn} title="Delete center">
-            ✕ Delete
-          </button>
-        </div>
-      </td>
-    </tr>
+      </div>
+      <div style={styles.cardMeta}>
+        <span style={styles.cardMetaLabel}>Schedule</span>
+        <span>{center.timeSlot || "-"}</span>
+      </div>
+      <div style={styles.cardActions}>
+        <ActionButton label="View" variant="ghost"   onClick={onView} />
+        <ActionButton label="Edit" variant="primary" onClick={onEdit} />
+        <button onClick={onDelete} style={actionStyles.deleteBtn} title="Delete center">
+          ✕ Delete
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -478,15 +466,15 @@ const styles: Record<string, React.CSSProperties> = {
   header:      { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 },
   heading:     { fontSize: 22, fontWeight: 600, color: "var(--color-text-primary)" },
   addBtn:      { background: "#4f46e5", color: "#fff", border: "none", padding: "8px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" },
-  tableWrapper:{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, overflow: "hidden" },
-  stateRow:    { padding: "24px 16px", textAlign: "center", fontSize: 13, color: "var(--color-text-secondary)" },
-  table:       { width: "100%", borderCollapse: "collapse" },
-  th:          { padding: "11px 16px", textAlign: "left", fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: "1px solid var(--color-border)", background: "#f9fafb" },
-  td:          { padding: "12px 16px", fontSize: 13, color: "var(--color-text-primary)", borderBottom: "1px solid var(--color-border)" },
-  tdBold:      { padding: "12px 16px", fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)", borderBottom: "1px solid var(--color-border)" },
-  rowEven:     { background: "var(--color-surface)" },
-  rowOdd:      { background: "#fafafa" },
-  rowHover:    { background: "#f0f4ff" },
+  stateRow:    { padding: "24px 16px", textAlign: "center", fontSize: 13, color: "var(--color-text-secondary)", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10 },
+  grid:        { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 },
+  card:        { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, padding: "16px 18px", display: "flex", flexDirection: "column", gap: 10 },
+  cardHover:   { boxShadow: "0 4px 14px rgba(0,0,0,0.08)" },
+  cardHeader:  { display: "flex", alignItems: "center", justifyContent: "space-between" },
+  cardName:    { fontSize: 15, fontWeight: 600, color: "var(--color-text-primary)" },
+  cardMeta:    { display: "flex", flexDirection: "column", gap: 2, fontSize: 13, color: "var(--color-text-primary)" },
+  cardMetaLabel:{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.04em" },
+  cardActions: { display: "flex", gap: 6, alignItems: "center", marginTop: 4, paddingTop: 10, borderTop: "1px solid var(--color-border)" },
   mono:        { fontFamily: "monospace", fontSize: 12, color: "var(--color-text-secondary)" },
   codeChip:    { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4, fontWeight: 600 },
   badge:       { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" },

@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
   collection, getDocs, setDoc, updateDoc, doc, getDoc,
-  query, where, serverTimestamp,
+  query, where, serverTimestamp, addDoc, increment,
 } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import {
@@ -24,6 +24,8 @@ import {
   deleteUser as deleteUserRecord,
   type ClearHistoryOptions,
 } from "@/services/admin/delete.service";
+import { computeStudentBalances } from "@/services/finance/finance.service";
+import type { Transaction } from "@/types/finance";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -108,6 +110,26 @@ function fmtINR(n: number): string {
   return n === 0 ? "₹0" : `₹${n.toLocaleString("en-IN")}`;
 }
 
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** "2026-08" → "August 2026" */
+function fmtMonth(ym: string): string {
+  const [y, m] = ym.split("-");
+  const names = ["January","February","March","April","May","June",
+                  "July","August","September","October","November","December"];
+  return `${names[parseInt(m, 10) - 1] ?? m} ${y ?? ""}`.trim();
+}
+
+/** "2026-08-12" → "12 Aug 2026" */
+function fmtDate(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso.length === 7 ? `${iso}-01` : iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
 // ─── Status styles ─────────────────────────────────────────────────────────────
 
 const STATUS_BADGE: Record<string, React.CSSProperties> = {
@@ -160,6 +182,7 @@ function StudentsContent() {
   const { user, role }                  = useAuth();
   const { isAllowed, filterCentres, teacherCentreIds, isTeacherRole } = useCentreAccess();
   const [students, setStudents]         = useState<StudentRow[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [centerMap, setCenterMap]       = useState<Map<string, string>>(new Map());
   const [centerOptions, setCenterOpts]  = useState<{ id: string; name: string }[]>([]);
   const [teacherOptions, setTeacherOpts] = useState<{ id: string; name: string }[]>([]);
@@ -191,11 +214,19 @@ function StudentsContent() {
 
   async function fetchData() {
     try {
-      const [studentSnap, centerSnap, teacherSnap] = await Promise.all([
+      const [studentSnap, centerSnap, teacherSnap, txSnap] = await Promise.all([
         getDocs(query(collection(db, "users"), where("role", "==", "student"))),
         getDocs(collection(db, "centers")),
         getDocs(query(collection(db, "users"), where("role", "==", "teacher"))),
+        getDocs(collection(db, "transactions")),
       ]);
+
+      // Single source of truth for balance: derive from the transaction
+      // ledger (Total Dues Generated − Total Payments Received) rather than
+      // the denormalized `currentBalance` field, which can drift out of sync.
+      const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }) as Transaction);
+      const balanceMap = computeStudentBalances(txs);
+      setTransactions(txs);
 
       const cMap = new Map<string, string>();
       const cOptsAll: { id: string; name: string }[] = [];
@@ -239,7 +270,7 @@ function StudentsContent() {
           classTime:   (s.classTime ?? null) as string | null,
           feeCycle:    (s.feeCycle    ?? "-") as string,
           feePerClass: Number(s.feePerClass ?? 0),
-          balance:     Number(s.currentBalance ?? 0),
+          balance:     balanceMap.get(d.id) ?? 0,
           status:      (s.status ?? s.studentStatus ?? "active") as string,
           deactivationRequestedBy: (s.deactivationRequestedBy ?? null) as string | null,
           deactivationRequestedAt: (s.deactivationRequestedAt ?? null) as string | null,
@@ -269,6 +300,16 @@ function StudentsContent() {
   }, [isTeacherRole, teacherCentreIds]);
 
   useEffect(() => { fetchData(); }, []);
+
+  // Keep an open Student Detail Modal in sync after a refetch (e.g. payment recorded)
+  useEffect(() => {
+    setSelectedStudent(prev => {
+      if (!prev) return prev;
+      const fresh = students.find(st => st.id === prev.id);
+      return fresh ?? prev;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [students]);
 
   function handleSearch(e: React.ChangeEvent<HTMLInputElement>) {
     const val = e.target.value;
@@ -885,15 +926,18 @@ function StudentsContent() {
       {selectedStudent && (
         <StudentDetailModal
           student={selectedStudent}
+          transactions={transactions.filter(t => t.studentUid === selectedStudent.id)}
           isAdmin={isAdmin}
           isTeacher={isTeacher}
           canEdit={!isTeacherRole || isAllowed(selectedStudent.centerId)}
+          receivedBy={user?.displayName ?? user?.email ?? "admin"}
           onClose={() => setSelectedStudent(null)}
           onEdit={() => { setSelectedStudent(null); setEditTarget(selectedStudent); }}
           onRequestDeactivation={() => { setSelectedStudent(null); requestDeactivation(selectedStudent); }}
           onRequestBreak={() => { setSelectedStudent(null); setBreakTarget(selectedStudent); }}
           onClearHistory={isAdmin ? () => { setSelectedStudent(null); setClearHistoryTarget(selectedStudent); } : undefined}
           onDelete={isAdmin ? () => { setSelectedStudent(null); setDeleteTarget(selectedStudent); } : undefined}
+          onPaymentRecorded={() => fetchData()}
         />
       )}
 
@@ -1838,12 +1882,30 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
 
 // ─── Student Detail Modal ──────────────────────────────────────────────────────
 
-function StudentDetailModal({ student: s, isAdmin, isTeacher, canEdit, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
-  student: StudentRow; isAdmin: boolean; isTeacher: boolean; canEdit: boolean;
+function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canEdit, receivedBy, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete, onPaymentRecorded }: {
+  student: StudentRow; transactions: Transaction[]; isAdmin: boolean; isTeacher: boolean; canEdit: boolean;
+  receivedBy: string;
   onClose: () => void; onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
-  onClearHistory?: () => void; onDelete?: () => void;
+  onClearHistory?: () => void; onDelete?: () => void; onPaymentRecorded: () => void;
 }) {
   const statusStyle = STATUS_BADGE[s.status] ?? { background: "#f3f4f6", color: "#6b7280" };
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [payTarget, setPayTarget] = useState<Transaction | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [menuOpen]);
+
+  // Chronological (newest first) statement: fee dues, payments, deposits, auto-charges.
+  const statement = useMemo(() => {
+    return [...transactions].sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
+  }, [transactions]);
+
   function Row({ label, value }: { label: string; value: React.ReactNode }) {
     return (
       <div style={{ display: "flex", gap: 8, fontSize: 13, paddingBottom: 8, borderBottom: "1px solid #f3f4f6" }}>
@@ -1871,7 +1933,11 @@ function StudentDetailModal({ student: s, isAdmin, isTeacher, canEdit, onClose, 
           <Row label="Email"        value={s.email} />
           {s.phone && <Row label="Phone" value={s.phone} />}
           <Row label="Instrument"   value={s.instrument} />
-          <Row label="Course"       value={s.course} />
+          <Row label="Course"       value={
+            <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.courseLink} title="View syllabus for this course">
+              {s.course} <span style={{ fontSize: 11 }}>→</span>
+            </Link>
+          } />
           <Row label="Class Type"   value={
             <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
               {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
@@ -1896,30 +1962,204 @@ function StudentDetailModal({ student: s, isAdmin, isTeacher, canEdit, onClose, 
           <Row label="Balance" value={
             <span style={{ fontWeight: 700, color: s.balance > 0 ? "#dc2626" : "#16a34a" }}>{fmtINR(s.balance)}</span>
           } />
-        </div>
-        <div style={{ ...modal.footer, justifyContent: "space-between", flexWrap: "wrap" as const, gap: 8 }}>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
-            {(isAdmin || isTeacher) && canEdit && (
-              <button onClick={onEdit} style={p.editBtn}>✏ Edit</button>
-            )}
-            {(isAdmin || isTeacher) && s.status === "active" && (
-              <button onClick={onRequestDeactivation} style={p.deactBtn}>Deactivate</button>
-            )}
-            {(isAdmin || isTeacher) && s.status === "active" && (
-              <button onClick={onRequestBreak} style={{ ...p.editBtn, background: "#e0f2fe", color: "#0369a1", borderColor: "#7dd3fc" }}>☕ Break</button>
-            )}
-            {onClearHistory && (
-              <button onClick={onClearHistory} style={p.clearBtn}>🗑 History</button>
-            )}
-            {onDelete && (
-              <button onClick={onDelete} style={p.deleteBtn}>✕ Delete</button>
+
+          {/* ── Financial Statement ── */}
+          <div style={{ marginTop: 6 }}>
+            <div style={modal.sectionLabel}>Financial Statement</div>
+            {statement.length === 0 ? (
+              <div style={{ fontSize: 12, color: "#9ca3af", padding: "10px 0" }}>No transactions yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
+                {statement.map(tx => {
+                  const raw      = tx as unknown as Record<string, unknown>;
+                  const isFeeDue = raw.type === "fee_due";
+                  const isDeposit = raw.type === "deposit";
+                  const isAuto   = tx.method === "auto" || tx.method === "auto-monthly";
+                  const isPending = isFeeDue && tx.status === "due";
+                  const isCharge  = isFeeDue || isAuto;
+
+                  const label = isFeeDue
+                    ? `Fee Due — ${fmtMonth(tx.billingMonth ?? (tx.date ?? "").slice(0, 7))}`
+                    : isDeposit
+                    ? "Advance Deposit"
+                    : isAuto
+                    ? "Auto Charge"
+                    : `Payment — ${tx.method ?? "—"}`;
+
+                  const badge = isPending
+                    ? { label: "Pending", background: "#fee2e2", color: "#dc2626" }
+                    : isFeeDue
+                    ? { label: "Paid", background: "#dcfce7", color: "#16a34a" }
+                    : isCharge
+                    ? { label: "Charged", background: "#fef3c7", color: "#92400e" }
+                    : { label: "Received", background: "#dcfce7", color: "#16a34a" };
+
+                  const clickable = isPending && isAdmin;
+
+                  return (
+                    <div
+                      key={tx.id}
+                      onClick={clickable ? () => setPayTarget(tx) : undefined}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        gap: 10, padding: "9px 12px", borderRadius: 8,
+                        border: `1px solid ${isPending ? "#fecaca" : "#f3f4f6"}`,
+                        background: isPending ? "#fff7f7" : "#fafafa",
+                        cursor: clickable ? "pointer" : "default",
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, fontWeight: 600, color: "#111827" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 1 }}>{fmtDate(tx.date)}</div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                        <span style={{ fontWeight: 700, fontSize: 13, color: isCharge ? "#dc2626" : "#16a34a" }}>
+                          {isCharge ? "+" : "−"}{fmtINR(tx.amount)}
+                        </span>
+                        <span style={{ ...p.badge, background: badge.background, color: badge.color }}>{badge.label}</span>
+                        {clickable && <span style={{ fontSize: 12, color: "#9ca3af" }}>→</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.syllabusBtn}>Syllabus</Link>
-            <button onClick={onClose} style={modal.cancelBtn}>Close</button>
-          </div>
         </div>
+        <div style={{ ...modal.footer, justifyContent: "space-between", gap: 8, position: "relative" as const }}>
+          <div ref={menuRef} style={{ position: "relative" as const }}>
+            <button onClick={() => setMenuOpen(v => !v)} style={p.moreBtn} title="More actions" aria-label="More actions">⋮</button>
+            {menuOpen && (
+              <div style={p.menuPanel}>
+                {(isAdmin || isTeacher) && canEdit && (
+                  <button onClick={() => { setMenuOpen(false); onEdit(); }} style={p.menuItem}>✏ Edit</button>
+                )}
+                <Link href={`/dashboard/student-syllabus/${s.id}`} onClick={() => setMenuOpen(false)} style={p.menuItem}>📘 Syllabus</Link>
+                {(isAdmin || isTeacher) && s.status === "active" && (
+                  <button onClick={() => { setMenuOpen(false); onRequestBreak(); }} style={p.menuItem}>☕ Break</button>
+                )}
+                {onClearHistory && (
+                  <button onClick={() => { setMenuOpen(false); onClearHistory(); }} style={p.menuItem}>🗑 History</button>
+                )}
+                {(isAdmin || isTeacher) && s.status === "active" && (
+                  <button onClick={() => { setMenuOpen(false); onRequestDeactivation(); }} style={p.menuItem}>⏸ Deactivate</button>
+                )}
+                {onDelete && (
+                  <button onClick={() => { setMenuOpen(false); onDelete(); }} style={{ ...p.menuItem, ...p.menuItemDanger }}>✕ Delete</button>
+                )}
+              </div>
+            )}
+          </div>
+          <button onClick={onClose} style={modal.cancelBtn}>Close</button>
+        </div>
+      </div>
+
+      {payTarget && (
+        <RecordPaymentModal
+          student={s}
+          feeDue={payTarget}
+          receivedBy={receivedBy}
+          onClose={() => setPayTarget(null)}
+          onRecorded={() => { setPayTarget(null); onPaymentRecorded(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Record Payment Modal ───────────────────────────────────────────────────────
+
+function RecordPaymentModal({ student, feeDue, receivedBy, onClose, onRecorded }: {
+  student: StudentRow; feeDue: Transaction; receivedBy: string;
+  onClose: () => void; onRecorded: () => void;
+}) {
+  const [amount, setAmount]       = useState(String(feeDue.amount));
+  const [payDate, setPayDate]     = useState(todayStr());
+  const [method, setMethod]       = useState<"Cash" | "UPI" | "Bank">("Cash");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError]         = useState<string | null>(null);
+
+  const feeMonth  = fmtMonth(feeDue.billingMonth ?? (feeDue.date ?? "").slice(0, 7));
+  const genDate   = fmtDate(feeDue.date);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const net = Number(amount);
+    if (!net || net <= 0) { setError("Enter a valid amount (must be > 0)"); return; }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await addDoc(collection(db, "transactions"), {
+        studentUid: student.id,
+        centerId:   student.centerId,
+        amount:     net,
+        method,
+        receivedBy,
+        date:       payDate || todayStr(),
+        status:     "completed",
+        createdAt:  serverTimestamp(),
+      });
+      await updateDoc(doc(db, "users", student.id), {
+        currentBalance: increment(-net),
+        updatedAt:      new Date().toISOString(),
+      });
+      await updateDoc(doc(db, "transactions", feeDue.id), {
+        status: "completed",
+        paidAt: payDate || todayStr(),
+      });
+      onRecorded();
+    } catch (err) {
+      console.error("Record payment failed:", err);
+      setError("Payment failed. Try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div style={{ ...modal.overlay, zIndex: 1100 }} onClick={onClose}>
+      <div style={{ ...modal.box, maxWidth: 420 }} onClick={e => e.stopPropagation()}>
+        <div style={modal.header}>
+          <div>
+            <div style={modal.title}>Record Payment</div>
+            <div style={modal.subtitle}>{student.name} · {student.studentID}</div>
+          </div>
+          <button onClick={onClose} style={modal.closeBtn}>✕</button>
+        </div>
+        <form onSubmit={submit}>
+          <div style={modal.body}>
+            {error && <div style={modal.errorBanner}>{error}</div>}
+            <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
+              <Field label="Fee Month">
+                <div style={{ ...p.input, background: "#f9fafb", color: "#374151" }}>{feeMonth}</div>
+              </Field>
+              <Field label="Due / Generated Date">
+                <div style={{ ...p.input, background: "#f9fafb", color: "#374151" }}>{genDate}</div>
+              </Field>
+              <Field label="Payment Date">
+                <input type="date" value={payDate} onChange={e => setPayDate(e.target.value)}
+                  max={todayStr()} style={p.input} required />
+              </Field>
+              <Field label="Payment Method">
+                <select value={method} onChange={e => setMethod(e.target.value as "Cash" | "UPI" | "Bank")} style={p.input}>
+                  <option value="Cash">Cash</option>
+                  <option value="UPI">UPI</option>
+                  <option value="Bank">Bank</option>
+                </select>
+              </Field>
+              <Field label="Payable Amount">
+                <input type="number" min={1} step="1" value={amount}
+                  onChange={e => setAmount(e.target.value)} style={p.input} required />
+              </Field>
+            </div>
+          </div>
+          <div style={modal.footer}>
+            <button type="button" onClick={onClose} style={modal.cancelBtn}>Cancel</button>
+            <button type="submit" disabled={submitting} style={{ ...p.primaryBtn, opacity: submitting ? 0.6 : 1, cursor: submitting ? "not-allowed" : "pointer" }}>
+              {submitting ? "Recording…" : "Record Payment"}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -1992,6 +2232,13 @@ const p: Record<string, React.CSSProperties> = {
   syllabusBtn: { background: "#ede9fe", color: "#6d28d9", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, textDecoration: "none", display: "inline-block" },
   clearBtn:    { background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
   deleteBtn:   { background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
+
+  moreBtn:     { background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 8, width: 32, height: 32, fontSize: 16, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 },
+  menuPanel:   { position: "absolute" as const, bottom: "calc(100% + 6px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.16)", minWidth: 180, overflow: "hidden", zIndex: 10 },
+  menuItem:    { display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 14px", fontSize: 13, fontWeight: 500, color: "#111827", background: "none", border: "none", textAlign: "left" as const, cursor: "pointer", textDecoration: "none", boxSizing: "border-box" as const },
+  menuItemDanger: { color: "#dc2626" },
+
+  courseLink: { display: "inline-flex", alignItems: "center", gap: 4, color: "#4f46e5", fontWeight: 600, textDecoration: "underline", cursor: "pointer" },
 };
 
 // ─── Modal styles ──────────────────────────────────────────────────────────────

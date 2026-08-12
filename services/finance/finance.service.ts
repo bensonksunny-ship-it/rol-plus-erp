@@ -210,14 +210,45 @@ export async function getFeeStructureByCenter(
  * Convention used throughout the codebase:
  *   • Payment (UPI/Cash/Bank, no billingMonth, type !== "deposit"): -amount  (reduces balance)
  *   • Deposit (type === "deposit"):                                  -amount  (reduces balance / adds credit)
- *   • Charge  (method === "auto" or "auto-monthly"):                +amount  (increases balance / owed)
+ *   • Charge  (method === "auto"/"auto-monthly", type === "charge"/"fee_due"): +amount (increases balance / owed)
+ *
+ * A "fee_due" transaction applies its charge the moment it's generated
+ * (status "due"), independent of whether it's later marked "completed" by a
+ * payment — so it counts as a charge regardless of status.
  */
-function balanceEffectFor(tx: Transaction): number {
+export function transactionBalanceEffect(tx: Transaction): number {
   const isCharge =
     tx.method === "auto-monthly" ||
     tx.method === "auto" ||
-    tx.type === "charge";
-  return isCharge ? +tx.amount : -tx.amount;
+    tx.type === "charge" ||
+    tx.type === "fee_due";
+  if (isCharge) return tx.amount;
+  // Payments/deposits only count once actually received.
+  if (tx.status !== "completed") return 0;
+  return -tx.amount;
+}
+
+/**
+ * Single source of truth for a student's outstanding balance:
+ * Total Dues Generated − Total Payments Received, derived directly from the
+ * transaction ledger rather than the denormalized `users.currentBalance`
+ * cache (which can drift if a charge is ever applied without a matching
+ * transaction record).
+ *
+ * Pass `asOfDate` (YYYY-MM-DD) to reconstruct the balance as of a past date;
+ * omit it for the live balance.
+ */
+export function computeStudentBalances(
+  transactions: Transaction[],
+  asOfDate?: string,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const tx of transactions) {
+    if (!tx.studentUid) continue;
+    if (asOfDate && (tx.date ?? "").slice(0, 10) > asOfDate) continue;
+    map.set(tx.studentUid, (map.get(tx.studentUid) ?? 0) + transactionBalanceEffect(tx));
+  }
+  return map;
 }
 
 /**
@@ -251,8 +282,8 @@ export async function editTransaction(
     note:    patch.note ?? null,
   };
 
-  const oldEffect = balanceEffectFor(oldTx);
-  const newEffect = balanceEffectFor(newTx);
+  const oldEffect = transactionBalanceEffect(oldTx);
+  const newEffect = transactionBalanceEffect(newTx);
   const delta     = newEffect - oldEffect;
 
   // 1) Persist the patch
@@ -323,7 +354,7 @@ export async function deleteTransaction(
   if (!txSnap.exists()) throw new Error(`TRANSACTION_NOT_FOUND: ${txId}`);
   const tx = { id: txSnap.id, ...txSnap.data() } as Transaction;
 
-  const oldEffect = balanceEffectFor(tx);
+  const oldEffect = transactionBalanceEffect(tx);
 
   // 1) Reverse the balance effect (subtract the original effect)
   if (oldEffect !== 0 && tx.studentUid) {

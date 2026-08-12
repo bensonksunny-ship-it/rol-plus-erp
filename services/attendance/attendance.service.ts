@@ -3,7 +3,6 @@ import {
   doc,
   addDoc,
   updateDoc,
-  increment,
   getDocFromServer,
   getDocs,
   query,
@@ -18,7 +17,7 @@ import type {
   AttendanceRecord,
   MarkAttendanceInput,
 } from "@/types/attendance";
-import { getFeeStructureByCenter } from "@/services/finance/finance.service";
+import { getFeeStructureByCenter, chargeStudentPerClass } from "@/services/finance/finance.service";
 import { logAction } from "@/services/audit/audit.service";
 import { detectRevenueLeakage } from "@/services/alert/alert.service";
 
@@ -180,14 +179,20 @@ export async function markAttendance(data: MarkAttendanceInput): Promise<Attenda
     },
   });
 
-  // Per-class billing: charge student only on first (present) attendance mark
+  // Per-class billing: charge student only on first (present) attendance mark.
+  // Gated on the STUDENT's own billing config (postpay + per_class), not just
+  // the center's fee structure — a center can host both prepay/monthly and
+  // postpay/per_class students, and charging a prepay student here would
+  // silently inflate their currentBalance with no transaction record.
   if (data.status === "present") {
-    const feeStructure = await getFeeStructureByCenter(classData.centerId);
-    if (feeStructure && feeStructure.billingCycle === "per_class") {
-      await updateDoc(doc(db, "users", data.studentUid), {
-        currentBalance: increment(feeStructure.amount),
-        updatedAt:      new Date().toISOString(),
-      });
+    const studentRaw = studentData as unknown as Record<string, unknown>;
+    const studentIsPerClassBilled =
+      studentRaw.billingMode === "postpay" && studentRaw.feeCycle === "per_class";
+    if (studentIsPerClassBilled) {
+      const feeStructure = await getFeeStructureByCenter(classData.centerId);
+      if (feeStructure && feeStructure.billingCycle === "per_class") {
+        await chargeStudentPerClass(data.studentUid, classData.centerId, feeStructure.amount);
+      }
     }
 
     // Non-blocking: check for revenue leakage (outstanding balance at class time)
