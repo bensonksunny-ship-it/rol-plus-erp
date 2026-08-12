@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
@@ -52,6 +53,24 @@ interface StudentMeta {
 function StudentSyllabusContent({ studentId }: { studentId: string }) {
   const { user, role } = useAuth();
   const isMobile       = useIsMobile();
+  const router          = useRouter();
+
+  // Admins/teachers arrive here from the Students list (usually via the
+  // Student Detail modal) — send them back there, reopening that student's
+  // drawer. Students viewing their own syllabus have no Students list to
+  // return to, so send them to their own dashboard instead.
+  const isStaff = role === "admin" || role === "super_admin" || role === "teacher";
+  function goBack() {
+    if (isStaff) router.push(`/dashboard/students?studentId=${studentId}`);
+    else router.push("/dashboard");
+  }
+  const backBar = (
+    <div style={s.backBar}>
+      <button onClick={goBack} style={s.backBtn}>
+        ← {isStaff ? "Back to Students" : "Back to Dashboard"}
+      </button>
+    </div>
+  );
 
   const [lessons, setLessons]               = useState<LessonWithItems[]>([]);
   const [progressMap, setProgressMap]        = useState<Record<string, StudentLessonProgress>>({});
@@ -101,30 +120,33 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
 
   useEffect(() => { load(); }, [studentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (loading) return <div style={s.state}>Loading syllabus…</div>;
-  if (error)   return <div style={{ ...s.state, color: "#dc2626" }}>{error}</div>;
+  if (loading) return <>{backBar}<div style={s.state}>Loading syllabus…</div></>;
+  if (error)   return <>{backBar}<div style={{ ...s.state, color: "#dc2626" }}>{error}</div></>;
 
   if (lessons.length === 0) {
     return (
-      <div style={s.empty}>
-        <div style={s.emptyIcon}>📋</div>
-        <div style={s.emptyTitle}>No syllabus assigned yet</div>
-        <div style={s.emptySub}>
-          No lessons are available for this student yet. You can import lessons two ways:
-          <br /><br />
-          <strong>1. Center-wide</strong> — Import lessons for the student&apos;s center (all students
-          in that center will see them) via <strong>Syllabus → Import from Excel</strong>.<br />
-          <strong>2. Student-specific</strong> — Import lessons directly for this student only.
+      <>
+        {backBar}
+        <div style={s.empty}>
+          <div style={s.emptyIcon}>📋</div>
+          <div style={s.emptyTitle}>No syllabus assigned yet</div>
+          <div style={s.emptySub}>
+            No lessons are available for this student yet. You can import lessons two ways:
+            <br /><br />
+            <strong>1. Center-wide</strong> — Import lessons for the student&apos;s center (all students
+            in that center will see them) via <strong>Syllabus → Import from Excel</strong>.<br />
+            <strong>2. Student-specific</strong> — Import lessons directly for this student only.
+          </div>
+          <div style={{ marginTop: 16, display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+            <a href={`/dashboard/lessons/import?scope=student&id=${studentId}`} style={s.importLink}>
+              Import for this student →
+            </a>
+            <a href="/dashboard/lessons/import?scope=center" style={{ ...s.importLink, background: "#6b7280" }}>
+              Import for center →
+            </a>
+          </div>
         </div>
-        <div style={{ marginTop: 16, display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-          <a href={`/dashboard/lessons/import?scope=student&id=${studentId}`} style={s.importLink}>
-            Import for this student →
-          </a>
-          <a href="/dashboard/lessons/import?scope=center" style={{ ...s.importLink, background: "#6b7280" }}>
-            Import for center →
-          </a>
-        </div>
-      </div>
+      </>
     );
   }
 
@@ -161,6 +183,8 @@ function StudentSyllabusContent({ studentId }: { studentId: string }) {
           onSaved={() => { setEditItemTarget(null); load(); }}
         />
       )}
+
+      {backBar}
 
       {/* Student header */}
       <div style={s.header}>
@@ -594,6 +618,21 @@ const s: Record<string, React.CSSProperties> = {
     fontSize:       13,
     fontWeight:     700,
     textDecoration: "none",
+  },
+
+  backBar: { marginBottom: 14 },
+  backBtn: {
+    display:      "inline-flex",
+    alignItems:   "center",
+    gap:          6,
+    background:   "#fff",
+    border:       "1px solid #e5e7eb",
+    borderRadius: 8,
+    padding:      "7px 14px",
+    fontSize:     13,
+    fontWeight:   600,
+    color:        "#374151",
+    cursor:       "pointer",
   },
 
   // Page header

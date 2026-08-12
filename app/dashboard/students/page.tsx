@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import {
   collection, getDocs, setDoc, updateDoc, doc, getDoc,
   query, where, serverTimestamp, addDoc, increment,
@@ -173,13 +174,17 @@ function EmptyState({ icon, title, hint }: { icon: string; title: string; hint?:
 export default function StudentsPage() {
   return (
     <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
-      <StudentsContent />
+      <Suspense fallback={null}>
+        <StudentsContent />
+      </Suspense>
     </ProtectedRoute>
   );
 }
 
 function StudentsContent() {
   const { user, role }                  = useAuth();
+  const searchParams                    = useSearchParams();
+  const router                          = useRouter();
   const { isAllowed, filterCentres, teacherCentreIds, isTeacherRole } = useCentreAccess();
   const [students, setStudents]         = useState<StudentRow[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -308,6 +313,17 @@ function StudentsContent() {
       const fresh = students.find(st => st.id === prev.id);
       return fresh ?? prev;
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [students]);
+
+  // Reopen a student's detail drawer when arriving back from a linked page
+  // (e.g. "← Back to Students" from the syllabus view) via ?studentId=...
+  useEffect(() => {
+    const wantId = searchParams.get("studentId");
+    if (!wantId || students.length === 0) return;
+    const found = students.find(st => st.id === wantId);
+    if (found) setSelectedStudent(found);
+    router.replace("/dashboard/students");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [students]);
 
@@ -1891,6 +1907,7 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
   const statusStyle = STATUS_BADGE[s.status] ?? { background: "#f3f4f6", color: "#6b7280" };
   const [menuOpen, setMenuOpen] = useState(false);
   const [payTarget, setPayTarget] = useState<Transaction | null>(null);
+  const [statementOpen, setStatementOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!menuOpen) return;
@@ -1949,11 +1966,27 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
           {s.classType === "personal" && s.classDays.length > 0 && (
             <Row label="Class Days" value={`${s.classDays.join(", ")}${s.classTime ? " · " + s.classTime : ""}`} />
           )}
-          <Row label="Fee"          value={
-            <span style={{ ...p.badge, ...(s.feeCycle === "per_class" ? { background: "#ede9fe", color: "#7c3aed" } : { background: "#dbeafe", color: "#1d4ed8" }) }}>
-              {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}
+          <div
+            onClick={() => setStatementOpen(v => !v)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setStatementOpen(v => !v); } }}
+            style={{
+              display: "flex", gap: 8, fontSize: 13, paddingBottom: 8,
+              borderBottom: "1px solid #f3f4f6", cursor: "pointer", userSelect: "none" as const,
+            }}
+            title={statementOpen ? "Hide financial statement" : "View financial statement"}
+          >
+            <span style={{ minWidth: 130, fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", paddingTop: 2 }}>Fee</span>
+            <span style={{ color: "#111827", flex: 1, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ ...p.badge, ...(s.feeCycle === "per_class" ? { background: "#ede9fe", color: "#7c3aed" } : { background: "#dbeafe", color: "#1d4ed8" }) }}>
+                {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}
+              </span>
+              <span style={{ fontSize: 11, color: "#4f46e5", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                Statement <span style={{ transform: statementOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", display: "inline-block" }}>▾</span>
+              </span>
             </span>
-          } />
+          </div>
           <Row label="Billing Mode" value={
             <span style={{ ...p.badge, ...(s.billingMode === "prepay" ? { background: "#fef3c7", color: "#92400e" } : { background: "#f3f4f6", color: "#374151" }) }}>
               {s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}
@@ -1963,7 +1996,8 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
             <span style={{ fontWeight: 700, color: s.balance > 0 ? "#dc2626" : "#16a34a" }}>{fmtINR(s.balance)}</span>
           } />
 
-          {/* ── Financial Statement ── */}
+          {/* ── Financial Statement (collapsed by default; toggled via the Fee row) ── */}
+          {statementOpen && (
           <div style={{ marginTop: 6 }}>
             <div style={modal.sectionLabel}>Financial Statement</div>
             {statement.length === 0 ? (
@@ -2025,6 +2059,7 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
               </div>
             )}
           </div>
+          )}
         </div>
         <div style={{ ...modal.footer, justifyContent: "space-between", gap: 8, position: "relative" as const }}>
           <div ref={menuRef} style={{ position: "relative" as const }}>
