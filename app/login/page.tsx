@@ -16,6 +16,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   "auth/user-disabled":          "This account has been disabled. Contact your administrator.",
   "auth/too-many-requests":      "Too many attempts. Try again later.",
   "auth/network-request-failed": "Network error. Check your connection and try again.",
+  "auth/api-key-not-valid":      "Firebase API key is invalid. Check firebase.ts config.",
+  "auth/internal-error":         "Firebase Auth rejected the request. Check console for details.",
+  "permission-denied":           "Firestore denied access to the user profile. Check Firestore rules.",
+  "unavailable":                 "Firestore is unreachable. Check your network or Firebase project status.",
 };
 
 export default function LoginPage() {
@@ -61,7 +65,15 @@ export default function LoginPage() {
       // `.code`, so they fall back to `.message`, which IS the short key in that case.
       const errObj = err as { code?: string; message?: string };
       const key = errObj.code ?? errObj.message ?? "unknown";
-      setError(ERROR_MESSAGES[key] ?? "Something went wrong. Please try again.");
+      // Always log the raw error — ERROR_MESSAGES only covers known codes,
+      // and a mismatch here is otherwise a silent generic message with no
+      // way to diagnose what actually failed (bad Firestore rules, missing
+      // Firebase config, etc).
+      console.error("[login] sign-in failed:", key, err);
+      setError(
+        ERROR_MESSAGES[key] ??
+          `Something went wrong (${key}). Check the browser console for details.`
+      );
       setSubmitting(false);
     }
   }
