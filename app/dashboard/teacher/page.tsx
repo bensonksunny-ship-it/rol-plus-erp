@@ -847,21 +847,23 @@ const STATUS_LABEL: Record<AttendanceStatus, string> = {
   absent:             "✗ Absent",
   break:              "☕ Break",
   cancelled_teacher:  "CT Cancel",
-  cancelled_student:  "CS Cancel",
+  // Stored value stays "cancelled_student" for compatibility with existing
+  // records; it now means the student had no class scheduled that day.
+  cancelled_student:  "Not Assigned",
 };
 const STATUS_BG: Record<AttendanceStatus, string> = {
   present:           "#dcfce7",
   absent:            "#fee2e2",
   break:             "#fef9c3",
   cancelled_teacher: "#ede9fe",
-  cancelled_student: "#fce7f3",
+  cancelled_student: "#e5e7eb",
 };
 const STATUS_COLOR: Record<AttendanceStatus, string> = {
   present:           "#166534",
   absent:            "#991b1b",
   break:             "#92400e",
   cancelled_teacher: "#5b21b6",
-  cancelled_student: "#9d174d",
+  cancelled_student: "#374151",
 };
 
 // ─── Status picker modal ───────────────────────────────────────────────────────

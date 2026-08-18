@@ -586,7 +586,9 @@ const ATT_LABEL: Record<string, string> = {
   absent:            "✗ Absent",
   break:             "☕ Break",
   cancelled_teacher: "CT Cancel",
-  cancelled_student: "CS Cancel",
+  // Stored value stays "cancelled_student" for compatibility with existing
+  // records; it now means the student had no class scheduled that day.
+  cancelled_student: "Not Assigned",
 };
 
 const ATT_STYLE: Record<string, React.CSSProperties> = {
@@ -595,7 +597,7 @@ const ATT_STYLE: Record<string, React.CSSProperties> = {
   absent:            { background: "#fee2e2", color: "#dc2626",  border: "1px solid #fecaca" },
   break:             { background: "#fef9c3", color: "#92400e",  border: "1px solid #fde68a" },
   cancelled_teacher: { background: "#ede9fe", color: "#5b21b6",  border: "1px solid #c4b5fd" },
-  cancelled_student: { background: "#fce7f3", color: "#9d174d",  border: "1px solid #fbcfe8" },
+  cancelled_student: { background: "#e5e7eb", color: "#374151",  border: "1px solid #d1d5db" },
 };
 
 // ─── Styles ───────────────────────────────────────────────────────────────────

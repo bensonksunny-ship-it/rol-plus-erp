@@ -432,14 +432,18 @@ function CommandCenter() {
 
       {/* ── 2. KPI ROW ── */}
       <div style={s.kpiStrip}>
-        <KpiCard label="Total Students"   value={String(totalStudents)}   sub={`${activeStudents} active`} color="#4f46e5" />
-        <KpiCard label="Active Centres"   value={String(centers.filter(c=>c.status==="active").length)} sub={`of ${centers.length} total`} color="#0891b2" />
+        <KpiCard label="Total Students"   value={String(totalStudents)}   sub={`${activeStudents} active`} color="#4f46e5"
+          onClick={() => router.push("/dashboard/students")} />
+        <KpiCard label="Active Centres"   value={String(centers.filter(c=>c.status==="active").length)} sub={`of ${centers.length} total`} color="#0891b2"
+          onClick={() => router.push("/dashboard/centers")} />
         <KpiCard label="Revenue · Month"  value={`₹${(revThisMonth/1000).toFixed(1)}k`}
           sub={revGrowthPct!==null ? `${revGrowthPct>=0?"▲":"▼"} ${Math.abs(revGrowthPct)}% vs last` : "no prior data"}
-          color={revGrowthPct===null?"#6b7280":revGrowthPct>=0?"#16a34a":"#dc2626"} />
+          color={revGrowthPct===null?"#6b7280":revGrowthPct>=0?"#16a34a":"#dc2626"}
+          onClick={() => router.push("/dashboard/finance")} />
         <KpiCard label="Pending Fees"     value={totalPendingFees===0?"All Clear":`₹${(totalPendingFees/1000).toFixed(1)}k`}
           sub={totalPendingFees===0?"Collected":`${pendingFeeStudents} students`}
-          color={totalPendingFees===0?"#16a34a":"#f59e0b"} />
+          color={totalPendingFees===0?"#16a34a":"#f59e0b"}
+          onClick={() => router.push("/dashboard/finance?tab=students&filter=pending")} />
       </div>
 
       {/* ── CLASSES FOR [DATE] ── */}
@@ -525,10 +529,26 @@ function ChartCard({ title, sub, children }: { title:string; sub?:string; childr
   );
 }
 
-function KpiCard({ label, value, sub, color }: { label:string; value:string; sub:string; color:string }) {
+function KpiCard({ label, value, sub, color, onClick }: { label:string; value:string; sub:string; color:string; onClick?:() => void }) {
+  const [hover, setHover] = useState(false);
   return (
-    <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:"16px 18px",
-                  borderTop:`3px solid ${color}`, flex:1, minWidth:140 }}>
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }) : undefined}
+      style={{
+        background:"#fff", border:`1px solid ${hover && onClick ? color : "#e5e7eb"}`, borderRadius:12, padding:"16px 18px",
+        borderTop:`3px solid ${color}`, flex:1, minWidth:140,
+        cursor: onClick ? "pointer" : "default",
+        boxShadow: hover && onClick ? "0 4px 16px rgba(0,0,0,0.08)" : "0 1px 3px rgba(0,0,0,0.04)",
+        transform: hover && onClick ? "translateY(-2px)" : "translateY(0)",
+        transition: "box-shadow 0.15s, border-color 0.15s, transform 0.15s",
+        outline: "none",
+      }}
+    >
       <div style={{ fontSize:11, fontWeight:600, color:"#9ca3af", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:6 }}>{label}</div>
       <div style={{ fontSize:24, fontWeight:800, color, lineHeight:1 }}>{value}</div>
       <div style={{ fontSize:11, color:"#6b7280", marginTop:4 }}>{sub}</div>
@@ -749,9 +769,10 @@ function GaugeChart({ value, goal }: { value:number; goal:number }) {
 // each scheduled centre's attendance status for that specific day.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-type ClassDayStatus = "pending" | "recorded" | "completed" | "upcoming";
+type ClassDayStatus = "today" | "pending" | "recorded" | "completed" | "upcoming";
 
 const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string }> = {
+  today:     { bg: "var(--color-info-dim)",              border: "var(--color-info)",                    fg: "var(--color-info)",   label: "Today" },
   pending:   { bg: "var(--color-danger-dim)",           border: "var(--color-danger-border)",           fg: "var(--color-danger)",  label: "! Pending" },
   recorded:  { bg: "var(--color-warning-dim)",           border: "var(--color-warning-border)",          fg: "var(--color-warning)", label: "◐ Recorded" },
   completed: { bg: "var(--color-success-dim)",           border: "var(--color-success-border)",          fg: "var(--color-success)", label: "✓ Completed" },
@@ -820,9 +841,17 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
     return m;
   }, [dateAttRecs]);
 
+  // Compares the card's scheduled classDate against currentDate: only a date that
+  // has fully elapsed with no attendance recorded counts as "Pending" (needs action).
+  // Today's own unmarked classes read as "Today" — expected, not yet overdue.
   function statusFor(centerId: string): ClassDayStatus {
     const recs = attByCenter.get(centerId) ?? [];
-    if (recs.length === 0) return selectedDate > todayISO ? "upcoming" : "pending";
+    if (recs.length === 0) {
+      const classDate = selectedDate;
+      if (classDate > todayISO) return "upcoming";
+      if (classDate === todayISO) return "today";
+      return "pending";
+    }
     const expected = activeCountByCenter[centerId] ?? 0;
     if (expected > 0 && recs.length >= expected) return "completed";
     return "recorded";

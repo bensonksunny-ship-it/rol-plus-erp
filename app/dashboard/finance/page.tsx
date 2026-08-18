@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef, Fragment } from "react";
+import { useState, useEffect, useMemo, useRef, Fragment, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
   query, where, doc, serverTimestamp,
@@ -99,7 +100,9 @@ function minMonth(): string {
 export default function FinancePage() {
   return (
     <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
-      <FinanceContent />
+      <Suspense fallback={null}>
+        <FinanceContent />
+      </Suspense>
     </ProtectedRoute>
   );
 }
@@ -109,7 +112,16 @@ type ActiveTab = "overview" | "students" | "transactions";
 function FinanceContent() {
   const { user, isAdmin, isSuperAdmin }      = useAuth();
   const canManageTx                          = isAdmin || isSuperAdmin;
-  const [tab, setTab]                        = useState<ActiveTab>("overview");
+  const searchParams                         = useSearchParams();
+  // Deep-link support, e.g. from the dashboard's Pending Fees KPI card:
+  // /dashboard/finance?tab=students&filter=pending
+  const [tab, setTab]                        = useState<ActiveTab>(() => {
+    const t = searchParams.get("tab");
+    return t === "students" || t === "transactions" ? t : "overview";
+  });
+  const [feeStatusFilter, setFeeStatusFilter] = useState<"all" | "pending">(
+    () => searchParams.get("filter") === "pending" ? "pending" : "all"
+  );
   const [transactions, setTransactions]      = useState<Transaction[]>([]);
   const [students, setStudents]              = useState<StudentFeeRow[]>([]);
   const [centers, setCenters]                = useState<CenterOption[]>([]);
@@ -663,6 +675,7 @@ function FinanceContent() {
     else if (filterType === "personal") list = list.filter(s => s.classType   === "personal");
     else if (filterType === "prepay")   list = list.filter(s => s.billingMode === "prepay");
     else if (filterType === "postpay")  list = list.filter(s => s.billingMode === "postpay");
+    if (feeStatusFilter === "pending") list = list.filter(s => s.balance > 0);
     if (studentSearch.trim()) {
       const q = studentSearch.toLowerCase();
       list = list.filter(s =>
@@ -681,7 +694,7 @@ function FinanceContent() {
       if (aOverdue !== bOverdue) return aOverdue - bOverdue;
       return a.name.localeCompare(b.name);
     });
-  }, [students, filterCenter, studentSearch, filterType]);
+  }, [students, filterCenter, studentSearch, filterType, feeStatusFilter]);
 
   function formatDate(value: unknown): string {
     if (!value || typeof value !== "string") return "-";
@@ -832,6 +845,13 @@ function FinanceContent() {
               <option value="postpay">⬇ Postpay</option>
               <option value="prepay">⬆ Prepay</option>
             </select>
+            <select value={feeStatusFilter} onChange={e => setFeeStatusFilter(e.target.value as "all" | "pending")} style={st.filterSelect}>
+              <option value="all">All Fee Status</option>
+              <option value="pending">⚠ Pending balance</option>
+            </select>
+            {feeStatusFilter === "pending" && (
+              <button onClick={() => setFeeStatusFilter("all")} style={st.clearDate}>✕ Clear filter</button>
+            )}
           </>
         )}
         {tab === "transactions" && (

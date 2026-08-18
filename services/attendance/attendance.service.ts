@@ -231,6 +231,9 @@ export type AttendanceStatus =
   | "absent"
   | "break"
   | "cancelled_teacher"
+  // Displayed in the UI as "Not Assigned" — a day the student had no scheduled
+  // class at all (e.g. enrolled for only 1 of a centre's 2 weekly slots). The
+  // stored value keeps its original name for compatibility with existing records.
   | "cancelled_student";
 
 export interface CentreAttendanceInput {

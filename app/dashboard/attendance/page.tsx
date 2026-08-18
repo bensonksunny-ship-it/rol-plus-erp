@@ -100,21 +100,25 @@ const STATUS_LABEL: Record<AttendanceStatus, string> = {
   absent:             "Absent",
   break:              "Break",
   cancelled_teacher:  "Cancelled (Teacher)",
-  cancelled_student:  "Cancelled (Student)",
+  // Stored value stays "cancelled_student" for backward compatibility with
+  // existing records, but the option now represents a day the student had
+  // no scheduled class at all (e.g. enrolled for only 1 of a centre's 2
+  // weekly slots) — not an actual cancellation.
+  cancelled_student:  "Not Assigned",
 };
 const STATUS_COLOR: Record<AttendanceStatus, { bg: string; fg: string }> = {
   present:           { bg: "#dcfce7", fg: "#16a34a" },
   absent:            { bg: "#fee2e2", fg: "#dc2626" },
   break:             { bg: "#e0f2fe", fg: "#0369a1" },
   cancelled_teacher: { bg: "#fef3c7", fg: "#92400e" },
-  cancelled_student: { bg: "#ede9fe", fg: "#6d28d9" },
+  cancelled_student: { bg: "#f3f4f6", fg: "#6b7280" },
 };
 const STATUS_SHORT: Record<AttendanceStatus, string> = {
   present:           "P",
   absent:            "A",
   break:             "☕",
   cancelled_teacher: "CT",
-  cancelled_student: "CS",
+  cancelled_student: "NA",
 };
 const ALL_STATUSES: AttendanceStatus[] = [
   "present","absent","break","cancelled_teacher","cancelled_student",
@@ -503,7 +507,9 @@ function CentreCard({
                         const statusKey = `${st.uid}|${date}`;
                         const status    = attMap.get(statusKey) ?? null;
 
-                        // Count for summary
+                        // Count for summary — Break and Not Assigned ("cancelled_student")
+                        // are intentionally excluded from both the P/A counts and the %
+                        // column, so non-class days never drag down a student's attendance.
                         if (status === "present") p++;
                         else if (status === "absent") a++;
 
@@ -598,7 +604,7 @@ function AttendanceContent() {
   useEffect(() => {
     if (authLoading || !user) return;
     (async () => {
-      const snap = await getDocs(collection(db, "centers"));
+      const snap = await getDocs(query(collection(db, "centers"), where("status", "==", "active")));
       const all: CentreRow[] = snap.docs.map(d => {
         const data = d.data() as Record<string, unknown>;
         return {

@@ -25,8 +25,8 @@ import {
   deleteUser as deleteUserRecord,
   type ClearHistoryOptions,
 } from "@/services/admin/delete.service";
-import { computeStudentBalances } from "@/services/finance/finance.service";
-import type { Transaction } from "@/types/finance";
+import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
+import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -203,6 +203,7 @@ function StudentsContent() {
   const [breakTarget, setBreakTarget]       = useState<StudentRow | null>(null);
   const debounceRef                         = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<StudentRow | null>(null);
+  const [attendanceHistoryTarget, setAttendanceHistoryTarget] = useState<StudentRow | null>(null);
   const { toasts, toast, remove }           = useToast();
 
   // Filters
@@ -853,7 +854,8 @@ function StudentsContent() {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
                     {group.students.map(s => (
-                      <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)} />
+                      <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)}
+                        onNameClick={tab === "inactive" ? () => setAttendanceHistoryTarget(s) : undefined} />
                     ))}
                   </div>
                 </div>
@@ -878,7 +880,8 @@ function StudentsContent() {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
                     {group.students.map(s => (
-                      <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)} />
+                      <StudentCard key={s.id} student={s} onClick={() => setSelectedStudent(s)}
+                        onNameClick={tab === "inactive" ? () => setAttendanceHistoryTarget(s) : undefined} />
                     ))}
                   </div>
                 </div>
@@ -947,6 +950,8 @@ function StudentsContent() {
           isTeacher={isTeacher}
           canEdit={!isTeacherRole || isAllowed(selectedStudent.centerId)}
           receivedBy={user?.displayName ?? user?.email ?? "admin"}
+          currentUserUid={user?.uid ?? ""}
+          currentUserRole={role ?? "admin"}
           onClose={() => setSelectedStudent(null)}
           onEdit={() => { setSelectedStudent(null); setEditTarget(selectedStudent); }}
           onRequestDeactivation={() => { setSelectedStudent(null); requestDeactivation(selectedStudent); }}
@@ -954,6 +959,15 @@ function StudentsContent() {
           onClearHistory={isAdmin ? () => { setSelectedStudent(null); setClearHistoryTarget(selectedStudent); } : undefined}
           onDelete={isAdmin ? () => { setSelectedStudent(null); setDeleteTarget(selectedStudent); } : undefined}
           onPaymentRecorded={() => fetchData()}
+        />
+      )}
+
+      {/* ── Inactive Student Attendance History Modal ── */}
+      {attendanceHistoryTarget && (
+        <AttendanceHistoryModal
+          student={attendanceHistoryTarget}
+          centerMap={centerMap}
+          onClose={() => setAttendanceHistoryTarget(null)}
         />
       )}
 
@@ -1845,8 +1859,9 @@ function DeleteStudentModal({ student, onClose, onDeleted, currentUserUid, curre
 
 // ─── Student Card (grid tile) ─────────────────────────────────────────────────
 
-function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: () => void }) {
+function StudentCard({ student: s, onClick, onNameClick }: { student: StudentRow; onClick: () => void; onNameClick?: () => void }) {
   const [hover, setHover] = useState(false);
+  const [nameHover, setNameHover] = useState(false);
   const initials = s.name.split(" ").map(n => n[0] ?? "").join("").slice(0, 2).toUpperCase() || "?";
   const statusStyle = STATUS_BADGE[s.status] ?? { background: "#f3f4f6", color: "#6b7280" };
   const isDue = s.balance > 0;
@@ -1873,7 +1888,23 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
           {initials}
         </div>
         <div style={{ overflow: "hidden" }}>
-          <div style={{ fontWeight: 600, fontSize: 13, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
+          {onNameClick ? (
+            <div
+              onClick={e => { e.stopPropagation(); onNameClick(); }}
+              onMouseEnter={e => { e.stopPropagation(); setNameHover(true); }}
+              onMouseLeave={e => { e.stopPropagation(); setNameHover(false); }}
+              title="View attendance history"
+              style={{
+                fontWeight: 600, fontSize: 13, color: "#4f46e5", whiteSpace: "nowrap",
+                overflow: "hidden", textOverflow: "ellipsis", cursor: "pointer",
+                textDecoration: nameHover ? "underline" : "none",
+              }}
+            >
+              {s.name}
+            </div>
+          ) : (
+            <div style={{ fontWeight: 600, fontSize: 13, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
+          )}
           <span style={p.idChip}>{s.studentID}</span>
         </div>
       </div>
@@ -1896,6 +1927,123 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
   );
 }
 
+// ─── Inactive Student Attendance History Modal ─────────────────────────────────
+// Self-contained: fetches this one student's full historical attendance record
+// on demand, so it never affects the queries backing the active attendance grid.
+
+interface AttendanceHistoryRec {
+  date:     string;
+  status:   string;
+  centerId: string;
+}
+
+const HISTORY_STATUS_STYLE: Record<string, React.CSSProperties> = {
+  present:           { background: "#dcfce7", color: "#16a34a" },
+  absent:            { background: "#fee2e2", color: "#dc2626" },
+  break:             { background: "#e0f2fe", color: "#0369a1" },
+  cancelled_teacher: { background: "#fef3c7", color: "#92400e" },
+  // Stored value is "cancelled_student" for compatibility with existing records,
+  // but it now means the student had no class scheduled that day.
+  cancelled_student: { background: "#f3f4f6", color: "#6b7280" },
+};
+
+const HISTORY_STATUS_LABEL: Record<string, string> = {
+  cancelled_student: "Not Assigned",
+};
+
+function AttendanceHistoryModal({ student, centerMap, onClose }: {
+  student: StudentRow; centerMap: Map<string, string>; onClose: () => void;
+}) {
+  const [records, setRecords] = useState<AttendanceHistoryRec[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const snap = await getDocs(query(collection(db, "attendance"), where("studentUid", "==", student.id)));
+        if (cancelled) return;
+        const recs = snap.docs
+          .map(d => {
+            const r = d.data();
+            return {
+              date:     (r.date     as string) ?? "",
+              status:   (r.status   as string) ?? "",
+              centerId: (r.centerId as string) ?? "",
+            };
+          })
+          .sort((a, b) => b.date.localeCompare(a.date));
+        setRecords(recs);
+      } catch (err) {
+        console.error("Failed to load attendance history:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [student.id]);
+
+  const presentCount = records.filter(r => r.status === "present").length;
+  const absentCount  = records.filter(r => r.status === "absent").length;
+
+  return (
+    <div style={modal.overlay} onClick={onClose}>
+      <div style={{ ...modal.box, maxWidth: 560 }} onClick={e => e.stopPropagation()}>
+        <div style={modal.header}>
+          <div>
+            <div style={modal.title}>🗓 Attendance History</div>
+            <div style={modal.subtitle}><span style={p.idChip}>{student.studentID}</span> · {student.name}</div>
+          </div>
+          <button onClick={onClose} style={modal.closeBtn}>✕</button>
+        </div>
+        <div style={modal.body}>
+          {loading ? (
+            <Spinner />
+          ) : records.length === 0 ? (
+            <EmptyState icon="🗓" title="No attendance records" hint="This student has no recorded attendance history." />
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" as const }}>
+                <span style={{ ...p.badge, background: "#dcfce7", color: "#16a34a" }}>{presentCount} Present</span>
+                <span style={{ ...p.badge, background: "#fee2e2", color: "#dc2626" }}>{absentCount} Absent</span>
+                <span style={{ ...p.badge, background: "#f3f4f6", color: "#6b7280" }}>{records.length} Total</span>
+              </div>
+              <div style={{ maxHeight: 420, overflowY: "auto", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ padding: "8px 12px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#6b7280", borderBottom: "2px solid #e5e7eb", background: "#f9fafb", position: "sticky" as const, top: 0 }}>Date</th>
+                      <th style={{ padding: "8px 12px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#6b7280", borderBottom: "2px solid #e5e7eb", background: "#f9fafb", position: "sticky" as const, top: 0 }}>Centre</th>
+                      <th style={{ padding: "8px 12px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#6b7280", borderBottom: "2px solid #e5e7eb", background: "#f9fafb", position: "sticky" as const, top: 0 }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {records.map((r, i) => (
+                      <tr key={`${r.date}-${i}`} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
+                        <td style={{ padding: "7px 12px", borderBottom: "1px solid #f3f4f6", color: "#111827" }}>{fmtDate(r.date)}</td>
+                        <td style={{ padding: "7px 12px", borderBottom: "1px solid #f3f4f6", color: "#6b7280" }}>{centerMap.get(r.centerId) ?? r.centerId ?? "—"}</td>
+                        <td style={{ padding: "7px 12px", borderBottom: "1px solid #f3f4f6" }}>
+                          <span style={{ ...p.badge, ...(HISTORY_STATUS_STYLE[r.status] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
+                            {HISTORY_STATUS_LABEL[r.status] ?? (r.status.replace(/_/g, " ") || "—")}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+        <div style={modal.footer}>
+          <button onClick={onClose} style={modal.cancelBtn}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Student Detail Modal ──────────────────────────────────────────────────────
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
@@ -1907,9 +2055,9 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canEdit, receivedBy, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete, onPaymentRecorded }: {
+function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canEdit, receivedBy, currentUserUid, currentUserRole, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete, onPaymentRecorded }: {
   student: StudentRow; transactions: Transaction[]; isAdmin: boolean; isTeacher: boolean; canEdit: boolean;
-  receivedBy: string;
+  receivedBy: string; currentUserUid: string; currentUserRole: string;
   onClose: () => void; onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
   onClearHistory?: () => void; onDelete?: () => void; onPaymentRecorded: () => void;
 }) {
@@ -1917,6 +2065,7 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
   const [menuOpen, setMenuOpen] = useState(false);
   const [payTarget, setPayTarget] = useState<Transaction | null>(null);
   const [statementOpen, setStatementOpen] = useState(false);
+  const [statementEditMode, setStatementEditMode] = useState(false);
   const [courseHover, setCourseHover]     = useState(false);
   const [centerHover, setCenterHover]     = useState(false);
   const [centerDetailOpen, setCenterDetailOpen] = useState(false);
@@ -1929,6 +2078,73 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [menuOpen]);
+
+  // ── Edit / Delete a single ledger line (admin only) ─────────────────────────
+  const [editingTxId,  setEditingTxId]  = useState<string | null>(null);
+  const [txAmount,     setTxAmount]     = useState("");
+  const [txMethod,     setTxMethod]     = useState<PaymentMethod>("Cash");
+  const [txDate,       setTxDate]       = useState("");
+  const [txStatus,     setTxStatus]     = useState<TransactionStatus>("completed");
+  const [txNote,       setTxNote]       = useState("");
+  const [txSaving,     setTxSaving]     = useState(false);
+  const [txError,      setTxError]      = useState("");
+  const [txDeletePending, setTxDeletePending] = useState<string | null>(null);
+  const [txDeleteSubmitting, setTxDeleteSubmitting] = useState(false);
+  const txDeleteResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function startTxEdit(tx: Transaction) {
+    setEditingTxId(tx.id);
+    setTxAmount(String(tx.amount ?? ""));
+    setTxMethod(tx.method);
+    setTxDate((tx.date ?? "").slice(0, 10));
+    setTxStatus(tx.status);
+    setTxNote(tx.note ?? "");
+    setTxError("");
+    setTxDeletePending(null);
+  }
+  function cancelTxEdit() {
+    setEditingTxId(null);
+    setTxError("");
+  }
+  async function saveTxEdit(tx: Transaction) {
+    const amt = Number(txAmount);
+    if (!Number.isFinite(amt) || amt <= 0) { setTxError("Enter a valid amount."); return; }
+    if (!txDate) { setTxError("Date is required."); return; }
+    setTxError("");
+    setTxSaving(true);
+    try {
+      await editTransaction(
+        tx.id,
+        { amount: amt, method: txMethod, date: txDate, status: txStatus, note: txNote.trim() || null },
+        currentUserUid,
+        currentUserRole as "admin" | "super_admin",
+      );
+      setEditingTxId(null);
+      onPaymentRecorded(); // refetches transactions + recomputes the student's balance
+    } catch (err) {
+      setTxError(err instanceof Error ? err.message : "Failed to save changes.");
+    } finally {
+      setTxSaving(false);
+    }
+  }
+  function clickTxDelete(txId: string) {
+    if (txDeletePending !== txId) {
+      setTxDeletePending(txId);
+      if (txDeleteResetTimer.current) clearTimeout(txDeleteResetTimer.current);
+      txDeleteResetTimer.current = setTimeout(() => setTxDeletePending(null), 4000);
+      return;
+    }
+    if (txDeleteResetTimer.current) clearTimeout(txDeleteResetTimer.current);
+    setTxDeletePending(null);
+    setTxDeleteSubmitting(true);
+    deleteTransaction(txId, currentUserUid, currentUserRole as "admin" | "super_admin")
+      .then(() => {
+        setEditingTxId(null);
+        onPaymentRecorded(); // refetches transactions + recomputes the student's balance
+      })
+      .catch(err => setTxError(err instanceof Error ? err.message : "Failed to delete."))
+      .finally(() => setTxDeleteSubmitting(false));
+  }
 
   // Chronological (newest first) statement: fee dues, payments, deposits, auto-charges.
   const statement = useMemo(() => {
@@ -2028,7 +2244,22 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
           {/* ── Financial Statement (collapsed by default; toggled via the Fee row) ── */}
           {statementOpen && (
           <div style={{ marginTop: 6 }}>
-            <div style={modal.sectionLabel}>Financial Statement</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={modal.sectionLabel}>Financial Statement</div>
+              {isAdmin && statement.length > 0 && (
+                <button
+                  onClick={() => { setStatementEditMode(v => !v); setEditingTxId(null); setTxDeletePending(null); }}
+                  style={{
+                    fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 99, cursor: "pointer",
+                    border: `1px solid ${statementEditMode ? "#1d4ed8" : "#d1d5db"}`,
+                    background: statementEditMode ? "#dbeafe" : "#fff",
+                    color: statementEditMode ? "#1d4ed8" : "#374151",
+                  }}
+                >
+                  {statementEditMode ? "Done" : "✏ Edit"}
+                </button>
+              )}
+            </div>
             {statement.length === 0 ? (
               <div style={{ fontSize: 12, color: "#9ca3af", padding: "10px 0" }}>No transactions yet.</div>
             ) : (
@@ -2040,6 +2271,8 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
                   const isAuto   = tx.method === "auto" || tx.method === "auto-monthly";
                   const isPending = isFeeDue && tx.status === "due";
                   const isCharge  = isFeeDue || isAuto;
+                  const isEditingRow = editingTxId === tx.id;
+                  const isPendingDelete = txDeletePending === tx.id;
 
                   const label = isFeeDue
                     ? `Fee Due — ${fmtMonth(tx.billingMonth ?? (tx.date ?? "").slice(0, 7))}`
@@ -2057,31 +2290,105 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
                     ? { label: "Charged", background: "#fef3c7", color: "#92400e" }
                     : { label: "Received", background: "#dcfce7", color: "#16a34a" };
 
-                  const clickable = isPending && isAdmin;
+                  const clickable = isPending && isAdmin && !statementEditMode;
 
                   return (
-                    <div
-                      key={tx.id}
-                      onClick={clickable ? () => setPayTarget(tx) : undefined}
-                      style={{
-                        display: "flex", alignItems: "center", justifyContent: "space-between",
-                        gap: 10, padding: "9px 12px", borderRadius: 8,
-                        border: `1px solid ${isPending ? "#fecaca" : "#f3f4f6"}`,
-                        background: isPending ? "#fff7f7" : "#fafafa",
-                        cursor: clickable ? "pointer" : "default",
-                      }}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 12.5, fontWeight: 600, color: "#111827" }}>{label}</div>
-                        <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 1 }}>{fmtDate(tx.date)}</div>
+                    <div key={tx.id}>
+                      <div
+                        onClick={clickable ? () => setPayTarget(tx) : undefined}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          gap: 10, padding: "9px 12px", borderRadius: 8,
+                          border: `1px solid ${isEditingRow ? "#93c5fd" : isPending ? "#fecaca" : "#f3f4f6"}`,
+                          background: isEditingRow ? "#eff6ff" : isPending ? "#fff7f7" : "#fafafa",
+                          cursor: clickable ? "pointer" : "default",
+                        }}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, fontWeight: 600, color: "#111827" }}>{label}</div>
+                          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 1 }}>
+                            {fmtDate(tx.date)}{tx.note ? ` · ${tx.note}` : ""}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: isCharge ? "#dc2626" : "#16a34a" }}>
+                            {isCharge ? "+" : "−"}{fmtINR(tx.amount)}
+                          </span>
+                          <span style={{ ...p.badge, background: badge.background, color: badge.color }}>{badge.label}</span>
+                          {clickable && <span style={{ fontSize: 12, color: "#9ca3af" }}>→</span>}
+                          {statementEditMode && (
+                            <>
+                              <button
+                                onClick={() => (isEditingRow ? cancelTxEdit() : startTxEdit(tx))}
+                                title={isEditingRow ? "Close editor" : "Edit this entry"}
+                                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, padding: 2, lineHeight: 1 }}
+                              >
+                                {isEditingRow ? "✕" : "✏️"}
+                              </button>
+                              <button
+                                onClick={() => clickTxDelete(tx.id)}
+                                disabled={txDeleteSubmitting}
+                                title={isPendingDelete ? "Click again to confirm permanent delete" : "Delete this entry"}
+                                style={{
+                                  background: "none", border: "none", cursor: "pointer", fontSize: 13, padding: 2, lineHeight: 1,
+                                  color: isPendingDelete ? "#dc2626" : undefined,
+                                }}
+                              >
+                                {isPendingDelete ? "⚠" : "🗑"}
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                        <span style={{ fontWeight: 700, fontSize: 13, color: isCharge ? "#dc2626" : "#16a34a" }}>
-                          {isCharge ? "+" : "−"}{fmtINR(tx.amount)}
-                        </span>
-                        <span style={{ ...p.badge, background: badge.background, color: badge.color }}>{badge.label}</span>
-                        {clickable && <span style={{ fontSize: 12, color: "#9ca3af" }}>→</span>}
-                      </div>
+
+                      {/* Inline edit panel for this single line item */}
+                      {isEditingRow && (
+                        <div style={{ marginTop: 4, padding: "10px 12px", borderRadius: 8, border: "1px solid #93c5fd", background: "#f8fafc" }}>
+                          {txError && <div style={{ ...modal.errorBanner, marginBottom: 10, padding: "7px 10px", fontSize: 11 }}>{txError}</div>}
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8, marginBottom: 8 }}>
+                            <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", display: "flex", flexDirection: "column" as const, gap: 3 }}>
+                              Amount (₹)
+                              <input type="number" min={1} step={1} value={txAmount} onChange={e => setTxAmount(e.target.value)} style={{ ...p.input, padding: "6px 8px", fontSize: 12 }} />
+                            </label>
+                            <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", display: "flex", flexDirection: "column" as const, gap: 3 }}>
+                              Description
+                              <input type="text" value={txNote} onChange={e => setTxNote(e.target.value)} placeholder="Optional note" style={{ ...p.input, padding: "6px 8px", fontSize: 12 }} />
+                            </label>
+                            <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", display: "flex", flexDirection: "column" as const, gap: 3 }}>
+                              Date
+                              <input type="date" value={txDate} max={todayStr()} onChange={e => setTxDate(e.target.value)} style={{ ...p.input, padding: "6px 8px", fontSize: 12 }} />
+                            </label>
+                            <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", display: "flex", flexDirection: "column" as const, gap: 3 }}>
+                              Method
+                              <select value={txMethod} onChange={e => setTxMethod(e.target.value as PaymentMethod)} style={{ ...p.input, padding: "6px 8px", fontSize: 12 }}>
+                                <option value="Cash">Cash</option>
+                                <option value="UPI">UPI</option>
+                                <option value="Bank">Bank</option>
+                                <option value="auto-monthly">auto-monthly</option>
+                                <option value="auto">auto</option>
+                              </select>
+                            </label>
+                            <label style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", display: "flex", flexDirection: "column" as const, gap: 3 }}>
+                              Payment Status
+                              <select value={txStatus} onChange={e => setTxStatus(e.target.value as TransactionStatus)} style={{ ...p.input, padding: "6px 8px", fontSize: 12 }}>
+                                <option value="completed">Received</option>
+                                <option value="pending">Due</option>
+                                <option value="failed">Failed</option>
+                              </select>
+                            </label>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                            <button onClick={cancelTxEdit} disabled={txSaving} style={{ ...p.resetBtn, fontSize: 12 }}>Cancel</button>
+                            <button
+                              onClick={() => saveTxEdit(tx)}
+                              disabled={txSaving || !txAmount || Number(txAmount) <= 0 || !txDate}
+                              style={{ ...p.primaryBtn, fontSize: 12, padding: "6px 14px", opacity: txSaving ? 0.6 : 1 }}
+                            >
+                              {txSaving ? "Saving…" : "💾 Save"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

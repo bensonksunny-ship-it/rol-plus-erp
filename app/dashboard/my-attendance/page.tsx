@@ -54,7 +54,9 @@ const STATUS_LABELS: Record<string, string> = {
   absent:             "Absent",
   break:              "Break",
   cancelled_teacher:  "Cancelled",
-  cancelled_student:  "Cancelled",
+  // Stored value stays "cancelled_student" for compatibility with existing
+  // records; it now represents a day with no class scheduled for this student.
+  cancelled_student:  "Not Assigned",
 };
 
 const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string; rowBg: string; rowBorder: string }> = {
