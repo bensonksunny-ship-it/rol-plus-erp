@@ -375,16 +375,6 @@ function CommandCenter() {
   // Revenue goal (hardcoded target = 1.2× last month or 50000 floor)
   const revGoal = Math.max(50000, Math.round(revLastMonth * 1.2));
 
-  // Today's classes — any attendance record with any status = marked
-  const markedCentreIds = useMemo(() => {
-    const s = new Set<string>();
-    todayAtt.forEach(a => { if (a.centerId) s.add(a.centerId); });
-    return s;
-  }, [todayAtt]);
-  const todayCentres = useMemo(() => {
-    const dow = DAY_ABBR[new Date(today + "T00:00:00").getDay()];
-    return centers.filter(c => ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(dow));
-  }, [centers, today]);
 
   // Alerts (priority issues)
   const alerts = useMemo(() => {
@@ -452,38 +442,8 @@ function CommandCenter() {
           color={totalPendingFees===0?"#16a34a":"#f59e0b"} />
       </div>
 
-      {/* ── TODAY'S CLASSES ── */}
-      {todayCentres.length > 0 && (
-        <div style={{ ...s.section, marginBottom: 16 }}>
-          <div style={{ ...s.sectionHeader, marginBottom: 14 }}>
-            <span style={s.sectionTitle}>Today's Classes</span>
-            <span style={s.sectionSub}>{new Date().toLocaleDateString("en-IN", { weekday: "long" })}</span>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-            {todayCentres.map(c => {
-              const marked = markedCentreIds.has(c.id);
-              return (
-                <button
-                  key={c.id}
-                  onClick={() => router.push("/dashboard/attendance")}
-                  style={{
-                    background: marked ? "var(--color-success-dim)" : "var(--color-danger-dim)",
-                    border: `1px solid ${marked ? "var(--color-success-border)" : "var(--color-danger-border)"}`,
-                    borderRadius: 10, padding: "12px 16px",
-                    textAlign: "left", cursor: "pointer",
-                    display: "flex", flexDirection: "column", gap: 5, minWidth: 130,
-                  }}
-                >
-                  <div style={{ fontSize: 11, fontWeight: 700, color: marked ? "var(--color-success)" : "var(--color-danger)" }}>
-                    {marked ? "✓ Marked" : "! Pending"}
-                  </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* ── CLASSES FOR [DATE] ── */}
+      <ClassesForDateWidget sectionStyle={s.section} headerStyle={s.sectionHeader} titleStyle={s.sectionTitle} subStyle={s.sectionSub} />
 
       {/* ── MONTHLY ATTENDANCE TOTALS ── */}
       <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "18px 20px", marginBottom: 16 }}>
@@ -780,6 +740,161 @@ function GaugeChart({ value, goal }: { value:number; goal:number }) {
         ₹{(value/1000).toFixed(1)}k / ₹{(goal/1000).toFixed(1)}k
       </text>
     </svg>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLASSES FOR [DATE] — date-navigable widget shared by CommandCenter & AdminDashboard
+// Lets an admin step through days (‹ Prev / date picker / Today / Next ›) and see
+// each scheduled centre's attendance status for that specific day.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type ClassDayStatus = "pending" | "recorded" | "completed" | "upcoming";
+
+const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string }> = {
+  pending:   { bg: "var(--color-danger-dim)",           border: "var(--color-danger-border)",           fg: "var(--color-danger)",  label: "! Pending" },
+  recorded:  { bg: "var(--color-warning-dim)",           border: "var(--color-warning-border)",          fg: "var(--color-warning)", label: "◐ Recorded" },
+  completed: { bg: "var(--color-success-dim)",           border: "var(--color-success-border)",          fg: "var(--color-success)", label: "✓ Completed" },
+  upcoming:  { bg: "var(--color-surface-2)",             border: "var(--color-border)",                  fg: "var(--color-text-muted)", label: "Upcoming" },
+};
+
+function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle }: {
+  sectionStyle: React.CSSProperties;
+  headerStyle:  React.CSSProperties;
+  titleStyle:   React.CSSProperties;
+  subStyle:     React.CSSProperties;
+}) {
+  const router = useRouter();
+  const todayISO = useMemo(() => isoToday(), []);
+  const [selectedDate, setSelectedDate] = useState(todayISO);
+  const [centers, setCenters] = useState<Center[]>([]);
+  const [activeCountByCenter, setActiveCountByCenter] = useState<Record<string, number>>({});
+  const [dateAttRecs, setDateAttRecs] = useState<{ centerId: string; status: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const [centersData, studentsSnap, attSnap] = await Promise.all([
+          getCenters(),
+          getDocs(query(collection(db, "users"), where("role", "==", "student"), where("status", "==", "active"))),
+          getDocs(query(collection(db, "attendance"), where("date", "==", selectedDate))),
+        ]);
+        if (cancelled) return;
+        setCenters(centersData);
+        const counts: Record<string, number> = {};
+        studentsSnap.docs.forEach(d => {
+          const cid = (d.data().centerId ?? "") as string;
+          if (cid) counts[cid] = (counts[cid] ?? 0) + 1;
+        });
+        setActiveCountByCenter(counts);
+        setDateAttRecs(attSnap.docs.map(d => ({
+          centerId: (d.data().centerId ?? "") as string,
+          status:   (d.data().status   ?? "") as string,
+        })));
+      } catch (err) {
+        console.error("[ClassesForDateWidget] load error:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [selectedDate]);
+
+  const dow = useMemo(() => DAY_ABBR[new Date(selectedDate + "T00:00:00").getDay()], [selectedDate]);
+  const dateCentres = useMemo(
+    () => centers.filter(c => ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(dow)),
+    [centers, dow]
+  );
+
+  const attByCenter = useMemo(() => {
+    const m = new Map<string, { centerId: string; status: string }[]>();
+    dateAttRecs.forEach(r => {
+      if (!r.centerId) return;
+      if (!m.has(r.centerId)) m.set(r.centerId, []);
+      m.get(r.centerId)!.push(r);
+    });
+    return m;
+  }, [dateAttRecs]);
+
+  function statusFor(centerId: string): ClassDayStatus {
+    const recs = attByCenter.get(centerId) ?? [];
+    if (recs.length === 0) return selectedDate > todayISO ? "upcoming" : "pending";
+    const expected = activeCountByCenter[centerId] ?? 0;
+    if (expected > 0 && recs.length >= expected) return "completed";
+    return "recorded";
+  }
+
+  const isToday    = selectedDate === todayISO;
+  const dateObj     = new Date(selectedDate + "T00:00:00");
+  const dateLabel   = dateObj.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const sectionTitle = isToday ? "Today's Classes" : `Classes for ${dateObj.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`;
+
+  const pendingCount = useMemo(
+    () => dateCentres.filter(c => statusFor(c.id) === "pending").length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dateCentres, attByCenter, activeCountByCenter, selectedDate]
+  );
+
+  const navBtn: React.CSSProperties = {
+    fontSize: 12, fontWeight: 700, color: "var(--color-text-primary)", background: "var(--color-surface-2)",
+    border: "1px solid var(--color-border)", borderRadius: 8, padding: "6px 12px", cursor: "pointer", lineHeight: 1,
+  };
+
+  if (dateCentres.length === 0 && !loading) return null;
+
+  return (
+    <div style={{ ...sectionStyle, marginBottom: 16 }}>
+      <div style={{ ...headerStyle, marginBottom: 14, flexWrap: "wrap" as const, gap: 10 }}>
+        <div>
+          <span style={titleStyle}>{sectionTitle}</span>
+          <div style={{ ...subStyle, marginTop: 2 }}>
+            {dateLabel}{pendingCount > 0 ? ` · ${pendingCount} pending` : ""}{loading ? " · loading…" : ""}
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button style={navBtn} onClick={() => setSelectedDate(d => addDaysISO(d, -1))}>‹ Prev</button>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={e => e.target.value && setSelectedDate(e.target.value)}
+            style={{ ...navBtn, cursor: "pointer" }}
+          />
+          <button
+            style={{ ...navBtn, ...(isToday ? { opacity: 0.5, cursor: "default" } : {}) }}
+            disabled={isToday}
+            onClick={() => setSelectedDate(todayISO)}
+          >
+            Today
+          </button>
+          <button style={navBtn} onClick={() => setSelectedDate(d => addDaysISO(d, 1))}>Next ›</button>
+        </div>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+        {dateCentres.map(c => {
+          const status = statusFor(c.id);
+          const st = CLASS_STATUS_STYLE[status];
+          return (
+            <button
+              key={c.id}
+              onClick={() => router.push("/dashboard/attendance")}
+              style={{
+                background: st.bg, border: `1px solid ${st.border}`,
+                borderRadius: 10, padding: "12px 16px",
+                textAlign: "left", cursor: "pointer",
+                display: "flex", flexDirection: "column", gap: 5, minWidth: 130,
+              }}
+            >
+              <div style={{ fontSize: 11, fontWeight: 700, color: st.fg }}>{st.label}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -1613,38 +1728,8 @@ function AdminDashboard() {
         />
       </div>
 
-      {/* ── TODAY'S CLASSES ── */}
-      {todayCentres.length > 0 && (
-        <div style={adm.section}>
-          <div style={adm.secHeader}>
-            <span style={adm.secTitle}>Today's Classes</span>
-            <span style={adm.secSub}>{new Date().toLocaleDateString("en-IN", { weekday: "long" })}</span>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-            {todayCentres.map(c => {
-              const marked = markedCentreIds.has(c.id);
-              return (
-                <button
-                  key={c.id}
-                  onClick={() => router.push("/dashboard/attendance")}
-                  style={{
-                    background: marked ? "var(--color-success-dim)" : "var(--color-danger-dim)",
-                    border: `1px solid ${marked ? "var(--color-success-border)" : "var(--color-danger-border)"}`,
-                    borderRadius: 10, padding: "12px 16px",
-                    textAlign: "left", cursor: "pointer",
-                    display: "flex", flexDirection: "column", gap: 5, minWidth: 130,
-                  }}
-                >
-                  <div style={{ fontSize: 11, fontWeight: 700, color: marked ? "var(--color-success)" : "var(--color-danger)" }}>
-                    {marked ? "✓ Marked" : "! Pending"}
-                  </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* ── CLASSES FOR [DATE] ── */}
+      <ClassesForDateWidget sectionStyle={adm.section} headerStyle={adm.secHeader} titleStyle={adm.secTitle} subStyle={adm.secSub} />
 
       {/* ── MONTHLY ATTENDANCE TOTALS ── */}
       <div style={adm.section}>

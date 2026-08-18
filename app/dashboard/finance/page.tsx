@@ -1423,8 +1423,11 @@ function FinanceContent() {
 
                               {/* ════ HISTORY PANEL ══════════════════════════════ */}
                               {activeAction === "history" && (() => {
+                                // Show every transaction for this student — including system
+                                // auto-charges — so this matches the Student Detail modal's
+                                // Financial Statement 1:1 instead of silently hiding entries.
                                 const studentTx = transactions
-                                  .filter(t => t.studentUid === s.uid && t.method !== "auto" && t.method !== "auto-monthly")
+                                  .filter(t => t.studentUid === s.uid)
                                   .sort((a, b) => {
                                     const da = String(a.date ?? a.createdAt ?? "");
                                     const db2 = String(b.date ?? b.createdAt ?? "");
@@ -1484,9 +1487,10 @@ function FinanceContent() {
                                                 {typeLabel}
                                               </span>
 
-                                              {/* Amount */}
-                                              <span style={{ fontWeight: 700, color: (isCharge || isFeedue) ? "#c2410c" : "#16a34a", minWidth: 70 }}>
-                                                {(isCharge || isFeedue) ? "−" : "+"}{fmtINR(tx.amount)}
+                                              {/* Amount — charges/dues add to balance owed (+, red);
+                                                  payments/deposits reduce it (−, green). */}
+                                              <span style={{ fontWeight: 700, color: (isCharge || isFeedue) ? "#dc2626" : "#16a34a", minWidth: 70 }}>
+                                                {(isCharge || isFeedue) ? "+" : "−"}{fmtINR(tx.amount)}
                                               </span>
 
                                               {/* Payment date */}

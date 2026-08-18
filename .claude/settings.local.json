@@ -81,7 +81,9 @@
       "Bash(powershell -NoProfile -Command \"Get-NetTCPConnection -State Listen | Where-Object { \\\\$_.LocalPort -in 3000,3001,3002,8080,5000 } | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort -Unique\")",
       "Bash(powershell -NoProfile -Command \"Get-NetTCPConnection -State Listen | Where-Object { \\\\$_.OwningProcess -in \\(Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\"\\).ProcessId } | Select-Object LocalAddress,LocalPort,OwningProcess\")",
       "Bash(powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' } | Select-Object ProcessId, CommandLine\")",
-      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 26256,27136 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' } | Select-Object ProcessId,CommandLine\")"
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 26256,27136 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' } | Select-Object ProcessId,CommandLine\")",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 8396,28684 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' }\")",
+      "Bash(taskkill *)"
     ]
   }
 }

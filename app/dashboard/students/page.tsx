@@ -1898,6 +1898,15 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
 
 // ─── Student Detail Modal ──────────────────────────────────────────────────────
 
+function Row({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", gap: 8, fontSize: 13, paddingBottom: 8, borderBottom: "1px solid #f3f4f6" }}>
+      <span style={{ minWidth: 130, fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", paddingTop: 2 }}>{label}</span>
+      <span style={{ color: "#111827", flex: 1 }}>{value}</span>
+    </div>
+  );
+}
+
 function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canEdit, receivedBy, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete, onPaymentRecorded }: {
   student: StudentRow; transactions: Transaction[]; isAdmin: boolean; isTeacher: boolean; canEdit: boolean;
   receivedBy: string;
@@ -1908,6 +1917,9 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
   const [menuOpen, setMenuOpen] = useState(false);
   const [payTarget, setPayTarget] = useState<Transaction | null>(null);
   const [statementOpen, setStatementOpen] = useState(false);
+  const [courseHover, setCourseHover]     = useState(false);
+  const [centerHover, setCenterHover]     = useState(false);
+  const [centerDetailOpen, setCenterDetailOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!menuOpen) return;
@@ -1923,14 +1935,6 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
     return [...transactions].sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
   }, [transactions]);
 
-  function Row({ label, value }: { label: string; value: React.ReactNode }) {
-    return (
-      <div style={{ display: "flex", gap: 8, fontSize: 13, paddingBottom: 8, borderBottom: "1px solid #f3f4f6" }}>
-        <span style={{ minWidth: 130, fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", paddingTop: 2 }}>{label}</span>
-        <span style={{ color: "#111827", flex: 1 }}>{value}</span>
-      </div>
-    );
-  }
   return (
     <div style={modal.overlay} onClick={onClose}>
       <div style={{ ...modal.box, maxWidth: 540 }} onClick={e => e.stopPropagation()}>
@@ -1945,21 +1949,49 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
           <button onClick={onClose} style={modal.closeBtn}>✕</button>
         </div>
         <div style={{ ...modal.body, display: "flex", flexDirection: "column" as const, gap: 8 }}>
-          <Row label="Center"       value={s.centerName} />
+          <button
+            type="button"
+            onClick={() => setCenterDetailOpen(true)}
+            title="View center details"
+            onMouseEnter={() => setCenterHover(true)}
+            onMouseLeave={() => setCenterHover(false)}
+            style={{
+              display: "flex", gap: 8, fontSize: 13, paddingBottom: 8, width: "100%",
+              border: "none", borderBottom: "1px solid #f3f4f6", textAlign: "left" as const,
+              cursor: "pointer", borderRadius: 6, margin: "0 -6px", padding: "0 6px 8px",
+              background: centerHover ? "#f9fafb" : "transparent", font: "inherit",
+            }}
+          >
+            <span style={{ minWidth: 130, fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", paddingTop: 2 }}>Center</span>
+            <span style={{ color: "#111827", flex: 1, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const }}>
+              {s.centerName}
+              <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
+                {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+              </span>
+              <span style={{ fontSize: 11, color: "#4f46e5" }}>→</span>
+            </span>
+          </button>
           <Row label="Admission No" value={<span style={p.admChip}>{s.admissionNo}</span>} />
           <Row label="Email"        value={s.email} />
           {s.phone && <Row label="Phone" value={s.phone} />}
           <Row label="Instrument"   value={s.instrument} />
-          <Row label="Course"       value={
-            <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.courseLink} title="View syllabus for this course">
-              {s.course} <span style={{ fontSize: 11 }}>→</span>
-            </Link>
-          } />
-          <Row label="Class Type"   value={
-            <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
-              {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+          <Link
+            href={`/dashboard/student-syllabus/${s.id}`}
+            title="View syllabus for this course"
+            onMouseEnter={() => setCourseHover(true)}
+            onMouseLeave={() => setCourseHover(false)}
+            style={{
+              display: "flex", gap: 8, fontSize: 13, paddingBottom: 8,
+              borderBottom: "1px solid #f3f4f6", textDecoration: "none", color: "inherit",
+              cursor: "pointer", borderRadius: 6, margin: "0 -6px", padding: "0 6px",
+              background: courseHover ? "#f9fafb" : "transparent",
+            }}
+          >
+            <span style={{ minWidth: 130, fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", paddingTop: 2 }}>Course</span>
+            <span style={{ color: "#111827", flex: 1, display: "flex", alignItems: "center", gap: 4 }}>
+              {s.course} <span style={{ fontSize: 11, color: "#4f46e5" }}>→</span>
             </span>
-          } />
+          </Link>
           {s.classType === "personal" && (
             <Row label="Teacher" value={s.assignedTeacherName ?? <span style={{ color: "#d97706" }}>⚠ Unassigned</span>} />
           )}
@@ -1978,23 +2010,20 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
             title={statementOpen ? "Hide financial statement" : "View financial statement"}
           >
             <span style={{ minWidth: 130, fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.04em", paddingTop: 2 }}>Fee</span>
-            <span style={{ color: "#111827", flex: 1, display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ ...p.badge, ...(s.feeCycle === "per_class" ? { background: "#ede9fe", color: "#7c3aed" } : { background: "#dbeafe", color: "#1d4ed8" }) }}>
-                {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}
+            <span style={{ color: "#111827", flex: 1, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const }}>
+              <span>{s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}</span>
+              <span style={{ color: "#d1d5db" }}>•</span>
+              <span>{s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}</span>
+              <span style={{ color: "#d1d5db" }}>•</span>
+              <span style={{ fontWeight: 700, color: s.balance > 0 ? "#dc2626" : "#16a34a" }}>
+                Balance: {fmtINR(s.balance)}
               </span>
-              <span style={{ fontSize: 11, color: "#4f46e5", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 3 }}>
-                Statement <span style={{ transform: statementOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", display: "inline-block" }}>▾</span>
-              </span>
+              <span style={{
+                marginLeft: "auto", fontSize: 11, color: "#9ca3af",
+                transform: statementOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s", display: "inline-block",
+              }}>▾</span>
             </span>
           </div>
-          <Row label="Billing Mode" value={
-            <span style={{ ...p.badge, ...(s.billingMode === "prepay" ? { background: "#fef3c7", color: "#92400e" } : { background: "#f3f4f6", color: "#374151" }) }}>
-              {s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}
-            </span>
-          } />
-          <Row label="Balance" value={
-            <span style={{ fontWeight: 700, color: s.balance > 0 ? "#dc2626" : "#16a34a" }}>{fmtINR(s.balance)}</span>
-          } />
 
           {/* ── Financial Statement (collapsed by default; toggled via the Fee row) ── */}
           {statementOpen && (
@@ -2020,10 +2049,10 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
                     ? "Auto Charge"
                     : `Payment — ${tx.method ?? "—"}`;
 
+                  // Two clear categories: charges/dues owed (red, +amount) vs
+                  // payments received from the student (green, -amount).
                   const badge = isPending
-                    ? { label: "Pending", background: "#fee2e2", color: "#dc2626" }
-                    : isFeeDue
-                    ? { label: "Paid", background: "#dcfce7", color: "#16a34a" }
+                    ? { label: "Due", background: "#fee2e2", color: "#dc2626" }
                     : isCharge
                     ? { label: "Charged", background: "#fef3c7", color: "#92400e" }
                     : { label: "Received", background: "#dcfce7", color: "#16a34a" };
@@ -2098,6 +2127,109 @@ function StudentDetailModal({ student: s, transactions, isAdmin, isTeacher, canE
           onRecorded={() => { setPayTarget(null); onPaymentRecorded(); }}
         />
       )}
+
+      {centerDetailOpen && (
+        <CenterDetailModal centerId={s.centerId} onClose={() => setCenterDetailOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// ─── Center Detail Modal (nested on top of the Student Detail modal) ───────────
+
+interface CenterDetailData {
+  name:        string;
+  centerCode:  string;
+  location:    string;
+  timeSlot:    string;
+  daysOfWeek:  string[];
+  startTime:   string;
+  endTime:     string;
+  status:      string;
+  teacherName: string;
+}
+
+function CenterDetailModal({ centerId, onClose }: { centerId: string; onClose: () => void }) {
+  const [data, setData]       = useState<CenterDetailData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const snap = await getDoc(doc(db, "centers", centerId));
+        if (cancelled) return;
+        if (!snap.exists()) { setError("Center not found."); setLoading(false); return; }
+        const c = snap.data();
+
+        let teacherName = "—";
+        const teacherUid = (c.teacherUid ?? "") as string;
+        if (teacherUid) {
+          const tSnap = await getDoc(doc(db, "users", teacherUid));
+          if (!cancelled && tSnap.exists()) {
+            teacherName = ((tSnap.data().displayName ?? tSnap.data().name ?? "—") as string);
+          }
+        }
+        if (cancelled) return;
+
+        setData({
+          name:        (c.name ?? "—") as string,
+          centerCode:  (c.centerCode ?? "—") as string,
+          location:    (c.location ?? "—") as string,
+          timeSlot:    (c.timeSlot ?? "") as string,
+          daysOfWeek:  Array.isArray(c.daysOfWeek) ? (c.daysOfWeek as string[]) : [],
+          startTime:   (c.startTime ?? "") as string,
+          endTime:     (c.endTime ?? "") as string,
+          status:      (c.status ?? "active") as string,
+          teacherName,
+        });
+      } catch {
+        if (!cancelled) setError("Failed to load center details.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [centerId]);
+
+  const schedule = data
+    ? data.daysOfWeek.length > 0
+      ? `${data.daysOfWeek.join(", ")}${data.startTime ? ` · ${data.startTime}${data.endTime ? "–" + data.endTime : ""}` : ""}`
+      : (data.timeSlot || "—")
+    : "—";
+
+  return (
+    <div style={{ ...modal.overlay, zIndex: 1100 }} onClick={onClose}>
+      <div style={{ ...modal.box, maxWidth: 420 }} onClick={e => e.stopPropagation()}>
+        <div style={modal.header}>
+          <div style={modal.title}>Center Details</div>
+          <button onClick={onClose} style={modal.closeBtn}>✕</button>
+        </div>
+        <div style={{ ...modal.body, display: "flex", flexDirection: "column" as const, gap: 8 }}>
+          {loading ? (
+            <div style={{ fontSize: 13, color: "#9ca3af", padding: "24px 0", textAlign: "center" as const }}>Loading…</div>
+          ) : error ? (
+            <div style={{ fontSize: 13, color: "#dc2626", padding: "24px 0", textAlign: "center" as const }}>{error}</div>
+          ) : data && (
+            <>
+              <Row label="Name"     value={data.name} />
+              <Row label="Code"     value={<span style={p.admChip}>{data.centerCode}</span>} />
+              <Row label="Location" value={data.location} />
+              <Row label="Schedule" value={schedule} />
+              <Row label="Teacher"  value={data.teacherName} />
+              <Row label="Status"   value={
+                <span style={{ ...p.badge, ...(data.status === "active" ? { background: "#dcfce7", color: "#166534" } : { background: "#f3f4f6", color: "#6b7280" }) }}>
+                  {data.status}
+                </span>
+              } />
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2272,8 +2404,6 @@ const p: Record<string, React.CSSProperties> = {
   menuPanel:   { position: "absolute" as const, bottom: "calc(100% + 6px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.16)", minWidth: 180, overflow: "hidden", zIndex: 10 },
   menuItem:    { display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 14px", fontSize: 13, fontWeight: 500, color: "#111827", background: "none", border: "none", textAlign: "left" as const, cursor: "pointer", textDecoration: "none", boxSizing: "border-box" as const },
   menuItemDanger: { color: "#dc2626" },
-
-  courseLink: { display: "inline-flex", alignItems: "center", gap: 4, color: "#4f46e5", fontWeight: 600, textDecoration: "underline", cursor: "pointer" },
 };
 
 // ─── Modal styles ──────────────────────────────────────────────────────────────
