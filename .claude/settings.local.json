@@ -83,7 +83,10 @@
       "Bash(powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' } | Select-Object ProcessId, CommandLine\")",
       "Bash(powershell -NoProfile -Command \"Stop-Process -Id 26256,27136 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' } | Select-Object ProcessId,CommandLine\")",
       "Bash(powershell -NoProfile -Command \"Stop-Process -Id 8396,28684 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Get-CimInstance Win32_Process -Filter \\\\\"name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -like '*next*' }\")",
-      "Bash(taskkill *)"
+      "Bash(taskkill *)",
+      "Bash(awk '/^FIREBASE_ADMIN_PRIVATE_KEY=/{print NR\": \"length\\($0\\)\" chars, starts_with=\"substr\\($0,1,30\\)}' .env.local)",
+      "Bash(python3 -c ' *)",
+      "Bash(node -e ' *)"
     ]
   }
 }
