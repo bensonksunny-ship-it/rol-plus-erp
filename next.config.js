@@ -2,6 +2,17 @@ const nextConfig = {
   // Disable React StrictMode — prevents double-invocation of effects in dev.
   reactStrictMode: false,
 
+  // Disable webpack's persistent filesystem cache in dev. On Windows, an AV
+  // scanner (Defender etc.) intermittently locks the .pack.gz cache files
+  // mid-write, corrupting them (ENOENT on .next/cache/webpack/.../*.pack.gz,
+  // then .next/server going missing) and causing every route to 404 until
+  // .next is wiped and the server restarted. In-memory cache avoids the
+  // corruption entirely at the cost of losing cache between dev server runs.
+  webpack: (config, { dev }) => {
+    if (dev) config.cache = false;
+    return config;
+  },
+
   // ─── Cache headers ──────────────────────────────────────────────────────────
   // Hashed static chunks (_next/static/**) are safe to cache forever —
   // the hash changes on every deploy so stale content is never served.

@@ -86,7 +86,10 @@
       "Bash(taskkill *)",
       "Bash(awk '/^FIREBASE_ADMIN_PRIVATE_KEY=/{print NR\": \"length\\($0\\)\" chars, starts_with=\"substr\\($0,1,30\\)}' .env.local)",
       "Bash(python3 -c ' *)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(powershell -Command \"\\(Get-ItemProperty -Path 'HKCU:\\\\Software\\\\Microsoft\\\\OneDrive\\\\Accounts\\\\Personal' -ErrorAction SilentlyContinue\\).UserFolder\")",
+      "Bash(powershell -Command '$acc = fsutil reparsepoint query '\\\\''C:\\\\Users\\\\User\\\\Documents'\\\\'' 2>&1; $acc')",
+      "Bash(fsutil reparsepoint *)"
     ]
   }
 }

@@ -50,7 +50,7 @@ interface StudentMeta {
 
 // ─── Content ─────────────────────────────────────────────────────────────────
 
-export function StudentSyllabusContent({ studentId, hideBackBar }: { studentId: string; hideBackBar?: boolean }) {
+export function StudentSyllabusContent({ studentId, hideBackBar, viewOnly }: { studentId: string; hideBackBar?: boolean; viewOnly?: boolean }) {
   const { user, role } = useAuth();
   const isMobile       = useIsMobile();
   const router          = useRouter();
@@ -124,6 +124,18 @@ export function StudentSyllabusContent({ studentId, hideBackBar }: { studentId: 
   if (error)   return <>{backBar}<div style={{ ...s.state, color: "#dc2626" }}>{error}</div></>;
 
   if (lessons.length === 0) {
+    if (viewOnly) {
+      return (
+        <>
+          {backBar}
+          <div style={gs.empty}>
+            <div style={gs.emptyIcon}>🎵</div>
+            <div style={gs.emptyTitle}>No modules assigned yet</div>
+            <div style={gs.emptySub}>Check back soon — your learning journey will show up here once your teacher assigns a syllabus!</div>
+          </div>
+        </>
+      );
+    }
     return (
       <>
         {backBar}
@@ -146,6 +158,17 @@ export function StudentSyllabusContent({ studentId, hideBackBar }: { studentId: 
             </a>
           </div>
         </div>
+      </>
+    );
+  }
+
+  // ── View-only, gamified rendering (Student Detail Page > Syllabus tab) ──────
+  // Strictly read-only: no Mark Done, no edit/delete icons, no admin controls.
+  if (viewOnly) {
+    return (
+      <>
+        {backBar}
+        <SyllabusJourneyView lessons={lessons} progressMap={progressMap} studentName={student?.name ?? ""} />
       </>
     );
   }
@@ -360,6 +383,123 @@ export function StudentSyllabusContent({ studentId, hideBackBar }: { studentId: 
             );
           })
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Syllabus Journey View (view-only, gamified) ────────────────────────────
+// Used only when StudentSyllabusContent is rendered with viewOnly — strictly
+// read-only, no Mark Done / edit / delete controls, redesigned to feel warm
+// and motivating rather than like an admin working tool.
+
+const MODULE_STATUS: Record<"completed" | "in_progress" | "upcoming", { bg: string; fg: string; border: string; label: string }> = {
+  completed:   { bg: "#dcfce7", fg: "#15803d", border: "#86efac", label: "✅ Completed" },
+  in_progress: { bg: "#fef3c7", fg: "#b45309", border: "#fde68a", label: "🚀 In Progress" },
+  upcoming:    { bg: "#e0e7ff", fg: "#4338ca", border: "#c7d2fe", label: "⭐ Upcoming" },
+};
+
+const ITEM_TYPE_STYLE: Record<string, { bg: string; fg: string }> = {
+  concept:   { bg: "#dbeafe", fg: "#1d4ed8" },
+  exercise:  { bg: "#fef3c7", fg: "#b45309" },
+  songsheet: { bg: "#f3e8ff", fg: "#7c3aed" },
+};
+
+function SyllabusJourneyView({ lessons, progressMap, studentName }: {
+  lessons: LessonWithItems[]; progressMap: Record<string, StudentLessonProgress>; studentName: string;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(lessons[0]?.id ?? null);
+
+  const totalItems     = lessons.reduce((sum, l) => sum + l.items.length, 0);
+  const completedItems = lessons.reduce((sum, l) => sum + l.items.filter(i => progressMap[i.id]?.completed).length, 0);
+  const pct             = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 0;
+
+  const R = 52, CIRC = 2 * Math.PI * 52;
+
+  const badges = [
+    { key: "start", emoji: "🌱", label: "Getting Started",   earned: completedItems > 0 },
+    { key: "half",  emoji: "🔥", label: "Halfway Hero",       earned: pct >= 50 },
+    { key: "champ", emoji: "🏆", label: "Syllabus Champion",  earned: pct === 100 && totalItems > 0 },
+  ];
+
+  return (
+    <div>
+      {/* Hero header */}
+      <div style={gs.hero}>
+        <div style={gs.heroRing}>
+          <svg viewBox="0 0 120 120" width={104} height={104}>
+            <circle cx={60} cy={60} r={R} fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth={12} />
+            <circle
+              cx={60} cy={60} r={R} fill="none" stroke="#fff" strokeWidth={12}
+              strokeDasharray={CIRC} strokeDashoffset={CIRC * (1 - pct / 100)}
+              strokeLinecap="round" transform="rotate(-90 60 60)"
+              style={{ transition: "stroke-dashoffset 0.6s ease" }}
+            />
+          </svg>
+          <div style={gs.heroPct}>{pct}%</div>
+        </div>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={gs.heroTitle}>🎶 {studentName ? `${studentName}'s` : "Your"} Learning Journey</div>
+          <div style={gs.heroSub}>{completedItems} of {totalItems} activities completed</div>
+          <div style={gs.badgeRow}>
+            {badges.map(b => (
+              <span key={b.key} style={{ ...gs.badge, ...(b.earned ? gs.badgeEarned : gs.badgeLocked) }}>
+                {b.emoji} {b.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Modules */}
+      <div style={gs.modulesTitle}>Your Modules</div>
+      <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
+        {lessons.map(lesson => {
+          const items       = lesson.items;
+          const lPct        = calcLessonPercent(items, progressMap);
+          const allDone     = items.length > 0 && items.every(i => progressMap[i.id]?.completed);
+          const anyProgress = items.some(i => progressMap[i.id]?.completed || (progressMap[i.id]?.totalAttempts ?? 0) > 0);
+          const status: "completed" | "in_progress" | "upcoming" = allDone ? "completed" : anyProgress ? "in_progress" : "upcoming";
+          const ms          = MODULE_STATUS[status];
+          const expanded    = expandedId === lesson.id;
+          return (
+            <div key={lesson.id} style={{ ...gs.moduleCard, borderColor: expanded ? ms.border : "#f0eaff" }}>
+              <button onClick={() => setExpandedId(expanded ? null : lesson.id)} style={gs.moduleHeader}>
+                <div style={gs.moduleLeft}>
+                  <div style={{ ...gs.moduleEmoji, background: ms.bg }}>{status === "completed" ? "🎉" : status === "in_progress" ? "🎵" : "🎼"}</div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={gs.moduleTitle}>{lesson.title}</div>
+                    <div style={gs.moduleSub}>{items.length} activities</div>
+                  </div>
+                </div>
+                <div style={gs.moduleRight}>
+                  <span style={{ ...gs.statusChip, background: ms.bg, color: ms.fg, border: `1px solid ${ms.border}` }}>{ms.label}</span>
+                  <span style={gs.chevron}>{expanded ? "▾" : "▸"}</span>
+                </div>
+              </button>
+              <div style={gs.moduleBarTrack}>
+                <div style={{ ...gs.moduleBarFill, width: `${lPct}%`, background: status === "completed" ? "#16a34a" : status === "in_progress" ? "#f59e0b" : "#c7d2fe" }} />
+              </div>
+              {expanded && (
+                <div style={gs.itemGrid}>
+                  {items.length === 0 ? (
+                    <div style={gs.moduleSub}>No activities in this module yet.</div>
+                  ) : items.map(item => {
+                    const done = progressMap[item.id]?.completed ?? false;
+                    const tc   = ITEM_TYPE_STYLE[item.type] ?? { bg: "#f3f4f6", fg: "#374151" };
+                    return (
+                      <div key={item.id} style={{ ...gs.miniItem, ...(done ? gs.miniItemDone : {}) }}>
+                        <span style={gs.miniCheck}>{done ? "✅" : "⬜"}</span>
+                        <span style={gs.miniTitle}>{item.title}</span>
+                        <span style={{ ...gs.miniType, background: tc.bg, color: tc.fg }}>{item.type}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -839,4 +979,69 @@ const s: Record<string, React.CSSProperties> = {
   atDots:  { display: "flex", alignItems: "center", gap: 4 },
   atDot:   { width: 10, height: 10, borderRadius: "50%" },
   atEmpty: { padding: "20px", fontSize: 13, color: "#9ca3af" },
+};
+
+// ─── Gamified view-only styles ──────────────────────────────────────────────
+
+const gs: Record<string, React.CSSProperties> = {
+  empty: {
+    display: "flex", flexDirection: "column" as const, alignItems: "center",
+    padding: "72px 16px", textAlign: "center" as const,
+    background: "linear-gradient(135deg, #fdf4ff, #eef2ff)", borderRadius: 16,
+  },
+  emptyIcon:  { fontSize: 48, marginBottom: 14 },
+  emptyTitle: { fontSize: 19, fontWeight: 800, color: "#3730a3", marginBottom: 8 },
+  emptySub:   { fontSize: 13, color: "#6b7280", maxWidth: 380, lineHeight: 1.6 },
+
+  hero: {
+    display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" as const,
+    background: "linear-gradient(135deg, #7c3aed, #4f46e5)",
+    borderRadius: 18, padding: "26px 28px", marginBottom: 26,
+    boxShadow: "0 10px 30px rgba(79,70,229,0.25)",
+  },
+  heroRing: { position: "relative" as const, width: 104, height: 104, flexShrink: 0 },
+  heroPct: {
+    position: "absolute" as const, inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: 24, fontWeight: 900, color: "#fff",
+  },
+  heroTitle: { fontSize: 20, fontWeight: 800, color: "#fff", marginBottom: 4 },
+  heroSub:   { fontSize: 13, color: "rgba(255,255,255,0.85)", marginBottom: 14 },
+  badgeRow:  { display: "flex", gap: 8, flexWrap: "wrap" as const },
+  badge:     { fontSize: 11, fontWeight: 700, borderRadius: 99, padding: "6px 12px" },
+  badgeEarned: { background: "rgba(255,255,255,0.95)", color: "#4f46e5" },
+  badgeLocked: { background: "rgba(255,255,255,0.15)", color: "rgba(255,255,255,0.65)" },
+
+  modulesTitle: {
+    fontSize: 13, fontWeight: 800, color: "#374151",
+    textTransform: "uppercase" as const, letterSpacing: "0.06em", marginBottom: 12,
+  },
+
+  moduleCard: {
+    background: "#fff", border: "2px solid #f0eaff", borderRadius: 14,
+    overflow: "hidden", transition: "border-color 0.15s",
+  },
+  moduleHeader: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+    width: "100%", padding: "16px 18px", background: "none", border: "none",
+    cursor: "pointer", textAlign: "left" as const, font: "inherit",
+  },
+  moduleLeft:  { display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: 1 },
+  moduleEmoji: { width: 40, height: 40, borderRadius: 12, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19 },
+  moduleTitle: { fontSize: 14.5, fontWeight: 700, color: "#111827", whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis" },
+  moduleSub:   { fontSize: 12, color: "#9ca3af", marginTop: 2 },
+  moduleRight: { display: "flex", alignItems: "center", gap: 10, flexShrink: 0 },
+  statusChip:  { fontSize: 11, fontWeight: 800, borderRadius: 99, padding: "5px 12px", whiteSpace: "nowrap" as const },
+  chevron:     { fontSize: 13, color: "#9ca3af" },
+  moduleBarTrack: { height: 6, background: "#f3f4f6", margin: "0 18px 16px" },
+  moduleBarFill:  { height: "100%", borderRadius: 99, transition: "width 0.4s ease" },
+
+  itemGrid: { display: "flex", flexDirection: "column" as const, gap: 8, padding: "0 18px 18px" },
+  miniItem: {
+    display: "flex", alignItems: "center", gap: 10, background: "#fafafa",
+    border: "1px solid #f3f4f6", borderRadius: 10, padding: "10px 14px",
+  },
+  miniItemDone: { background: "#f0fdf4", borderColor: "#bbf7d0" },
+  miniCheck: { fontSize: 15, flexShrink: 0 },
+  miniTitle: { fontSize: 13, fontWeight: 600, color: "#111827", flex: 1, minWidth: 0 },
+  miniType:  { fontSize: 10, fontWeight: 700, borderRadius: 99, padding: "3px 9px", textTransform: "capitalize" as const, flexShrink: 0 },
 };

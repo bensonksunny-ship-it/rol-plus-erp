@@ -57,6 +57,7 @@ export interface StudentRow {
   breakRequestedAt: string | null;
   breakStartDate: string | null;
   breakReason: string | null;
+  createdAt: string;   // ISO date — joining date, "" if unknown
 }
 
 type StudentTab = "active" | "requests" | "break_requests" | "on_break" | "inactive";
@@ -129,6 +130,15 @@ export function fmtDate(iso: string): string {
   const d = new Date(iso.length === 7 ? `${iso}-01` : iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+/** Normalizes a Firestore Timestamp or ISO string field to an ISO string ("" if neither). */
+export function toISODate(v: unknown): string {
+  if (v && typeof v === "object" && "toDate" in v) {
+    return (v as { toDate(): Date }).toDate().toISOString();
+  }
+  if (typeof v === "string") return v;
+  return "";
 }
 
 // ─── Status styles ─────────────────────────────────────────────────────────────
@@ -275,6 +285,7 @@ function StudentsContent() {
           feePerClass: Number(s.feePerClass ?? 0),
           balance:     balanceMap.get(d.id) ?? 0,
           status:      (s.status ?? s.studentStatus ?? "active") as string,
+          createdAt:   toISODate(s.createdAt),
           deactivationRequestedBy: (s.deactivationRequestedBy ?? null) as string | null,
           deactivationRequestedAt: (s.deactivationRequestedAt ?? null) as string | null,
           breakRequestedBy: (s.breakRequestedBy ?? null) as string | null,
