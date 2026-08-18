@@ -226,7 +226,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
   if (loading) {
     return (
       <div style={dp.page}>
-        <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
+        <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
           <BackBar router={router} />
           <div className="bg-white shadow-sm rounded-xl border border-gray-100">
             <div style={dp.state}>Loading student…</div>
@@ -238,7 +238,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
   if (notFound || !student) {
     return (
       <div style={dp.page}>
-        <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
+        <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
           <BackBar router={router} />
           <div className="bg-white shadow-sm rounded-xl border border-gray-100">
             <div style={{ ...dp.state, color: "#dc2626" }}>Student not found.</div>
@@ -256,7 +256,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
       <ToastContainer toasts={toasts} onRemove={remove} />
 
       {/* A4-style document container: capped width, centered, clean card framing */}
-      <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
         <BackBar router={router} />
 
         <div className="bg-white shadow-sm rounded-xl border border-gray-100 overflow-hidden">

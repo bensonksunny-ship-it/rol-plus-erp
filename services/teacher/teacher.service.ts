@@ -15,7 +15,8 @@ import {
   signOut as fbSignOut,
 } from "firebase/auth";
 import { deleteApp } from "firebase/app";
-import { db } from "@/services/firebase/firebase";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { db, storage } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
 import type { TeacherUser } from "@/types";
 import type { Role } from "@/types";
@@ -95,6 +96,7 @@ export async function createTeacher(
     status:       "active",
     lastActivity: null,
     qrCodeURL:    null,
+    photoURL:     null,
     createdBy:    initiatorId,
     createdAt:    serverTimestamp(),
     updatedAt:    serverTimestamp(),
@@ -122,6 +124,21 @@ export async function createTeacher(
 
   const snap = await getDocFromServer(userRef);
   return { id: snap.id, ...snap.data() } as unknown as TeacherUser;
+}
+
+// ─── Profile picture upload ────────────────────────────────────────────────────
+
+/**
+ * Uploads a teacher's profile picture to Firebase Storage and returns its
+ * download URL. Does not touch the Firestore doc — callers persist the URL
+ * (e.g. via updateDoc({ photoURL })) so it can be paired with other field
+ * updates in a single write.
+ */
+export async function uploadTeacherPhoto(uid: string, file: File): Promise<string> {
+  const ext = file.name.split(".").pop() ?? "jpg";
+  const photoRef = ref(storage, `teacher-photos/${uid}.${ext}`);
+  await uploadBytes(photoRef, file);
+  return getDownloadURL(photoRef);
 }
 
 // ─── Get all teachers ─────────────────────────────────────────────────────────

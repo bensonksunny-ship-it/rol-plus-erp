@@ -1,9 +1,16 @@
 @import "tailwindcss";
 
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+/* Kept in the same cascade layer as Tailwind's own preflight reset — CSS
+   Cascade Layers give un-layered rules unconditional priority over layered
+   ones (regardless of selector specificity), so leaving this un-layered was
+   silently overriding every Tailwind margin/padding utility (mx-auto, px-4,
+   py-6, ...) app-wide with margin:0/padding:0. */
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════

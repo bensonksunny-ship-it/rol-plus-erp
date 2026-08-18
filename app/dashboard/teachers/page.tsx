@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, type FormEvent } from "react";
+import { useState, useEffect, useRef, Fragment, type FormEvent } from "react";
 import { getDocs, collection, query, where, doc, updateDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -10,6 +10,7 @@ import {
   createTeacher,
   getTeachers,
   updateTeacherCenters,
+  uploadTeacherPhoto,
 } from "@/services/teacher/teacher.service";
 import type { TeacherUser, UserStatus } from "@/types";
 import type { Center } from "@/types";
@@ -49,6 +50,7 @@ function TeachersContent() {
   const [password, setPassword] = useState("");
   const [showPw,   setShowPw]   = useState(false);
   const [selectedCenters, setSelectedCenters] = useState<string[]>([]);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
 
   // Edit form
   const [editCenters, setEditCenters] = useState<string[]>([]);
@@ -130,13 +132,21 @@ function TeachersContent() {
     if (password.length < 6) return setErrorMsg("Password must be at least 6 characters.");
     setSubmitting(true);
     try {
-      await createTeacher(
+      const created = await createTeacher(
         { displayName: name.trim(), email: email.trim(), password, centerIds: selectedCenters },
         user?.uid ?? "unknown",
         (user?.role ?? ROLES.ADMIN) as Parameters<typeof createTeacher>[2],
       );
+      if (photoFile) {
+        try {
+          const photoURL = await uploadTeacherPhoto(created.uid, photoFile);
+          await updateDoc(doc(db, "users", created.uid), { photoURL, updatedAt: serverTimestamp() });
+        } catch (photoErr) {
+          console.error("Failed to upload teacher photo:", photoErr);
+        }
+      }
       setSuccessMsg("Teacher created successfully.");
-      setName(""); setEmail(""); setPassword(""); setSelectedCenters([]);
+      setName(""); setEmail(""); setPassword(""); setSelectedCenters([]); setPhotoFile(null);
       setLoading(true);
       await load();
       setShowCreate(false);
@@ -336,7 +346,9 @@ function TeachersContent() {
                       </button>
                     </div>
                   </Field>
-                  <div />
+                  <Field label="Profile Picture (optional)">
+                    <PhotoUploadField file={photoFile} name={name || "New Teacher"} onChange={setPhotoFile} />
+                  </Field>
                   <Field label="Assign Centers (optional)" fullWidth>
                     <CenterCheckboxes
                       centers={centers}
@@ -373,7 +385,6 @@ function TeachersContent() {
                   <TeacherCard
                     key={t.uid}
                     teacher={t}
-                    centerName={centerName}
                     onView={() => setViewTarget(t)}
                     onEditDetails={() => setEditDetailsTarget(t)}
                     onEditCenters={() => openEdit(t)}
@@ -400,21 +411,32 @@ function TeachersContent() {
           ) : teachers.length === 0 ? (
             <div style={s.empty}>No teachers to show.</div>
           ) : (
-            <div style={s.grid}>
-              {teachers.map(t => (
-                <TeacherPerfCard
-                  key={t.uid}
-                  teacher={t}
-                  centerName={centerName}
-                  stats={attStats[t.uid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 }}
-                  centerStats={attByCenter[t.uid] ?? {}}
-                  expanded={expandedTeacher === t.uid}
-                  onToggle={() => setExpandedTeacher(prev => prev === t.uid ? null : t.uid)}
-                  onEditDetails={() => setEditDetailsTarget(t)}
-                  onEditCenters={() => openEdit(t)}
-                  onDelete={() => setDeleteTarget(t)}
-                />
-              ))}
+            <div style={{ overflowX: "auto" }}>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    {["Teacher", "Centers", "Present", "Absent", "Break", "Cancelled", "Total", ""].map(h => (
+                      <th key={h} style={s.th}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {teachers.map(t => (
+                    <TeacherPerfRow
+                      key={t.uid}
+                      teacher={t}
+                      centerName={centerName}
+                      stats={attStats[t.uid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 }}
+                      centerStats={attByCenter[t.uid] ?? {}}
+                      expanded={expandedTeacher === t.uid}
+                      onToggle={() => setExpandedTeacher(prev => prev === t.uid ? null : t.uid)}
+                      onEditDetails={() => setEditDetailsTarget(t)}
+                      onEditCenters={() => openEdit(t)}
+                      onDelete={() => setDeleteTarget(t)}
+                    />
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
@@ -463,6 +485,54 @@ function initials(name: string): string {
   return name.split(" ").map(n => n[0] ?? "").join("").slice(0, 2).toUpperCase() || "?";
 }
 
+// ─── Avatar (photo, falls back to initials) ─────────────────────────────────────
+
+function TeacherAvatar({ photoURL, name, size = 36 }: {
+  photoURL?: string | null; name: string; size?: number;
+}) {
+  if (photoURL) {
+    return (
+      <img
+        src={photoURL}
+        alt={name}
+        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover" as const, flexShrink: 0 }}
+      />
+    );
+  }
+  return (
+    <div style={{ ...s.tAvatar, width: size, height: size, fontSize: Math.round(size * 0.36) }}>
+      {initials(name)}
+    </div>
+  );
+}
+
+// ─── Profile picture upload field (Add/Edit teacher forms) ─────────────────────
+
+function PhotoUploadField({ file, currentUrl, name, onChange }: {
+  file: File | null; currentUrl?: string | null; name: string; onChange: (file: File | null) => void;
+}) {
+  const [preview, setPreview] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!file) { setPreview(null); return; }
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <TeacherAvatar photoURL={preview ?? currentUrl} name={name} size={48} />
+      <input
+        type="file"
+        accept="image/*"
+        onChange={e => onChange(e.target.files?.[0] ?? null)}
+        style={s.fileInput}
+      />
+    </div>
+  );
+}
+
 // ─── Three-dots actions menu (shared by both card grids) ───────────────────────
 
 function TeacherActionsMenu({ onEditDetails, onEditCenters, onDelete }: {
@@ -503,8 +573,8 @@ function TeacherActionsMenu({ onEditDetails, onEditCenters, onDelete }: {
 
 // ─── Teacher card (Teachers tab grid) ───────────────────────────────────────────
 
-function TeacherCard({ teacher, centerName, onView, onEditDetails, onEditCenters, onDelete }: {
-  teacher: TeacherUser; centerName: (id: string) => string;
+function TeacherCard({ teacher, onView, onEditDetails, onEditCenters, onDelete }: {
+  teacher: TeacherUser;
   onView: () => void; onEditDetails: () => void; onEditCenters: () => void; onDelete: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -515,7 +585,7 @@ function TeacherCard({ teacher, centerName, onView, onEditDetails, onEditCenters
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
     >
       <div style={s.tCardHeader}>
-        <div style={s.tAvatar}>{initials(teacher.displayName)}</div>
+        <TeacherAvatar photoURL={teacher.photoURL} name={teacher.displayName} size={36} />
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <StatusBadge status={teacher.status} />
           <TeacherActionsMenu onEditDetails={onEditDetails} onEditCenters={onEditCenters} onDelete={onDelete} />
@@ -523,81 +593,86 @@ function TeacherCard({ teacher, centerName, onView, onEditDetails, onEditCenters
       </div>
       <div style={s.tName}>{teacher.displayName}</div>
       <div style={s.tEmail}>{teacher.email}</div>
-      <div style={s.tMetaLabel}>Assigned Centers</div>
-      {(teacher.centerIds ?? []).length === 0 ? (
-        <span style={{ color: "#9ca3af", fontSize: 12 }}>None assigned</span>
-      ) : (
-        <div style={s.centerTags}>
-          {(teacher.centerIds ?? []).map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
-        </div>
-      )}
     </div>
   );
 }
 
-// ─── Teacher performance card (Performance tab grid) ────────────────────────────
+// ─── Teacher performance row (Performance tab list) ─────────────────────────────
 
 type AttCounts = { present: number; absent: number; break: number; cancelled: number; total: number };
 
-function TeacherPerfCard({ teacher, centerName, stats, centerStats, expanded, onToggle, onEditDetails, onEditCenters, onDelete }: {
+function TeacherPerfRow({ teacher, centerName, stats, centerStats, expanded, onToggle, onEditDetails, onEditCenters, onDelete }: {
   teacher: TeacherUser; centerName: (id: string) => string;
   stats: AttCounts; centerStats: Record<string, AttCounts>;
   expanded: boolean; onToggle: () => void;
   onEditDetails: () => void; onEditCenters: () => void; onDelete: () => void;
 }) {
-  const [hover, setHover]  = useState(false);
   const hasCentres = (teacher.centerIds ?? []).length > 0;
   return (
-    <div
-      onClick={() => hasCentres && onToggle()}
-      style={{ ...s.tCard, ...(hover ? s.tCardHover : {}), cursor: hasCentres ? "pointer" : "default" }}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-    >
-      <div style={s.tCardHeader}>
-        <div style={s.tAvatar}>{initials(teacher.displayName)}</div>
-        <TeacherActionsMenu onEditDetails={onEditDetails} onEditCenters={onEditCenters} onDelete={onDelete} />
-      </div>
-      <div style={s.tName}>
-        {teacher.displayName}
-        {hasCentres && <span style={{ marginLeft: 6, fontSize: 10, color: "#9ca3af" }}>{expanded ? "▼" : "▶"}</span>}
-      </div>
-      <div style={s.tMetaLabel}>Centers</div>
-      {!hasCentres ? (
-        <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
-      ) : (
-        <div style={s.centerTags}>
-          {teacher.centerIds!.map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
-        </div>
-      )}
-      <div style={s.perfChipsRow}>
-        <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")} title="Present">P {stats.present}</span>
-        <span style={attChip("#dc2626", "#fef2f2", "#fecaca")} title="Absent">A {stats.absent}</span>
-        <span style={attChip("#d97706", "#fffbeb", "#fde68a")} title="Break">Br {stats.break}</span>
-        <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")} title="Cancelled">C {stats.cancelled}</span>
-        <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")} title="Total">Σ {stats.total}</span>
-      </div>
+    <Fragment>
+      <tr
+        style={{ ...s.tr, cursor: hasCentres ? "pointer" : "default", background: expanded ? "var(--color-surface-2)" : undefined }}
+        onClick={() => hasCentres && onToggle()}
+      >
+        <td style={{ ...s.td, fontWeight: 600, color: "var(--color-text-primary)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <TeacherAvatar photoURL={teacher.photoURL} name={teacher.displayName} size={26} />
+            {teacher.displayName}
+            {hasCentres && <span style={{ fontSize: 10, color: "#9ca3af" }}>{expanded ? "▼" : "▶"}</span>}
+          </div>
+        </td>
+        <td style={s.td}>
+          {!hasCentres ? (
+            <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+          ) : (
+            <div style={s.centerTags}>
+              {teacher.centerIds!.map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
+            </div>
+          )}
+        </td>
+        <td style={{ ...s.td, textAlign: "center" as const }}>
+          <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")}>{stats.present}</span>
+        </td>
+        <td style={{ ...s.td, textAlign: "center" as const }}>
+          <span style={attChip("#dc2626", "#fef2f2", "#fecaca")}>{stats.absent}</span>
+        </td>
+        <td style={{ ...s.td, textAlign: "center" as const }}>
+          <span style={attChip("#d97706", "#fffbeb", "#fde68a")}>{stats.break}</span>
+        </td>
+        <td style={{ ...s.td, textAlign: "center" as const }}>
+          <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")}>{stats.cancelled}</span>
+        </td>
+        <td style={{ ...s.td, textAlign: "center" as const }}>
+          <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")}>{stats.total}</span>
+        </td>
+        <td style={s.td} onClick={e => e.stopPropagation()}>
+          <TeacherActionsMenu onEditDetails={onEditDetails} onEditCenters={onEditCenters} onDelete={onDelete} />
+        </td>
+      </tr>
 
       {expanded && hasCentres && (
-        <div style={s.perfBreakdown} onClick={e => e.stopPropagation()}>
-          <div style={s.perfBreakdownTitle}>Per-centre breakdown</div>
-          {teacher.centerIds!.map(cid => {
-            const cs = centerStats[cid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 };
-            return (
-              <div key={cid} style={s.perfBreakdownRow}>
-                <span style={{ fontWeight: 600, color: "#4338ca", fontSize: 12 }}>{centerName(cid)}</span>
-                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
-                  <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")}>{cs.present}</span>
-                  <span style={attChip("#dc2626", "#fef2f2", "#fecaca")}>{cs.absent}</span>
-                  <span style={attChip("#d97706", "#fffbeb", "#fde68a")}>{cs.break}</span>
-                  <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")}>{cs.cancelled}</span>
-                  <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")}>{cs.total}</span>
+        <tr style={{ background: "var(--color-surface-2)", borderBottom: "1px solid var(--color-border)" }}>
+          <td colSpan={8} style={{ padding: "0 16px 16px 44px" }}>
+            <div style={s.perfBreakdownTitle}>Per-centre breakdown</div>
+            {teacher.centerIds!.map(cid => {
+              const cs = centerStats[cid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 };
+              return (
+                <div key={cid} style={s.perfBreakdownRow}>
+                  <span style={{ fontWeight: 600, color: "#4338ca", fontSize: 12 }}>{centerName(cid)}</span>
+                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                    <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")}>{cs.present}</span>
+                    <span style={attChip("#dc2626", "#fef2f2", "#fecaca")}>{cs.absent}</span>
+                    <span style={attChip("#d97706", "#fffbeb", "#fde68a")}>{cs.break}</span>
+                    <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")}>{cs.cancelled}</span>
+                    <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")}>{cs.total}</span>
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </td>
+        </tr>
       )}
-    </div>
+    </Fragment>
   );
 }
 
@@ -614,6 +689,9 @@ function ViewTeacherModal({ teacher, centerName, onClose }: {
           <button onClick={onClose} style={s.closeBtn}>×</button>
         </div>
         <div style={s.modalBody}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
+            <TeacherAvatar photoURL={teacher.photoURL} name={teacher.displayName} size={64} />
+          </div>
           <ViewRow label="Email" value={teacher.email} />
           <ViewRow label="Status" value={<StatusBadge status={teacher.status} />} />
           <ViewRow label="Assigned Centers" value={
@@ -643,13 +721,14 @@ function ViewRow({ label, value }: { label: string; value: React.ReactNode }) {
 function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
   teacher: TeacherUser;
   onClose: () => void;
-  onSaved: (updated: { displayName: string; email: string; status: UserStatus }) => void;
+  onSaved: (updated: { displayName: string; email: string; status: UserStatus; photoURL?: string | null }) => void;
 }) {
-  const [name, setName]     = useState(teacher.displayName);
-  const [email, setEmail]   = useState(teacher.email);
-  const [status, setStatus] = useState<UserStatus>(teacher.status);
-  const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState("");
+  const [name, setName]       = useState(teacher.displayName);
+  const [email, setEmail]     = useState(teacher.email);
+  const [status, setStatus]   = useState<UserStatus>(teacher.status);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState("");
 
   async function handleSave(e: FormEvent) {
     e.preventDefault();
@@ -658,17 +737,22 @@ function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
     setError("");
     setSaving(true);
     try {
+      let photoURL = teacher.photoURL ?? null;
+      if (photoFile) {
+        photoURL = await uploadTeacherPhoto(teacher.uid, photoFile);
+      }
       await updateDoc(doc(db, "users", teacher.uid), {
         displayName: name.trim(),
         email:       email.trim().toLowerCase(),
         status,
+        photoURL,
         updatedAt:   serverTimestamp(),
       });
       if (email.trim().toLowerCase() !== teacher.email.toLowerCase()) {
         // Firestore updated; Firebase Auth email update requires server-side Admin SDK.
         console.info("Teacher email changed in Firestore. Firebase Auth email was not updated.");
       }
-      onSaved({ displayName: name.trim(), email: email.trim().toLowerCase(), status });
+      onSaved({ displayName: name.trim(), email: email.trim().toLowerCase(), status, photoURL });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save.");
     } finally {
@@ -698,6 +782,9 @@ function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
                   <option value="active">Active</option>
                   <option value="inactive">Inactive</option>
                 </select>
+              </Field>
+              <Field label="Profile Picture">
+                <PhotoUploadField file={photoFile} currentUrl={teacher.photoURL} name={name || teacher.displayName} onChange={setPhotoFile} />
               </Field>
             </div>
             <div style={s.formActions}>
@@ -800,6 +887,7 @@ const s: Record<string, React.CSSProperties> = {
   grid2:        { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 20px", marginBottom: 16 },
   label:        { fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" },
   input:        { background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "9px 12px", fontSize: 14, color: "var(--color-text-primary)", outline: "none", width: "100%", boxSizing: "border-box" },
+  fileInput:    { fontSize: 12.5, color: "var(--color-text-secondary)" },
   showHide:     { position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#9ca3af", fontSize: 11, cursor: "pointer", padding: 0 },
   formActions:  { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 },
 
@@ -826,7 +914,6 @@ const s: Record<string, React.CSSProperties> = {
   },
   tName:        { fontSize: 15, fontWeight: 600, color: "var(--color-text-primary)" },
   tEmail:       { fontSize: 13, color: "var(--color-text-secondary)" },
-  tMetaLabel:   { fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase" as const, letterSpacing: "0.04em" },
 
   // ── Three-dots menu ───────────────────────────────────────────────────────
   menuBtn: {
@@ -846,14 +933,13 @@ const s: Record<string, React.CSSProperties> = {
   },
   menuItemDanger: { color: "#dc2626" },
 
-  // ── Performance card extras ───────────────────────────────────────────────
-  perfChipsRow: { display: "flex", gap: 5, flexWrap: "wrap" as const, marginTop: 2 },
-  perfBreakdown: {
-    marginTop: 6, paddingTop: 10, borderTop: "1px solid var(--color-border)",
-    display: "flex", flexDirection: "column" as const, gap: 8, cursor: "default",
-  },
-  perfBreakdownTitle: { fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em" },
-  perfBreakdownRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const },
+  // ── Performance list (table) ─────────────────────────────────────────────
+  table: { width: "100%", borderCollapse: "collapse" as const, fontSize: 13 },
+  th:    { textAlign: "left" as const, padding: "8px 12px", fontSize: 10.5, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.05em", color: "var(--color-text-muted)", borderBottom: "1px solid var(--color-border)", background: "var(--color-surface-2)", whiteSpace: "nowrap" as const },
+  tr:    { borderBottom: "1px solid var(--color-border)" },
+  td:    { padding: "10px 12px", color: "var(--color-text-secondary)", verticalAlign: "middle" as const },
+  perfBreakdownTitle: { fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: 8 },
+  perfBreakdownRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const, padding: "6px 0" },
 
   overlay:      { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" },
   modal:        { background: "#fff", borderRadius: 12, width: "100%", maxWidth: 480, boxShadow: "0 8px 32px rgba(0,0,0,0.16)", overflow: "hidden" },

@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getDocs, collection, query, where } from "firebase/firestore";
+import { db } from "@/services/firebase/firebase";
 import { getCenters, createCenter, updateCenter } from "@/services/center/center.service";
 import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -68,38 +70,390 @@ function DayChips({ selected, onChange }: { selected: Day[]; onChange: (d: Day[]
   );
 }
 
-// ─── View Modal ────────────────────────────────────────────────────────────────
+// ─── Date / format helpers (Center Detail view) ─────────────────────────────────
+
+function isoToday(): string { return new Date().toISOString().slice(0, 10); }
+function isoDaysAgo(n: number): string { return new Date(Date.now() - n * 86400000).toISOString().slice(0, 10); }
+function currentMonthStr(): string { return new Date().toISOString().slice(0, 7); }
+function monthsAgoStr(n: number): string {
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - n);
+  return d.toISOString().slice(0, 7);
+}
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function fmtMonthLong(ym: string): string {
+  const [y, m] = ym.split("-");
+  return `${MONTH_NAMES[parseInt(m, 10) - 1] ?? m} ${y}`;
+}
+function fmtMonthShort(ym: string): string {
+  const [y, m] = ym.split("-");
+  return `${MONTH_SHORT[parseInt(m, 10) - 1] ?? m} ${y?.slice(2)}`;
+}
+function fmtDateShort(iso: string): string {
+  const [y, m, d] = iso.split("-");
+  if (!y || !m || !d) return iso;
+  return `${parseInt(d, 10)} ${MONTH_SHORT[parseInt(m, 10) - 1] ?? m} ${y}`;
+}
+function toISODateLocal(v: unknown): string {
+  if (v && typeof v === "object" && "toDate" in v) return (v as { toDate(): Date }).toDate().toISOString();
+  if (typeof v === "string") return v;
+  return "";
+}
+function attChip(color: string, bg: string, border: string): React.CSSProperties {
+  return { display: "inline-block", padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 700, color, background: bg, border: `1px solid ${border}` };
+}
+const ATT_STATUS_COLOR: Record<string, { bg: string; fg: string }> = {
+  present:           { bg: "#dcfce7", fg: "#16a34a" },
+  absent:            { bg: "#fee2e2", fg: "#dc2626" },
+  break:             { bg: "#fef9c3", fg: "#92400e" },
+  cancelled_teacher: { bg: "#ede9fe", fg: "#5b21b6" },
+  cancelled_student: { bg: "#f3f4f6", fg: "#6b7280" },
+};
+
+// ─── Center Detail data types ────────────────────────────────────────────────
+
+interface CenterAttRec { id: string; studentUid: string; date: string; status: string; }
+interface CenterStudentRec { uid: string; name: string; status: string; createdAt: string; }
+interface CenterTxRec { amount: number; date: string; status: string; type?: string; method?: string; }
+
+function isManualPayment(t: CenterTxRec): boolean {
+  return t.status === "completed" && t.type !== "fee_due" && t.type !== "charge" && t.method !== "auto" && t.method !== "auto-monthly";
+}
+
+// ─── View Modal (tabbed: Attendance History / Graphs & Insights) ───────────────
+
+type ViewTab = "attendance" | "insights";
 
 function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () => void; teachers: TeacherUser[] }) {
   const raw = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
   const teacher = teachers.find(t => t.uid === center.teacherUid);
-  const teacherLabel = teacher ? `${teacher.displayName} (${teacher.email})` : center.teacherUid || "-";
+  const teacherLabel = teacher ? teacher.displayName : center.teacherUid || "-";
+
+  const [tab, setTab] = useState<ViewTab>("attendance");
+  const [attRecs,  setAttRecs]  = useState<CenterAttRec[]>([]);
+  const [students, setStudents] = useState<CenterStudentRec[]>([]);
+  const [txs,      setTxs]      = useState<CenterTxRec[]>([]);
+  const [loading,  setLoading]  = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const [attSnap, stuSnap, txSnap] = await Promise.all([
+          getDocs(query(collection(db, "attendance"), where("centerId", "==", center.id))),
+          getDocs(query(collection(db, "users"), where("role", "==", "student"), where("centerId", "==", center.id))),
+          getDocs(query(collection(db, "transactions"), where("centerId", "==", center.id))),
+        ]);
+        if (cancelled) return;
+        setAttRecs(attSnap.docs.map(d => {
+          const r = d.data();
+          return { id: d.id, studentUid: (r.studentUid ?? "") as string, date: (r.date ?? "") as string, status: (r.status ?? "") as string };
+        }));
+        setStudents(stuSnap.docs.map(d => {
+          const st = d.data();
+          return {
+            uid: d.id,
+            name: (st.displayName ?? st.name ?? "-") as string,
+            status: (st.status ?? st.studentStatus ?? "active") as string,
+            createdAt: toISODateLocal(st.createdAt),
+          };
+        }));
+        setTxs(txSnap.docs.map(d => {
+          const t = d.data();
+          return {
+            amount: Number(t.amount ?? 0),
+            date:   (t.date   ?? "") as string,
+            status: (t.status ?? "") as string,
+            type:   t.type   as string | undefined,
+            method: t.method as string | undefined,
+          };
+        }));
+      } catch (err) {
+        console.error("[ViewModal] load error:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [center.id]);
+
+  const studentMap = useMemo(() => {
+    const m = new Map<string, string>();
+    students.forEach(s => m.set(s.uid, s.name));
+    return m;
+  }, [students]);
+
   return (
     <div style={modalStyles.overlay} onClick={onClose}>
-      <div style={modalStyles.box} onClick={e => e.stopPropagation()}>
+      <div style={{ ...modalStyles.box, maxWidth: 880, maxHeight: "88vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
         <div style={modalStyles.header}>
-          <span style={modalStyles.title}>{center.name}</span>
+          <div>
+            <div style={modalStyles.title}>{center.name}</div>
+            <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" as const }}>
+              <span style={styles.codeChip}>{(center as Center & { centerCode?: string }).centerCode || "-"}</span>
+              <StatusBadge status={center.status} />
+            </div>
+          </div>
           <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
         </div>
-        <div style={modalStyles.body}>
-          <ViewRow label="Center Code"  value={(center as Center & { centerCode?: string }).centerCode || "-"} mono />
-          <ViewRow label="Teacher"      value={teacherLabel} />
-          <ViewRow label="Days"         value={raw.daysOfWeek?.join(", ") || center.timeSlot || "-"} />
-          <ViewRow label="Start Time"   value={raw.startTime  || "-"} />
-          <ViewRow label="End Time"     value={raw.endTime    || "-"} />
-          <ViewRow label="Status"       value={center.status} />
+
+        {/* Quick facts */}
+        <div style={viewStyles.quickFacts}>
+          <QuickFact label="Teacher"  value={teacherLabel} />
+          <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || center.timeSlot || "-"} />
+          <QuickFact label="Time"     value={raw.startTime && raw.endTime ? `${raw.startTime}–${raw.endTime}` : "-"} />
+          <QuickFact label="Students" value={String(students.length)} />
+        </div>
+
+        {/* Sub-navigation tabs */}
+        <div style={viewStyles.tabBar}>
+          <button onClick={() => setTab("attendance")} style={{ ...viewStyles.tabBtn, ...(tab === "attendance" ? viewStyles.tabBtnActive : {}) }}>
+            Attendance History
+          </button>
+          <button onClick={() => setTab("insights")} style={{ ...viewStyles.tabBtn, ...(tab === "insights" ? viewStyles.tabBtnActive : {}) }}>
+            Graphs &amp; Insights
+          </button>
+        </div>
+
+        <div style={{ ...modalStyles.body, flex: 1, overflowY: "auto" as const }}>
+          {loading ? (
+            <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
+          ) : tab === "attendance" ? (
+            <CenterAttendanceHistoryTab records={attRecs} studentMap={studentMap} />
+          ) : (
+            <CenterInsightsTab records={attRecs} students={students} transactions={txs} />
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function ViewRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function QuickFact({ label, value }: { label: string; value: string }) {
   return (
-    <div style={modalStyles.row}>
-      <span style={modalStyles.rowLabel}>{label}</span>
-      <span style={{ ...modalStyles.rowValue, ...(mono ? styles.mono : {}) }}>{value}</span>
+    <div>
+      <div style={viewStyles.quickFactLabel}>{label}</div>
+      <div style={viewStyles.quickFactValue}>{value}</div>
     </div>
+  );
+}
+
+// ─── Attendance History Tab ─────────────────────────────────────────────────
+
+function CenterAttendanceHistoryTab({ records, studentMap }: {
+  records: CenterAttRec[]; studentMap: Map<string, string>;
+}) {
+  const [month, setMonth] = useState(currentMonthStr());
+
+  const monthRecs = useMemo(
+    () => records.filter(r => r.date.startsWith(month)).sort((a, b) => b.date.localeCompare(a.date)),
+    [records, month]
+  );
+
+  const counts = useMemo(() => {
+    const c = { present: 0, absent: 0, break: 0, cancelled: 0, total: monthRecs.length };
+    monthRecs.forEach(r => {
+      if (r.status === "present") c.present++;
+      else if (r.status === "absent") c.absent++;
+      else if (r.status === "break") c.break++;
+      else if (r.status?.startsWith("cancelled")) c.cancelled++;
+    });
+    return c;
+  }, [monthRecs]);
+
+  const monthOptions = useMemo(() => {
+    const set = new Set(records.map(r => r.date.slice(0, 7)));
+    set.add(currentMonthStr());
+    return Array.from(set).sort().reverse();
+  }, [records]);
+
+  if (records.length === 0) {
+    return <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>No attendance history recorded for this centre yet.</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap" as const, gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+          <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")}>{counts.present} Present</span>
+          <span style={attChip("#dc2626", "#fef2f2", "#fecaca")}>{counts.absent} Absent</span>
+          <span style={attChip("#92400e", "#fffbeb", "#fde68a")}>{counts.break} Break</span>
+          <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")}>{counts.cancelled} Cancelled</span>
+          <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")}>{counts.total} Total</span>
+        </div>
+        <select value={month} onChange={e => setMonth(e.target.value)} style={{ ...formStyles.input, width: "auto" }}>
+          {monthOptions.map(m => <option key={m} value={m}>{fmtMonthLong(m)}</option>)}
+        </select>
+      </div>
+
+      {monthRecs.length === 0 ? (
+        <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No attendance records for {fmtMonthLong(month)}.</div>
+      ) : (
+        <div style={{ maxHeight: 420, overflowY: "auto" as const, border: "1px solid #e5e7eb", borderRadius: 8 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+            <thead>
+              <tr>
+                <th style={viewStyles.histTh}>Date</th>
+                <th style={viewStyles.histTh}>Student</th>
+                <th style={viewStyles.histTh}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {monthRecs.map((r, i) => {
+                const sc = ATT_STATUS_COLOR[r.status] ?? { bg: "#f3f4f6", fg: "#374151" };
+                return (
+                  <tr key={r.id} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
+                    <td style={viewStyles.histTd}>{fmtDateShort(r.date)}</td>
+                    <td style={viewStyles.histTd}>{studentMap.get(r.studentUid) ?? r.studentUid ?? "—"}</td>
+                    <td style={viewStyles.histTd}>
+                      <span style={{ ...styles.badge, background: sc.bg, color: sc.fg }}>{r.status.replace(/_/g, " ") || "—"}</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Graphs & Insights Tab ──────────────────────────────────────────────────
+
+function CenterInsightsTab({ records, students, transactions }: {
+  records: CenterAttRec[]; students: CenterStudentRec[]; transactions: CenterTxRec[];
+}) {
+  const activeStudents = students.filter(s => s.status === "active").length;
+
+  const attTrend = useMemo(() => Array.from({ length: 14 }, (_, i) => {
+    const date    = isoDaysAgo(13 - i);
+    const dayRecs = records.filter(r => r.date === date);
+    const pct     = dayRecs.length > 0 ? Math.round((dayRecs.filter(r => r.status === "present").length / dayRecs.length) * 100) : 0;
+    return { label: new Date(date + "T12:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }), value: pct };
+  }), [records]);
+
+  const revTrend = useMemo(() => Array.from({ length: 6 }, (_, i) => {
+    const ym  = monthsAgoStr(5 - i);
+    const amt = transactions.filter(t => isManualPayment(t) && t.date?.startsWith(ym)).reduce((s, t) => s + t.amount, 0);
+    return { label: fmtMonthShort(ym), value: amt };
+  }), [transactions]);
+
+  const growthTrend = useMemo(() => Array.from({ length: 6 }, (_, i) => {
+    const ym    = monthsAgoStr(5 - i);
+    const count = students.filter(s => s.createdAt?.slice(0, 7) === ym).length;
+    return { label: fmtMonthShort(ym), value: count };
+  }), [students]);
+
+  const thisMonth  = currentMonthStr();
+  const monthAtt   = records.filter(r => r.date.startsWith(thisMonth));
+  const monthAttPct = monthAtt.length > 0 ? Math.round((monthAtt.filter(r => r.status === "present").length / monthAtt.length) * 100) : null;
+  const monthRevenue = revTrend[revTrend.length - 1]?.value ?? 0;
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" as const, marginBottom: 20 }}>
+        <InsightKpi label="Active Students"    value={String(activeStudents)} color="#4f46e5" />
+        <InsightKpi label="Attendance · Month" value={monthAttPct !== null ? `${monthAttPct}%` : "—"} color={monthAttPct !== null && monthAttPct < 60 ? "#dc2626" : "#16a34a"} />
+        <InsightKpi label="Revenue · Month"    value={`₹${(monthRevenue / 1000).toFixed(1)}k`} color="#0891b2" />
+      </div>
+
+      <ChartPanel title="Attendance Trend" sub="daily % present · last 14 days">
+        <MiniLineChart data={attTrend} color="#16a34a" formatValue={v => `${v}%`} />
+      </ChartPanel>
+      <ChartPanel title="Revenue Trend" sub="collected · last 6 months">
+        <MiniBarChart data={revTrend} color="#4f46e5" formatValue={v => `₹${(v / 1000).toFixed(1)}k`} />
+      </ChartPanel>
+      <ChartPanel title="Student Growth" sub="new enrollments · last 6 months">
+        <MiniBarChart data={growthTrend} color="#0891b2" formatValue={v => String(v)} />
+      </ChartPanel>
+    </div>
+  );
+}
+
+function InsightKpi({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderTop: `3px solid ${color}`, borderRadius: 10, padding: "10px 16px", minWidth: 130, flex: 1 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em" }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 800, color, marginTop: 3 }}>{value}</div>
+    </div>
+  );
+}
+
+function ChartPanel({ title, sub, children }: { title: string; sub?: string; children: React.ReactNode }) {
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "14px 16px", marginBottom: 14 }}>
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "#111" }}>{title}</div>
+        {sub && <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 1 }}>{sub}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ── Chart primitives (pure SVG, no library) ──────────────────────────────────
+
+function MiniLineChart({ data, color, formatValue }: {
+  data: { label: string; value: number }[]; color: string; formatValue: (v: number) => string;
+}) {
+  const W = 760, H = 110, PL = 10, PR = 10, PT = 20, PB = 24;
+  const vals  = data.map(d => d.value);
+  const maxV  = Math.max(...vals, 1);
+  const minV  = Math.min(...vals, 0);
+  const range = maxV - minV || 1;
+  const xStep = (W - PL - PR) / Math.max(data.length - 1, 1);
+  const y = (v: number) => PT + ((maxV - v) / range) * (H - PT - PB);
+  const x = (i: number) => PL + i * xStep;
+  const pts = data.map((_, i) => `${x(i)},${y(vals[i])}`).join(" ");
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+      {data.map((d, i) => (
+        <g key={i}>
+          <circle cx={x(i)} cy={y(vals[i])} r={2.5} fill={color} />
+          {(i === 0 || i === data.length - 1 || i % 3 === 0) && (
+            <text x={x(i)} y={H - PB + 13} textAnchor="middle" fontSize={9} fill="#9ca3af">{d.label}</text>
+          )}
+        </g>
+      ))}
+      {data.length > 0 && (
+        <text x={x(data.length - 1)} y={y(vals[vals.length - 1]) - 8} textAnchor="end" fontSize={10} fill={color} fontWeight={700}>
+          {formatValue(vals[vals.length - 1])}
+        </text>
+      )}
+    </svg>
+  );
+}
+
+function MiniBarChart({ data, color, formatValue }: {
+  data: { label: string; value: number }[]; color: string; formatValue: (v: number) => string;
+}) {
+  const W = 760, H = 120, PL = 4, PR = 4, PT = 20, PB = 24;
+  const maxV = Math.max(...data.map(d => d.value), 1);
+  const bW   = (W - PL - PR) / data.length;
+  const gap  = bW * 0.24;
+  const bW2  = bW - gap;
+  const bH   = (v: number) => Math.max(3, (v / maxV) * (H - PT - PB));
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block" }}>
+      <line x1={PL} y1={H - PB} x2={W - PR} y2={H - PB} stroke="#e5e7eb" />
+      {data.map((d, i) => {
+        const barH = bH(d.value);
+        const bx   = PL + i * bW + gap / 2;
+        const by   = H - PB - barH;
+        return (
+          <g key={i}>
+            <rect x={bx} y={by} width={bW2} height={barH} rx={3} fill={color} opacity={0.85} />
+            <text x={bx + bW2 / 2} y={by - 5} textAnchor="middle" fontSize={9} fill={color} fontWeight={700}>{formatValue(d.value)}</text>
+            <text x={bx + bW2 / 2} y={H - PB + 13} textAnchor="middle" fontSize={9} fill="#9ca3af">{d.label}</text>
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
@@ -490,7 +844,6 @@ const styles: Record<string, React.CSSProperties> = {
   cardName:    { fontSize: 15, fontWeight: 600, color: "var(--color-text-primary)" },
   cardMeta:    { display: "flex", flexDirection: "column", gap: 2, fontSize: 13, color: "var(--color-text-primary)" },
   cardMetaLabel:{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.04em" },
-  mono:        { fontFamily: "monospace", fontSize: 12, color: "var(--color-text-secondary)" },
   codeChip:    { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4, fontWeight: 600 },
   badge:       { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" },
 };
@@ -542,7 +895,27 @@ const modalStyles: Record<string, React.CSSProperties> = {
   title:    { fontSize: 15, fontWeight: 600, color: "#111827" },
   closeBtn: { background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#6b7280", lineHeight: 1 },
   body:     { padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 },
-  row:      { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 },
-  rowLabel: { fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em", minWidth: 90 },
-  rowValue: { fontSize: 13, color: "#111827", textAlign: "right" },
+};
+
+const viewStyles: Record<string, React.CSSProperties> = {
+  quickFacts: {
+    display: "flex", flexWrap: "wrap" as const, gap: 20,
+    padding: "14px 20px", borderBottom: "1px solid #f3f4f6", background: "#fafafa", flexShrink: 0,
+  },
+  quickFactLabel: { fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em" },
+  quickFactValue: { fontSize: 13, fontWeight: 600, color: "#111827", marginTop: 2 },
+
+  tabBar: { display: "flex", gap: 4, padding: "0 20px", borderBottom: "1px solid #e5e7eb", flexShrink: 0 },
+  tabBtn: {
+    padding: "10px 16px", background: "none", border: "none", borderBottom: "2px solid transparent",
+    marginBottom: -1, fontSize: 13, fontWeight: 600, color: "#6b7280", cursor: "pointer",
+  },
+  tabBtnActive: { color: "#4f46e5", borderBottomColor: "#4f46e5" },
+
+  histTh: {
+    textAlign: "left" as const, padding: "8px 12px", fontSize: 11, fontWeight: 700,
+    textTransform: "uppercase" as const, letterSpacing: "0.05em", color: "#6b7280",
+    borderBottom: "1px solid #e5e7eb", background: "#f9fafb", position: "sticky" as const, top: 0,
+  },
+  histTd: { padding: "9px 12px", fontSize: 12, color: "#111827", borderBottom: "1px solid #f3f4f6" },
 };

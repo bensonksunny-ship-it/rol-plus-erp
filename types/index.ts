@@ -53,6 +53,7 @@ interface UserBase {
   status: UserStatus;
   lastActivity: string | null;   // ISO — last login or action timestamp
   qrCodeURL: string | null;      // generated QR for identity / attendance scanning
+  photoURL?: string | null;      // uploaded profile picture (Firebase Storage download URL)
   createdAt: string;
   updatedAt: string;
 }

@@ -93,7 +93,13 @@
       "Bash(tasklist //FI \"IMAGENAME eq node.exe\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter 'ProcessId=18040' | Select-Object ProcessId,ParentProcessId,CommandLine | Format-List\")",
       "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"Name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -match 'next' } | Select-Object ProcessId,CommandLine | Format-List\")",
-      "Bash(disown)"
+      "Bash(disown)",
+      "Bash(powershell -Command \"Get-Process OneDrive -ErrorAction SilentlyContinue | Select-Object Id,ProcessName\")",
+      "Bash(powershell -Command \"try { \\(Get-MpPreference\\).EnableControlledFolderAccess } catch { 'access denied or not available' }\")",
+      "Bash(powershell -Command \"\\(Get-Process OneDrive\\).Path\")",
+      "Bash(powershell -Command \"Stop-Process -Name OneDrive -Force\")",
+      "Bash(powershell -Command \"Get-Process OneDrive -ErrorAction SilentlyContinue\")",
+      "Bash(powershell -Command \"Get-Process | Where-Object { \\\\$_.ProcessName -match 'Dropbox|GoogleDrive|iCloud|Backup|SearchIndexer|MsMpEng|Defender|CarbonBlack|CrowdStrike|Sophos|McAfee|Norton|Cortex|SentinelOne|Cylance' } | Select-Object Id,ProcessName\" 2>&1)"
     ]
   }
 }
