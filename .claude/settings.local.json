@@ -89,7 +89,11 @@
       "Bash(node -e ' *)",
       "Bash(powershell -Command \"\\(Get-ItemProperty -Path 'HKCU:\\\\Software\\\\Microsoft\\\\OneDrive\\\\Accounts\\\\Personal' -ErrorAction SilentlyContinue\\).UserFolder\")",
       "Bash(powershell -Command '$acc = fsutil reparsepoint query '\\\\''C:\\\\Users\\\\User\\\\Documents'\\\\'' 2>&1; $acc')",
-      "Bash(fsutil reparsepoint *)"
+      "Bash(fsutil reparsepoint *)",
+      "Bash(tasklist //FI \"IMAGENAME eq node.exe\")",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter 'ProcessId=18040' | Select-Object ProcessId,ParentProcessId,CommandLine | Format-List\")",
+      "Bash(powershell -Command \"Get-CimInstance Win32_Process -Filter \\\\\"Name='node.exe'\\\\\" | Where-Object { \\\\$_.CommandLine -match 'next' } | Select-Object ProcessId,CommandLine | Format-List\")",
+      "Bash(disown)"
     ]
   }
 }

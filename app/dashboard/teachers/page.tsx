@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, type FormEvent } from "react";
-import { getDocs, collection, query, where } from "firebase/firestore";
+import { useState, useEffect, useRef, type FormEvent } from "react";
+import { getDocs, collection, query, where, doc, updateDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
@@ -11,7 +11,7 @@ import {
   getTeachers,
   updateTeacherCenters,
 } from "@/services/teacher/teacher.service";
-import type { TeacherUser } from "@/types";
+import type { TeacherUser, UserStatus } from "@/types";
 import type { Center } from "@/types";
 import { deleteUser as deleteUserRecord } from "@/services/admin/delete.service";
 
@@ -40,6 +40,8 @@ function TeachersContent() {
   const [loading,  setLoading]  = useState(true);
   const [editTarget,   setEditTarget]   = useState<TeacherUser | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<TeacherUser | null>(null);
+  const [viewTarget,        setViewTarget]        = useState<TeacherUser | null>(null);
+  const [editDetailsTarget, setEditDetailsTarget] = useState<TeacherUser | null>(null);
 
   // Create form
   const [name,     setName]     = useState("");
@@ -246,6 +248,22 @@ function TeachersContent() {
         />
       )}
 
+      {viewTarget && (
+        <ViewTeacherModal teacher={viewTarget} centerName={centerName} onClose={() => setViewTarget(null)} />
+      )}
+
+      {editDetailsTarget && (
+        <EditTeacherDetailsModal
+          teacher={editDetailsTarget}
+          onClose={() => setEditDetailsTarget(null)}
+          onSaved={updated => {
+            setTeachers(prev => prev.map(t => t.uid !== editDetailsTarget.uid ? t : { ...t, ...updated }));
+            setEditDetailsTarget(null);
+            setSuccessMsg("Teacher details updated.");
+          }}
+        />
+      )}
+
       {editTarget && (
         <div style={s.overlay} onClick={() => setEditTarget(null)}>
           <div style={s.modal} onClick={e => e.stopPropagation()}>
@@ -350,42 +368,18 @@ function TeachersContent() {
             ) : teachers.length === 0 ? (
               <div style={s.empty}>No teachers yet. Click "+ Add Teacher" above to create one.</div>
             ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={s.table}>
-                  <thead>
-                    <tr>
-                      {["Name", "Email", "Status", "Centers", ""].map(h => (
-                        <th key={h} style={s.th}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {teachers.map(t => (
-                      <tr key={t.uid} style={s.tr}>
-                        <td style={{ ...s.td, fontWeight: 600, color: "#111" }}>{t.displayName}</td>
-                        <td style={s.td}>{t.email}</td>
-                        <td style={s.td}><StatusBadge status={t.status} /></td>
-                        <td style={s.td}>
-                          {(t.centerIds ?? []).length === 0 ? (
-                            <span style={{ color: "#9ca3af", fontSize: 12 }}>None assigned</span>
-                          ) : (
-                            <div style={s.centerTags}>
-                              {(t.centerIds ?? []).map(id => (
-                                <span key={id} style={s.centerTag}>{centerName(id)}</span>
-                              ))}
-                            </div>
-                          )}
-                        </td>
-                        <td style={s.td}>
-                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                            <button style={s.editBtn} onClick={() => openEdit(t)}>Edit Centers</button>
-                            <button style={s.deleteBtn} onClick={() => setDeleteTarget(t)}>✕ Delete</button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div style={s.grid}>
+                {teachers.map(t => (
+                  <TeacherCard
+                    key={t.uid}
+                    teacher={t}
+                    centerName={centerName}
+                    onView={() => setViewTarget(t)}
+                    onEditDetails={() => setEditDetailsTarget(t)}
+                    onEditCenters={() => openEdit(t)}
+                    onDelete={() => setDeleteTarget(t)}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -406,108 +400,21 @@ function TeachersContent() {
           ) : teachers.length === 0 ? (
             <div style={s.empty}>No teachers to show.</div>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={s.table}>
-                <thead>
-                  <tr>
-                    {["Teacher", "Centers", "Present", "Absent", "Break", "Cancelled", "Total"].map(h => (
-                      <th key={h} style={s.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {teachers.map(t => {
-                    const st       = attStats[t.uid]    ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 };
-                    const centreMap = attByCenter[t.uid] ?? {};
-                    const isOpen   = expandedTeacher === t.uid;
-                    const hasCentres = (t.centerIds ?? []).length > 0;
-                    return (
-                      <>
-                        <tr
-                          key={t.uid}
-                          style={{ ...s.tr, cursor: hasCentres ? "pointer" : "default", background: isOpen ? "#f8f7ff" : undefined }}
-                          onClick={() => hasCentres && setExpandedTeacher(isOpen ? null : t.uid)}
-                        >
-                          <td style={{ ...s.td, fontWeight: 600, color: "#111" }}>
-                            <span style={{ marginRight: 6, fontSize: 10, color: "#9ca3af" }}>
-                              {hasCentres ? (isOpen ? "▼" : "▶") : ""}
-                            </span>
-                            {t.displayName}
-                          </td>
-                          <td style={s.td}>
-                            {!hasCentres ? (
-                              <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
-                            ) : (
-                              <div style={s.centerTags}>
-                                {(t.centerIds ?? []).map(id => (
-                                  <span key={id} style={s.centerTag}>{centerName(id)}</span>
-                                ))}
-                              </div>
-                            )}
-                          </td>
-                          <td style={{ ...s.td, textAlign: "center" as const }}>
-                            <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")}>{st.present}</span>
-                          </td>
-                          <td style={{ ...s.td, textAlign: "center" as const }}>
-                            <span style={attChip("#dc2626", "#fef2f2", "#fecaca")}>{st.absent}</span>
-                          </td>
-                          <td style={{ ...s.td, textAlign: "center" as const }}>
-                            <span style={attChip("#d97706", "#fffbeb", "#fde68a")}>{st.break}</span>
-                          </td>
-                          <td style={{ ...s.td, textAlign: "center" as const }}>
-                            <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")}>{st.cancelled}</span>
-                          </td>
-                          <td style={{ ...s.td, textAlign: "center" as const }}>
-                            <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")}>{st.total}</span>
-                          </td>
-                        </tr>
-
-                        {/* Expanded: per-centre breakdown */}
-                        {isOpen && (
-                          <tr key={t.uid + "-detail"} style={{ background: "#f8f7ff", borderBottom: "1px solid #e5e7eb" }}>
-                            <td colSpan={7} style={{ padding: "0 16px 16px 36px" }}>
-                              <table style={{ ...s.table, marginTop: 10 }}>
-                                <thead>
-                                  <tr>
-                                    {["Centre", "Present", "Absent", "Break", "Cancelled", "Total"].map(h => (
-                                      <th key={h} style={{ ...s.th, background: "#ede9fe", fontSize: 10 }}>{h}</th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {(t.centerIds ?? []).map(cid => {
-                                    const cs = centreMap[cid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 };
-                                    return (
-                                      <tr key={cid} style={{ borderBottom: "1px solid #e5e7eb" }}>
-                                        <td style={{ ...s.td, fontWeight: 600, color: "#4338ca", fontSize: 12 }}>{centerName(cid)}</td>
-                                        <td style={{ ...s.td, textAlign: "center" as const }}>
-                                          <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")}>{cs.present}</span>
-                                        </td>
-                                        <td style={{ ...s.td, textAlign: "center" as const }}>
-                                          <span style={attChip("#dc2626", "#fef2f2", "#fecaca")}>{cs.absent}</span>
-                                        </td>
-                                        <td style={{ ...s.td, textAlign: "center" as const }}>
-                                          <span style={attChip("#d97706", "#fffbeb", "#fde68a")}>{cs.break}</span>
-                                        </td>
-                                        <td style={{ ...s.td, textAlign: "center" as const }}>
-                                          <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")}>{cs.cancelled}</span>
-                                        </td>
-                                        <td style={{ ...s.td, textAlign: "center" as const }}>
-                                          <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")}>{cs.total}</span>
-                                        </td>
-                                      </tr>
-                                    );
-                                  })}
-                                </tbody>
-                              </table>
-                            </td>
-                          </tr>
-                        )}
-                      </>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <div style={s.grid}>
+              {teachers.map(t => (
+                <TeacherPerfCard
+                  key={t.uid}
+                  teacher={t}
+                  centerName={centerName}
+                  stats={attStats[t.uid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 }}
+                  centerStats={attByCenter[t.uid] ?? {}}
+                  expanded={expandedTeacher === t.uid}
+                  onToggle={() => setExpandedTeacher(prev => prev === t.uid ? null : t.uid)}
+                  onEditDetails={() => setEditDetailsTarget(t)}
+                  onEditCenters={() => openEdit(t)}
+                  onDelete={() => setDeleteTarget(t)}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -550,6 +457,260 @@ function StatusBadge({ status }: { status: string }) {
     ? { background: "#dcfce7", color: "#16a34a" }
     : { background: "#f3f4f6", color: "#6b7280" };
   return <span style={{ ...s.badge, ...style }}>{status}</span>;
+}
+
+function initials(name: string): string {
+  return name.split(" ").map(n => n[0] ?? "").join("").slice(0, 2).toUpperCase() || "?";
+}
+
+// ─── Three-dots actions menu (shared by both card grids) ───────────────────────
+
+function TeacherActionsMenu({ onEditDetails, onEditCenters, onDelete }: {
+  onEditDetails: () => void; onEditCenters: () => void; onDelete: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [menuOpen]);
+
+  return (
+    <div ref={menuRef} style={{ position: "relative" }}>
+      <button
+        onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
+        style={s.menuBtn}
+        title="More actions"
+        aria-label="More actions"
+      >
+        ⋮
+      </button>
+      {menuOpen && (
+        <div style={s.menuPanel} onClick={e => e.stopPropagation()}>
+          <button onClick={() => { setMenuOpen(false); onEditDetails(); }} style={s.menuItem}>✏ Edit Details</button>
+          <button onClick={() => { setMenuOpen(false); onEditCenters(); }} style={s.menuItem}>🏫 Edit Assigned Centers</button>
+          <button onClick={() => { setMenuOpen(false); onDelete(); }} style={{ ...s.menuItem, ...s.menuItemDanger }}>✕ Delete / Remove Teacher</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Teacher card (Teachers tab grid) ───────────────────────────────────────────
+
+function TeacherCard({ teacher, centerName, onView, onEditDetails, onEditCenters, onDelete }: {
+  teacher: TeacherUser; centerName: (id: string) => string;
+  onView: () => void; onEditDetails: () => void; onEditCenters: () => void; onDelete: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onClick={onView}
+      style={{ ...s.tCard, ...(hover ? s.tCardHover : {}) }}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+    >
+      <div style={s.tCardHeader}>
+        <div style={s.tAvatar}>{initials(teacher.displayName)}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <StatusBadge status={teacher.status} />
+          <TeacherActionsMenu onEditDetails={onEditDetails} onEditCenters={onEditCenters} onDelete={onDelete} />
+        </div>
+      </div>
+      <div style={s.tName}>{teacher.displayName}</div>
+      <div style={s.tEmail}>{teacher.email}</div>
+      <div style={s.tMetaLabel}>Assigned Centers</div>
+      {(teacher.centerIds ?? []).length === 0 ? (
+        <span style={{ color: "#9ca3af", fontSize: 12 }}>None assigned</span>
+      ) : (
+        <div style={s.centerTags}>
+          {(teacher.centerIds ?? []).map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Teacher performance card (Performance tab grid) ────────────────────────────
+
+type AttCounts = { present: number; absent: number; break: number; cancelled: number; total: number };
+
+function TeacherPerfCard({ teacher, centerName, stats, centerStats, expanded, onToggle, onEditDetails, onEditCenters, onDelete }: {
+  teacher: TeacherUser; centerName: (id: string) => string;
+  stats: AttCounts; centerStats: Record<string, AttCounts>;
+  expanded: boolean; onToggle: () => void;
+  onEditDetails: () => void; onEditCenters: () => void; onDelete: () => void;
+}) {
+  const [hover, setHover]  = useState(false);
+  const hasCentres = (teacher.centerIds ?? []).length > 0;
+  return (
+    <div
+      onClick={() => hasCentres && onToggle()}
+      style={{ ...s.tCard, ...(hover ? s.tCardHover : {}), cursor: hasCentres ? "pointer" : "default" }}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+    >
+      <div style={s.tCardHeader}>
+        <div style={s.tAvatar}>{initials(teacher.displayName)}</div>
+        <TeacherActionsMenu onEditDetails={onEditDetails} onEditCenters={onEditCenters} onDelete={onDelete} />
+      </div>
+      <div style={s.tName}>
+        {teacher.displayName}
+        {hasCentres && <span style={{ marginLeft: 6, fontSize: 10, color: "#9ca3af" }}>{expanded ? "▼" : "▶"}</span>}
+      </div>
+      <div style={s.tMetaLabel}>Centers</div>
+      {!hasCentres ? (
+        <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+      ) : (
+        <div style={s.centerTags}>
+          {teacher.centerIds!.map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
+        </div>
+      )}
+      <div style={s.perfChipsRow}>
+        <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")} title="Present">P {stats.present}</span>
+        <span style={attChip("#dc2626", "#fef2f2", "#fecaca")} title="Absent">A {stats.absent}</span>
+        <span style={attChip("#d97706", "#fffbeb", "#fde68a")} title="Break">Br {stats.break}</span>
+        <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")} title="Cancelled">C {stats.cancelled}</span>
+        <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")} title="Total">Σ {stats.total}</span>
+      </div>
+
+      {expanded && hasCentres && (
+        <div style={s.perfBreakdown} onClick={e => e.stopPropagation()}>
+          <div style={s.perfBreakdownTitle}>Per-centre breakdown</div>
+          {teacher.centerIds!.map(cid => {
+            const cs = centerStats[cid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 };
+            return (
+              <div key={cid} style={s.perfBreakdownRow}>
+                <span style={{ fontWeight: 600, color: "#4338ca", fontSize: 12 }}>{centerName(cid)}</span>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                  <span style={attChip("#16a34a", "#f0fdf4", "#bbf7d0")}>{cs.present}</span>
+                  <span style={attChip("#dc2626", "#fef2f2", "#fecaca")}>{cs.absent}</span>
+                  <span style={attChip("#d97706", "#fffbeb", "#fde68a")}>{cs.break}</span>
+                  <span style={attChip("#6b7280", "#f9fafb", "#e5e7eb")}>{cs.cancelled}</span>
+                  <span style={attChip("#1d4ed8", "#eff6ff", "#bfdbfe")}>{cs.total}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── View Teacher Modal ──────────────────────────────────────────────────────
+
+function ViewTeacherModal({ teacher, centerName, onClose }: {
+  teacher: TeacherUser; centerName: (id: string) => string; onClose: () => void;
+}) {
+  return (
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.modal} onClick={e => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <span style={s.modalTitle}>{teacher.displayName}</span>
+          <button onClick={onClose} style={s.closeBtn}>×</button>
+        </div>
+        <div style={s.modalBody}>
+          <ViewRow label="Email" value={teacher.email} />
+          <ViewRow label="Status" value={<StatusBadge status={teacher.status} />} />
+          <ViewRow label="Assigned Centers" value={
+            (teacher.centerIds ?? []).length === 0
+              ? <span style={{ color: "#9ca3af", fontSize: 12 }}>None assigned</span>
+              : <div style={{ ...s.centerTags, justifyContent: "flex-end" as const }}>
+                  {(teacher.centerIds ?? []).map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
+                </div>
+          } />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ViewRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div style={s.viewRow}>
+      <span style={s.viewRowLabel}>{label}</span>
+      <span style={s.viewRowValue}>{value}</span>
+    </div>
+  );
+}
+
+// ─── Edit Teacher Details Modal ─────────────────────────────────────────────
+
+function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
+  teacher: TeacherUser;
+  onClose: () => void;
+  onSaved: (updated: { displayName: string; email: string; status: UserStatus }) => void;
+}) {
+  const [name, setName]     = useState(teacher.displayName);
+  const [email, setEmail]   = useState(teacher.email);
+  const [status, setStatus] = useState<UserStatus>(teacher.status);
+  const [saving, setSaving] = useState(false);
+  const [error, setError]   = useState("");
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+    if (!name.trim())  { setError("Name is required.");  return; }
+    if (!email.trim()) { setError("Email is required."); return; }
+    setError("");
+    setSaving(true);
+    try {
+      await updateDoc(doc(db, "users", teacher.uid), {
+        displayName: name.trim(),
+        email:       email.trim().toLowerCase(),
+        status,
+        updatedAt:   serverTimestamp(),
+      });
+      if (email.trim().toLowerCase() !== teacher.email.toLowerCase()) {
+        // Firestore updated; Firebase Auth email update requires server-side Admin SDK.
+        console.info("Teacher email changed in Firestore. Firebase Auth email was not updated.");
+      }
+      onSaved({ displayName: name.trim(), email: email.trim().toLowerCase(), status });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.modal} onClick={e => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <span style={s.modalTitle}>Edit Details — {teacher.displayName}</span>
+          <button onClick={onClose} style={s.closeBtn}>×</button>
+        </div>
+        <div style={s.modalBody}>
+          <form onSubmit={handleSave}>
+            {error && <div style={{ ...s.bannerError, marginBottom: 14 }}>{error}</div>}
+            <div style={s.grid2}>
+              <Field label="Full Name">
+                <input style={s.input} value={name} onChange={e => setName(e.target.value)} required />
+              </Field>
+              <Field label="Email Address">
+                <input style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} required />
+              </Field>
+              <Field label="Status">
+                <select style={s.input} value={status} onChange={e => setStatus(e.target.value as UserStatus)}>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </Field>
+            </div>
+            <div style={s.formActions}>
+              <button type="button" style={s.btnGhost} onClick={onClose} disabled={saving}>Cancel</button>
+              <button type="submit" disabled={saving} style={{ ...s.btnPrimary, opacity: saving ? 0.6 : 1 }}>
+                {saving ? "Saving…" : "Save Changes"}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function DeleteUserModal({ name, role, uid, onClose, onDeleted, onError, currentUserUid, currentUserRole }: {
@@ -646,18 +807,53 @@ const s: Record<string, React.CSSProperties> = {
   checkboxLabel:{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" },
   centerCode:   { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "1px 7px", borderRadius: 4, fontWeight: 600, marginLeft: 4 },
 
-  table:        { width: "100%", borderCollapse: "collapse", fontSize: 13 },
-  th:           { textAlign: "left", padding: "8px 14px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-secondary)", borderBottom: "1px solid var(--color-border)", background: "var(--color-bg)" },
-  tr:           { borderBottom: "1px solid var(--color-border)" },
-  td:           { padding: "13px 14px", color: "var(--color-text-secondary)", verticalAlign: "middle" },
-
   badge:        { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 600 },
-  centerTags:   { display: "flex", flexWrap: "wrap", gap: 6 },
+  centerTags:   { display: "flex", flexWrap: "wrap" as const, gap: 6 },
   centerTag:    { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 500, background: "#e0e7ff", color: "#4338ca" },
 
-  editBtn:      { padding: "5px 12px", background: "#ede9fe", color: "#4f46e5", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" },
-  deleteBtn:    { padding: "5px 12px", background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" },
   empty:        { textAlign: "center", padding: "40px 0", color: "var(--color-text-secondary)", fontSize: 14 },
+
+  // ── Card grid (Teachers + Performance tabs) ──────────────────────────────
+  grid:         { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 },
+  tCard:        { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, padding: "16px 18px", display: "flex", flexDirection: "column" as const, gap: 8, cursor: "pointer" },
+  tCardHover:   { boxShadow: "0 4px 14px rgba(0,0,0,0.08)" },
+  tCardHeader:  { display: "flex", alignItems: "center", justifyContent: "space-between" },
+  tAvatar: {
+    width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
+    background: "linear-gradient(135deg, #6d28d9, #4f46e5)",
+    color: "#fff", fontSize: 13, fontWeight: 700,
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  tName:        { fontSize: 15, fontWeight: 600, color: "var(--color-text-primary)" },
+  tEmail:       { fontSize: 13, color: "var(--color-text-secondary)" },
+  tMetaLabel:   { fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase" as const, letterSpacing: "0.04em" },
+
+  // ── Three-dots menu ───────────────────────────────────────────────────────
+  menuBtn: {
+    background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 8,
+    width: 28, height: 28, fontSize: 15, fontWeight: 700, cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+  },
+  menuPanel: {
+    position: "absolute" as const, top: "calc(100% + 6px)", right: 0, background: "#fff",
+    border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.16)",
+    minWidth: 190, overflow: "hidden", zIndex: 10,
+  },
+  menuItem: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 14px",
+    fontSize: 13, fontWeight: 500, color: "#111827", background: "none", border: "none",
+    textAlign: "left" as const, cursor: "pointer", boxSizing: "border-box" as const, whiteSpace: "nowrap" as const,
+  },
+  menuItemDanger: { color: "#dc2626" },
+
+  // ── Performance card extras ───────────────────────────────────────────────
+  perfChipsRow: { display: "flex", gap: 5, flexWrap: "wrap" as const, marginTop: 2 },
+  perfBreakdown: {
+    marginTop: 6, paddingTop: 10, borderTop: "1px solid var(--color-border)",
+    display: "flex", flexDirection: "column" as const, gap: 8, cursor: "default",
+  },
+  perfBreakdownTitle: { fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em" },
+  perfBreakdownRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const },
 
   overlay:      { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" },
   modal:        { background: "#fff", borderRadius: 12, width: "100%", maxWidth: 480, boxShadow: "0 8px 32px rgba(0,0,0,0.16)", overflow: "hidden" },
@@ -666,4 +862,8 @@ const s: Record<string, React.CSSProperties> = {
   closeBtn:     { background: "none", border: "none", fontSize: 22, cursor: "pointer", color: "#6b7280", lineHeight: 1 },
   modalBody:    { padding: "20px" },
   modalHint:    { fontSize: 13, color: "#6b7280", marginTop: 0, marginBottom: 14 },
+
+  viewRow:      { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: "1px solid #f3f4f6" },
+  viewRowLabel: { fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.04em", minWidth: 110 },
+  viewRowValue: { fontSize: 13, color: "#111827", textAlign: "right" as const, flex: 1 },
 };

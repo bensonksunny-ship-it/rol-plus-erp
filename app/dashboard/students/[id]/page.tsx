@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   collection, getDocs, query, where, doc, getDoc, updateDoc, serverTimestamp,
@@ -182,6 +182,24 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
   const [breakOpen, setBreakOpen]               = useState(false);
   const [payTarget, setPayTarget]               = useState<Transaction | null>(null);
   const [statementEditMode, setStatementEditMode] = useState(false);
+  const [menuOpen, setMenuOpen]                 = useState(false);
+  const menuRef                                 = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [menuOpen]);
 
   async function requestDeactivation() {
     if (!user || !student) return;
@@ -256,21 +274,52 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
                 </div>
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
-              {canEdit && (
-                <button onClick={() => setEditOpen(true)} style={p.editBtn}>✏ Edit</button>
-              )}
-              {(isAdmin || isTeacher) && student.status === "active" && (
-                <button onClick={() => setBreakOpen(true)} style={{ ...p.editBtn, background: "#e0f2fe", color: "#0369a1", borderColor: "#7dd3fc" }}>☕ Break</button>
-              )}
-              {(isAdmin || isTeacher) && student.status === "active" && (
-                <button onClick={requestDeactivation} style={p.deactBtn}>Deactivate</button>
-              )}
-              {isAdmin && (
-                <button onClick={() => setClearHistoryOpen(true)} style={p.clearBtn} title="Clear student history">🗑 History</button>
-              )}
-              {isAdmin && (
-                <button onClick={() => setDeleteOpen(true)} style={p.deleteBtn} title="Delete student permanently">✕ Delete</button>
+            <div style={{ position: "relative" }} ref={menuRef}>
+              <button
+                onClick={() => setMenuOpen(v => !v)}
+                style={dp.menuBtn}
+                aria-label="Student actions"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                title="Student actions"
+              >
+                ⋮
+              </button>
+              {menuOpen && (
+                <div style={dp.menuDropdown} role="menu">
+                  {canEdit && (
+                    <button role="menuitem" style={dp.menuItem} onClick={() => { setMenuOpen(false); setEditOpen(true); }}>
+                      ✏ Edit Details
+                    </button>
+                  )}
+                  {(isAdmin || isTeacher) && student.status === "active" && (
+                    <button role="menuitem" style={dp.menuItem} onClick={() => { setMenuOpen(false); setBreakOpen(true); }}>
+                      ☕ Mark On Break
+                    </button>
+                  )}
+                  {(isAdmin || isTeacher) && student.status === "active" && (
+                    <button role="menuitem" style={dp.menuItem} onClick={() => { setMenuOpen(false); requestDeactivation(); }}>
+                      ⛔ Deactivate Student
+                    </button>
+                  )}
+                  {isAdmin && (
+                    <button role="menuitem" style={dp.menuItem} onClick={() => { setMenuOpen(false); setClearHistoryOpen(true); }}>
+                      🗑 Clear History
+                    </button>
+                  )}
+                  {isAdmin && (
+                    <>
+                      <div style={dp.menuDivider} />
+                      <button
+                        role="menuitem"
+                        style={{ ...dp.menuItem, ...dp.menuItemDanger }}
+                        onClick={() => { setMenuOpen(false); setDeleteOpen(true); }}
+                      >
+                        ✕ Delete Student
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -810,4 +859,22 @@ const dp: Record<string, React.CSSProperties> = {
   cardHeader: { fontSize: 12, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", marginBottom: 12 },
   attTh: { padding: "8px 12px", textAlign: "left" as const, fontSize: 11, fontWeight: 700, color: "#6b7280", borderBottom: "2px solid #e5e7eb", background: "#f9fafb", position: "sticky" as const, top: 0 },
   attTd: { padding: "7px 12px", borderBottom: "1px solid #f3f4f6", color: "#111827" },
+  menuBtn: {
+    width: 36, height: 36, borderRadius: 8, border: "1px solid #e5e7eb", background: "#fff",
+    color: "#374151", fontSize: 18, fontWeight: 700, cursor: "pointer", lineHeight: 1,
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  menuDropdown: {
+    position: "absolute" as const, top: "calc(100% + 6px)", right: 0, minWidth: 200,
+    background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.12)", padding: 6, zIndex: 20,
+    display: "flex", flexDirection: "column" as const, gap: 2,
+  },
+  menuItem: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left" as const,
+    background: "none", border: "none", borderRadius: 6, padding: "9px 10px",
+    fontSize: 13, fontWeight: 600, color: "#374151", cursor: "pointer", font: "inherit",
+  },
+  menuItemDanger: { color: "#dc2626" },
+  menuDivider: { height: 1, background: "#f3f4f6", margin: "4px 2px" },
 };

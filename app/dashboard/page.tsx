@@ -98,6 +98,13 @@ function isoMonthStart(offset = 0): string {
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - offset);
   return d.toISOString().slice(0, 7);
 }
+
+// Month-over-month widget (Super Admin only, see MonthComparisonWidget below):
+// how many months of attendance history to fetch, and how far back the
+// selector may navigate. MOM_MAX_OFFSET stays one below MOM_MONTHS_BACK so
+// the comparison month (offset + 1) never falls outside the fetched range.
+const MOM_MONTHS_BACK = 5;
+const MOM_MAX_OFFSET  = MOM_MONTHS_BACK - 1;
 function mondayOf(dateISO: string): string {
   const d = new Date(dateISO + "T00:00:00");
   const day = d.getDay();            // 0=Sun..6=Sat
@@ -132,6 +139,48 @@ function classHasEnded(timeSlot: string): boolean {
   if (end === null) return true;
   const n = new Date();
   return n.getHours() * 60 + n.getMinutes() >= end;
+}
+
+// Extracts both start and end minutes-past-midnight from a timeSlot string
+// like "Mon/Wed/Fri 17:00–18:30" or "Mon/Wed/Fri 5:00 PM–6:30 PM".
+function parseClassTimeRange(timeSlot: string): { startMin: number; endMin: number } | null {
+  const m24 = timeSlot.match(/(\d{1,2}):(\d{2})\s*[–\-]\s*(\d{1,2}):(\d{2})(?!\s*(?:AM|PM))/i);
+  if (m24) {
+    return {
+      startMin: parseInt(m24[1]) * 60 + parseInt(m24[2]),
+      endMin:   parseInt(m24[3]) * 60 + parseInt(m24[4]),
+    };
+  }
+  const m12 = timeSlot.match(/(\d{1,2}):(\d{2})\s*(AM|PM)\s*[–\-]\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (m12) {
+    let sh = parseInt(m12[1]);
+    const sAmPm = m12[3].toUpperCase();
+    if (sAmPm === "PM" && sh !== 12) sh += 12;
+    if (sAmPm === "AM" && sh === 12) sh = 0;
+    let eh = parseInt(m12[4]);
+    const eAmPm = m12[6].toUpperCase();
+    if (eAmPm === "PM" && eh !== 12) eh += 12;
+    if (eAmPm === "AM" && eh === 12) eh = 0;
+    return { startMin: sh * 60 + parseInt(m12[2]), endMin: eh * 60 + parseInt(m12[5]) };
+  }
+  return null;
+}
+
+function fmtClockMinutes(mins: number): string {
+  let h = Math.floor(mins / 60) % 24;
+  const m = mins % 60;
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${String(m).padStart(2, "0")} ${ampm}`;
+}
+
+// "Mon/Wed/Fri 17:00–18:30" → "5:00 PM - 6:30 PM"; falls back to the raw
+// timeSlot (or a neutral placeholder) when it can't be parsed.
+function fmtTimeSlotRange(timeSlot: string): string {
+  const r = parseClassTimeRange(timeSlot);
+  if (!r) return timeSlot || "Scheduled";
+  return `${fmtClockMinutes(r.startMin)} - ${fmtClockMinutes(r.endMin)}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -181,6 +230,9 @@ function CommandCenter() {
   const days30ago = useMemo(() => isoDaysAgo(30),   []);
   const thisMonth = useMemo(() => isoMonthStart(0), []);
   const lastMonth = useMemo(() => isoMonthStart(1), []);
+  // Fetch floor for the Super Admin month-over-month widget below — needs
+  // several months of history, not just the current month's attendance.
+  const momFetchFloor = useMemo(() => isoMonthStart(MOM_MONTHS_BACK), []);
 
   useEffect(() => {
     async function load() {
@@ -189,7 +241,7 @@ function CommandCenter() {
           getDocs(query(collection(db, "users"), where("role", "==", "student"))),
           getDocs(query(collection(db, "users"), where("role", "==", "teacher"))),
           getCenters(),
-          getDocs(query(collection(db, "attendance"), where("date", ">=", thisMonth + "-01"))),
+          getDocs(query(collection(db, "attendance"), where("date", ">=", momFetchFloor + "-01"))),
           getDocs(collection(db, "transactions")),
           getAllTeacherQuality(),
         ]);
@@ -423,11 +475,6 @@ function CommandCenter() {
           <div style={s.eyebrow}>CENTER SUITE</div>
           <div style={s.date}>{new Date().toLocaleDateString("en-IN", { weekday:"long", day:"numeric", month:"long", year:"numeric" })}</div>
         </div>
-        <div style={s.actions}>
-          <button style={s.btn}    onClick={() => router.push("/dashboard/centers")}>+ Centre</button>
-          <button style={s.btn}    onClick={() => router.push("/dashboard/students")}>+ Student</button>
-          <button style={s.btnPri} onClick={() => router.push("/dashboard/finance")}>Finance →</button>
-        </div>
       </div>
 
       {/* ── 2. KPI ROW ── */}
@@ -445,6 +492,9 @@ function CommandCenter() {
           color={totalPendingFees===0?"#16a34a":"#f59e0b"}
           onClick={() => router.push("/dashboard/finance?tab=students&filter=pending")} />
       </div>
+
+      {/* ── MONTH-OVER-MONTH COMPARISON (Super Admin only) ── */}
+      <MonthComparisonWidget attendance={attendance} completedTx={completedTx} />
 
       {/* ── CLASSES FOR [DATE] ── */}
       <ClassesForDateWidget sectionStyle={s.section} headerStyle={s.sectionHeader} titleStyle={s.sectionTitle} subStyle={s.sectionSub} />
@@ -512,6 +562,118 @@ function CommandCenter() {
     </div>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MONTH-OVER-MONTH COMPARISON — Super Admin only
+// Lets the Super Admin step back through recent months and compare revenue +
+// attendance rate against the month immediately before it.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function MonthComparisonWidget({ attendance, completedTx }: {
+  attendance: AttendanceDoc[]; completedTx: TransactionDoc[];
+}) {
+  const { user } = useAuthContext();
+  const [offset, setOffset] = useState(0);
+
+  // Explicit role gate — this widget must never render for non-Super-Admin
+  // users even if it's ever reused outside CommandCenter.
+  if (user?.role !== ROLES.SUPER_ADMIN) return null;
+
+  const currentYm  = isoMonthStart(offset);
+  const previousYm = isoMonthStart(offset + 1);
+
+  const revenueFor = (ym: string) =>
+    completedTx.filter(t => t.date?.startsWith(ym)).reduce((sum, t) => sum + t.amount, 0);
+
+  const attendanceRateFor = (ym: string): number | null => {
+    const recs = attendance.filter(a => a.date?.startsWith(ym));
+    if (recs.length === 0) return null;
+    return Math.round((recs.filter(a => a.status === "present").length / recs.length) * 100);
+  };
+
+  const revCurrent  = revenueFor(currentYm);
+  const revPrevious = revenueFor(previousYm);
+  const revDeltaPct = revPrevious > 0 ? Math.round(((revCurrent - revPrevious) / revPrevious) * 100) : null;
+
+  const attCurrent  = attendanceRateFor(currentYm);
+  const attPrevious = attendanceRateFor(previousYm);
+  const attDeltaPts = attCurrent !== null && attPrevious !== null ? attCurrent - attPrevious : null;
+
+  return (
+    <div style={s.section}>
+      <div style={mom.header}>
+        <div>
+          <div style={s.sectionTitle}>Month-over-Month Comparison</div>
+          <div style={s.sectionSub}>{monthLabel(currentYm)} vs {monthLabel(previousYm)}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            style={{ ...mom.navBtn, opacity: offset >= MOM_MAX_OFFSET ? 0.4 : 1 }}
+            disabled={offset >= MOM_MAX_OFFSET}
+            onClick={() => setOffset(o => Math.min(o + 1, MOM_MAX_OFFSET))}
+          >
+            ← Older
+          </button>
+          <button
+            style={{ ...mom.navBtn, opacity: offset <= 0 ? 0.4 : 1 }}
+            disabled={offset <= 0}
+            onClick={() => setOffset(o => Math.max(o - 1, 0))}
+          >
+            Newer →
+          </button>
+        </div>
+      </div>
+      <div style={mom.grid}>
+        <MomCard
+          label="Revenue"
+          currentLabel={monthLabel(currentYm)} previousLabel={monthLabel(previousYm)}
+          currentValue={`₹${revCurrent.toLocaleString("en-IN")}`}
+          previousValue={`₹${revPrevious.toLocaleString("en-IN")}`}
+          deltaText={revDeltaPct !== null ? `${revDeltaPct >= 0 ? "▲" : "▼"} ${Math.abs(revDeltaPct)}%` : "no prior data"}
+          deltaColor={revDeltaPct === null ? "var(--color-text-muted)" : revDeltaPct >= 0 ? "var(--color-success)" : "var(--color-danger)"}
+        />
+        <MomCard
+          label="Attendance Rate"
+          currentLabel={monthLabel(currentYm)} previousLabel={monthLabel(previousYm)}
+          currentValue={attCurrent !== null ? `${attCurrent}%` : "—"}
+          previousValue={attPrevious !== null ? `${attPrevious}%` : "—"}
+          deltaText={attDeltaPts !== null ? `${attDeltaPts >= 0 ? "▲" : "▼"} ${Math.abs(attDeltaPts)} pts` : "no prior data"}
+          deltaColor={attDeltaPts === null ? "var(--color-text-muted)" : attDeltaPts >= 0 ? "var(--color-success)" : "var(--color-danger)"}
+        />
+      </div>
+    </div>
+  );
+}
+
+function MomCard({ label, currentLabel, previousLabel, currentValue, previousValue, deltaText, deltaColor }: {
+  label: string; currentLabel: string; previousLabel: string;
+  currentValue: string; previousValue: string; deltaText: string; deltaColor: string;
+}) {
+  return (
+    <div style={mom.card}>
+      <div style={mom.cardLabel}>{label}</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 6 }}>
+        <div style={mom.cardValue}>{currentValue}</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: deltaColor }}>{deltaText}</div>
+      </div>
+      <div style={mom.compareRow}>
+        <span>{currentLabel}: <b style={mom.compareStrong}>{currentValue}</b></span>
+        <span>{previousLabel}: <b style={mom.compareStrong}>{previousValue}</b></span>
+      </div>
+    </div>
+  );
+}
+
+const mom: Record<string, React.CSSProperties> = {
+  header:   { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap" as const, gap: 8 },
+  navBtn:   { background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "var(--color-text-secondary)" },
+  grid:     { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 },
+  card:     { background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: "14px 16px" },
+  cardLabel: { fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.05em", color: "var(--color-text-muted)" },
+  cardValue: { fontSize: 22, fontWeight: 800, color: "var(--color-text-primary)" },
+  compareRow: { display: "flex", flexDirection: "column" as const, gap: 2, marginTop: 10, fontSize: 11.5, color: "var(--color-text-muted)" },
+  compareStrong: { color: "var(--color-text-primary)" },
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHART PRIMITIVES  (pure SVG, no library)
@@ -769,14 +931,17 @@ function GaugeChart({ value, goal }: { value:number; goal:number }) {
 // each scheduled centre's attendance status for that specific day.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-type ClassDayStatus = "today" | "pending" | "recorded" | "completed" | "upcoming";
+// "scheduled" = the class's day/time hasn't fully elapsed yet (whether that's
+// later today or some future date) — its badge shows the actual time slot
+// instead of a static label. "pending" = the day/time has passed with no
+// attendance recorded.
+type ClassDayStatus = "scheduled" | "pending" | "recorded" | "completed";
 
-const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string }> = {
-  today:     { bg: "var(--color-info-dim)",              border: "var(--color-info)",                    fg: "var(--color-info)",   label: "Today" },
-  pending:   { bg: "var(--color-danger-dim)",           border: "var(--color-danger-border)",           fg: "var(--color-danger)",  label: "! Pending" },
-  recorded:  { bg: "var(--color-warning-dim)",           border: "var(--color-warning-border)",          fg: "var(--color-warning)", label: "◐ Recorded" },
-  completed: { bg: "var(--color-success-dim)",           border: "var(--color-success-border)",          fg: "var(--color-success)", label: "✓ Completed" },
-  upcoming:  { bg: "var(--color-surface-2)",             border: "var(--color-border)",                  fg: "var(--color-text-muted)", label: "Upcoming" },
+const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string | null }> = {
+  scheduled: { bg: "var(--color-info-dim)",    border: "var(--color-info)",           fg: "var(--color-info)",    label: null },
+  pending:   { bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)",  fg: "var(--color-danger)",  label: "! Pending" },
+  recorded:  { bg: "var(--color-warning-dim)", border: "var(--color-warning-border)", fg: "var(--color-warning)", label: "◐ Recorded" },
+  completed: { bg: "var(--color-success-dim)", border: "var(--color-success-border)", fg: "var(--color-success)", label: "✓ Completed" },
 };
 
 function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle }: {
@@ -841,16 +1006,18 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
     return m;
   }, [dateAttRecs]);
 
-  // Compares the card's scheduled classDate against currentDate: only a date that
-  // has fully elapsed with no attendance recorded counts as "Pending" (needs action).
-  // Today's own unmarked classes read as "Today" — expected, not yet overdue.
-  function statusFor(centerId: string): ClassDayStatus {
+  // Compares the card's scheduled classDate (and, for today, the class's own
+  // end time) against the current moment: only once that has fully elapsed
+  // with no attendance recorded does the badge switch to "Pending". Before
+  // that — later today, or any future date — it reads as "scheduled" and
+  // shows the actual time slot instead of a generic label.
+  function statusFor(centerId: string, timeSlot: string): ClassDayStatus {
     const recs = attByCenter.get(centerId) ?? [];
     if (recs.length === 0) {
-      const classDate = selectedDate;
-      if (classDate > todayISO) return "upcoming";
-      if (classDate === todayISO) return "today";
-      return "pending";
+      const isPastDay        = selectedDate < todayISO;
+      const isTodayAndEnded  = selectedDate === todayISO && classHasEnded(timeSlot);
+      if (isPastDay || isTodayAndEnded) return "pending";
+      return "scheduled";
     }
     const expected = activeCountByCenter[centerId] ?? 0;
     if (expected > 0 && recs.length >= expected) return "completed";
@@ -863,7 +1030,7 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   const sectionTitle = isToday ? "Today's Classes" : `Classes for ${dateObj.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`;
 
   const pendingCount = useMemo(
-    () => dateCentres.filter(c => statusFor(c.id) === "pending").length,
+    () => dateCentres.filter(c => statusFor(c.id, c.timeSlot ?? "") === "pending").length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [dateCentres, attByCenter, activeCountByCenter, selectedDate]
   );
@@ -904,8 +1071,9 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {dateCentres.map(c => {
-          const status = statusFor(c.id);
+          const status = statusFor(c.id, c.timeSlot ?? "");
           const st = CLASS_STATUS_STYLE[status];
+          const badgeText = st.label ?? fmtTimeSlotRange(c.timeSlot ?? "");
           return (
             <button
               key={c.id}
@@ -917,7 +1085,7 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
                 display: "flex", flexDirection: "column", gap: 5, minWidth: 130,
               }}
             >
-              <div style={{ fontSize: 11, fontWeight: 700, color: st.fg }}>{st.label}</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: st.fg }}>{badgeText}</div>
               <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
             </button>
           );
@@ -1976,9 +2144,6 @@ const s: Record<string, React.CSSProperties> = {
   header:  { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 12 },
   eyebrow: { fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", color: "var(--color-accent)", textTransform: "uppercase", marginBottom: 4 },
   date:    { fontSize: 18, fontWeight: 700, color: "var(--color-text-primary)" },
-  actions: { display: "flex", gap: 8 },
-  btn:     { background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", color: "var(--color-text-secondary)" },
-  btnPri:  { background: "var(--color-accent)", color: "#0a0a0a", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" },
 
   // KPI strip
   kpiStrip:   { display: "flex", alignItems: "stretch", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 14, padding: "20px 28px", marginBottom: 20, gap: 0, boxShadow: "var(--shadow-sm)", flexWrap: "wrap" },

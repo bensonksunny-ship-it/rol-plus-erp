@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCenters, createCenter, updateCenter } from "@/services/center/center.service";
 import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -33,20 +33,6 @@ function StatusBadge({ status }: { status: string }) {
     ? { background: "#dcfce7", color: "#16a34a" }
     : { background: "#f3f4f6", color: "#6b7280" };
   return <span style={{ ...styles.badge, ...style }}>{status}</span>;
-}
-
-function ActionButton({ label, onClick, variant = "ghost" }: {
-  label: string; onClick: () => void; variant?: "ghost" | "primary";
-}) {
-  const [hover, setHover] = useState(false);
-  const base = variant === "primary" ? actionStyles.primary : actionStyles.ghost;
-  const hov  = variant === "primary" ? actionStyles.primaryHover : actionStyles.ghostHover;
-  return (
-    <button onClick={onClick} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      style={{ ...actionStyles.base, ...base, ...(hover ? hov : {}) }}>
-      {label}
-    </button>
-  );
 }
 
 function FormField({ label, required, children, fullWidth }: {
@@ -354,15 +340,52 @@ function CenterCard({ center, teachers, onView, onEdit, onDelete }: {
   center: Center; teachers: TeacherUser[];
   onView: () => void; onEdit: () => void; onDelete: () => void;
 }) {
-  const [hover, setHover] = useState(false);
+  const [hover, setHover]     = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const raw = center as Center & { centerCode?: string };
   const teacher = teachers.find(t => t.uid === center.teacherUid);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [menuOpen]);
+
   return (
-    <div style={{ ...styles.card, ...(hover ? styles.cardHover : {}) }}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+    <div
+      onClick={onView}
+      style={{ ...styles.card, ...(hover ? styles.cardHover : {}), cursor: "pointer", position: "relative" }}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+    >
       <div style={styles.cardHeader}>
         <span style={styles.codeChip}>{raw.centerCode || "-"}</span>
-        <StatusBadge status={center.status} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <StatusBadge status={center.status} />
+          <div ref={menuRef} style={{ position: "relative" }}>
+            <button
+              onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
+              style={actionStyles.menuBtn}
+              title="More actions"
+              aria-label="More actions"
+            >
+              ⋮
+            </button>
+            {menuOpen && (
+              <div style={actionStyles.menuPanel} onClick={e => e.stopPropagation()}>
+                <button onClick={() => { setMenuOpen(false); onEdit(); }} style={actionStyles.menuItem}>
+                  ✏ Edit
+                </button>
+                <button onClick={() => { setMenuOpen(false); onDelete(); }} style={{ ...actionStyles.menuItem, ...actionStyles.menuItemDanger }}>
+                  ✕ Delete
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
       <div style={styles.cardName}>{center.name}</div>
       <div style={styles.cardMeta}>
@@ -374,13 +397,6 @@ function CenterCard({ center, teachers, onView, onEdit, onDelete }: {
       <div style={styles.cardMeta}>
         <span style={styles.cardMetaLabel}>Schedule</span>
         <span>{center.timeSlot || "-"}</span>
-      </div>
-      <div style={styles.cardActions}>
-        <ActionButton label="View" variant="ghost"   onClick={onView} />
-        <ActionButton label="Edit" variant="primary" onClick={onEdit} />
-        <button onClick={onDelete} style={actionStyles.deleteBtn} title="Delete center">
-          ✕ Delete
-        </button>
       </div>
     </div>
   );
@@ -474,7 +490,6 @@ const styles: Record<string, React.CSSProperties> = {
   cardName:    { fontSize: 15, fontWeight: 600, color: "var(--color-text-primary)" },
   cardMeta:    { display: "flex", flexDirection: "column", gap: 2, fontSize: 13, color: "var(--color-text-primary)" },
   cardMetaLabel:{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.04em" },
-  cardActions: { display: "flex", gap: 6, alignItems: "center", marginTop: 4, paddingTop: 10, borderTop: "1px solid var(--color-border)" },
   mono:        { fontFamily: "monospace", fontSize: 12, color: "var(--color-text-secondary)" },
   codeChip:    { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4, fontWeight: 600 },
   badge:       { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" },
@@ -502,13 +517,22 @@ const chipStyles: Record<string, React.CSSProperties> = {
 };
 
 const actionStyles: Record<string, React.CSSProperties> = {
-  row:          { display: "flex", gap: 6, alignItems: "center" },
-  base:         { border: "none", borderRadius: 5, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
-  ghost:        { background: "#f3f4f6", color: "#374151" },
-  ghostHover:   { background: "#e5e7eb" },
-  primary:      { background: "#ede9fe", color: "#4f46e5" },
-  primaryHover: { background: "#ddd6fe" },
-  deleteBtn:    { border: "1px solid #fecaca", background: "#fef2f2", color: "#991b1b", borderRadius: 5, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  menuBtn: {
+    background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 8,
+    width: 28, height: 28, fontSize: 15, fontWeight: 700, cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+  },
+  menuPanel: {
+    position: "absolute", top: "calc(100% + 6px)", right: 0, background: "#fff",
+    border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.16)",
+    minWidth: 150, overflow: "hidden", zIndex: 10,
+  },
+  menuItem: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 14px",
+    fontSize: 13, fontWeight: 500, color: "#111827", background: "none", border: "none",
+    textAlign: "left", cursor: "pointer", boxSizing: "border-box",
+  },
+  menuItemDanger: { color: "#dc2626" },
 };
 
 const modalStyles: Record<string, React.CSSProperties> = {
