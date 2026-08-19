@@ -16,6 +16,11 @@ import {
   editTransaction,
   deleteTransaction,
   computeStudentBalances,
+  computeDueSettlements,
+  outstandingDuesForStudent,
+  isSettlingPayment,
+  recordPayment,
+  type DueSettlement,
 } from "@/services/finance/finance.service";
 import type {
   Transaction,
@@ -107,18 +112,17 @@ export default function FinancePage() {
   );
 }
 
-type ActiveTab = "overview" | "students" | "transactions";
+// Clicking a summary tile drills into the transactions behind that number.
+// null = the normal student list.
+type DrillDown = null | "collected" | "overdue" | "prepay";
 
 function FinanceContent() {
   const { user, isAdmin, isSuperAdmin }      = useAuth();
   const canManageTx                          = isAdmin || isSuperAdmin;
   const searchParams                         = useSearchParams();
+  const [drillDown, setDrillDown]            = useState<DrillDown>(null);
   // Deep-link support, e.g. from the dashboard's Pending Fees KPI card:
-  // /dashboard/finance?tab=students&filter=pending
-  const [tab, setTab]                        = useState<ActiveTab>(() => {
-    const t = searchParams.get("tab");
-    return t === "students" || t === "transactions" ? t : "overview";
-  });
+  // /dashboard/finance?filter=pending
   const [feeStatusFilter, setFeeStatusFilter] = useState<"all" | "pending">(
     () => searchParams.get("filter") === "pending" ? "pending" : "all"
   );
@@ -142,6 +146,9 @@ function FinanceContent() {
   const [payMethod, setPayMethod]            = useState<PayMethod>("Cash");
   const [payNote, setPayNote]                = useState<string>("");
   const [payDate, setPayDate]                = useState<string>(todayStr());
+  // Which billing month this payment settles. Deliberately starts null — the
+  // admin picks explicitly rather than money silently landing on a guessed month.
+  const [payBillingMonth, setPayBillingMonth] = useState<string | null>(null);
   const [discountType, setDiscountType]      = useState<DiscountType>("fixed");
   const [discountValue, setDiscountValue]    = useState<string>("");
   const [paySubmitting, setPaySubmitting]    = useState(false);
@@ -286,35 +293,47 @@ function FinanceContent() {
   }, [selectedMonth]);
 
   // ── Fee-due generated this month per student ────────────────────────────────
+  // Reconciles every due against the payments credited to it, so a part-paid
+  // month reports what's actually left rather than counting as fully settled.
+  const dueSettlements = useMemo(() => computeDueSettlements(transactions), [transactions]);
+
+  // Keyed by student: what they still owe for the selected month. Driven by the
+  // settlement engine, so a student who has part-paid stays here with the
+  // remaining amount instead of dropping out the moment any payment lands.
   const feeDueMap = useMemo(() => {
-    const m = new Map<string, { id: string; amount: number }>();
-    transactions.forEach(tx => {
-      if (!tx.studentUid) return;
-      const raw = tx as unknown as Record<string, unknown>;
-      if ((raw.type as string) === "fee_due") {
-        if (tx.status !== "due") return;
-        const bm = (raw.billingMonth as string) ?? (tx.date ?? "").slice(0, 7);
-        if (bm === selectedMonth) m.set(tx.studentUid, { id: tx.id, amount: tx.amount });
-      }
+    const m = new Map<string, { id: string; amount: number; original: number; paid: number; partial: boolean }>();
+    dueSettlements.forEach(s => {
+      if (s.billingMonth !== selectedMonth) return;
+      if (s.remaining <= 0) return;
+      m.set(s.studentUid, {
+        id:       s.dueId,
+        amount:   s.remaining,
+        original: s.dueAmount,
+        paid:     s.paidAmount,
+        partial:  s.state === "partial",
+      });
     });
     return m;
-  }, [transactions, selectedMonth]);
+  }, [dueSettlements, selectedMonth]);
 
   // ── Payment recorded this month per student ──────────────────────────────────
+  // "Paid" now means fully settled for the month — a part payment no longer
+  // counts as done, which is what made short-paid students disappear.
   const paidMap = useMemo(() => {
     const m = new Set<string>();
+    dueSettlements.forEach(s => {
+      if (s.billingMonth !== selectedMonth) return;
+      if (s.state === "paid") m.add(s.studentUid);
+    });
+    // Students with no due generated at all, but who paid something this month,
+    // still read as paid rather than blank.
     transactions.forEach(tx => {
-      if (!tx.studentUid) return;
-      if (tx.status !== "completed") return;
+      if (!tx.studentUid || !isSettlingPayment(tx)) return;
       if (!(tx.date ?? "").startsWith(selectedMonth)) return;
-      const raw    = tx as unknown as Record<string, unknown>;
-      const type   = (raw.type   as string) ?? "";
-      const method = (tx.method  as string) ?? "";
-      if (type === "fee_due" || type === "charge" || method === "auto" || method === "auto-monthly") return;
-      m.add(tx.studentUid);
+      if (!feeDueMap.has(tx.studentUid)) m.add(tx.studentUid);
     });
     return m;
-  }, [transactions, selectedMonth]);
+  }, [dueSettlements, transactions, selectedMonth, feeDueMap]);
 
   // ── Total amount paid this month per student ────────────────────────────────
   const paidAmountMap = useMemo(() => {
@@ -405,7 +424,10 @@ function FinanceContent() {
     setActiveUid(uid);
     setActiveAction(action);
     // Reset all form states
-    setPayAmount(action === "pay" ? (student.balance > 0 ? String(student.balance) : String(student.estimatedFee)) : "");
+    // Amount is left for the admin to fill once they pick a month — selecting a
+    // month prefills that month's outstanding figure.
+    setPayAmount("");
+    setPayBillingMonth(null);
     setPayMethod("Cash");
     setPayNote("");
     setPayDate(todayStr());
@@ -449,44 +471,42 @@ function FinanceContent() {
     }
     setPaySubmitting(true);
     try {
-      const receivedBy    = user?.displayName ?? user?.email ?? "admin";
-      const rawAmount     = Number(payAmount);
-      const discountAmt   = rawAmount - net;
+      const rawAmount   = Number(payAmount);
+      const discountAmt = rawAmount - net;
 
-      await addDoc(collection(db, "transactions"), {
+      // One shared service call — it writes the receipt, adjusts the balance,
+      // and closes the targeted due only if this payment actually settles it.
+      await recordPayment({
         studentUid:   student.uid,
         centerId:     student.centerId,
         amount:       net,
-        rawAmount:    rawAmount !== net ? rawAmount : null,
-        discountAmt:  discountAmt > 0 ? discountAmt : null,
-        discountType: discountAmt > 0 ? discountType : null,
+        rawAmount,
+        discountAmt,
+        discountType,
         method:       payMethod,
-        receivedBy,
-        note:         payNote.trim() || null,
+        receivedBy:   user?.displayName ?? user?.email ?? "admin",
         date:         payDate || todayStr(),
-        status:       "completed",
-        createdAt:    serverTimestamp(),
+        note:         payNote.trim() || null,
+        billingMonth: payBillingMonth,
       });
-      await updateDoc(doc(db, "users", student.uid), {
-        currentBalance: increment(-net),
-        updatedAt:      new Date().toISOString(),
-      });
-      const feeDue = feeDueMap.get(student.uid);
-      if (feeDue) {
-        await updateDoc(doc(db, "transactions", feeDue.id), {
-          status: "completed",
-          paidAt: todayStr(),
-        });
-      }
+
+      // Report what actually happened to the due, so a short payment doesn't
+      // read as if the bill were cleared.
+      const target = payBillingMonth
+        ? dueSettlements.get(`${student.uid}|${payBillingMonth}`)
+        : undefined;
+      const stillOwed = target ? Math.max(0, target.remaining - net) : 0;
+
       closePanel();
       await fetchAll(selectedMonth);
-      const discMsg = discountAmt > 0
-        ? ` (discount ${fmtINR(discountAmt)} applied)`
-        : "";
-      toast(`✓ ${fmtINR(net)} received from ${student.name} via ${payMethod}${discMsg}`, "success");
+
+      const discMsg  = discountAmt > 0 ? ` · discount ${fmtINR(discountAmt)}` : "";
+      const monthMsg = payBillingMonth ? ` for ${fmtMonth(payBillingMonth)}` : "";
+      const leftMsg  = stillOwed > 0 ? ` — ${fmtINR(stillOwed)} still due` : "";
+      toast(`✓ ${fmtINR(net)} from ${student.name}${monthMsg} via ${payMethod}${discMsg}${leftMsg}`, "success");
     } catch (err) {
       console.error("Payment failed:", err);
-      toast("Payment failed. Try again.", "error");
+      toast(`Payment failed: ${err instanceof Error ? err.message : "try again"}`, "error");
     } finally {
       setPaySubmitting(false);
     }
@@ -669,6 +689,28 @@ function FinanceContent() {
     });
   }, [transactions, filterCenter, filterStatus, filterDate, selectedMonth]);
 
+  // Which slice of the ledger sits behind the summary tile the admin clicked.
+  const drillDownTx = useMemo(() => {
+    if (drillDown === null) return [];
+    if (drillDown === "overdue") {
+      // Dues still carrying a balance — includes part-paid ones, which the old
+      // status-only check silently dropped once any payment landed.
+      return transactions.filter(tx => {
+        if (tx.type !== "fee_due") return false;
+        if (filterCenter !== "all" && tx.centerId !== filterCenter) return false;
+        const bm = tx.billingMonth || (tx.date ?? "").slice(0, 7);
+        if (bm !== selectedMonth) return false;
+        const s = dueSettlements.get(`${tx.studentUid}|${bm}`);
+        return (s?.remaining ?? 0) > 0;
+      });
+    }
+    if (drillDown === "prepay") {
+      return filteredTx.filter(tx => tx.type === "deposit");
+    }
+    // "collected" — real money in.
+    return filteredTx.filter(tx => isSettlingPayment(tx));
+  }, [drillDown, transactions, filteredTx, dueSettlements, filterCenter, selectedMonth]);
+
   const filteredStudents = useMemo(() => {
     let list = filterCenter === "all" ? students : students.filter(s => s.centerId === filterCenter);
     if      (filterType === "group")    list = list.filter(s => s.classType   === "group");
@@ -768,7 +810,7 @@ function FinanceContent() {
         </div>
       </div>
 
-      {/* ── Summary Cards ────────────────────────────────────────────────────── */}
+      {/* ── Summary Cards — click one to see the transactions behind it ──────── */}
       <div style={st.cardGrid}>
         <SummaryCard
           label={`Collected — ${fmtMonth(selectedMonth)}`}
@@ -777,6 +819,8 @@ function FinanceContent() {
           hint={loading ? undefined : isCurrentMonth
             ? `${fmtINR(summary.todayAmt)} today`
             : "Historical view"}
+          active={drillDown === "collected"}
+          onClick={() => setDrillDown(d => d === "collected" ? null : "collected")}
         />
         <SummaryCard
           label="Overdue"
@@ -784,6 +828,8 @@ function FinanceContent() {
           accent="#dc2626" icon="🚨"
           urgent={summary.overdueCount > 0}
           hint={loading ? undefined : `${fmtINR(summary.pendingBal)} pending`}
+          active={drillDown === "overdue"}
+          onClick={() => setDrillDown(d => d === "overdue" ? null : "overdue")}
         />
         <SummaryCard
           label="Active Students"
@@ -799,26 +845,9 @@ function FinanceContent() {
           hint={loading ? undefined : summary.lowCreditCount > 0
             ? `⚠ ${summary.lowCreditCount} due unpaid · ${summary.prepayCount} prepay`
             : `${summary.prepayCount} prepay · Postpay ${fmtINR(summary.postpayCollected)}`}
+          active={drillDown === "prepay"}
+          onClick={() => setDrillDown(d => d === "prepay" ? null : "prepay")}
         />
-      </div>
-
-      {/* ── Tabs ─────────────────────────────────────────────────────────────── */}
-      <div style={st.tabs}>
-        {([
-          { key: "overview",     label: "📊 Overview" },
-          { key: "students",     label: `🎓 Students${summary.overdueCount > 0 && !loading ? ` (${summary.overdueCount} overdue)` : ""}` },
-          { key: "transactions", label: "🧾 Transactions" },
-        ] as { key: ActiveTab; label: string }[]).map(({ key, label }) => (
-          <button key={key} onClick={() => setTab(key)}
-            style={{
-              ...st.tab,
-              ...(tab === key ? st.tabActive : {}),
-              ...(key === "students" && summary.overdueCount > 0 && !loading && tab !== key
-                ? { color: "#dc2626", fontWeight: 600 } : {}),
-            }}>
-            {label}
-          </button>
-        ))}
       </div>
 
       {/* ── Shared filters ───────────────────────────────────────────────────── */}
@@ -829,7 +858,7 @@ function FinanceContent() {
             <option key={c.id} value={c.id}>[{c.centerCode}] {c.name}</option>
           ))}
         </select>
-        {tab === "students" && (
+        {drillDown === null ? (
           <>
             <input
               type="search"
@@ -853,8 +882,7 @@ function FinanceContent() {
               <button onClick={() => setFeeStatusFilter("all")} style={st.clearDate}>✕ Clear filter</button>
             )}
           </>
-        )}
-        {tab === "transactions" && (
+        ) : (
           <>
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={st.filterSelect}>
               <option value="all">All Statuses</option>
@@ -871,57 +899,33 @@ function FinanceContent() {
         )}
       </div>
 
-      {/* ══ OVERVIEW TAB ═══════════════════════════════════════════════════════ */}
-      {tab === "overview" && (
+      {/* ══ DRILL-DOWN — the transactions behind a summary tile ════════════════ */}
+      {drillDown !== null && (
         <div>
-          <div style={st.sectionTitle}>
-            Students — {fmtMonth(selectedMonth)}
-          </div>
-          {loading ? (
-            <div style={st.stateRow}>Loading…</div>
-          ) : filteredStudents.length === 0 ? (
-            <div style={st.stateRow}>No students found.</div>
-          ) : (
-            <div style={st.tableWrapper}>
-              <table style={{ ...st.table, minWidth: isMobile ? 240 : 860 }}>
-                <thead>
-                  <tr>
-                    <th style={st.th}>Student</th>
-                    <th style={{ ...st.th, textAlign: "right" }}>Fee</th>
-                    <th style={{ ...st.th, textAlign: "center" }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredStudents.map((s) => {
-                    const fee    = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
-                    const hasDue = feeDueMap.has(s.uid);
-                    const isPaid = paidMap.has(s.uid);
-                    const isDue  = hasDue && !isPaid;
-                    return (
-                      <tr key={s.uid} style={{ background: isDue ? "#fff7f7" : "var(--color-surface)" }}>
-                        <td style={st.td}>{s.name}</td>
-                        <td style={{ ...st.td, textAlign: "right" }}>{fmtINR(fee)}</td>
-                        <td style={{ ...st.td, textAlign: "center" }}>
-                          {isDue ? (
-                            <span style={{ color: "#dc2626", fontWeight: 600 }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
-                          ) : isPaid ? (
-                            <span style={{ color: "#16a34a", fontWeight: 600 }}>Paid</span>
-                          ) : (
-                            <span style={{ color: "#9ca3af" }}>—</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap" as const, gap: 10 }}>
+            <div style={st.sectionTitle}>
+              {drillDown === "collected" ? `Payments collected — ${fmtMonth(selectedMonth)}`
+                : drillDown === "overdue" ? `Outstanding dues — ${fmtMonth(selectedMonth)}`
+                : `Prepay deposits — ${fmtMonth(selectedMonth)}`}
             </div>
-          )}
+            <button onClick={() => setDrillDown(null)} style={st.clearDate}>← Back to students</button>
+          </div>
+          <TxTable
+            transactions={drillDownTx}
+            students={students}
+            centers={centers}
+            loading={loading}
+            formatDate={formatDate}
+            canManage={canManageTx}
+            onEdit={handleEditTx}
+            onDelete={handleDeleteTx}
+            isMobile={isMobile}
+          />
         </div>
       )}
 
-      {/* ══ STUDENTS TAB ═══════════════════════════════════════════════════════ */}
-      {tab === "students" && (
+      {/* ══ STUDENT LIST — the default view ════════════════════════════════════ */}
+      {drillDown === null && (
         <div>
           {summary.overdueCount > 0 && !loading && (
             <div style={st.overdueBanner}>
@@ -1023,7 +1027,10 @@ function FinanceContent() {
                                 {paidMap.has(s.uid) ? (
                                   <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                                 ) : feeDueMap.has(s.uid) ? (
-                                  <span style={{ marginLeft: 6, fontWeight: 600, color: "#dc2626" }}>· Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                                  <span style={{ marginLeft: 6, fontWeight: 600, color: "#dc2626" }}>
+                                    · Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
+                                    {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partly paid</span>}
+                                  </span>
                                 ) : null}
                               </div>
                             )}
@@ -1047,7 +1054,10 @@ function FinanceContent() {
                               {paidMap.has(s.uid) ? (
                                 <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                               ) : feeDueMap.has(s.uid) ? (
-                                <span style={{ color: "#dc2626" }}>Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                                <span style={{ color: "#dc2626" }}>
+                                  Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
+                                  {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partly paid</span>}
+                                </span>
                               ) : (
                                 <span style={{ color: "#9ca3af" }}>—</span>
                               )}
@@ -1067,6 +1077,11 @@ function FinanceContent() {
                               >
                                 💳 Payment
                               </button>
+                              <RowActionsMenu
+                                onAdjust={() => openPanel(s.uid, "adjust", s)}
+                                onDeposit={() => openPanel(s.uid, "deposit", s)}
+                                onHistory={() => openPanel(s.uid, "history", s)}
+                              />
                               {isOpen && (
                                 <button onClick={closePanel} style={st.closePanelBtn} title="Close">✕</button>
                               )}
@@ -1103,30 +1118,6 @@ function FinanceContent() {
                                   </span>
                                 )}
                               </div>
-
-                              {/* ── Action tabs (only when opened via action button) ── */}
-                              {activeAction !== "history" && (
-                                <div style={{ display: "flex", gap: 4, marginBottom: 14, flexWrap: "wrap" as const }}>
-                                  <button
-                                      onClick={() => setActiveAction("pay")}
-                                      style={{
-                                        ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                        ...(activeAction === "pay" ? st.tabActive : {}),
-                                      }}
-                                    >
-                                      💳 Pay
-                                    </button>
-                                  <button
-                                    onClick={() => setActiveAction("adjust")}
-                                    style={{
-                                      ...st.tab, flex: "none" as const, padding: "6px 14px",
-                                      ...(activeAction === "adjust" ? st.tabActive : {}),
-                                    }}
-                                  >
-                                    ✏️ Adjust Fee
-                                  </button>
-                                </div>
-                              )}
 
                               {/* ════ PAY PANEL ════════════════════════════════ */}
                               {activeAction === "pay" && (
@@ -1264,6 +1255,51 @@ function FinanceContent() {
                                       </span>
                                     )}
                                   </div>
+
+                                  {/* ── Which month is this payment settling? ──── */}
+                                  {(() => {
+                                    const unpaid = outstandingDuesForStudent(dueSettlements, s.uid);
+                                    if (unpaid.length === 0) return null;
+                                    return (
+                                      <div style={st.monthPicker}>
+                                        <div style={st.monthPickerLabel}>
+                                          Apply this payment to
+                                          {unpaid.length > 1 && (
+                                            <span style={{ fontWeight: 400, color: "#92400e", marginLeft: 6 }}>
+                                              — {unpaid.length} months unpaid
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 6 }}>
+                                          {unpaid.map(d => {
+                                            const selected = payBillingMonth === d.billingMonth;
+                                            return (
+                                              <button
+                                                key={d.billingMonth}
+                                                type="button"
+                                                onClick={() => {
+                                                  setPayBillingMonth(selected ? null : d.billingMonth);
+                                                  if (!selected && !payAmount) setPayAmount(String(d.remaining));
+                                                }}
+                                                style={{ ...st.monthChip, ...(selected ? st.monthChipActive : {}) }}
+                                              >
+                                                <span style={{ fontWeight: 700 }}>{fmtMonth(d.billingMonth)}</span>
+                                                <span style={{ opacity: 0.85 }}>
+                                                  {fmtINR(d.remaining)} left
+                                                  {d.state === "partial" && ` · ${fmtINR(d.paidAmount)} paid`}
+                                                </span>
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                        {payBillingMonth === null && (
+                                          <div style={{ fontSize: 11, color: "#92400e", marginTop: 8 }}>
+                                            Pick a month, or leave unselected to record this as unallocated credit.
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
 
                                   <div style={st.panelRow}>
                                     {/* Amount received */}
@@ -1639,17 +1675,44 @@ function FinanceContent() {
         );
       })()}
 
-      {/* ══ TRANSACTIONS TAB ═══════════════════════════════════════════════════ */}
-      {tab === "transactions" && (
-        <div>
-          <div style={st.filterSummary}>
-            {fmtMonth(selectedMonth)} — {filteredTx.length} transaction{filteredTx.length !== 1 ? "s" : ""}
-            {(filterDate || filterCenter !== "all" || filterStatus !== "all") && " (filtered)"}
-          </div>
-          <TxTable transactions={filteredTx} students={students}
-            centers={centers} loading={loading} formatDate={formatDate}
-            canManage={canManageTx} onEdit={handleEditTx} onDelete={handleDeleteTx}
-            isMobile={isMobile} />
+    </div>
+  );
+}
+
+// ─── Row actions menu ─────────────────────────────────────────────────────────
+// Keeps "Payment" as the single obvious action on each row and tucks the rarely
+// used money operations behind ⋮, rather than showing four buttons per student.
+
+function RowActionsMenu({ onAdjust, onDeposit, onHistory }: {
+  onAdjust: () => void; onDeposit: () => void; onHistory: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={e => { e.stopPropagation(); setOpen(v => !v); }}
+        style={st.rowMenuBtn}
+        title="More actions"
+        aria-label="More actions"
+      >
+        ⋮
+      </button>
+      {open && (
+        <div style={st.rowMenuPanel} onClick={e => e.stopPropagation()}>
+          <button onClick={() => { setOpen(false); onHistory(); }} style={st.rowMenuItem}>🧾 View history</button>
+          <button onClick={() => { setOpen(false); onAdjust();  }} style={st.rowMenuItem}>✏️ Adjust fee</button>
+          <button onClick={() => { setOpen(false); onDeposit(); }} style={st.rowMenuItem}>⬆ Add deposit</button>
         </div>
       )}
     </div>
@@ -1658,17 +1721,36 @@ function FinanceContent() {
 
 // ─── Summary Card ─────────────────────────────────────────────────────────────
 
-function SummaryCard({ label, value, accent, icon, hint, urgent }: {
+function SummaryCard({ label, value, accent, icon, hint, urgent, onClick, active }: {
   label: string; value: string; accent: string; icon: string; hint?: string; urgent?: boolean;
+  onClick?: () => void; active?: boolean;
 }) {
+  const clickable = !!onClick;
   return (
-    <div style={{ ...st.card, ...(urgent ? { boxShadow: `0 0 0 2px ${accent}33, 0 1px 4px rgba(0,0,0,0.06)` } : {}) }}>
+    <div
+      onClick={onClick}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={clickable ? (e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick!(); } }) : undefined}
+      style={{
+        ...st.card,
+        ...(urgent ? { boxShadow: `0 0 0 2px ${accent}33, 0 1px 4px rgba(0,0,0,0.06)` } : {}),
+        ...(active ? { boxShadow: `0 0 0 2px ${accent}, 0 2px 10px rgba(0,0,0,0.10)` } : {}),
+        cursor: clickable ? "pointer" : "default",
+        outline: "none",
+      }}
+    >
       <div style={{ ...st.cardAccent, background: accent }} />
       <div style={st.cardBody}>
         <div style={st.cardIcon}>{icon}</div>
         <div style={st.cardLabel}>{label}</div>
         <div style={{ ...st.cardValue, color: accent }}>{value}</div>
         {hint && <div style={st.cardHint}>{hint}</div>}
+        {clickable && (
+          <div style={{ fontSize: 10, fontWeight: 700, color: accent, marginTop: 6 }}>
+            {active ? "▲ Hide details" : "▼ View details"}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2077,6 +2159,44 @@ const st: Record<string, React.CSSProperties> = {
   infoChip:    { fontSize: 12, background: "#f3f4f6", color: "#374151", padding: "3px 10px", borderRadius: 99, fontWeight: 500 },
   infoChipRed: { fontSize: 12, background: "#fee2e2", color: "#dc2626", padding: "3px 10px", borderRadius: 99, fontWeight: 700 },
   infoChipGreen:{ fontSize: 12, background: "#dcfce7", color: "#16a34a", padding: "3px 10px", borderRadius: 99, fontWeight: 700 },
+  partlyPaidTag: {
+    display: "inline-block", marginLeft: 6, padding: "1px 8px", borderRadius: 99,
+    fontSize: 10, fontWeight: 700, background: "#fef9c3", color: "#92400e",
+    border: "1px solid #fde68a", verticalAlign: "middle",
+  },
+
+  rowMenuBtn: {
+    background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 8,
+    width: 28, height: 28, fontSize: 15, fontWeight: 700, cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1, flexShrink: 0,
+  },
+  rowMenuPanel: {
+    position: "absolute" as const, top: "calc(100% + 6px)", right: 0, background: "#fff",
+    border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.16)",
+    minWidth: 165, overflow: "hidden", zIndex: 20,
+  },
+  rowMenuItem: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 14px",
+    fontSize: 13, fontWeight: 500, color: "#111827", background: "none", border: "none",
+    textAlign: "left" as const, cursor: "pointer", boxSizing: "border-box" as const, whiteSpace: "nowrap" as const,
+  },
+
+  monthPicker: {
+    background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10,
+    padding: "12px 14px", marginBottom: 14,
+  },
+  monthPickerLabel: {
+    fontSize: 11, fontWeight: 700, color: "#92400e",
+    textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: 8,
+  },
+  monthChip: {
+    display: "flex", flexDirection: "column" as const, gap: 2, alignItems: "flex-start",
+    padding: "7px 14px", borderRadius: 8, cursor: "pointer",
+    background: "#fff", border: "1.5px solid #e5e7eb", color: "#374151",
+    fontSize: 11, fontFamily: "inherit", textAlign: "left" as const,
+  },
+  monthChipActive: { background: "#f59e0b", color: "#fff", border: "1.5px solid #d97706" },
+
   panelRow:    { display: "flex", gap: 14, alignItems: "flex-end", flexWrap: "wrap" as const, marginBottom: 14 },
   panelField:  { display: "flex", flexDirection: "column" as const, gap: 5, flex: 1, minWidth: 110 },
   panelLabel:  { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.04em" },

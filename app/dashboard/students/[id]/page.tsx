@@ -17,7 +17,7 @@ import { computeStudentBalances } from "@/services/finance/finance.service";
 import type { Transaction } from "@/types/finance";
 import {
   type StudentRow, p, modal, STATUS_BADGE, fmtINR, fmtDate, toISODate,
-  Row, Field, LedgerEditor, RecordPaymentModal, CenterDetailModal,
+  Row, Field, LedgerEditor, CenterDetailModal,
   EditModal, ClearHistoryModal, DeleteStudentModal, BreakRequestModal,
   HISTORY_STATUS_STYLE, HISTORY_STATUS_LABEL,
 } from "../_shared";
@@ -180,8 +180,6 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
   const [clearHistoryOpen, setClearHistoryOpen] = useState(false);
   const [deleteOpen, setDeleteOpen]             = useState(false);
   const [breakOpen, setBreakOpen]               = useState(false);
-  const [payTarget, setPayTarget]               = useState<Transaction | null>(null);
-  const [statementEditMode, setStatementEditMode] = useState(false);
   const [menuOpen, setMenuOpen]                 = useState(false);
   const menuRef                                 = useRef<HTMLDivElement>(null);
 
@@ -352,21 +350,15 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
             )}
             {tab === "syllabus" && <StudentSyllabusContent studentId={student.id} hideBackBar viewOnly />}
             {tab === "attendance" && <AttendanceTab studentId={student.id} centerMap={centerMap} />}
+            {/* Money is handled in one place only — the Finance page. This tab
+                is a read-only record: no recording, no editing, no deleting. */}
             {tab === "financial" && (
               <div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap" as const, gap: 8 }}>
                   <div style={dp.cardHeader}>Financial Statement</div>
-                  {isAdmin && transactions.length > 0 && (
-                    <button
-                      onClick={() => setStatementEditMode(v => !v)}
-                      style={{
-                        fontSize: 12, fontWeight: 700, padding: "5px 14px", borderRadius: 99, cursor: "pointer",
-                        border: `1px solid ${statementEditMode ? "#1d4ed8" : "#d1d5db"}`,
-                        background: statementEditMode ? "#dbeafe" : "#fff",
-                        color: statementEditMode ? "#1d4ed8" : "#374151",
-                      }}
-                    >
-                      {statementEditMode ? "Done" : "✏ Edit Statement"}
+                  {isAdmin && (
+                    <button onClick={() => router.push("/dashboard/finance")} style={dp.manageBtn}>
+                      Manage in Finance →
                     </button>
                   )}
                 </div>
@@ -379,8 +371,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
                   currentUserUid={user?.uid ?? ""}
                   currentUserRole={role ?? "admin"}
                   onChanged={load}
-                  editMode={statementEditMode}
-                  onPayDue={isAdmin ? tx => setPayTarget(tx) : undefined}
+                  editMode={false}
                 />
               </div>
             )}
@@ -433,15 +424,6 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
           currentUserUid={user?.uid ?? ""}
           currentUserRole={role ?? "teacher"}
           isAdmin={isAdmin}
-        />
-      )}
-      {payTarget && (
-        <RecordPaymentModal
-          student={student}
-          feeDue={payTarget}
-          receivedBy={user?.displayName ?? user?.email ?? "admin"}
-          onClose={() => setPayTarget(null)}
-          onRecorded={() => { setPayTarget(null); load(); }}
         />
       )}
     </div>
@@ -852,6 +834,10 @@ const dp: Record<string, React.CSSProperties> = {
     display: "flex", alignItems: "center", justifyContent: "center",
   },
   name: { fontSize: 20, fontWeight: 700, color: "#111827" },
+  manageBtn: {
+    fontSize: 12, fontWeight: 700, padding: "5px 14px", borderRadius: 99, cursor: "pointer",
+    border: "1px solid #d1d5db", background: "#fff", color: "#4f46e5",
+  },
   joinBanner: {
     display: "flex", alignItems: "center", gap: 12, background: "#eff6ff",
     border: "1px solid #bfdbfe", borderRadius: 10, padding: "12px 16px", marginBottom: 20,

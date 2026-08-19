@@ -19,6 +19,7 @@ import type {
   Transaction,
   CreateTransactionInput,
   EditableTransactionInput,
+  PaymentMethod,
 } from "@/types/finance";
 import { logAction } from "@/services/audit/audit.service";
 
@@ -208,9 +209,15 @@ export async function getFeeStructureByCenter(
  * when it was originally written. To reverse, apply the negation.
  *
  * Convention used throughout the codebase:
- *   • Payment (UPI/Cash/Bank, no billingMonth, type !== "deposit"): -amount  (reduces balance)
- *   • Deposit (type === "deposit"):                                  -amount  (reduces balance / adds credit)
+ *   • Payment (UPI/Cash/Bank, type !== "deposit"):                    -amount  (reduces balance)
+ *   • Deposit (type === "deposit"):                                   -amount  (reduces balance / adds credit)
  *   • Charge  (method === "auto"/"auto-monthly", type === "charge"/"fee_due"): +amount (increases balance / owed)
+ *
+ * Note: `billingMonth` deliberately plays NO part in this calculation. On a
+ * fee_due it records the month being billed; on a payment it records the month
+ * being settled (see computeDueSettlements). Either way the balance effect is
+ * decided purely by type/method, so tagging a payment with a month never
+ * changes what a student owes in total — only which due it is credited to.
  *
  * A "fee_due" transaction applies its charge the moment it's generated
  * (status "due"), independent of whether it's later marked "completed" by a
@@ -249,6 +256,185 @@ export function computeStudentBalances(
     map.set(tx.studentUid, (map.get(tx.studentUid) ?? 0) + transactionBalanceEffect(tx));
   }
   return map;
+}
+
+// ─── Due settlement (which payments cleared which month) ──────────────────────
+
+export type DueState = "unpaid" | "partial" | "paid";
+
+export interface DueSettlement {
+  dueId:        string;
+  studentUid:   string;
+  billingMonth: string;   // "YYYY-MM"
+  dueAmount:    number;
+  paidAmount:   number;   // total credited to this month
+  remaining:    number;   // dueAmount − paidAmount, floored at 0
+  state:        DueState;
+}
+
+/** True for a real money-in receipt (not a due, charge, or system auto-entry). */
+export function isSettlingPayment(tx: Transaction): boolean {
+  if (tx.status !== "completed") return false;
+  if (tx.type === "fee_due" || tx.type === "charge") return false;
+  if (tx.method === "auto" || tx.method === "auto-monthly") return false;
+  return true;
+}
+
+/**
+ * The month a payment is credited to.
+ *
+ * New payments carry an explicit `billingMonth` chosen by the admin at the
+ * time of recording. Payments written before that field existed fall back to
+ * the month of their own date — which is exactly the guess the app made
+ * everywhere previously, so historical records keep behaving as they always
+ * have rather than silently changing meaning.
+ */
+export function paymentSettlesMonth(tx: Transaction): string {
+  return tx.billingMonth || (tx.date ?? "").slice(0, 7);
+}
+
+/**
+ * Reconciles every fee_due against the payments credited to its month, keyed
+ * by `${studentUid}|${billingMonth}`.
+ *
+ * This is what lets a ₹500 payment against a ₹2,000 due leave ₹1,500 still
+ * outstanding instead of closing the whole bill — the previous behaviour,
+ * where any payment flipped a due to "completed" regardless of amount, made
+ * part-paid students vanish from the overdue list while still owing money.
+ */
+export function computeDueSettlements(transactions: Transaction[]): Map<string, DueSettlement> {
+  const key = (uid: string, month: string) => `${uid}|${month}`;
+  const settlements = new Map<string, DueSettlement>();
+
+  // 1) Seed one entry per fee_due.
+  for (const tx of transactions) {
+    if (!tx.studentUid || tx.type !== "fee_due") continue;
+    const billingMonth = tx.billingMonth || (tx.date ?? "").slice(0, 7);
+    if (!billingMonth) continue;
+    const k = key(tx.studentUid, billingMonth);
+    const existing = settlements.get(k);
+    // Defensive: if a month was somehow billed twice, treat the total as owed
+    // rather than dropping one silently.
+    settlements.set(k, {
+      dueId:        existing?.dueId ?? tx.id,
+      studentUid:   tx.studentUid,
+      billingMonth,
+      dueAmount:    (existing?.dueAmount ?? 0) + tx.amount,
+      paidAmount:   0,
+      remaining:    0,
+      state:        "unpaid",
+    });
+  }
+
+  // 2) Credit payments to their month.
+  for (const tx of transactions) {
+    if (!tx.studentUid || !isSettlingPayment(tx)) continue;
+    const k = key(tx.studentUid, paymentSettlesMonth(tx));
+    const s = settlements.get(k);
+    if (!s) continue;   // payment with no matching due — counts toward balance, not a settlement
+    s.paidAmount += tx.amount;
+  }
+
+  // 3) Resolve state.
+  settlements.forEach(s => {
+    s.remaining = Math.max(0, s.dueAmount - s.paidAmount);
+    s.state = s.paidAmount <= 0 ? "unpaid"
+      : s.remaining > 0 ? "partial"
+      : "paid";
+  });
+
+  return settlements;
+}
+
+/** Every month a student still owes something on, oldest first. */
+export function outstandingDuesForStudent(
+  settlements: Map<string, DueSettlement>,
+  studentUid: string,
+): DueSettlement[] {
+  return Array.from(settlements.values())
+    .filter(s => s.studentUid === studentUid && s.remaining > 0)
+    .sort((a, b) => a.billingMonth.localeCompare(b.billingMonth));
+}
+
+// ─── Record a payment ─────────────────────────────────────────────────────────
+
+export interface RecordPaymentInput {
+  studentUid:   string;
+  centerId:     string;
+  amount:       number;          // net received, after any discount
+  rawAmount?:   number;          // pre-discount amount, if a discount was applied
+  discountAmt?: number;
+  discountType?: string;
+  method:       PaymentMethod;
+  receivedBy:   string;
+  date:         string;          // YYYY-MM-DD — the date money actually changed hands
+  note?:        string | null;
+  billingMonth: string | null;   // "YYYY-MM" this settles; null = unallocated credit
+}
+
+/**
+ * Single entry point for recording money received. Replaces the two divergent
+ * implementations that previously existed (the Finance page's inline panel and
+ * the student profile's RecordPaymentModal), which disagreed on three things:
+ *
+ *   1. Which due got closed — one used the page's selected month, so paying a
+ *      student whose unpaid due was from a different month silently marked
+ *      nothing at all.
+ *   2. `paidAt` — one stamped today regardless of the payment date the admin
+ *      had just typed, so backdated payments recorded the wrong day.
+ *   3. Discounts — supported in one flow only.
+ *
+ * A due is now closed only when it is actually settled in full; a short payment
+ * leaves the remainder outstanding.
+ */
+export async function recordPayment(input: RecordPaymentInput): Promise<void> {
+  if (input.amount <= 0) throw new Error("INVALID_AMOUNT: amount must be greater than 0");
+
+  const payDate = input.date || new Date().toISOString().slice(0, 10);
+
+  // 1) Write the receipt.
+  await addDoc(collection(db, TRANSACTIONS), {
+    studentUid:   input.studentUid,
+    centerId:     input.centerId,
+    amount:       input.amount,
+    rawAmount:    input.rawAmount && input.rawAmount !== input.amount ? input.rawAmount : null,
+    discountAmt:  input.discountAmt && input.discountAmt > 0 ? input.discountAmt : null,
+    discountType: input.discountAmt && input.discountAmt > 0 ? (input.discountType ?? null) : null,
+    method:       input.method,
+    receivedBy:   input.receivedBy,
+    note:         input.note?.trim() || null,
+    date:         payDate,
+    billingMonth: input.billingMonth,   // the month this settles
+    status:       "completed",
+    createdAt:    serverTimestamp(),
+  });
+
+  // 2) Reduce the denormalized balance cache.
+  await updateDoc(doc(db, "users", input.studentUid), {
+    currentBalance: increment(-input.amount),
+    updatedAt:      new Date().toISOString(),
+  });
+
+  // 3) Close the targeted due only if it is now fully settled. Re-read the
+  //    ledger rather than trusting a stale client snapshot, so concurrent
+  //    payments can't both conclude the due is still short.
+  if (!input.billingMonth) return;
+
+  const snap = await getDocs(
+    query(collection(db, TRANSACTIONS), where("studentUid", "==", input.studentUid)),
+  );
+  const txs = snap.docs.map(d => ({ id: d.id, ...d.data() }) as Transaction);
+  const settlement = computeDueSettlements(txs).get(`${input.studentUid}|${input.billingMonth}`);
+  if (!settlement) return;
+
+  const dueRef = doc(db, TRANSACTIONS, settlement.dueId);
+  if (settlement.remaining <= 0) {
+    await updateDoc(dueRef, { status: "completed", paidAt: payDate });
+  } else {
+    // Still short — make sure a previously-closed due reopens if this write
+    // followed an edit that reduced an earlier payment.
+    await updateDoc(dueRef, { status: "due", paidAt: null });
+  }
 }
 
 /**

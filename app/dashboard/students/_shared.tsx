@@ -1616,21 +1616,8 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
               </Field>
             </div>
 
-            {/* ── Financial Statement / Ledger Edit (admin only) ── */}
-            {isAdmin && (
-              <>
-                <div style={modal.sectionLabel}>Financial Statement / Ledger Edit</div>
-                <div style={{ marginBottom: 4 }}>
-                  <LedgerEditor
-                    transactions={transactions}
-                    currentUserUid={currentUserUid}
-                    currentUserRole={currentUserRole}
-                    onChanged={onTransactionsChanged}
-                    editMode
-                  />
-                </div>
-              </>
-            )}
+            {/* Ledger editing deliberately lives on the Finance page only, so
+                corrections to money happen in exactly one place. */}
           </div>
 
           {/* Footer */}
@@ -1916,22 +1903,26 @@ export function Row({ label, value }: { label: string; value: React.ReactNode })
 
 // ─── Ledger Editor (shared) ─────────────────────────────────────────────────────
 // Renders a student's transaction line items (Fee Dues, Payments, Auto Charges,
-// Deposits) newest-first. Used both by the Student Detail Modal's collapsible
-// "Financial Statement" (editMode toggled by a button) and by the Edit Student
-// Modal's always-editable "Financial Statement / Ledger Edit" section.
+// Deposits) newest-first.
+//
+// `editMode` is currently only ever false: the student profile renders this as
+// a read-only record, and all money corrections happen on the Finance page so
+// there is a single place where the ledger can be changed. The editing branch
+// is kept because it is the same component the Finance page can adopt if that
+// consolidation is taken further.
+//
 // Edit/delete call the same finance.service functions the Finance page uses —
 // both already reconcile `users.currentBalance` server-side by the exact delta,
 // so `onChanged` just needs to refetch transactions to pick up the new balance.
 
 export function LedgerEditor({
-  transactions, currentUserUid, currentUserRole, onChanged, editMode, onPayDue,
+  transactions, currentUserUid, currentUserRole, onChanged, editMode,
 }: {
   transactions:    Transaction[];
   currentUserUid:  string;
   currentUserRole: string;
   onChanged:       () => void;
   editMode:        boolean;
-  onPayDue?:       (tx: Transaction) => void;
 }) {
   const [editingTxId,  setEditingTxId]  = useState<string | null>(null);
   const [txAmount,     setTxAmount]     = useState("");
@@ -2036,18 +2027,14 @@ export function LedgerEditor({
           ? { label: "Charged", background: "#fef3c7", color: "#92400e" }
           : { label: "Received", background: "#dcfce7", color: "#16a34a" };
 
-        const clickable = isPending && !editMode && !!onPayDue;
-
         return (
           <div key={tx.id}>
             <div
-              onClick={clickable ? () => onPayDue!(tx) : undefined}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "space-between",
                 gap: 10, padding: "9px 12px", borderRadius: 8,
                 border: `1px solid ${isEditingRow ? "#93c5fd" : isPending ? "#fecaca" : "#f3f4f6"}`,
                 background: isEditingRow ? "#eff6ff" : isPending ? "#fff7f7" : "#fafafa",
-                cursor: clickable ? "pointer" : "default",
               }}
             >
               <div style={{ minWidth: 0 }}>
@@ -2061,7 +2048,6 @@ export function LedgerEditor({
                   {isCharge ? "+" : "−"}{fmtINR(tx.amount)}
                 </span>
                 <span style={{ ...p.badge, background: badge.background, color: badge.color }}>{badge.label}</span>
-                {clickable && <span style={{ fontSize: 12, color: "#9ca3af" }}>→</span>}
                 {editMode && (
                   <>
                     <button
@@ -2239,104 +2225,6 @@ export function CenterDetailModal({ centerId, onClose }: { centerId: string; onC
             </>
           )}
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Record Payment Modal ───────────────────────────────────────────────────────
-
-export function RecordPaymentModal({ student, feeDue, receivedBy, onClose, onRecorded }: {
-  student: StudentRow; feeDue: Transaction; receivedBy: string;
-  onClose: () => void; onRecorded: () => void;
-}) {
-  const [amount, setAmount]       = useState(String(feeDue.amount));
-  const [payDate, setPayDate]     = useState(todayStr());
-  const [method, setMethod]       = useState<"Cash" | "UPI" | "Bank">("Cash");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError]         = useState<string | null>(null);
-
-  const feeMonth  = fmtMonth(feeDue.billingMonth ?? (feeDue.date ?? "").slice(0, 7));
-  const genDate   = fmtDate(feeDue.date);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    const net = Number(amount);
-    if (!net || net <= 0) { setError("Enter a valid amount (must be > 0)"); return; }
-    setSubmitting(true);
-    setError(null);
-    try {
-      await addDoc(collection(db, "transactions"), {
-        studentUid: student.id,
-        centerId:   student.centerId,
-        amount:     net,
-        method,
-        receivedBy,
-        date:       payDate || todayStr(),
-        status:     "completed",
-        createdAt:  serverTimestamp(),
-      });
-      await updateDoc(doc(db, "users", student.id), {
-        currentBalance: increment(-net),
-        updatedAt:      new Date().toISOString(),
-      });
-      await updateDoc(doc(db, "transactions", feeDue.id), {
-        status: "completed",
-        paidAt: payDate || todayStr(),
-      });
-      onRecorded();
-    } catch (err) {
-      console.error("Record payment failed:", err);
-      setError("Payment failed. Try again.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div style={{ ...modal.overlay, zIndex: 1100 }} onClick={onClose}>
-      <div style={{ ...modal.box, maxWidth: 420 }} onClick={e => e.stopPropagation()}>
-        <div style={modal.header}>
-          <div>
-            <div style={modal.title}>Record Payment</div>
-            <div style={modal.subtitle}>{student.name} · {student.studentID}</div>
-          </div>
-          <button onClick={onClose} style={modal.closeBtn}>✕</button>
-        </div>
-        <form onSubmit={submit}>
-          <div style={modal.body}>
-            {error && <div style={modal.errorBanner}>{error}</div>}
-            <div style={{ display: "flex", flexDirection: "column" as const, gap: 14 }}>
-              <Field label="Fee Month">
-                <div style={{ ...p.input, background: "#f9fafb", color: "#374151" }}>{feeMonth}</div>
-              </Field>
-              <Field label="Due / Generated Date">
-                <div style={{ ...p.input, background: "#f9fafb", color: "#374151" }}>{genDate}</div>
-              </Field>
-              <Field label="Payment Date">
-                <input type="date" value={payDate} onChange={e => setPayDate(e.target.value)}
-                  max={todayStr()} style={p.input} required />
-              </Field>
-              <Field label="Payment Method">
-                <select value={method} onChange={e => setMethod(e.target.value as "Cash" | "UPI" | "Bank")} style={p.input}>
-                  <option value="Cash">Cash</option>
-                  <option value="UPI">UPI</option>
-                  <option value="Bank">Bank</option>
-                </select>
-              </Field>
-              <Field label="Payable Amount">
-                <input type="number" min={1} step="1" value={amount}
-                  onChange={e => setAmount(e.target.value)} style={p.input} required />
-              </Field>
-            </div>
-          </div>
-          <div style={modal.footer}>
-            <button type="button" onClick={onClose} style={modal.cancelBtn}>Cancel</button>
-            <button type="submit" disabled={submitting} style={{ ...p.primaryBtn, opacity: submitting ? 0.6 : 1, cursor: submitting ? "not-allowed" : "pointer" }}>
-              {submitting ? "Recording…" : "Record Payment"}
-            </button>
-          </div>
-        </form>
       </div>
     </div>
   );
