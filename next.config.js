@@ -17,6 +17,16 @@ const nextConfig = {
   // The ChunkErrorBoundary handles recovery. These headers ensure CDN and
   // browser caches are correctly configured going forward.
   async headers() {
+    // Dev-mode chunks (main-app.js, webpack.js, layout.css, etc.) keep the
+    // same URL across rebuilds — only their content changes. Caching them as
+    // "immutable" made the browser keep serving the first version it ever
+    // fetched, forever, regardless of how many times the dev server rebuilds
+    // or .next gets wiped. That's what caused stale/ghost errors (e.g. a
+    // reference to a function removed hours earlier) to keep reappearing
+    // even after every server-side fix. Only content-hashed production
+    // chunks are safe to cache long-term.
+    if (process.env.NODE_ENV !== "production") return [];
+
     return [
       {
         // Hashed chunks — immutable, cache forever

@@ -20,6 +20,7 @@ import type {
   CreateTransactionInput,
   EditableTransactionInput,
   PaymentMethod,
+  TransactionStatus,
 } from "@/types/finance";
 import { logAction } from "@/services/audit/audit.service";
 
@@ -267,7 +268,7 @@ export interface DueSettlement {
   studentUid:   string;
   billingMonth: string;   // "YYYY-MM"
   dueAmount:    number;
-  paidAmount:   number;   // total credited to this month
+  paidAmount:   number;   // total explicitly credited to this month
   remaining:    number;   // dueAmount − paidAmount, floored at 0
   state:        DueState;
 }
@@ -281,30 +282,39 @@ export function isSettlingPayment(tx: Transaction): boolean {
 }
 
 /**
- * The month a payment is credited to.
+ * The month a payment is explicitly credited to — `null` if it isn't tagged.
  *
- * New payments carry an explicit `billingMonth` chosen by the admin at the
- * time of recording. Payments written before that field existed fall back to
- * the month of their own date — which is exactly the guess the app made
- * everywhere previously, so historical records keep behaving as they always
- * have rather than silently changing meaning.
+ * Only new payments (recorded with the month picker) carry `billingMonth`.
+ * Deliberately NOT falling back to "the payment's own date" here: a payment
+ * dated this month is not reliably FOR this month — arrears paid late, an
+ * unrelated deposit, anything logged with today's date regardless of which
+ * bill it actually settles. Guessing by date previously caused a genuinely
+ * unpaid month to read as settled whenever any same-month payment existed,
+ * which made overdue students silently vanish from the list without any
+ * data actually changing. See computeDueSettlements for how untagged
+ * payments are handled instead (the due's own status field).
  */
-export function paymentSettlesMonth(tx: Transaction): string {
-  return tx.billingMonth || (tx.date ?? "").slice(0, 7);
+export function paymentSettlesMonth(tx: Transaction): string | null {
+  return tx.billingMonth ?? null;
 }
 
 /**
- * Reconciles every fee_due against the payments credited to its month, keyed
- * by `${studentUid}|${billingMonth}`.
+ * Reconciles every fee_due against the payments explicitly credited to its
+ * month, keyed by `${studentUid}|${billingMonth}`.
  *
- * This is what lets a ₹500 payment against a ₹2,000 due leave ₹1,500 still
- * outstanding instead of closing the whole bill — the previous behaviour,
- * where any payment flipped a due to "completed" regardless of amount, made
- * part-paid students vanish from the overdue list while still owing money.
+ * A due with at least one explicitly-tagged payment is reconciled by amount —
+ * this is what lets a ₹500 payment against a ₹2,000 due leave ₹1,500 still
+ * outstanding instead of closing the whole bill.
+ *
+ * A due with NO tagged payment (i.e. every historical due, until it receives
+ * its first payment recorded through the new month picker) falls back to its
+ * own `status` field — exactly what the app trusted before this reconciliation
+ * existed, so historical records keep behaving as they always have.
  */
 export function computeDueSettlements(transactions: Transaction[]): Map<string, DueSettlement> {
   const key = (uid: string, month: string) => `${uid}|${month}`;
   const settlements = new Map<string, DueSettlement>();
+  const legacyStatus = new Map<string, TransactionStatus>();
 
   // 1) Seed one entry per fee_due.
   for (const tx of transactions) {
@@ -324,23 +334,36 @@ export function computeDueSettlements(transactions: Transaction[]): Map<string, 
       remaining:    0,
       state:        "unpaid",
     });
+    legacyStatus.set(k, tx.status);
   }
 
-  // 2) Credit payments to their month.
+  // 2) Credit only explicitly-tagged payments to their month.
   for (const tx of transactions) {
     if (!tx.studentUid || !isSettlingPayment(tx)) continue;
-    const k = key(tx.studentUid, paymentSettlesMonth(tx));
+    const month = paymentSettlesMonth(tx);
+    if (month === null) continue;   // untagged — resolved via legacy status below
+    const k = key(tx.studentUid, month);
     const s = settlements.get(k);
     if (!s) continue;   // payment with no matching due — counts toward balance, not a settlement
     s.paidAmount += tx.amount;
   }
 
   // 3) Resolve state.
-  settlements.forEach(s => {
-    s.remaining = Math.max(0, s.dueAmount - s.paidAmount);
-    s.state = s.paidAmount <= 0 ? "unpaid"
-      : s.remaining > 0 ? "partial"
-      : "paid";
+  settlements.forEach((s, k) => {
+    if (s.paidAmount > 0) {
+      // At least one tagged payment exists — reconcile by amount.
+      s.remaining = Math.max(0, s.dueAmount - s.paidAmount);
+      s.state = s.remaining > 0 ? "partial" : "paid";
+      return;
+    }
+    // No tagged payment found for this due — trust the due's own status
+    // field, exactly as the app did before amount-based reconciliation
+    // existed. This is what keeps historical dues (paid the old way, before
+    // payments recorded which month they settled) showing correctly instead
+    // of being re-guessed from unrelated same-month transactions.
+    const wasCompleted = legacyStatus.get(k) === "completed";
+    s.remaining = wasCompleted ? 0 : s.dueAmount;
+    s.state     = wasCompleted ? "paid" : "unpaid";
   });
 
   return settlements;
