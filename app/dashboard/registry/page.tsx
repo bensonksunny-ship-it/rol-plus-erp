@@ -26,6 +26,7 @@ interface Entry {
   name:        string;
   admittedOn:  string;   // ISO date or ""
   centre:      string;
+  teacher:     string;   // free-text name as recorded at admission time
   phone:       string;
   admissionNo: string;
   course:      string;
@@ -171,6 +172,7 @@ function RegistryContent() {
             name:        (s.displayName ?? s.name ?? "—") as string,
             admittedOn:  toISO(s.dateOfAdmission ?? s.admissionDate ?? s.createdAt),
             centre:      centreName.get(centreRef) || centreRef || "—",
+            teacher:     String(s.teacherName ?? s.teacher ?? "").trim() || "—",
             phone:       phone || "—",
             admissionNo,
             course,
