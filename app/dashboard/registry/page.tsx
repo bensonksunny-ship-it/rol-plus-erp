@@ -14,7 +14,7 @@ import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES } from "@/config/permissions";
 import { useAuth } from "@/hooks/useAuth";
 import { wingOf } from "@/lib/wing";
-import { parseFile } from "@/lib/xlsx-parser";
+import { parseFile, normalizeHeader } from "@/lib/xlsx-parser";
 import { formatAdmissionNo, looksLikeAdmissionNo, reserveAdmissionSeq } from "@/lib/admissionNumber";
 import { logAction } from "@/services/audit/audit.service";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
@@ -26,7 +26,7 @@ interface Entry {
   name:        string;
   admittedOn:  string;   // ISO date or ""
   centre:      string;
-  teacher:     string;   // free-text name as recorded at admission time
+  batch:       string;
   phone:       string;
   admissionNo: string;
   course:      string;
@@ -100,6 +100,64 @@ function parseSheetDate(raw: string): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+// Canonical column order — used ONLY when pasted rows have no header line.
+// Wing and Batch are recognised by header name only (they can't be positioned
+// reliably without one), so they're not in this fallback order.
+const REGISTRY_COLUMNS = [
+  "name", "dateofadmission", "centre",
+  "phonenumber", "admissionno", "course", "status", "screeninggrade",
+];
+const HEADER_WORDS = /name|wing|centre|center|batch|admission|phone|mobile|course|instrument|status|date|screening|grade/i;
+
+// Fields for the "paste by column" mode.
+const COL_FIELDS: { key: string; label: string }[] = [
+  { key: "name",            label: "Name" },
+  { key: "dateofadmission", label: "Date Of Admission" },
+  { key: "wing",            label: "Wing" },
+  { key: "centre",          label: "Centre" },
+  { key: "batch",           label: "Batch" },
+  { key: "phonenumber",     label: "Phone number" },
+  { key: "admissionno",     label: "Admission no." },
+  { key: "course",          label: "Course" },
+  { key: "status",          label: "Status" },
+  { key: "screeninggrade",  label: "Screening grade" },
+];
+
+/**
+ * Parse tabular text pasted from Excel / Google Sheets (tab-delimited), CSV, or
+ * a plain 2+-space-aligned table. If the first line doesn't look like a header
+ * row, the canonical column order (Name · Date · Centre · Phone ·
+ * Admission no. · Course · Status · Screening) is assumed.
+ */
+function parsePastedTable(text: string): Record<string, string>[] {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n").filter(l => l.trim().length > 0);
+  if (lines.length === 0) return [];
+
+  const first = lines[0];
+  const delim: string | RegExp = first.includes("\t") ? "\t" : first.includes(",") ? "," : /\s{2,}/;
+  const cut = (l: string) => l.split(delim).map(c => c.trim());
+
+  const looksLikeHeader = HEADER_WORDS.test(first) && !/\d{5,}/.test(first);
+  let headers: string[];
+  let dataLines: string[];
+  if (looksLikeHeader) {
+    headers = cut(first).map(normalizeHeader);
+    dataLines = lines.slice(1);
+  } else {
+    headers = REGISTRY_COLUMNS;
+    dataLines = lines;
+  }
+
+  const rows: Record<string, string>[] = [];
+  for (const line of dataLines) {
+    const cells = cut(line);
+    const row: Record<string, string> = {};
+    headers.forEach((h, idx) => { if (h) row[h] = cells[idx] ?? ""; });
+    if (Object.values(row).some(v => v)) rows.push(row);
+  }
+  return rows;
+}
+
 export default function RegistryPage() {
   return (
     <ProtectedRoute
@@ -122,6 +180,7 @@ function RegistryContent() {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [showImport, setShowImport] = useState(false);
+  const [pastedText, setPastedText] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -172,7 +231,7 @@ function RegistryContent() {
             name:        (s.displayName ?? s.name ?? "—") as string,
             admittedOn:  toISO(s.dateOfAdmission ?? s.admissionDate ?? s.createdAt),
             centre:      centreName.get(centreRef) || centreRef || "—",
-            teacher:     String(s.teacherName ?? s.teacher ?? "").trim() || "—",
+            batch:       String(s.batch ?? "").trim() || "—",
             phone:       phone || "—",
             admissionNo,
             course,
@@ -208,6 +267,7 @@ function RegistryContent() {
         e.admissionNo.toLowerCase().includes(needle) ||
         e.phone.toLowerCase().includes(needle) ||
         e.centre.toLowerCase().includes(needle) ||
+        e.batch.toLowerCase().includes(needle) ||
         e.course.toLowerCase().includes(needle) ||
         e.screening.toLowerCase().includes(needle)
       );
@@ -244,24 +304,28 @@ function RegistryContent() {
       <div style={s.card}>
         {loading ? (
           <div style={s.empty}>Loading…</div>
-        ) : rows.length === 0 ? (
-          <div style={s.empty}>{entries.length === 0 ? "No students on the register yet." : "No matches."}</div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={s.table}>
               <thead>
                 <tr>
-                  {["SL", "Name", "Date Of Admission", "Centre", "Phone number", "Admission number", "Course", "Status", "Screening grade"]
+                  {["SL", "Name", "Date Of Admission", "Centre", "Batch", "Phone number", "Admission number", "Course", "Status", "Screening grade"]
                     .map(h => <th key={h} style={s.th}>{h}</th>)}
                 </tr>
               </thead>
               <tbody>
+                {rows.length === 0 && (
+                  <tr><td colSpan={10} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "28px 0" }}>
+                    {entries.length === 0 ? "No students on the register yet." : "No matches."}
+                  </td></tr>
+                )}
                 {rows.map((e, i) => (
                   <tr key={e.uid} style={s.tr}>
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{i + 1}</td>
                     <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>{e.name}</td>
                     <td style={s.td}>{fmtDate(e.admittedOn)}</td>
                     <td style={s.td}>{e.centre}</td>
+                    <td style={s.td}>{e.batch}</td>
                     <td style={s.td}>{e.phone}</td>
                     <td style={s.td}><span style={s.code}>{e.admissionNo}</span></td>
                     <td style={s.td}>{e.course}</td>
@@ -271,6 +335,28 @@ function RegistryContent() {
                     <td style={s.td}>{e.screening}</td>
                   </tr>
                 ))}
+                {canImport && (
+                  <tr style={s.pasteTr}>
+                    <td style={{ ...s.td, color: "var(--color-text-muted)" }}>＋</td>
+                    <td colSpan={9} style={{ padding: 0 }}>
+                      <input
+                        style={s.pasteCell}
+                        value={pastedText}
+                        onChange={ev => setPastedText(ev.target.value)}
+                        onPaste={ev => {
+                          const text = ev.clipboardData.getData("text");
+                          if (text && (text.includes("\n") || text.includes("\t"))) {
+                            ev.preventDefault();
+                            setPastedText(text);
+                            setShowImport(true);
+                          }
+                        }}
+                        onKeyDown={ev => { if (ev.key === "Enter" && pastedText.trim()) setShowImport(true); }}
+                        placeholder="Click here and paste rows from Excel / Google Sheets — as many lines as you like"
+                      />
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -283,8 +369,9 @@ function RegistryContent() {
           existingAdmNos={existingAdmNos}
           initiatorId={user?.uid ?? "unknown"}
           initiatorRole={user?.role ?? ROLES.FOUNDER}
-          onClose={() => setShowImport(false)}
-          onDone={() => { setShowImport(false); load(); }}
+          initialPaste={pastedText}
+          onClose={() => { setShowImport(false); setPastedText(""); }}
+          onDone={() => { setShowImport(false); setPastedText(""); load(); }}
         />
       )}
     </div>
@@ -301,6 +388,7 @@ interface PreviewRow {
   centreId:    string | null;
   centreCode:  string;
   centreUnmatched: boolean;
+  batch:       string;
   phone:       string;
   admissionNo: string;    // explicit from the sheet; "" → auto-generate on import
   auto:        boolean;
@@ -312,21 +400,30 @@ interface PreviewRow {
 }
 
 function ImportModal({
-  centres, existingAdmNos, initiatorId, initiatorRole, onClose, onDone,
+  centres, existingAdmNos, initiatorId, initiatorRole, initialPaste, onClose, onDone,
 }: {
   centres: { id: string; name: string; code: string }[];
   existingAdmNos: Set<string>;
   initiatorId: string;
   initiatorRole: string;
+  initialPaste?: string;
   onClose: () => void;
   onDone: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const [mode, setMode] = useState<"file" | "paste" | "columns">(initialPaste ? "paste" : "file");
   const [fileName, setFileName] = useState("");
+  const [pasteText, setPasteText] = useState(initialPaste ?? "");
+  const [cols, setCols] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [parseErr, setParseErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ imported: number; skipped: number; failed: number; generated: number } | null>(null);
+
+  // Centre-confirmation step: raw rows held back until every unrecognised centre
+  // name has been resolved (mapped to an existing centre, or kept as typed).
+  const [pendingRows, setPendingRows] = useState<Record<string, string>[] | null>(null);
+  const [centreChoices, setCentreChoices] = useState<Record<string, string>>({}); // lc name → "" keep / centreId
 
   const centreByName = useMemo(() => {
     const m = new Map<string, { id: string; code: string }>();
@@ -344,24 +441,22 @@ function ImportModal({
     return "";
   }
 
-  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    e.target.value = "";
-    if (!f) return;
-    setFileName(f.name);
-    setParseErr(""); setResult(null); setPreview([]);
+  function rawCentre(r: Record<string, string>): string {
+    return pick(r, "centre", "center", "branch", "location");
+  }
 
-    const res = await parseFile(f);
-    if (res.error) { setParseErr(res.error); return; }
-    if (res.rows.length === 0) { setParseErr("The file has no data rows."); return; }
-
+  /** Turn parsed rows into validated preview rows. `choices` maps a lowercased
+   *  unrecognised centre name to "" (keep as typed) or an existing centre id. */
+  function buildPreview(rows: Record<string, string>[], choices: Record<string, string> = {}): PreviewRow[] {
     const seen = new Set<string>();
-    const out: PreviewRow[] = res.rows.map((r, i) => {
+    return rows.map((r, i) => {
       const name = pick(r, "name", "studentname", "fullname");
       // Distinct columns — phone never feeds the admission number and vice versa.
       const phone = pick(r, "phonenumber", "phoneno", "phone", "mobilenumber", "mobileno", "mobile", "contactnumber", "contactno", "contact");
-      let admissionNo = pick(r, "admissionnumber", "admissionno", "admissionnumberno", "admno", "admissionid");
+      let admissionNo = pick(r, "admissionno", "admissionnumber", "admissionnumberno", "admno", "admissionid");
       let centreRaw = pick(r, "centre", "center", "branch", "location");
+      const batch = pick(r, "batch", "batchname", "batchno", "batchnumber");
+      const wingRaw = pick(r, "wing", "school", "branchwing");
 
       // Salvage: sometimes the admission code sits in another column (often the
       // Centre column). If admission number is blank but a cell holds an
@@ -378,19 +473,36 @@ function ImportModal({
         }
       }
 
-      const centreMatch = centreRaw ? centreByName.get(centreRaw.toLowerCase()) ?? null : null;
-      const centreId = centreMatch?.id ?? null;
-      const centreCode = centreMatch?.code ?? "";
+      // Resolve centre: exact name match → a confirmed choice → free text.
+      const lc = centreRaw.toLowerCase();
+      let centreId: string | null = null;
+      let centreCode = "";
+      let centreConfirmed = false;
+      const nameMatch = centreRaw ? centreByName.get(lc) : undefined;
+      if (nameMatch) {
+        centreId = nameMatch.id; centreCode = nameMatch.code;
+      } else if (centreRaw && lc in choices) {
+        centreConfirmed = true;
+        const chosen = choices[lc];
+        if (chosen) {
+          const c = centreById.get(chosen);
+          centreId = chosen; centreCode = c?.code ?? "";
+        }
+      }
 
       const auto = !admissionNo;
       const dupInFile = admissionNo && seen.has(admissionNo);
       if (admissionNo) seen.add(admissionNo);
       const duplicate = !!admissionNo && (existingAdmNos.has(admissionNo) || !!dupInFile);
 
-      // Only a missing name blocks a row. An unmatched centre is kept as free
-      // text; the admission number, status and phone are stored exactly as given.
+      // A missing name blocks the row; so does a Wing column that clearly says
+      // ROL+ (this is the School of Music register). Everything else is stored
+      // exactly as given, an unmatched centre included.
+      const wingIsRolPlus = /rol\s*\+|rol\s*plus|music\s*academy|\bacademy\b/i.test(wingRaw)
+        && !/school\s*of\s*music|\bsom\b|\brsm\b/i.test(wingRaw);
       let error: string | null = null;
       if (!name) error = "Name is required";
+      else if (wingIsRolPlus) error = `Wing is "${wingRaw}", not School of Music`;
       else if (phone && admissionNo && phone === admissionNo) error = "Phone number and admission number are the same";
 
       return {
@@ -400,7 +512,8 @@ function ImportModal({
         centreRaw,
         centreId,
         centreCode,
-        centreUnmatched: !!centreRaw && !centreId,
+        centreUnmatched: !!centreRaw && !centreId && !centreConfirmed,
+        batch,
         phone,
         admissionNo,
         auto,
@@ -411,8 +524,96 @@ function ImportModal({
         duplicate,
       };
     });
-    setPreview(out);
   }
+
+  /** After any parse: if a pasted centre name isn't a known centre, hold the
+   *  rows and ask the user to confirm each one before previewing. */
+  function ingest(rows: Record<string, string>[]) {
+    setPreview([]); setResult(null); setPendingRows(null);
+    const unknown = Array.from(new Set(
+      rows.map(rawCentre).filter(c => c && !centreByName.has(c.toLowerCase())),
+    ));
+    if (unknown.length > 0) {
+      setPendingRows(rows);
+      setCentreChoices(Object.fromEntries(unknown.map(c => [c.toLowerCase(), ""])));
+      return;
+    }
+    setPreview(buildPreview(rows));
+  }
+
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    setFileName(f.name);
+    setParseErr(""); setResult(null); setPreview([]); setPendingRows(null);
+
+    const res = await parseFile(f);
+    if (res.error) { setParseErr(res.error); return; }
+    if (res.rows.length === 0) { setParseErr("The file has no data rows."); return; }
+    ingest(res.rows);
+  }
+
+  function parsePaste(text: string) {
+    setParseErr(""); setResult(null); setPreview([]); setPendingRows(null);
+    const rows = parsePastedTable(text);
+    if (rows.length === 0) {
+      setParseErr("Paste rows copied straight from Excel or Google Sheets — one student per line.");
+      return;
+    }
+    ingest(rows);
+  }
+  const handlePasteParse = () => parsePaste(pasteText);
+
+  const unknownCentreList = useMemo(() => {
+    if (!pendingRows) return [] as { raw: string; count: number }[];
+    const counts = new Map<string, { raw: string; count: number }>();
+    for (const r of pendingRows) {
+      const c = rawCentre(r);
+      if (!c || centreByName.has(c.toLowerCase())) continue;
+      const k = c.toLowerCase();
+      const e = counts.get(k) ?? { raw: c, count: 0 };
+      e.count++; counts.set(k, e);
+    }
+    return Array.from(counts.values());
+  }, [pendingRows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function confirmCentres() {
+    if (!pendingRows) return;
+    setPreview(buildPreview(pendingRows, centreChoices));
+    setPendingRows(null);
+  }
+
+  /** "Paste by column" mode: zip the per-column lists together by row. A column
+   *  with a single value is broadcast to every row (same centre / date). */
+  function parseColumns() {
+    setParseErr(""); setResult(null); setPreview([]); setPendingRows(null);
+    const lists: Record<string, string[]> = {};
+    let maxLen = 0;
+    for (const f of COL_FIELDS) {
+      const arr = (cols[f.key] ?? "").replace(/\r\n?/g, "\n").split("\n").map(v => v.trim());
+      while (arr.length && !arr[arr.length - 1]) arr.pop();
+      lists[f.key] = arr;
+      if (arr.length > 1) maxLen = Math.max(maxLen, arr.length);
+    }
+    if (maxLen === 0) { setParseErr("Paste at least one multi-line column (e.g. the Name list)."); return; }
+    const rows: Record<string, string>[] = [];
+    for (let i = 0; i < maxLen; i++) {
+      const row: Record<string, string> = {};
+      for (const f of COL_FIELDS) {
+        const arr = lists[f.key];
+        row[f.key] = arr.length === 1 ? arr[0] : (arr[i] ?? "");
+      }
+      if (Object.values(row).some(v => v)) rows.push(row);
+    }
+    ingest(rows);
+  }
+
+  // If the modal was opened by pasting into the on-page row, parse immediately.
+  useEffect(() => {
+    if (initialPaste) parsePaste(initialPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const importable = preview.filter(r => !r.error && !r.duplicate);
   const skipCount = preview.filter(r => r.duplicate && !r.error).length;
@@ -452,6 +653,7 @@ function ImportModal({
             studentID:      admNo,
             centre:         r.centreId ?? r.centreRaw,
             centerId:       r.centreId ?? "",
+            batch:          r.batch || null,
             course:         r.course,
             classType:      "group",
             billingMode:    "prepay",
@@ -481,7 +683,7 @@ function ImportModal({
         approverId: null,
         approverRole: null,
         reason: null,
-        metadata: { imported, skipped: skipCount, failed, generated: autoRows.length, file: fileName },
+        metadata: { imported, skipped: skipCount, failed, generated: autoRows.length, source: mode === "file" ? (fileName || "file") : mode },
       }).catch(() => {});
       setResult({ imported, skipped: skipCount, failed, generated: autoRows.length });
     } finally {
@@ -493,7 +695,7 @@ function ImportModal({
     <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
       <div style={s.modal}>
         <div style={s.modalHead}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: "var(--color-text-primary)" }}>Import students from Excel</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "var(--color-text-primary)" }}>Import students</div>
           <button onClick={onClose} disabled={busy} style={s.closeBtn}>✕</button>
         </div>
 
@@ -510,9 +712,7 @@ function ImportModal({
           ) : (
             <>
               <p style={{ fontSize: 12.5, color: "var(--color-text-secondary)", marginTop: 0, lineHeight: 1.6 }}>
-                Upload a <strong>.xlsx</strong> or <strong>.csv</strong> file with these column headers:
-                <br />
-                <code style={s.cols}>Name · Date Of Admission · Centre · Phone number · Admission number · Course · Status · Screening grade</code>
+                Column headers (any order, punctuation ignored): <code style={s.cols}>Name · Date Of Admission · Wing · Centre · Phone number · Admission no. · Course · Status · Screening grade</code> — plus an optional <code style={{ fontSize: 11 }}>Batch</code> column.
                 <br />
                 Every value is stored exactly as written — centre, admission number and status are
                 kept verbatim (a centre that isn't in the system is just free text). If a row has no
@@ -520,9 +720,111 @@ function ImportModal({
                 Only rows with no name, or an admission number already on the register, are skipped.
               </p>
 
-              <input ref={fileRef} type="file" accept=".xlsx,.csv" onChange={handleFile} style={s.fileInput} />
-              {fileName && <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginTop: 6 }}>📄 {fileName}</div>}
+              {!pendingRows && preview.length === 0 && (<>
+              <div style={s.modeTabs}>
+                {([
+                  ["file", "📄 Upload file"],
+                  ["paste", "📋 Paste table"],
+                  ["columns", "🧬 Paste by column"],
+                ] as const).map(([m, label]) => (
+                  <button
+                    key={m}
+                    onClick={() => { setMode(m); setParseErr(""); setPreview([]); }}
+                    style={{ ...s.modeTab, ...(mode === m ? s.modeTabActive : {}) }}
+                  >{label}</button>
+                ))}
+              </div>
+
+              {mode === "file" && (
+                <>
+                  <input ref={fileRef} type="file" accept=".xlsx,.csv" onChange={handleFile} style={s.fileInput} />
+                  {fileName && <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginTop: 6 }}>📄 {fileName}</div>}
+                </>
+              )}
+
+              {mode === "paste" && (
+                <>
+                  <textarea
+                    value={pasteText}
+                    onChange={e => setPasteText(e.target.value)}
+                    placeholder={"Paste rows copied from Excel / Google Sheets (header row optional):\n\nAdithya M\t20 November 2017\tROLCC\t\t20112017101\tDrums\tConfirm"}
+                    rows={7}
+                    style={s.textarea}
+                  />
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                    <button style={s.primaryBtn} onClick={handlePasteParse} disabled={!pasteText.trim()}>
+                      Preview rows
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {mode === "columns" && (
+                <>
+                  <p style={{ fontSize: 11.5, color: "var(--color-text-muted)", margin: "0 0 8px" }}>
+                    Paste each column separately — one value per line. A column with a single value
+                    (e.g. Centre or Date) is applied to every row.
+                  </p>
+                  <div style={s.colGrid}>
+                    {COL_FIELDS.map(f => (
+                      <div key={f.key}>
+                        <label style={s.colLabel}>{f.label}</label>
+                        <textarea
+                          value={cols[f.key] ?? ""}
+                          onChange={e => setCols(c => ({ ...c, [f.key]: e.target.value }))}
+                          rows={4}
+                          style={s.colBox}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                    <button
+                      style={s.primaryBtn}
+                      onClick={parseColumns}
+                      disabled={!Object.values(cols).some(v => (v ?? "").includes("\n"))}
+                    >
+                      Preview rows
+                    </button>
+                  </div>
+                </>
+              )}
+              </>
+              )}
+
               {parseErr && <div style={s.err}>{parseErr}</div>}
+
+              {pendingRows && unknownCentreList.length > 0 && (
+                <div style={s.confirmBox}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", marginBottom: 4 }}>
+                    Confirm {unknownCentreList.length} centre{unknownCentreList.length === 1 ? "" : "s"}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--color-text-muted)", marginBottom: 12 }}>
+                    These names in the paste aren&apos;t centres in the system. For each one, keep it
+                    as typed or point it at an existing centre.
+                  </div>
+                  {unknownCentreList.map(u => (
+                    <div key={u.raw} style={s.confirmRow}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{u.raw}</span>
+                        <span style={{ fontSize: 11, color: "var(--color-text-muted)" }}> · {u.count} student{u.count === 1 ? "" : "s"}</span>
+                      </div>
+                      <select
+                        style={s.select}
+                        value={centreChoices[u.raw.toLowerCase()] ?? ""}
+                        onChange={e => setCentreChoices(c => ({ ...c, [u.raw.toLowerCase()]: e.target.value }))}
+                      >
+                        <option value="">Keep as &quot;{u.raw}&quot;</option>
+                        {centres.map(c => <option key={c.id} value={c.id}>→ {c.name}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+                    <button style={s.ghostBtn} onClick={() => setPendingRows(null)}>Cancel</button>
+                    <button style={s.primaryBtn} onClick={confirmCentres}>Confirm &amp; preview</button>
+                  </div>
+                </div>
+              )}
 
               {preview.length > 0 && (
                 <>
@@ -535,7 +837,7 @@ function ImportModal({
                   <div style={{ maxHeight: 280, overflow: "auto", border: "1px solid var(--color-border)", borderRadius: 8 }}>
                     <table style={s.table}>
                       <thead>
-                        <tr>{["#", "Name", "Adm no.", "Centre", "Phone", "Course", "Date", "Screening", ""].map(h => <th key={h} style={s.th}>{h}</th>)}</tr>
+                        <tr>{["#", "Name", "Adm no.", "Centre", "Batch", "Phone", "Course", "Date", "Screening", ""].map(h => <th key={h} style={s.th}>{h}</th>)}</tr>
                       </thead>
                       <tbody>
                         {preview.map(r => (
@@ -544,6 +846,7 @@ function ImportModal({
                             <td style={s.td}>{r.name || <em style={{ color: "#dc2626" }}>missing</em>}</td>
                             <td style={s.td}>{r.admissionNo || <em style={{ color: "#4f46e5" }}>auto</em>}</td>
                             <td style={s.td}>{r.centreRaw || "—"}</td>
+                            <td style={s.td}>{r.batch || "—"}</td>
                             <td style={s.td}>{r.phone || "—"}</td>
                             <td style={s.td}>{r.course || "—"}</td>
                             <td style={s.td}>{r.admittedOn ? fmtDate(r.admittedOn) : "—"}</td>
@@ -610,6 +913,17 @@ const s: Record<string, React.CSSProperties> = {
   modalFoot: { display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 20px", borderTop: "1px solid var(--color-border)" },
   closeBtn: { background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "var(--color-text-muted)", padding: 4 },
   fileInput: { display: "block", fontSize: 13, marginTop: 6 },
+  pasteTr: { borderTop: "2px dashed var(--color-border)", background: "var(--color-surface-2)" },
+  pasteCell: { width: "100%", boxSizing: "border-box", border: "none", background: "transparent", padding: "12px", fontSize: 13, color: "var(--color-text-primary)", outline: "none" },
+  modeTabs: { display: "flex", gap: 6, margin: "12px 0" },
+  modeTab: { padding: "6px 14px", borderRadius: 8, border: "1px solid var(--color-border)", background: "var(--color-surface-2)", color: "var(--color-text-secondary)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
+  modeTabActive: { background: "#ede9fe", borderColor: "#4f46e5", color: "#4338ca" },
+  textarea: { width: "100%", boxSizing: "border-box", minHeight: 140, padding: "10px 12px", borderRadius: 8, border: "1px solid var(--color-border)", background: "var(--color-bg)", color: "var(--color-text-primary)", fontSize: 12.5, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", outline: "none", resize: "vertical" as const, whiteSpace: "pre" as const },
+  colGrid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 },
+  colLabel: { display: "block", fontSize: 10.5, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.04em", color: "var(--color-text-muted)", marginBottom: 3 },
+  colBox: { width: "100%", boxSizing: "border-box", padding: "7px 9px", borderRadius: 7, border: "1px solid var(--color-border)", background: "var(--color-bg)", color: "var(--color-text-primary)", fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", outline: "none", resize: "vertical" as const },
+  confirmBox: { marginTop: 12, border: "1px solid #bfdbfe", background: "#eff6ff", borderRadius: 10, padding: "14px 16px" },
+  confirmRow: { display: "flex", alignItems: "center", gap: 10, padding: "6px 0", flexWrap: "wrap" as const },
   cols: { display: "inline-block", marginTop: 6, fontSize: 11.5, background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: 6, padding: "4px 8px" },
   err: { background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#991b1b", marginTop: 10 },
   pill: { display: "inline-block", padding: "2px 8px", borderRadius: 99, fontSize: 10.5, fontWeight: 700 },

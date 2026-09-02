@@ -15,6 +15,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useWing } from "@/hooks/useWing";
 import { isSchoolOfMusic } from "@/lib/wing";
 import { deleteCenter } from "@/services/admin/delete.service";
+import { parseFile } from "@/lib/xlsx-parser";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -489,6 +490,80 @@ function CentersContent() {
   const [dayError, setDayError]     = useState("");
   const { toasts, toast, remove }   = useToast();
 
+  // ── Bulk import (names only) ──────────────────────────────────────────────
+  const [showImport, setShowImport]   = useState(false);
+  const [importNames, setImportNames] = useState<string[]>([]);
+  const [importErr, setImportErr]     = useState("");
+  const [importing, setImporting]     = useState(false);
+  const importFileRef                 = useRef<HTMLInputElement>(null);
+
+  const existingNamesLC = useMemo(
+    () => new Set(centers.map(c => c.name.trim().toLowerCase())),
+    [centers],
+  );
+  const newImportNames = useMemo(
+    () => importNames.filter(n => !existingNamesLC.has(n.toLowerCase())),
+    [importNames, existingNamesLC],
+  );
+
+  function openImport() {
+    setShowForm(false);
+    setImportNames([]);
+    setImportErr("");
+    setShowImport(true);
+  }
+  function closeImport() {
+    setShowImport(false);
+    setImportNames([]);
+    setImportErr("");
+    if (importFileRef.current) importFileRef.current.value = "";
+  }
+
+  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportErr("");
+    setImportNames([]);
+    const { rows, error } = await parseFile(file);
+    if (error) { setImportErr(error); return; }
+    // Accept a "name" column (also centre/center/centername), else the first column.
+    const pick = (r: Record<string, string>) =>
+      (r.name ?? r.centrename ?? r.centername ?? r.centre ?? r.center ?? Object.values(r)[0] ?? "").trim();
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const r of rows) {
+      const n = pick(r);
+      if (n && !seen.has(n.toLowerCase())) { seen.add(n.toLowerCase()); names.push(n); }
+    }
+    if (names.length === 0) { setImportErr("No centre names found. Put one name per row (a header like \"Name\" is fine)."); return; }
+    setImportNames(names);
+  }
+
+  async function handleImportRun() {
+    if (newImportNames.length === 0 || importing) return;
+    setImporting(true);
+    let created = 0;
+    try {
+      for (const name of newImportNames) {
+        try {
+          await createCenter({
+            name, location: "", timeSlot: "", teacherUid: "",
+            studentUids: [], status: "active", wing,
+          } as Parameters<typeof createCenter>[0]);
+          created++;
+        } catch (err) {
+          console.error(`Failed to create center "${name}":`, err);
+        }
+      }
+      toast(`Imported ${created} centre${created !== 1 ? "s" : ""}. Add teacher, days & times on each.`, created > 0 ? "success" : "error");
+      closeImport();
+      setLoading(true);
+      await fetchCenters();
+    } finally {
+      setImporting(false);
+    }
+  }
+
   async function fetchCenters() {
     try {
       const [data, teacherList] = await Promise.all([
@@ -520,6 +595,7 @@ function CentersContent() {
     setEditTarget(null);
     setForm({ ...EMPTY_FORM });
     setDayError("");
+    setShowImport(false);
     setShowForm(true);
   }
 
@@ -620,10 +696,75 @@ function CentersContent() {
       {/* Header */}
       <div style={styles.header}>
         <h1 style={styles.heading}>Centers</h1>
-        <button onClick={showForm ? closeForm : openCreate} style={styles.addBtn}>
-          {showForm ? "Cancel" : "Add Center"}
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={showImport ? closeImport : openImport}
+            style={{ ...styles.addBtn, background: showImport ? "#f3f4f6" : "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
+            {showImport ? "Cancel" : "⬆ Import names"}
+          </button>
+          <button onClick={showForm ? closeForm : openCreate} style={styles.addBtn}>
+            {showForm ? "Cancel" : "Add Center"}
+          </button>
+        </div>
       </div>
+
+      {/* Bulk import — names only */}
+      {showImport && (
+        <div style={formStyles.wrapper}>
+          <div style={formStyles.sectionTitle}>Import centre names from Excel / CSV</div>
+          <div style={{ fontSize: 12.5, color: "#6b7280", marginBottom: 12 }}>
+            One centre name per row (a header row like <b>Name</b> is fine, or just a plain list).
+            Each centre is created as <b>Active</b> with no teacher, days or times — fill those in
+            afterwards by editing the centre.
+          </div>
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".xlsx,.csv"
+            onChange={handleImportFile}
+            style={{ fontSize: 13, marginBottom: 10 }}
+          />
+          {importErr && (
+            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#dc2626", marginBottom: 10 }}>
+              {importErr}
+            </div>
+          )}
+          {importNames.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, color: "#374151", marginBottom: 6 }}>
+                {importNames.length} name{importNames.length !== 1 ? "s" : ""} found ·{" "}
+                <b style={{ color: "#16a34a" }}>{newImportNames.length} new</b>
+                {importNames.length - newImportNames.length > 0 && (
+                  <span style={{ color: "#9ca3af" }}> · {importNames.length - newImportNames.length} already exist</span>
+                )}
+              </div>
+              <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid #e5e7eb", borderRadius: 8, padding: 8, display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                {importNames.map(n => {
+                  const dup = existingNamesLC.has(n.toLowerCase());
+                  return (
+                    <span key={n} style={{
+                      fontSize: 12, padding: "3px 10px", borderRadius: 99,
+                      background: dup ? "#f3f4f6" : "#dcfce7",
+                      color: dup ? "#9ca3af" : "#15803d",
+                      textDecoration: dup ? "line-through" : "none",
+                    }}>
+                      {n}
+                    </span>
+                  );
+                })}
+              </div>
+            </>
+          )}
+          <div style={formStyles.actions}>
+            <button
+              onClick={handleImportRun}
+              disabled={newImportNames.length === 0 || importing}
+              style={{ ...formStyles.submitBtn, opacity: newImportNames.length === 0 || importing ? 0.5 : 1 }}
+            >
+              {importing ? "Importing…" : `Import ${newImportNames.length} centre${newImportNames.length !== 1 ? "s" : ""}`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Form */}
       {showForm && (

@@ -1,8 +1,17 @@
 // Shared zero-dependency xlsx + csv parser. No external libraries required.
 
 export interface ParseResult {
-  rows:  Record<string, string>[];  // keys are lowercased, spaces/underscores stripped
+  rows:  Record<string, string>[];  // keys are lowercased, all punctuation/whitespace stripped
   error: string | null;
+}
+
+/**
+ * Normalize a header cell to a lookup key: lowercase, then drop everything that
+ * isn't a letter or digit. So "Admission no." → "admissionno", "Phone number" →
+ * "phonenumber", "Screening grade" → "screeninggrade".
+ */
+export function normalizeHeader(h: string): string {
+  return h.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 // ─── ZIP / XLSX internals ─────────────────────────────────────────────────────
@@ -106,7 +115,7 @@ async function parseXlsxBuffer(buffer: ArrayBuffer): Promise<ParseResult> {
       if (tAttr?.[1] === "inlineStr") return stripXmlTags(parseXmlText(cell, "t")[0] ?? "");
       return stripXmlTags(raw);
     });
-    const normalHeaders = rawHeaders.map(h => h.trim().toLowerCase().replace(/[_\s]+/g, ""));
+    const normalHeaders = rawHeaders.map(normalizeHeader);
 
     const dataRows: Record<string, string>[] = [];
     for (let ri = 1; ri < rowMatches.length; ri++) {
@@ -159,7 +168,7 @@ function parseCsvLine(line: string): string[] {
 function parseCsvText(text: string): ParseResult {
   const lines = text.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) return { rows: [], error: "CSV has no data rows." };
-  const headers = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase().replace(/[_\s]+/g, ""));
+  const headers = parseCsvLine(lines[0]).map(normalizeHeader);
   const rows: Record<string, string>[] = [];
   for (let i = 1; i < lines.length; i++) {
     const values = parseCsvLine(lines[i]);
