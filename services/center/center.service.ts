@@ -12,6 +12,9 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
+import { DEFAULT_WING } from "@/config/constants";
+import { inWing } from "@/lib/wing";
+import type { Wing } from "@/types";
 import type { Center, CreateCenterInput, UpdateCenterInput } from "@/types/center";
 
 const COLLECTION = "centers";
@@ -45,6 +48,8 @@ export async function createCenter(data: CreateCenterInput): Promise<Center> {
     teacherUid:  data.teacherUid,
     studentUids: data.studentUids ?? [],
     status:      data.status,
+    wing:        data.wing ?? DEFAULT_WING,
+    monthlyFee:  data.monthlyFee ?? 0,
     createdAt:   serverTimestamp(),
     updatedAt:   serverTimestamp(),
   });
@@ -70,10 +75,13 @@ export async function createCenter(data: CreateCenterInput): Promise<Center> {
 
 /**
  * Get all centers from Firestore (server read, no cache).
+ * Pass `wing` to scope to one music school (legacy docs with no `wing` field
+ * count as the default wing).
  */
-export async function getCenters(): Promise<Center[]> {
+export async function getCenters(wing?: Wing): Promise<Center[]> {
   const snap = await getDocs(collection(db, COLLECTION));
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }) as Center);
+  const all  = snap.docs.map(d => ({ id: d.id, ...d.data() }) as Center);
+  return wing ? all.filter(c => inWing(c, wing)) : all;
 }
 
 /**
@@ -112,6 +120,7 @@ export async function updateCenter(id: string, data: UpdateCenterInput): Promise
   if (data.teacherUid  !== undefined) payload.teacherUid  = data.teacherUid;
   if (data.studentUids !== undefined) payload.studentUids = data.studentUids;
   if (data.status      !== undefined) payload.status      = data.status;
+  if (data.monthlyFee  !== undefined) payload.monthlyFee  = data.monthlyFee;
 
   await updateDoc(ref, payload);
 

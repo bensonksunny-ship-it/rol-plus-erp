@@ -9,6 +9,8 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
+import { useWing } from "@/hooks/useWing";
+import { inWing, isSchoolOfMusic } from "@/lib/wing";
 import {
   saveCentreAttendance,
   saveExtraClass,
@@ -128,7 +130,7 @@ const ALL_STATUSES: AttendanceStatus[] = [
 
 export default function AttendancePage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <AttendanceContent />
     </ProtectedRoute>
   );
@@ -577,15 +579,213 @@ function CentreCard({
   );
 }
 
+// ─── Today view — quick mark the batches that have class on a chosen day ──────
+
+const QUICK_STATUSES: AttendanceStatus[] = ["present", "absent", "break"];
+
+function shiftDay(iso: string, n: number): string {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function TodayView({
+  date, setDate, centres, studentMap, attMap, extraMap, userUid, onSaved,
+}: {
+  date:       string;
+  setDate:    (d: string) => void;
+  centres:    CentreRow[];
+  studentMap: Map<string, StudentRow[]>;
+  attMap:     Map<string, AttRec[]>;
+  extraMap:   Map<string, Set<string>>;
+  userUid:    string;
+  onSaved:    (centreId: string, changes: { uid: string; date: string; status: AttendanceStatus }[]) => void;
+}) {
+  // draft: `${centreId}|${uid}` -> status (unsaved picks)
+  const [draft, setDraft]     = useState<Map<string, AttendanceStatus>>(new Map());
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  // Reset drafts whenever the day changes.
+  useEffect(() => { setDraft(new Map()); }, [date]);
+
+  const isToday   = date === todayISO();
+  const dow       = new Date(date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "long" });
+  const dateLabel = new Date(date + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+
+  const todaysCentres = centres.filter(c =>
+    (studentMap.get(c.id)?.length ?? 0) > 0 &&
+    isScheduled(date, c, extraMap.get(c.id) ?? new Set()),
+  );
+
+  const savedStatus = (centreId: string, uid: string): AttendanceStatus | null =>
+    (attMap.get(centreId) ?? []).find(r => r.studentUid === uid && r.date === date)?.status ?? null;
+
+  const effective = (centreId: string, uid: string): AttendanceStatus | null =>
+    draft.get(`${centreId}|${uid}`) ?? savedStatus(centreId, uid);
+
+  function pick(centreId: string, uid: string, status: AttendanceStatus) {
+    setDraft(prev => {
+      const next = new Map(prev);
+      const key  = `${centreId}|${uid}`;
+      if (savedStatus(centreId, uid) === status) next.delete(key);   // back to saved = no draft
+      else next.set(key, status);
+      return next;
+    });
+  }
+
+  function markAllPresent(centreId: string) {
+    const students = studentMap.get(centreId) ?? [];
+    setDraft(prev => {
+      const next = new Map(prev);
+      for (const s of students) {
+        if (savedStatus(centreId, s.uid) === "present") next.delete(`${centreId}|${s.uid}`);
+        else next.set(`${centreId}|${s.uid}`, "present");
+      }
+      return next;
+    });
+  }
+
+  function pendingFor(centreId: string): { uid: string; status: AttendanceStatus }[] {
+    const students = studentMap.get(centreId) ?? [];
+    return students
+      .map(s => ({ uid: s.uid, status: draft.get(`${centreId}|${s.uid}`) }))
+      .filter((x): x is { uid: string; status: AttendanceStatus } => !!x.status);
+  }
+
+  async function save(centreId: string) {
+    const pending = pendingFor(centreId);
+    if (pending.length === 0) return;
+    setSavingId(centreId);
+    try {
+      await Promise.all(pending.map(p =>
+        saveCentreAttendance({ studentUid: p.uid, centerId: centreId, date, status: p.status, markedBy: userUid }),
+      ));
+      onSaved(centreId, pending.map(p => ({ uid: p.uid, date, status: p.status })));
+      setDraft(prev => {
+        const next = new Map(prev);
+        for (const p of pending) next.delete(`${centreId}|${p.uid}`);
+        return next;
+      });
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  return (
+    <div>
+      {/* Day navigator */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        <button onClick={() => setDate(shiftDay(date, -1))} style={btnGhost}>‹</button>
+        <input type="date" value={date} min={minMonth() + "-01"} max={shiftDay(todayISO(), 7)}
+          onChange={e => e.target.value && setDate(e.target.value)} style={inputStyle} />
+        <button onClick={() => setDate(shiftDay(date, 1))} style={btnGhost}>›</button>
+        {!isToday && <button onClick={() => setDate(todayISO())} style={btnGhost}>Today</button>}
+        <span style={{ fontSize: 13, color: "#6b7280" }}>{dow}, {dateLabel}</span>
+      </div>
+
+      {todaysCentres.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "56px 0", color: "#6b7280" }}>
+          <div style={{ fontSize: 34, marginBottom: 8 }}>🎵</div>
+          <p style={{ fontSize: 14, margin: 0 }}>No batches have a class on {dow}.</p>
+          <p style={{ fontSize: 12, color: "#9ca3af", marginTop: 4 }}>Pick another day, or check the batch class-days in Centres.</p>
+        </div>
+      ) : (
+        todaysCentres.map(centre => {
+          const students = studentMap.get(centre.id) ?? [];
+          const pending  = pendingFor(centre.id).length;
+          const counts   = students.reduce((a, s) => {
+            const st = effective(centre.id, s.uid);
+            if (st === "present") a.present++;
+            else if (st === "absent") a.absent++;
+            else if (st) a.other++;
+            else a.unmarked++;
+            return a;
+          }, { present: 0, absent: 0, other: 0, unmarked: 0 });
+          const isExtra = !centre.daysOfWeek.includes(dowOf(date));
+
+          return (
+            <div key={centre.id} style={{ ...card, padding: "14px 16px" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+                <div>
+                  <span style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{centre.name}</span>
+                  <span style={{ marginLeft: 8, fontSize: 11, color: "#6b7280", background: "#f3f4f6", padding: "2px 8px", borderRadius: 99 }}>
+                    {centre.daysOfWeek.join(" · ") || "no days"}
+                  </span>
+                  {isExtra && <span style={{ marginLeft: 6, fontSize: 11, color: "#166534", background: "#dcfce7", padding: "2px 8px", borderRadius: 99 }}>extra class</span>}
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button onClick={() => markAllPresent(centre.id)} style={btnSmall}>All present</button>
+                  <button onClick={() => save(centre.id)} disabled={pending === 0 || savingId === centre.id}
+                    style={{ ...btnPrimary, flex: "none", padding: "7px 16px", opacity: pending === 0 ? 0.5 : 1, cursor: pending === 0 ? "not-allowed" : "pointer" }}>
+                    {savingId === centre.id ? "Saving…" : pending > 0 ? `Save ${pending}` : "Saved"}
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 8 }}>
+                {counts.present} present · {counts.absent} absent
+                {counts.other > 0 && ` · ${counts.other} other`}
+                {counts.unmarked > 0 && ` · ${counts.unmarked} unmarked`}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {students.map(s => {
+                  const eff = effective(centre.id, s.uid);
+                  const dirty = draft.has(`${centre.id}|${s.uid}`);
+                  return (
+                    <div key={s.uid} style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "6px 8px", borderRadius: 8,
+                      background: dirty ? "#eff6ff" : "transparent",
+                    }}>
+                      <span style={{ flex: 1, fontSize: 13, color: "#111827", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {s.name}
+                        {s.instrument && <span style={{ color: "#9ca3af", fontSize: 11 }}> · {s.instrument}</span>}
+                      </span>
+                      {QUICK_STATUSES.map(st => {
+                        const on = eff === st;
+                        const { bg, fg } = STATUS_COLOR[st];
+                        return (
+                          <button key={st} onClick={() => pick(centre.id, s.uid, st)} style={{
+                            minWidth: 34, padding: "6px 8px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+                            border: on ? `2px solid ${fg}` : "1px solid #e5e7eb",
+                            background: on ? bg : "#fff", color: on ? fg : "#9ca3af",
+                          }}>
+                            {STATUS_SHORT[st]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 // ─── Main content ─────────────────────────────────────────────────────────────
 
 function AttendanceContent() {
   const { user, loading: authLoading } = useAuthContext();
   const { filterCentres }              = useCentreAccess();
+  const { wing }                       = useWing();
 
+  const [tab,     setTab]     = useState<"today" | "history">("today");
+  const [dayDate, setDayDate] = useState<string>(todayISO());
   const [month,   setMonth]   = useState<string>(currentMonth());
   const [centres, setCentres] = useState<CentreRow[]>([]);
+  const [centresLoaded, setCentresLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  // Keep the loaded month in sync with whichever day the "Today" view is showing.
+  useEffect(() => {
+    const m = dayDate.slice(0, 7);
+    if (m !== month) setMonth(m);
+  }, [dayDate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Per-centre data
   const [studentMap,    setStudentMap]    = useState<Map<string, StudentRow[]>>(new Map());
@@ -605,7 +805,9 @@ function AttendanceContent() {
     if (authLoading || !user) return;
     (async () => {
       const snap = await getDocs(query(collection(db, "centers"), where("status", "==", "active")));
-      const all: CentreRow[] = snap.docs.map(d => {
+      const all: CentreRow[] = snap.docs
+        .filter(d => inWing(d.data(), wing))
+        .map(d => {
         const data = d.data() as Record<string, unknown>;
         return {
           id:         d.id,
@@ -616,9 +818,11 @@ function AttendanceContent() {
         };
       });
       setCentres(filterCentres(all));
-    })().catch(console.error);
+    })()
+      .catch(console.error)
+      .finally(() => setCentresLoaded(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user]);
+  }, [authLoading, user, wing]);
 
   // ── Load students + attendance for all centres when month changes ─────────
   const loadAll = useCallback(async (centreList: CentreRow[], m: string) => {
@@ -706,8 +910,10 @@ function AttendanceContent() {
   }, []);
 
   useEffect(() => {
+    if (!centresLoaded) return;
     if (centres.length > 0) loadAll(centres, month);
-  }, [centres, month, loadAll]);
+    else setLoading(false);   // no centres in this wing — don't hang on the spinner
+  }, [centresLoaded, centres, month, loadAll]);
 
   // ── Save attendance ───────────────────────────────────────────────────────
   async function handleSave(status: AttendanceStatus, dates: string[]) {
@@ -763,31 +969,26 @@ function AttendanceContent() {
   // ── Render ────────────────────────────────────────────────────────────────
   if (authLoading) return null;
 
+  const tabBtn = (key: "today" | "history", label: string): React.CSSProperties => ({
+    padding: "8px 16px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 700,
+    border: tab === key ? "2px solid #4f46e5" : "1px solid #e5e7eb",
+    background: tab === key ? "#ede9fe" : "#fafafa",
+    color: tab === key ? "#4f46e5" : "#374151",
+  });
+
   return (
     <div style={{ fontFamily: "inherit" }}>
       {/* Header */}
-      <div style={{ marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111827", margin: 0 }}>Attendance</h1>
           <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4, margin: 0 }}>
-            All centres · click any cell to mark or edit
+            {tab === "today" ? "Mark the batches that have class on a given day" : "Month grid — review and correct any date"}
           </p>
         </div>
-        {/* Month picker */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <input
-            type="month"
-            value={month}
-            min={minMonth()}
-            max={maxBreakMonth()}
-            onChange={e => setMonth(e.target.value)}
-            style={inputStyle}
-          />
-          {month !== currentMonth() && (
-            <button onClick={() => setMonth(currentMonth())} style={btnGhost}>
-              ← Today
-            </button>
-          )}
+          <button onClick={() => setTab("today")} style={tabBtn("today", "Today")}>Today</button>
+          <button onClick={() => setTab("history")} style={tabBtn("history", "History")}>History</button>
         </div>
       </div>
 
@@ -800,34 +1001,73 @@ function AttendanceContent() {
       {!loading && centres.length === 0 && (
         <div style={{ textAlign: "center", padding: "64px 0" }}>
           <div style={{ fontSize: 36, marginBottom: 10 }}>🏫</div>
-          <p style={{ color: "#6b7280", fontSize: 14 }}>No centres available.</p>
+          <p style={{ color: "#6b7280", fontSize: 14, marginBottom: 4 }}>
+            No {isSchoolOfMusic(wing) ? "Rol's School of Music " : ""}batches yet.
+          </p>
+          <p style={{ color: "#9ca3af", fontSize: 12 }}>
+            Create a centre with class-days and enrol students into it to start marking attendance.
+          </p>
         </div>
       )}
 
-      {/* Legend — shown once for the whole page */}
-      {!loading && centres.length > 0 && (
-        <div style={{ display: "flex", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
-          {ALL_STATUSES.map(s => (
-            <span key={s} style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4, color: STATUS_COLOR[s].fg, background: STATUS_COLOR[s].bg, padding: "2px 8px", borderRadius: 99 }}>
-              <b>{STATUS_SHORT[s]}</b> {STATUS_LABEL[s]}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {!loading && centres.map(centre => (
-        <CentreCard
-          key={centre.id}
-          centre={centre}
-          students={studentMap.get(centre.id) ?? []}
-          attendance={attMap.get(centre.id) ?? []}
-          extraDates={extraMap.get(centre.id) ?? new Set()}
-          month={month}
-          today={today}
-          onCellClick={setModal}
-          onAddExtra={() => setExtraTarget(centre.id)}
+      {/* ── Today tab ── */}
+      {!loading && centres.length > 0 && tab === "today" && (
+        <TodayView
+          date={dayDate}
+          setDate={setDayDate}
+          centres={centres}
+          studentMap={studentMap}
+          attMap={attMap}
+          extraMap={extraMap}
+          userUid={user?.uid ?? ""}
+          onSaved={(centreId, changes) => {
+            setAttMap(prev => {
+              const next = new Map(prev);
+              const recs = [...(next.get(centreId) ?? [])];
+              for (const ch of changes) {
+                const idx = recs.findIndex(r => r.studentUid === ch.uid && r.date === ch.date);
+                if (idx >= 0) recs[idx] = { ...recs[idx], status: ch.status };
+                else recs.push({ id: `${ch.uid}|${ch.date}`, studentUid: ch.uid, date: ch.date, status: ch.status });
+              }
+              next.set(centreId, recs);
+              return next;
+            });
+          }}
         />
-      ))}
+      )}
+
+      {/* ── History tab (month grid) ── */}
+      {!loading && centres.length > 0 && tab === "history" && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <input type="month" value={month} min={minMonth()} max={maxBreakMonth()}
+              onChange={e => setMonth(e.target.value)} style={inputStyle} />
+            {month !== currentMonth() && (
+              <button onClick={() => setMonth(currentMonth())} style={btnGhost}>← This month</button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
+            {ALL_STATUSES.map(s => (
+              <span key={s} style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4, color: STATUS_COLOR[s].fg, background: STATUS_COLOR[s].bg, padding: "2px 8px", borderRadius: 99 }}>
+                <b>{STATUS_SHORT[s]}</b> {STATUS_LABEL[s]}
+              </span>
+            ))}
+          </div>
+          {centres.map(centre => (
+            <CentreCard
+              key={centre.id}
+              centre={centre}
+              students={studentMap.get(centre.id) ?? []}
+              attendance={attMap.get(centre.id) ?? []}
+              extraDates={extraMap.get(centre.id) ?? new Set()}
+              month={month}
+              today={today}
+              onCellClick={setModal}
+              onAddExtra={() => setExtraTarget(centre.id)}
+            />
+          ))}
+        </>
+      )}
 
       {/* Cell modal */}
       {modal && (

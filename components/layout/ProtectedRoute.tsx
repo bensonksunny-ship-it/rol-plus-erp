@@ -4,16 +4,25 @@ import { useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
 import { validateUserAccess, isRoleAllowed } from "@/lib/validators/auth.validators";
+import type { Capability } from "@/config/permissions";
 import type { Role } from "@/types";
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
   allowedRoles: Role[];
+  /**
+   * Optional extra gate: the user must also hold this capability. Lets a route
+   * be opened to a role list but still respect a permission override that
+   * revoked the feature for one of them.
+   */
+  requiredCapability?: Capability;
 }
 
-export default function ProtectedRoute({ children, allowedRoles }: ProtectedRouteProps) {
-  const { user, loading } = useAuth();
+export default function ProtectedRoute({ children, allowedRoles, requiredCapability }: ProtectedRouteProps) {
+  const { user, loading, capabilities } = useAuth();
   const router = useRouter();
+
+  const capOk = !requiredCapability || capabilities.has(requiredCapability);
 
   // Stabilise the roles array so its reference doesn't change on every render.
   // Callers pass inline literals like [ROLES.ADMIN, ROLES.SUPER_ADMIN] which
@@ -41,11 +50,11 @@ export default function ProtectedRoute({ children, allowedRoles }: ProtectedRout
       return;
     }
 
-    // Logged in, active, but wrong role → login
-    if (!isRoleAllowed(user, stableRoles)) {
+    // Logged in, active, but wrong role or missing capability → login
+    if (!isRoleAllowed(user, stableRoles) || !capOk) {
       if (!redirectedRef.current) { redirectedRef.current = true; router.replace("/login"); }
     }
-  }, [user, loading, stableRoles, router]);
+  }, [user, loading, stableRoles, router, capOk]);
 
   // Show a neutral background while auth resolves — never return null which
   // would cause a hydration mismatch and a blank flash on SSR.
@@ -61,8 +70,8 @@ export default function ProtectedRoute({ children, allowedRoles }: ProtectedRout
 
   if (!user) return null;
 
-  // Block render if status or role fails — redirect already triggered above
-  if (!validateUserAccess(user) || !isRoleAllowed(user, stableRoles)) return null;
+  // Block render if status, role, or capability fails — redirect already triggered above
+  if (!validateUserAccess(user) || !isRoleAllowed(user, stableRoles) || !capOk) return null;
 
   return <>{children}</>;
 }

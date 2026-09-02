@@ -27,6 +27,7 @@ import { db } from "@/config/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
+import { CAPABILITIES } from "@/config/permissions";
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ type ActiveTab     = "finance" | "attendance" | "students";
 
 export default function HistoryPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]} requiredCapability={CAPABILITIES.AUDIT_VIEW}>
       <HistoryContent />
     </ProtectedRoute>
   );

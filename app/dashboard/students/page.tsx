@@ -1,6 +1,13 @@
-// This route's implementation lives in ./_shared.tsx (a plain module, not a
-// Next.js special file) because the page also needs to export shared
-// components/styles (StudentRow, LedgerEditor, EditModal, etc.) for reuse by
-// the student detail page at ./[id]/page.tsx — and Next.js's page.tsx export
-// contract only permits `default` (plus a few route-config exports).
-export { default } from "./_shared";
+// Legacy route — Students is now a tab on the unified Enrollments page.
+// The implementation still lives in ./_shared.tsx (imported by the Enrollments
+// page and by the student detail page ./[id]/page.tsx).
+"use client";
+
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+
+export default function StudentsRedirect() {
+  const router = useRouter();
+  useEffect(() => { router.replace("/dashboard/enrollments?view=students"); }, [router]);
+  return <div style={{ height: "100dvh", background: "var(--color-bg)" }} />;
+}

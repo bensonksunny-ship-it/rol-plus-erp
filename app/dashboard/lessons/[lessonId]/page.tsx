@@ -30,7 +30,7 @@ export default function LessonDetailPage({
   const { studentId }  = use(searchParams);
 
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <LessonDetailContent lessonId={lessonId} studentId={studentId ?? ""} />
     </ProtectedRoute>
   );

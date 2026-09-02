@@ -10,8 +10,15 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { getCenters } from "@/services/center/center.service";
 import { getClassesByCenter } from "@/services/attendance/attendance.service";
 import { getAllTeacherQuality } from "@/services/quality/quality.service";
+import { useWing } from "@/hooks/useWing";
+import { inWing, isSchoolOfMusic } from "@/lib/wing";
 import type { TeacherQuality } from "@/types/quality";
-import type { Center } from "@/types";
+import type { Center, Wing } from "@/types";
+
+/** Keep only rows whose centre belongs to the active wing. */
+function scopeToWing<T extends { centerId?: string }>(rows: T[], centerIds: Set<string>): T[] {
+  return rows.filter(r => !r.centerId || centerIds.has(r.centerId));
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -189,7 +196,7 @@ function fmtTimeSlotRange(timeSlot: string): string {
 
 export default function DashboardPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.PARENT, ROLES.MEMBER]}>
       <DashboardContent />
     </ProtectedRoute>
   );
@@ -202,10 +209,13 @@ function DashboardContent() {
   useEffect(() => {
     if (authLoading) return;
     if (user?.role === ROLES.STUDENT) router.replace("/dashboard/student");
+    if (user?.role === ROLES.PARENT) router.replace("/dashboard/parent");
+    if (user?.role === ROLES.MEMBER) router.replace("/dashboard/account");
   }, [authLoading, user, router]);
 
-  if (authLoading || !user || user.role === ROLES.STUDENT) return null;
-  if (user.role === ROLES.SUPER_ADMIN) return <CommandCenter />;
+  if (authLoading || !user) return null;
+  if (user.role === ROLES.STUDENT || user.role === ROLES.PARENT || user.role === ROLES.MEMBER) return null;
+  if (user.role === ROLES.FOUNDER) return <CommandCenter />;
   return <AdminDashboard />;
 }
 
@@ -216,6 +226,7 @@ function DashboardContent() {
 
 function CommandCenter() {
   const router = useRouter();
+  const { wing } = useWing();
   const [data,    setData]    = useState<SystemData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
@@ -240,17 +251,18 @@ function CommandCenter() {
         const [studentsSnap, teachersSnap, centersSnap, attSnap, txSnap, quality] = await Promise.all([
           getDocs(query(collection(db, "users"), where("role", "==", "student"))),
           getDocs(query(collection(db, "users"), where("role", "==", "teacher"))),
-          getCenters(),
+          getCenters(wing),
           getDocs(query(collection(db, "attendance"), where("date", ">=", momFetchFloor + "-01"))),
           getDocs(collection(db, "transactions")),
           getAllTeacherQuality(),
         ]);
+        const centerIds = new Set(centersSnap.map(c => c.id));
         setData({
-          students:     studentsSnap.docs.map(d => ({ uid: d.id, ...d.data() } as StudentDoc)),
-          teachers:     teachersSnap.docs.map(d => ({ uid: d.id, ...d.data() } as TeacherDoc)),
+          students:     studentsSnap.docs.filter(d => inWing(d.data(), wing)).map(d => ({ uid: d.id, ...d.data() } as StudentDoc)),
+          teachers:     teachersSnap.docs.filter(d => inWing(d.data(), wing)).map(d => ({ uid: d.id, ...d.data() } as TeacherDoc)),
           centers:      centersSnap,
-          attendance:   attSnap.docs.map(d => d.data() as AttendanceDoc),
-          transactions: txSnap.docs.map(d => d.data() as TransactionDoc),
+          attendance:   scopeToWing(attSnap.docs.map(d => d.data() as AttendanceDoc), centerIds),
+          transactions: scopeToWing(txSnap.docs.map(d => d.data() as TransactionDoc), centerIds),
           quality,
         });
       } catch (e) {
@@ -261,7 +273,7 @@ function CommandCenter() {
     }
     load();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [wing]);
 
   // ── All hooks BEFORE any early return ────────────────────────────────────────
 
@@ -951,6 +963,7 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   subStyle:     React.CSSProperties;
 }) {
   const router = useRouter();
+  const { wing } = useWing();
   const todayISO = useMemo(() => isoToday(), []);
   const [selectedDate, setSelectedDate] = useState(todayISO);
   const [centers, setCenters] = useState<Center[]>([]);
@@ -964,22 +977,25 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
       setLoading(true);
       try {
         const [centersData, studentsSnap, attSnap] = await Promise.all([
-          getCenters(),
+          getCenters(wing),
           getDocs(query(collection(db, "users"), where("role", "==", "student"), where("status", "==", "active"))),
           getDocs(query(collection(db, "attendance"), where("date", "==", selectedDate))),
         ]);
         if (cancelled) return;
+        const cidSet = new Set(centersData.map(c => c.id));
         setCenters(centersData);
         const counts: Record<string, number> = {};
         studentsSnap.docs.forEach(d => {
           const cid = (d.data().centerId ?? "") as string;
-          if (cid) counts[cid] = (counts[cid] ?? 0) + 1;
+          if (cid && cidSet.has(cid)) counts[cid] = (counts[cid] ?? 0) + 1;
         });
         setActiveCountByCenter(counts);
-        setDateAttRecs(attSnap.docs.map(d => ({
-          centerId: (d.data().centerId ?? "") as string,
-          status:   (d.data().status   ?? "") as string,
-        })));
+        setDateAttRecs(attSnap.docs
+          .map(d => ({
+            centerId: (d.data().centerId ?? "") as string,
+            status:   (d.data().status   ?? "") as string,
+          }))
+          .filter(r => cidSet.has(r.centerId)));
       } catch (err) {
         console.error("[ClassesForDateWidget] load error:", err);
       } finally {
@@ -988,7 +1004,7 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
     }
     load();
     return () => { cancelled = true; };
-  }, [selectedDate]);
+  }, [selectedDate, wing]);
 
   const dow = useMemo(() => DAY_ABBR[new Date(selectedDate + "T00:00:00").getDay()], [selectedDate]);
   const dateCentres = useMemo(
@@ -1152,6 +1168,7 @@ interface WeeklyEntry {
 }
 
 function WeeklyClassBreakdown() {
+  const { wing } = useWing();
   const [weekOffset, setWeekOffset] = useState(0);
   const [centers,  setCenters]  = useState<Center[]>([]);
   const [students, setStudents] = useState<WeeklyStudentDoc[]>([]);
@@ -1169,13 +1186,16 @@ function WeeklyClassBreakdown() {
       setLoading(true);
       try {
         const [centersData, studentsSnap, attSnap] = await Promise.all([
-          getCenters(),
+          getCenters(wing),
           getDocs(query(collection(db, "users"), where("role", "==", "student"))),
           getDocs(query(collection(db, "attendance"), where("date", ">=", weekStart), where("date", "<=", weekEnd))),
         ]);
         if (cancelled) return;
+        const cidSet = new Set(centersData.map(c => c.id));
         setCenters(centersData);
-        setStudents(studentsSnap.docs.map(d => {
+        setStudents(studentsSnap.docs
+          .filter(d => { const cid = (d.data().centerId ?? "") as string; return cid && cidSet.has(cid); })
+          .map(d => {
           const data = d.data();
           return {
             uid:       d.id,
@@ -1202,7 +1222,7 @@ function WeeklyClassBreakdown() {
     }
     load();
     return () => { cancelled = true; };
-  }, [weekStart, weekEnd]);
+  }, [weekStart, weekEnd, wing]);
 
   const centerDaysMap = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -1461,6 +1481,7 @@ interface BillingMonthStatus {
 // ── Admin Dashboard Component ──────────────────────────────────────────────────
 function AdminDashboard() {
   const { user } = useAuthContext();
+  const { wing } = useWing();
   const router   = useRouter();
 
   const today     = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -1487,12 +1508,16 @@ function AdminDashboard() {
         const [studSnap, teachSnap, centersData, txSnap, ...billingSnaps] = await Promise.all([
           getDocs(query(collection(db, "users"), where("role", "==", "student"))),
           getDocs(query(collection(db, "users"), where("role", "==", "teacher"))),
-          getCenters(),
+          getCenters(wing),
           getDocs(query(collection(db, "transactions"), where("date", ">=", isoMonthStart(2)))),
           ...months3.map(m => getDoc(doc(db, "billing_months", m))),
         ]);
 
-        const studs: AdminStudentDoc[] = studSnap.docs.map(d => ({
+        const wingCenterIds = new Set(centersData.map(c => c.id));
+
+        const studs: AdminStudentDoc[] = studSnap.docs
+          .filter(d => inWing(d.data(), wing))
+          .map(d => ({
           uid:            d.id,
           centerId:       (d.data().centerId   ?? "") as string,
           status:         (d.data().status ?? d.data().studentStatus ?? "active") as string,
@@ -1503,24 +1528,31 @@ function AdminDashboard() {
         }));
         setStudents(studs);
 
-        setTeachers(teachSnap.docs.map(d => ({
-          uid:         d.id,
-          displayName: (d.data().displayName ?? d.data().name ?? "—") as string,
-          centerIds:   (d.data().centerIds   ?? []) as string[],
-          status:      (d.data().status      ?? "active") as string,
-        })));
+        setTeachers(teachSnap.docs
+          .filter(d => inWing(d.data(), wing))
+          .map(d => ({
+            uid:         d.id,
+            displayName: (d.data().displayName ?? d.data().name ?? "—") as string,
+            centerIds:   (d.data().centerIds   ?? []) as string[],
+            status:      (d.data().status      ?? "active") as string,
+          })));
 
         setCenters(centersData);
 
-        const txs = txSnap.docs.map(d => ({
-          month:        ((d.data().date as string | undefined) ?? "").slice(0, 7),
-          amount:       Number(d.data().amount ?? 0),
-          studentUid:   (d.data().studentUid   ?? "") as string,
-          status:       (d.data().status        ?? "") as string,
-          type:         (d.data().type          ?? "") as string,
-          method:       (d.data().method        ?? "") as string,
-          billingMonth: (d.data().billingMonth  ?? "") as string,
-        }));
+        const txs = txSnap.docs
+          .filter(d => {
+            const cid = (d.data().centerId ?? "") as string;
+            return !cid || wingCenterIds.has(cid);
+          })
+          .map(d => ({
+            month:        ((d.data().date as string | undefined) ?? "").slice(0, 7),
+            amount:       Number(d.data().amount ?? 0),
+            studentUid:   (d.data().studentUid   ?? "") as string,
+            status:       (d.data().status        ?? "") as string,
+            type:         (d.data().type          ?? "") as string,
+            method:       (d.data().method        ?? "") as string,
+            billingMonth: (d.data().billingMonth  ?? "") as string,
+          }));
         setTxList(txs);
 
         // Build billing status map — merge Firestore doc with derived stats
@@ -1552,7 +1584,7 @@ function AdminDashboard() {
     }
     load();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, today]);
+  }, [user?.uid, today, wing]);
 
   // ── Real-time attendance listener — covers the full current month ─────────
   useEffect(() => {
@@ -1904,7 +1936,7 @@ function AdminDashboard() {
 
       {/* ── KPI STRIP ── */}
       <div style={adm.kpiStrip}>
-        <KpiTile label="Students" value={loading ? "…" : String(students.length)} sub={loading ? "" : `${activeStudents} active · ${groupStudents} group · ${personalStudents} personal`} />
+        <KpiTile label="Students" value={loading ? "…" : String(students.length)} sub={loading ? "" : isSchoolOfMusic(wing) ? `${activeStudents} active` : `${activeStudents} active · ${groupStudents} group · ${personalStudents} personal`} />
         <div style={adm.kpiDiv} />
         <KpiTile label="Centres" value={loading ? "…" : String(centers.length)} sub={`${centers.filter(c => c.status === "active").length} active`} />
         <div style={adm.kpiDiv} />

@@ -19,6 +19,8 @@ import { useToast } from "@/hooks/useToast";
 import { logAction } from "@/services/audit/audit.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
+import { useWing } from "@/hooks/useWing";
+import { inWing, isSchoolOfMusic, wingOf } from "@/lib/wing";
 import Link from "next/link";
 import {
   clearStudentHistory,
@@ -39,6 +41,7 @@ export interface StudentRow {
   phone:       string;
   centerId:    string;
   centerName:  string;
+  wing:        string;   // "rol_plus" | "school_of_music"
   instrument:  string;
   course:      string;
   classType:   string;   // "group" | "personal"
@@ -49,6 +52,7 @@ export interface StudentRow {
   classTime:   string | null; // e.g. "17:00" — personal only
   feeCycle:    string;
   feePerClass: number;
+  monthlyFee:  number;
   balance:     number;
   status:      string;
   deactivationRequestedBy: string | null;
@@ -77,6 +81,7 @@ interface EditForm {
   classTime:          string;     // e.g. "17:00"
   feeCycle:           string;
   feePerClass:        string;
+  monthlyFee:         string;
   status:             string;
 }
 
@@ -90,8 +95,10 @@ const EMPTY_CREATE = {
   assignedTeacherUid: "",
   classDays: [] as string[],
   classTime: "",
-  feeCycle: "monthly", feePerClass: "", status: "active",
+  feeCycle: "monthly", feePerClass: "", monthlyFee: "", status: "active",
 };
+
+type CreateForm = typeof EMPTY_CREATE;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -183,7 +190,7 @@ function EmptyState({ icon, title, hint }: { icon: string; title: string; hint?:
 
 export default function StudentsPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <Suspense fallback={null}>
         <StudentsContent />
       </Suspense>
@@ -193,12 +200,14 @@ export default function StudentsPage() {
 
 function StudentsContent() {
   const { user, role }                  = useAuth();
+  const { wing }                        = useWing();
+  const isSom                           = isSchoolOfMusic(wing);
   const router                          = useRouter();
   const { isAllowed, filterCentres, teacherCentreIds, isTeacherRole } = useCentreAccess();
   const [students, setStudents]         = useState<StudentRow[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [centerMap, setCenterMap]       = useState<Map<string, string>>(new Map());
-  const [centerOptions, setCenterOpts]  = useState<{ id: string; name: string }[]>([]);
+  const [centerOptions, setCenterOpts]  = useState<{ id: string; name: string; monthlyFee?: number }[]>([]);
   const [teacherOptions, setTeacherOpts] = useState<{ id: string; name: string }[]>([]);
   const [teacherMap, setTeacherMap]     = useState<Map<string, string>>(new Map());
   const [loading, setLoading]           = useState(true);
@@ -210,8 +219,36 @@ function StudentsContent() {
   const [clearHistoryTarget, setClearHistoryTarget] = useState<StudentRow | null>(null);
   const [deleteTarget, setDeleteTarget]     = useState<StudentRow | null>(null);
   const [breakTarget, setBreakTarget]       = useState<StudentRow | null>(null);
+  const [formErrors, setFormErrors]         = useState<Record<string, string>>({});
   const debounceRef                         = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { toasts, toast, remove }           = useToast();
+
+  // ── UI prefs (persisted) ───────────────────────────────────────────────────
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const [listView, setListView]         = useState<"cards" | "table">("cards");
+  const [sortKey, setSortKey]           = useState<"name" | "centerName" | "course" | "balance" | "status">("name");
+  const [sortDir, setSortDir]           = useState<1 | -1>(1);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("students_insights_open") === "1") setInsightsOpen(true);
+      const v = localStorage.getItem("students_list_view");
+      if (v === "table" || v === "cards") setListView(v);
+    } catch { /* storage blocked */ }
+  }, []);
+  function toggleInsights() {
+    setInsightsOpen(o => {
+      try { localStorage.setItem("students_insights_open", o ? "0" : "1"); } catch { /* ignore */ }
+      return !o;
+    });
+  }
+  function pickListView(v: "cards" | "table") {
+    setListView(v);
+    try { localStorage.setItem("students_list_view", v); } catch { /* ignore */ }
+  }
+  function toggleSort(k: typeof sortKey) {
+    if (sortKey === k) setSortDir(d => (d === 1 ? -1 : 1));
+    else { setSortKey(k); setSortDir(1); }
+  }
 
   // Filters
   const [searchInput, setSearchInput]   = useState("");
@@ -222,7 +259,11 @@ function StudentsContent() {
   const [filterFeeStatus, setFilterFeeStatus]   = useState("all");
   const [filterClassType, setFilterClassType]   = useState("all");
 
-  const isAdmin = role === ROLES.ADMIN || role === ROLES.SUPER_ADMIN;
+  // Leadership roles that manage students. NOTE: chief_teacher is included here
+  // for full student management on this screen; the finer split (no hard-delete
+  // / no deactivation approval for chief_teacher) is a later capability pass.
+  const isAdmin = role === ROLES.ADMIN || role === ROLES.FOUNDER
+    || role === ROLES.DIRECTOR || role === ROLES.CHIEF_TEACHER;
   const isTeacher = role === ROLES.TEACHER;
 
   async function fetchData() {
@@ -242,26 +283,36 @@ function StudentsContent() {
       setTransactions(txs);
 
       const cMap = new Map<string, string>();
-      const cOptsAll: { id: string; name: string }[] = [];
-      centerSnap.docs.forEach(d => {
-        cMap.set(d.id, (d.data().name as string) ?? d.id);
-        cOptsAll.push({ id: d.id, name: (d.data().name as string) ?? d.id });
-      });
+      const cOptsAll: { id: string; name: string; monthlyFee?: number }[] = [];
+      centerSnap.docs
+        .filter(d => inWing(d.data(), wing))
+        .forEach(d => {
+          cMap.set(d.id, (d.data().name as string) ?? d.id);
+          cOptsAll.push({
+            id: d.id,
+            name: (d.data().name as string) ?? d.id,
+            monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
+          });
+        });
       setCenterMap(cMap);
       // Teachers: show only their assigned centres in the filter dropdown
       setCenterOpts(filterCentres(cOptsAll));
 
       const tMap = new Map<string, string>();
       const tOptsAll: { id: string; name: string }[] = [];
-      teacherSnap.docs.forEach(d => {
-        const tName = ((d.data().displayName ?? d.data().name ?? "-") as string);
-        tMap.set(d.id, tName);
-        tOptsAll.push({ id: d.id, name: tName });
-      });
+      teacherSnap.docs
+        .filter(d => inWing(d.data(), wing))
+        .forEach(d => {
+          const tName = ((d.data().displayName ?? d.data().name ?? "-") as string);
+          tMap.set(d.id, tName);
+          tOptsAll.push({ id: d.id, name: tName });
+        });
       setTeacherMap(tMap);
       setTeacherOpts(tOptsAll);
 
-      const allStudentsRaw = studentSnap.docs.map(d => {
+      const allStudentsRaw = studentSnap.docs
+        .filter(d => inWing(d.data(), wing))
+        .map(d => {
         const s = d.data();
         const assignedTUid = (s.assignedTeacherUid ?? null) as string | null;
         return {
@@ -273,6 +324,7 @@ function StudentsContent() {
           phone:       (s.phone       ?? "") as string,
           centerId:    (s.centerId    ?? "-") as string,
           centerName:  cMap.get(s.centerId as string) ?? (s.centerId as string) ?? "-",
+          wing:        wingOf(s),
           instrument:  (s.instrument  ?? "-") as string,
           course:      (s.course      ?? "-") as string,
           classType:   ((s.classType  as string) === "personal" ? "personal" : "group"),
@@ -283,6 +335,7 @@ function StudentsContent() {
           classTime:   (s.classTime ?? null) as string | null,
           feeCycle:    (s.feeCycle    ?? "-") as string,
           feePerClass: Number(s.feePerClass ?? 0),
+          monthlyFee:  Number(s.monthlyFee ?? 0),
           balance:     balanceMap.get(d.id) ?? 0,
           status:      (s.status ?? s.studentStatus ?? "active") as string,
           createdAt:   toISODate(s.createdAt),
@@ -313,7 +366,8 @@ function StudentsContent() {
     }
   }, [isTeacherRole, teacherCentreIds]);
 
-  useEffect(() => { fetchData(); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchData(); }, [wing]);
 
   function handleSearch(e: React.ChangeEvent<HTMLInputElement>) {
     const val = e.target.value;
@@ -382,9 +436,18 @@ function StudentsContent() {
   // ── Create student ─────────────────────────────────────────────────────────
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.email.trim())     { toast("Email is required.", "error"); return; }
-    if (!form.admissionNo.trim()) { toast("Admission number is required.", "error"); return; }
-    if (!form.centerId.trim())  { toast("Center is required.", "error"); return; }
+    const errs: Record<string, string> = {};
+    if (!form.name.trim())        errs.name = "Required";
+    if (!form.email.trim())       errs.email = "Required";
+    else if (!/\S+@\S+\.\S+/.test(form.email)) errs.email = "Enter a valid email";
+    if (!form.admissionNo.trim()) errs.admissionNo = "Required";
+    if (!form.centerId.trim())    errs.centerId = "Pick a centre";
+    if (!form.instrument.trim())  errs.instrument = "Required";
+    if (!form.course.trim())      errs.course = "Required";
+    if (isSom && Number(form.monthlyFee) <= 0) errs.monthlyFee = "Enter the monthly fee";
+    if (!isSom && form.feeCycle === "per_class" && Number(form.feePerClass) <= 0) errs.feePerClass = "Enter the per-class fee";
+    setFormErrors(errs);
+    if (Object.keys(errs).length > 0) { toast("Please fix the highlighted fields.", "error"); return; }
 
     setSaving(true);
     try {
@@ -419,16 +482,20 @@ function StudentsContent() {
         centerId:    form.centerId.trim(),
         instrument:  form.instrument.trim(),
         course:      form.course.trim(),
-        classType:          form.classType || "group",
-        billingMode:        form.billingMode || "postpay",
-        assignedTeacherUid: form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
-        classDays:          form.classType === "personal" ? form.classDays : [],
-        classTime:          form.classType === "personal" ? (form.classTime || null) : null,
-        feeCycle:    form.feeCycle,
-        feePerClass: form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        // School of Music (wing 2): every student is a group batch, prepaid,
+        // billed monthly — the form hides the ROL+ options and forces these.
+        classType:          isSom ? "group"   : (form.classType || "group"),
+        billingMode:        isSom ? "prepay"  : (form.billingMode || "postpay"),
+        assignedTeacherUid: !isSom && form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
+        classDays:          !isSom && form.classType === "personal" ? form.classDays : [],
+        classTime:          !isSom && form.classType === "personal" ? (form.classTime || null) : null,
+        feeCycle:    isSom ? "monthly" : form.feeCycle,
+        feePerClass: !isSom && form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        ...(isSom ? { monthlyFee: Number(form.monthlyFee) } : {}),
         status:        form.status,
         studentStatus: form.status,   // mirror for type-system compatibility
         role:        "student",
+        wing:        wing,
         mustResetPassword: true,
         currentBalance: 0,
         deactivationRequestedBy: null,
@@ -449,6 +516,7 @@ function StudentsContent() {
         metadata: { uid, studentID, name: form.name.trim(), email: form.email.trim().toLowerCase() } });
 
       setForm({ ...EMPTY_CREATE });
+      setFormErrors({});
       setShowForm(false);
       setLoading(true);
       await fetchData();
@@ -593,9 +661,11 @@ function StudentsContent() {
         <div>
           <h1 style={p.heading}>Students</h1>
           <div style={p.subheading}>
-            {students.length} total · {activeStudents.length} active ·{" "}
-            {students.filter(s => s.classType === "group").length} group ·{" "}
-            {students.filter(s => s.classType === "personal").length} personal
+            {students.length} total · {activeStudents.length} active
+            {!isSom && <>
+              {" "}· {students.filter(s => s.classType === "group").length} group ·{" "}
+              {students.filter(s => s.classType === "personal").length} personal
+            </>}
           </div>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -611,121 +681,21 @@ function StudentsContent() {
             </div>
           )}
           {(isAdmin || isTeacher) && (
-            <button onClick={() => { setShowForm(v => !v); setEditTarget(null); }} style={p.addBtn}>
-              {showForm ? "Cancel" : "+ Add Student"}
+            <button onClick={() => { setFormErrors({}); setEditTarget(null); setShowForm(true); }} style={p.addBtn}>
+              + Add Student
             </button>
           )}
         </div>
       </div>
 
-      {/* ── Create Form ── */}
-      {showForm && (
-        <div style={p.card}>
-          <div style={p.cardHeader}>New Student</div>
-          <div style={p.hint}>
-            🔐 Login: <strong>email</strong> as username · <strong>admission no.</strong> as password · System assigns Student ID automatically
-          </div>
-          <form onSubmit={handleCreate}>
-            <div style={p.formGrid}>
-              <Field label="Full Name *">
-                <input name="name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                  required placeholder="e.g. Arjun Sharma" style={p.input} />
-              </Field>
-              <Field label="Email (login username) *">
-                <input name="email" type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                  required placeholder="e.g. arjun@gmail.com" style={p.input} />
-              </Field>
-              <Field label="Admission No. (initial password) *">
-                <input name="admissionNo" value={form.admissionNo} onChange={e => setForm(f => ({ ...f, admissionNo: e.target.value }))}
-                  required placeholder="e.g. ADM-2026-001" style={p.input} />
-              </Field>
-              <Field label="Phone">
-                <input name="phone" value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
-                  placeholder="e.g. +91 98765 43210" style={p.input} />
-              </Field>
-              <Field label="Center *">
-                <select value={form.centerId} onChange={e => setForm(f => ({ ...f, centerId: e.target.value }))}
-                  required style={p.input}>
-                  <option value="">— Select center —</option>
-                  {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </Field>
-              <Field label="Class Type *">
-                <select value={form.classType} onChange={e => setForm(f => ({ ...f, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))} style={p.input}>
-                  <option value="group">Group Class (batch at center)</option>
-                  <option value="personal">Personal Class (one-on-one / private)</option>
-                </select>
-              </Field>
-              <Field label="Billing Mode *">
-                <select value={form.billingMode} onChange={e => setForm(f => ({ ...f, billingMode: e.target.value }))} style={p.input}>
-                  <option value="postpay">Postpay — billed first, pays after</option>
-                  <option value="prepay">Prepay — payments advance, fee deducted</option>
-                </select>
-              </Field>
-              {form.classType === "personal" && (
-                <Field label="Assign Teacher">
-                  <select value={form.assignedTeacherUid} onChange={e => setForm(f => ({ ...f, assignedTeacherUid: e.target.value }))} style={p.input}>
-                    <option value="">— Unassigned —</option>
-                    {teacherOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                </Field>
-              )}
-              {form.classType === "personal" && (
-                <Field label="Class Days">
-                  <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8, paddingTop: 4 }}>
-                    {DAYS_OF_WEEK.map(day => (
-                      <label key={day} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, cursor: "pointer" }}>
-                        <input type="checkbox" checked={form.classDays.includes(day)}
-                          onChange={e => setForm(f => ({
-                            ...f,
-                            classDays: e.target.checked
-                              ? [...f.classDays, day]
-                              : f.classDays.filter(d => d !== day),
-                          }))} />
-                        {day}
-                      </label>
-                    ))}
-                  </div>
-                </Field>
-              )}
-              {form.classType === "personal" && (
-                <Field label="Class Time">
-                  <input type="time" value={form.classTime}
-                    onChange={e => setForm(f => ({ ...f, classTime: e.target.value }))}
-                    style={p.input} />
-                </Field>
-              )}
-              <Field label="Instrument *">
-                <input name="instrument" value={form.instrument} onChange={e => setForm(f => ({ ...f, instrument: e.target.value }))}
-                  required placeholder="e.g. Guitar" style={p.input} />
-              </Field>
-              <Field label="Course *">
-                <input name="course" value={form.course} onChange={e => setForm(f => ({ ...f, course: e.target.value }))}
-                  required placeholder="e.g. Beginner Guitar" style={p.input} />
-              </Field>
-              <Field label="Fee Cycle">
-                <select value={form.feeCycle} onChange={e => setForm(f => ({ ...f, feeCycle: e.target.value }))} style={p.input}>
-                  <option value="monthly">Monthly</option>
-                  <option value="per_class">Per Class</option>
-                </select>
-              </Field>
-              {form.feeCycle === "per_class" && (
-                <Field label="Fee Per Class (₹)">
-                  <input name="feePerClass" type="number" min="0" step="1" value={form.feePerClass}
-                    onChange={e => setForm(f => ({ ...f, feePerClass: e.target.value }))}
-                    required placeholder="500" style={p.input} />
-                </Field>
-              )}
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-              <button type="submit" disabled={saving}
-                style={{ ...p.primaryBtn, opacity: saving ? 0.6 : 1 }}>
-                {saving ? "Creating…" : "Create Student"}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
+      {/* ── Insights ── */}
+      <InsightsPanel
+        students={students}
+        centerOptions={centerOptions}
+        open={insightsOpen}
+        onToggle={toggleInsights}
+        onPickStatus={setTab}
+      />
 
       {/* ── Filter Bar ── */}
       <div style={p.filterBar}>
@@ -755,14 +725,30 @@ function StudentsContent() {
           <option value="paid">Paid (₹0 due)</option>
           <option value="pending">Pending balance</option>
         </select>
-        <select value={filterClassType} onChange={e => setFilterClassType(e.target.value)} style={p.filterSelect}>
-          <option value="all">All Class Types</option>
-          <option value="group">👥 Group</option>
-          <option value="personal">👤 Personal</option>
-        </select>
+        {!isSom && (
+          <select value={filterClassType} onChange={e => setFilterClassType(e.target.value)} style={p.filterSelect}>
+            <option value="all">All Class Types</option>
+            <option value="group">👥 Group</option>
+            <option value="personal">👤 Personal</option>
+          </select>
+        )}
         {(search || filterCenter !== "all" || filterCourse || filterInstrument || filterFeeStatus !== "all" || filterClassType !== "all") && (
           <button onClick={resetFilters} style={p.resetBtn}>✕ Reset</button>
         )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 2, background: "#f1f5f9", borderRadius: 8, padding: 2 }}>
+          {(["cards", "table"] as const).map(v => (
+            <button key={v} onClick={() => pickListView(v)}
+              style={{
+                border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600,
+                padding: "5px 12px", borderRadius: 6,
+                background: listView === v ? "#fff" : "transparent",
+                color: listView === v ? "#4338ca" : "#6b7280",
+                boxShadow: listView === v ? "0 1px 2px rgba(0,0,0,0.1)" : "none",
+              }}>
+              {v === "cards" ? "▦ Cards" : "☰ Table"}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* ── Tabs ── */}
@@ -822,14 +808,30 @@ function StudentsContent() {
           onEndBreak={endBreak}
           isAdmin={isAdmin}
         />
+      ) : listView === "table" ? (
+        <StudentTableView
+          students={filtered}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={toggleSort}
+          isAdmin={isAdmin}
+          isTeacher={isTeacher}
+          onEdit={s => setEditTarget(s)}
+          onRequestDeactivation={s => requestDeactivation(s)}
+          onRequestBreak={s => setBreakTarget(s)}
+          onClearHistory={isAdmin ? s => setClearHistoryTarget(s) : undefined}
+          onDelete={isAdmin ? s => setDeleteTarget(s) : undefined}
+        />
       ) : (
         <div>
           {/* ── Group classes ── */}
           {groupedByCenter.group.length > 0 && (
             <>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#6d28d9", letterSpacing: 0.5, textTransform: "uppercase" as const, marginBottom: 14, paddingBottom: 6, borderBottom: "2px solid #ede9fe" }}>
-                👥 Group Classes
-              </div>
+              {!isSom && (
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#6d28d9", letterSpacing: 0.5, textTransform: "uppercase" as const, marginBottom: 14, paddingBottom: 6, borderBottom: "2px solid #ede9fe" }}>
+                  👥 Group Classes
+                </div>
+              )}
               {groupedByCenter.group.map(group => (
                 <div key={group.centerId} style={{ marginBottom: 28 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid #e5e7eb" }}>
@@ -875,6 +877,20 @@ function StudentsContent() {
           )}
         </div>
       )}
+
+      {/* ── Add Student drawer ── */}
+      <AddStudentDrawer
+        open={showForm}
+        form={form}
+        setForm={setForm}
+        errors={formErrors}
+        isSom={isSom}
+        saving={saving}
+        centerOptions={centerOptions}
+        teacherOptions={teacherOptions}
+        onClose={() => { setShowForm(false); setFormErrors({}); }}
+        onSubmit={handleCreate}
+      />
 
       {/* ── Edit Modal ── */}
       {editTarget && (
@@ -1016,7 +1032,9 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
             ? { background: "#ede9fe", color: "#7c3aed" }
             : { background: "#dbeafe", color: "#1d4ed8" }),
         }}>
-          {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}
+          {s.feeCycle === "per_class"
+            ? `₹${s.feePerClass}/class`
+            : s.monthlyFee > 0 ? `₹${s.monthlyFee}/mo` : "Monthly"}
         </span>
         <div style={{ marginTop: 3 }}>
           <span style={{
@@ -1395,7 +1413,7 @@ export function BreakRequestModal({ student, onClose, onRequested, onApprovedDir
 
 export function EditModal({ student, centerOptions, teacherOptions, transactions, isAdmin, onTransactionsChanged, onClose, onSaved, currentUserUid, currentUserRole }: {
   student:         StudentRow;
-  centerOptions:   { id: string; name: string }[];
+  centerOptions:   { id: string; name: string; monthlyFee?: number }[];
   teacherOptions:  { id: string; name: string }[];
   transactions:    Transaction[];
   isAdmin:         boolean;
@@ -1405,6 +1423,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
   currentUserUid:  string;
   currentUserRole: string;
 }) {
+  const isSom = isSchoolOfMusic(student.wing);
   const [form, setForm]     = useState<EditForm>({
     name:               student.name,
     email:              student.email,
@@ -1413,13 +1432,14 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
     centerId:           student.centerId,
     instrument:         student.instrument,
     course:             student.course,
-    classType:          student.classType || "group",
-    billingMode:        student.billingMode || "postpay",
+    classType:          isSom ? "group"  : (student.classType || "group"),
+    billingMode:        isSom ? "prepay" : (student.billingMode || "postpay"),
     assignedTeacherUid: student.assignedTeacherUid ?? "",
     classDays:          student.classDays ?? [],
     classTime:          student.classTime ?? "",
-    feeCycle:           student.feeCycle,
+    feeCycle:           isSom ? "monthly" : student.feeCycle,
     feePerClass:        String(student.feePerClass),
+    monthlyFee:         student.monthlyFee ? String(student.monthlyFee) : "",
     status:             student.status,
   });
   const [saving, setSaving] = useState(false);
@@ -1436,6 +1456,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
     if (!form.name.trim())  { setError("Name is required."); return; }
     if (!form.email.trim()) { setError("Email is required."); return; }
     if (!/\S+@\S+\.\S+/.test(form.email)) { setError("Invalid email format."); return; }
+    if (isSom && Number(form.monthlyFee) <= 0) { setError("Monthly fee is required."); return; }
 
     setSaving(true);
     try {
@@ -1449,13 +1470,14 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         centerId:           form.centerId,
         instrument:         form.instrument.trim(),
         course:             form.course.trim(),
-        classType:          form.classType || "group",
-        billingMode:        form.billingMode || "postpay",
-        assignedTeacherUid: form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
-        classDays:          form.classType === "personal" ? form.classDays : [],
-        classTime:          form.classType === "personal" ? (form.classTime || null) : null,
-        feeCycle:           form.feeCycle,
-        feePerClass:        form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        classType:          isSom ? "group"  : (form.classType || "group"),
+        billingMode:        isSom ? "prepay" : (form.billingMode || "postpay"),
+        assignedTeacherUid: !isSom && form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
+        classDays:          !isSom && form.classType === "personal" ? form.classDays : [],
+        classTime:          !isSom && form.classType === "personal" ? (form.classTime || null) : null,
+        feeCycle:           isSom ? "monthly" : form.feeCycle,
+        feePerClass:        !isSom && form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        ...(isSom ? { monthlyFee: Number(form.monthlyFee) } : {}),
         status:             form.status,
         studentStatus:      form.status,   // mirror for type-system compatibility
         updatedAt:          serverTimestamp(),
@@ -1488,13 +1510,14 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         centerId:            form.centerId,
         instrument:          form.instrument.trim(),
         course:              form.course.trim(),
-        classType:           form.classType || "group",
-        billingMode:         form.billingMode || "postpay",
-        assignedTeacherUid:  form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
-        classDays:           form.classType === "personal" ? form.classDays : [],
-        classTime:           form.classType === "personal" ? (form.classTime || null) : null,
-        feeCycle:            form.feeCycle,
-        feePerClass:         form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        classType:           isSom ? "group"  : (form.classType || "group"),
+        billingMode:         isSom ? "prepay" : (form.billingMode || "postpay"),
+        assignedTeacherUid:  !isSom && form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
+        classDays:           !isSom && form.classType === "personal" ? form.classDays : [],
+        classTime:           !isSom && form.classType === "personal" ? (form.classTime || null) : null,
+        feeCycle:            isSom ? "monthly" : form.feeCycle,
+        feePerClass:         !isSom && form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
+        monthlyFee:          isSom ? Number(form.monthlyFee) : student.monthlyFee,
         status:              form.status,
       });
     } catch (err) {
@@ -1540,11 +1563,29 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
             <div style={modal.sectionLabel}>Academic Info</div>
             <div style={modal.grid}>
               <Field label="Center *">
-                <select name="centerId" value={form.centerId} onChange={f} required style={p.input}>
+                <select
+                  name="centerId"
+                  value={form.centerId}
+                  onChange={e => {
+                    const cid = e.target.value;
+                    const centerFee = centerOptions.find(c => c.id === cid)?.monthlyFee;
+                    setForm(prev => ({
+                      ...prev,
+                      centerId: cid,
+                      monthlyFee: isSom && !prev.monthlyFee && centerFee ? String(centerFee) : prev.monthlyFee,
+                    }));
+                  }}
+                  required style={p.input}>
                   <option value="">— Select center —</option>
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
+              {isSom && (
+                <Field label="Monthly Fee (₹) *">
+                  <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee} onChange={f} required style={p.input} />
+                </Field>
+              )}
+              {!isSom && (
               <Field label="Class Type *">
                 <select name="classType" value={form.classType}
                   onChange={e => setForm(prev => ({ ...prev, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))}
@@ -1553,13 +1594,16 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                   <option value="personal">Personal Class (one-on-one / private)</option>
                 </select>
               </Field>
+              )}
+              {!isSom && (
               <Field label="Billing Mode *">
                 <select name="billingMode" value={form.billingMode} onChange={f} style={p.input}>
                   <option value="postpay">Postpay — billed first, pays after</option>
                   <option value="prepay">Prepay — payments advance, fee deducted</option>
                 </select>
               </Field>
-              {form.classType === "personal" && (
+              )}
+              {!isSom && form.classType === "personal" && (
                 <Field label="Assign Teacher">
                   <select name="assignedTeacherUid" value={form.assignedTeacherUid} onChange={f} style={p.input}>
                     <option value="">— Unassigned —</option>
@@ -1567,7 +1611,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                   </select>
                 </Field>
               )}
-              {form.classType === "personal" && (
+              {!isSom && form.classType === "personal" && (
                 <Field label="Class Days">
                   <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8, paddingTop: 4 }}>
                     {DAYS_OF_WEEK.map(day => (
@@ -1585,7 +1629,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                   </div>
                 </Field>
               )}
-              {form.classType === "personal" && (
+              {!isSom && form.classType === "personal" && (
                 <Field label="Class Time">
                   <input type="time" name="classTime" value={form.classTime} onChange={f} style={p.input} />
                 </Field>
@@ -1596,13 +1640,15 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
               <Field label="Course">
                 <input name="course" value={form.course} onChange={f} style={p.input} />
               </Field>
+              {!isSom && (
               <Field label="Fee Cycle">
                 <select name="feeCycle" value={form.feeCycle} onChange={f} style={p.input}>
                   <option value="monthly">Monthly</option>
                   <option value="per_class">Per Class</option>
                 </select>
               </Field>
-              {form.feeCycle === "per_class" && (
+              )}
+              {!isSom && form.feeCycle === "per_class" && (
                 <Field label="Fee Per Class (₹)">
                   <input name="feePerClass" type="number" min="0" value={form.feePerClass} onChange={f} style={p.input} />
                 </Field>
@@ -1860,16 +1906,529 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
         {s.course ? <span style={{ color: "#6b7280" }}> · {s.course}</span> : null}
       </div>
       <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const, marginBottom: isDue ? 8 : 0 }}>
-        <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
-          {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
-        </span>
+        {!isSchoolOfMusic(s.wing) && (
+          <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
+            {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+          </span>
+        )}
         <span style={{ ...p.badge, ...statusStyle }}>{s.status.replace(/_/g, " ")}</span>
       </div>
       {isDue && (
-        <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", background: "#fef2f2", padding: "3px 8px", borderRadius: 4 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", background: "#fef2f2", padding: "3px 8px", borderRadius: 4, display: "inline-block" }}>
           Due {fmtINR(s.balance)}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Insights panel ───────────────────────────────────────────────────────────
+
+const CHART_HUE = "#4f46e5";
+
+interface BarDatum { label: string; value: number; hint?: string }
+
+function StatTile({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "13px 16px", flex: 1, minWidth: 150 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em" }}>{label}</div>
+      <div style={{ fontSize: 21, fontWeight: 800, color: tone ?? "#111827", marginTop: 4, lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function BarList({ title, rows, color = CHART_HUE, emptyText = "No data" }: {
+  title: string; rows: BarDatum[]; color?: string; emptyText?: string;
+}) {
+  const max = Math.max(1, ...rows.map(r => r.value));
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "13px 16px" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 10 }}>{title}</div>
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 12, color: "#9ca3af", padding: "6px 0" }}>{emptyText}</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column" as const, gap: 7 }}>
+          {rows.map(r => (
+            <div key={r.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div title={r.label} style={{ width: 92, flexShrink: 0, fontSize: 12, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.label}</div>
+              <div style={{ flex: 1, background: "#f1f5f9", borderRadius: 5, height: 15, overflow: "hidden" }}>
+                <div style={{ width: `${Math.max(3, (r.value / max) * 100)}%`, background: color, height: "100%", borderRadius: 5 }} />
+              </div>
+              <div style={{ width: 66, flexShrink: 0, textAlign: "right" as const, fontSize: 12, fontWeight: 700, color: "#111827" }}>
+                {r.hint ?? String(r.value)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MiniMonthBars({ data }: { data: { label: string; value: number }[] }) {
+  const max = Math.max(1, ...data.map(d => d.value));
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "13px 16px" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 12 }}>New enrolments · last 12 months</div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 5, height: 92 }}>
+        {data.map((d, i) => (
+          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 3 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, color: "#6b7280", minHeight: 12 }}>{d.value || ""}</div>
+            <div title={`${d.label}: ${d.value}`} style={{
+              width: "100%", background: CHART_HUE, opacity: 0.85, borderRadius: 3,
+              height: `${Math.max(2, (d.value / max) * 60)}px`,
+            }} />
+            <div style={{ fontSize: 9, color: "#9ca3af" }}>{d.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type AttAgg = { overallPct: number; byCourse: BarDatum[]; byCenter: BarDatum[] };
+
+function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }: {
+  students: StudentRow[];
+  centerOptions: { id: string; name: string; monthlyFee?: number }[];
+  open: boolean;
+  onToggle: () => void;
+  onPickStatus: (tab: StudentTab) => void;
+}) {
+  const [att, setAtt] = useState<AttAgg | "error" | null>(null);
+  const [attLoading, setAttLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || att !== null || attLoading) return;
+    let cancelled = false;
+    setAttLoading(true);
+    (async () => {
+      try {
+        const wingCenterIds = new Set(centerOptions.map(c => c.id));
+        const snap = await getDocs(collection(db, "attendance"));
+        const perStudent = new Map<string, { present: number; total: number }>();
+        snap.docs.forEach(d => {
+          const r = d.data() as { studentUid?: string; centerId?: string; status?: string; present?: boolean };
+          if (r.centerId && !wingCenterIds.has(r.centerId)) return;
+          const uid = r.studentUid;
+          if (!uid) return;
+          const counted = r.status
+            ? r.status === "present" || r.status === "absent"
+            : typeof r.present === "boolean";
+          if (!counted) return;
+          const isPresent = r.status ? r.status === "present" : r.present === true;
+          const cur = perStudent.get(uid) ?? { present: 0, total: 0 };
+          cur.total += 1;
+          if (isPresent) cur.present += 1;
+          perStudent.set(uid, cur);
+        });
+        const byCourse = new Map<string, { p: number; t: number }>();
+        const byCenter = new Map<string, { p: number; t: number }>();
+        let gp = 0, gt = 0;
+        students.forEach(s => {
+          const a = perStudent.get(s.id);
+          if (!a || a.total === 0) return;
+          gp += a.present; gt += a.total;
+          const c = byCourse.get(s.course || "—") ?? { p: 0, t: 0 };
+          c.p += a.present; c.t += a.total; byCourse.set(s.course || "—", c);
+          const ce = byCenter.get(s.centerName || "—") ?? { p: 0, t: 0 };
+          ce.p += a.present; ce.t += a.total; byCenter.set(s.centerName || "—", ce);
+        });
+        const toRows = (m: Map<string, { p: number; t: number }>): BarDatum[] =>
+          Array.from(m.entries())
+            .map(([label, v]) => { const pct = Math.round((v.p / v.t) * 100); return { label, value: pct, hint: `${pct}%` }; })
+            .sort((a, b) => b.value - a.value)
+            .slice(0, 8);
+        if (!cancelled) {
+          setAtt({
+            overallPct: gt > 0 ? Math.round((gp / gt) * 100) : 0,
+            byCourse: toRows(byCourse),
+            byCenter: toRows(byCenter),
+          });
+        }
+      } catch {
+        if (!cancelled) setAtt("error");
+      } finally {
+        if (!cancelled) setAttLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, att, attLoading, centerOptions, students]);
+
+  const stats = useMemo(() => {
+    const total = students.length;
+    const active = students.filter(s => s.status === "active").length;
+    const owing = students.filter(s => s.balance > 0);
+    const dues = owing.reduce((a, s) => a + s.balance, 0);
+    const ym = new Date().toISOString().slice(0, 7);
+    const newThisMonth = students.filter(s => (s.createdAt ?? "").slice(0, 7) === ym).length;
+
+    const tally = (key: (s: StudentRow) => string): BarDatum[] => {
+      const m = new Map<string, number>();
+      students.forEach(s => { const k = (key(s) || "—").trim() || "—"; m.set(k, (m.get(k) ?? 0) + 1); });
+      return Array.from(m.entries()).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+    };
+    const cap = (rows: BarDatum[], n: number): BarDatum[] => {
+      if (rows.length <= n) return rows;
+      const rest = rows.slice(n).reduce((a, r) => a + r.value, 0);
+      return [...rows.slice(0, n), { label: "Other", value: rest }];
+    };
+    const withPct = (rows: BarDatum[]): BarDatum[] =>
+      rows.map(r => ({ ...r, hint: `${r.value} · ${total ? Math.round((r.value / total) * 100) : 0}%` }));
+
+    const statusRows = ([
+      { label: "Active", key: "active" as StudentTab, value: active, color: "#16a34a" },
+      { label: "On break", key: "on_break" as StudentTab, value: students.filter(s => s.status === "on_break").length, color: "#0284c7" },
+      { label: "Break req.", key: "break_requests" as StudentTab, value: students.filter(s => s.status === "break_requested").length, color: "#0369a1" },
+      { label: "Deact. req.", key: "requests" as StudentTab, value: students.filter(s => s.status === "deactivation_requested").length, color: "#d97706" },
+      { label: "Inactive", key: "inactive" as StudentTab, value: students.filter(s => s.status === "inactive").length, color: "#6b7280" },
+    ]).filter(r => r.value > 0);
+
+    const months: { label: string; value: number }[] = [];
+    const now = new Date();
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      months.push({
+        label: d.toLocaleDateString("en-IN", { month: "short" }),
+        value: students.filter(s => (s.createdAt ?? "").slice(0, 7) === key).length,
+      });
+    }
+
+    return {
+      total, active, dues, owingCount: owing.length, newThisMonth,
+      byCourse: withPct(cap(tally(s => s.course), 8)),
+      byInstrument: withPct(cap(tally(s => s.instrument), 8)),
+      byCenter: withPct(cap(tally(s => s.centerName), 8)),
+      courseGroups: tally(s => s.course).length,
+      statusRows, months,
+    };
+  }, [students]);
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.05)", overflow: "hidden" }}>
+      <button onClick={onToggle} style={{
+        width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "12px 18px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" as const,
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 700, color: "#111827", flexWrap: "wrap" as const }}>
+          📊 Insights
+          <span style={{ fontSize: 12, fontWeight: 400, color: "#9ca3af" }}>
+            {stats.total} students · {stats.courseGroups} courses · {fmtINR(stats.dues)} outstanding
+          </span>
+        </span>
+        <span style={{ fontSize: 12, color: "#6b7280", flexShrink: 0 }}>{open ? "▲ Hide" : "▼ Show"}</span>
+      </button>
+
+      {open && (
+        <div style={{ padding: "2px 18px 20px", borderTop: "1px solid #f1f5f9" }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, margin: "14px 0" }}>
+            <StatTile label="Total" value={String(stats.total)} />
+            <StatTile label="Active" value={String(stats.active)} tone="#16a34a" sub={`${stats.total - stats.active} not active`} />
+            <StatTile label="Outstanding dues" value={fmtINR(stats.dues)} tone={stats.dues > 0 ? "#d97706" : "#16a34a"} sub={`${stats.owingCount} owing`} />
+            <StatTile label="New this month" value={String(stats.newThisMonth)} tone="#4f46e5" />
+          </div>
+
+          {stats.statusRows.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 8 }}>Status</div>
+              <div style={{ display: "flex", height: 16, borderRadius: 6, overflow: "hidden", border: "1px solid #e5e7eb" }}>
+                {stats.statusRows.map(r => (
+                  <div key={r.key} onClick={() => onPickStatus(r.key)} title={`${r.label}: ${r.value}`}
+                    style={{ flex: r.value, background: r.color, cursor: "pointer" }} />
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap" as const, marginTop: 8 }}>
+                {stats.statusRows.map(r => (
+                  <button key={r.key} onClick={() => onPickStatus(r.key)} style={{
+                    display: "flex", alignItems: "center", gap: 6, background: "none", border: "none",
+                    cursor: "pointer", fontSize: 12, color: "#374151", fontFamily: "inherit", padding: 0,
+                  }}>
+                    <span style={{ width: 9, height: 9, borderRadius: 2, background: r.color }} />
+                    {r.label} <strong>{r.value}</strong>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(258px, 1fr))", gap: 12 }}>
+            <BarList title="By course" rows={stats.byCourse} />
+            <BarList title="By instrument" rows={stats.byInstrument} />
+            <BarList title="By centre" rows={stats.byCenter} />
+            <MiniMonthBars data={stats.months} />
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            {attLoading ? (
+              <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}><Spinner /></div>
+            ) : att === "error" ? (
+              <div style={{ fontSize: 12, color: "#9ca3af" }}>Attendance data unavailable.</div>
+            ) : att ? (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(258px, 1fr))", gap: 12 }}>
+                <BarList title={`Attendance by course · ${att.overallPct}% overall`} rows={att.byCourse} color="#16a34a" emptyText="No attendance recorded yet" />
+                <BarList title="Attendance by centre" rows={att.byCenter} color="#16a34a" emptyText="No attendance recorded yet" />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Add Student drawer ───────────────────────────────────────────────────────
+
+function DrawerErr({ msg }: { msg?: string }) {
+  if (!msg) return null;
+  return <span style={{ fontSize: 11, fontWeight: 600, color: "#dc2626" }}>{msg}</span>;
+}
+
+function AddStudentDrawer({
+  open, form, setForm, errors, isSom, saving, centerOptions, teacherOptions, onClose, onSubmit,
+}: {
+  open: boolean;
+  form: CreateForm;
+  setForm: React.Dispatch<React.SetStateAction<CreateForm>>;
+  errors: Record<string, string>;
+  isSom: boolean;
+  saving: boolean;
+  centerOptions: { id: string; name: string; monthlyFee?: number }[];
+  teacherOptions: { id: string; name: string }[];
+  onClose: () => void;
+  onSubmit: (e: React.FormEvent) => void;
+}) {
+  const errInput = (k: string): React.CSSProperties =>
+    errors[k] ? { ...p.input, borderColor: "#fca5a5", background: "#fef2f2" } : p.input;
+
+  return (
+    <>
+      <div onClick={onClose} style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1000,
+        opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none", transition: "opacity 0.2s",
+      }} />
+      <form
+        onSubmit={onSubmit}
+        style={{
+          position: "fixed", top: 0, right: 0, height: "100dvh", width: "min(460px, 100vw)",
+          background: "#fff", zIndex: 1001, display: "flex", flexDirection: "column" as const,
+          boxShadow: "-8px 0 32px rgba(0,0,0,0.18)",
+          transform: open ? "translateX(0)" : "translateX(100%)",
+          transition: "transform 0.25s cubic-bezier(0.4,0,0.2,1)",
+          pointerEvents: open ? "auto" : "none",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #e5e7eb", flexShrink: 0 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>New Student</div>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1 }}>✕</button>
+        </div>
+
+        <div style={{ padding: "16px 20px", overflowY: "auto" as const, flex: 1 }}>
+          <div style={p.hint}>
+            🔐 Login: <strong>email</strong> as username · <strong>admission no.</strong> as password · Student ID is assigned automatically
+          </div>
+
+          <div style={modal.sectionLabel}>Identity</div>
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 12, marginBottom: 18 }}>
+            <Field label="Full Name *">
+              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Arjun Sharma" style={errInput("name")} />
+              <DrawerErr msg={errors.name} />
+            </Field>
+            <Field label="Email (login username) *">
+              <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="e.g. arjun@gmail.com" style={errInput("email")} />
+              <DrawerErr msg={errors.email} />
+            </Field>
+            <Field label="Admission No. (initial password) *">
+              <input value={form.admissionNo} onChange={e => setForm(f => ({ ...f, admissionNo: e.target.value }))} placeholder="e.g. ADM-2026-001" style={errInput("admissionNo")} />
+              <DrawerErr msg={errors.admissionNo} />
+            </Field>
+            <Field label="Phone">
+              <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} placeholder="e.g. +91 98765 43210" style={p.input} />
+            </Field>
+          </div>
+
+          <div style={modal.sectionLabel}>Placement</div>
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 12, marginBottom: 18 }}>
+            <Field label="Centre *">
+              <select
+                value={form.centerId}
+                onChange={e => {
+                  const cid = e.target.value;
+                  const centerFee = centerOptions.find(c => c.id === cid)?.monthlyFee;
+                  setForm(f => ({
+                    ...f,
+                    centerId: cid,
+                    monthlyFee: isSom && !f.monthlyFee && centerFee ? String(centerFee) : f.monthlyFee,
+                  }));
+                }}
+                style={errInput("centerId")}>
+                <option value="">— Select centre —</option>
+                {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <DrawerErr msg={errors.centerId} />
+            </Field>
+            {!isSom && (
+              <Field label="Class Type *">
+                <select value={form.classType} onChange={e => setForm(f => ({ ...f, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))} style={p.input}>
+                  <option value="group">Group Class (batch at centre)</option>
+                  <option value="personal">Personal Class (one-on-one / private)</option>
+                </select>
+              </Field>
+            )}
+            {!isSom && form.classType === "personal" && (
+              <Field label="Assign Teacher">
+                <select value={form.assignedTeacherUid} onChange={e => setForm(f => ({ ...f, assignedTeacherUid: e.target.value }))} style={p.input}>
+                  <option value="">— Unassigned —</option>
+                  {teacherOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+            )}
+            {!isSom && form.classType === "personal" && (
+              <Field label="Class Days">
+                <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8, paddingTop: 2 }}>
+                  {DAYS_OF_WEEK.map(day => (
+                    <label key={day} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, cursor: "pointer" }}>
+                      <input type="checkbox" checked={form.classDays.includes(day)}
+                        onChange={e => setForm(f => ({
+                          ...f,
+                          classDays: e.target.checked ? [...f.classDays, day] : f.classDays.filter(d => d !== day),
+                        }))} />
+                      {day}
+                    </label>
+                  ))}
+                </div>
+              </Field>
+            )}
+            {!isSom && form.classType === "personal" && (
+              <Field label="Class Time">
+                <input type="time" value={form.classTime} onChange={e => setForm(f => ({ ...f, classTime: e.target.value }))} style={p.input} />
+              </Field>
+            )}
+            <Field label="Instrument *">
+              <input value={form.instrument} onChange={e => setForm(f => ({ ...f, instrument: e.target.value }))} placeholder="e.g. Guitar" style={errInput("instrument")} />
+              <DrawerErr msg={errors.instrument} />
+            </Field>
+            <Field label="Course *">
+              <input value={form.course} onChange={e => setForm(f => ({ ...f, course: e.target.value }))} placeholder="e.g. Beginner Guitar" style={errInput("course")} />
+              <DrawerErr msg={errors.course} />
+            </Field>
+          </div>
+
+          <div style={modal.sectionLabel}>Fees</div>
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
+            {isSom ? (
+              <Field label="Monthly Fee (₹) *">
+                <input type="number" min="0" step="1" value={form.monthlyFee}
+                  onChange={e => setForm(f => ({ ...f, monthlyFee: e.target.value }))} placeholder="e.g. 2000" style={errInput("monthlyFee")} />
+                <DrawerErr msg={errors.monthlyFee} />
+              </Field>
+            ) : (
+              <>
+                <Field label="Billing Mode *">
+                  <select value={form.billingMode} onChange={e => setForm(f => ({ ...f, billingMode: e.target.value }))} style={p.input}>
+                    <option value="postpay">Postpay — billed first, pays after</option>
+                    <option value="prepay">Prepay — payments advance, fee deducted</option>
+                  </select>
+                </Field>
+                <Field label="Fee Cycle">
+                  <select value={form.feeCycle} onChange={e => setForm(f => ({ ...f, feeCycle: e.target.value }))} style={p.input}>
+                    <option value="monthly">Monthly</option>
+                    <option value="per_class">Per Class</option>
+                  </select>
+                </Field>
+                {form.feeCycle === "per_class" && (
+                  <Field label="Fee Per Class (₹)">
+                    <input type="number" min="0" step="1" value={form.feePerClass}
+                      onChange={e => setForm(f => ({ ...f, feePerClass: e.target.value }))} placeholder="500" style={errInput("feePerClass")} />
+                    <DrawerErr msg={errors.feePerClass} />
+                  </Field>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        <div style={{ padding: "14px 20px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 10, flexShrink: 0, background: "#f9fafb" }}>
+          <button type="button" onClick={onClose} style={modal.cancelBtn}>Cancel</button>
+          <button type="submit" disabled={saving} style={{ ...p.primaryBtn, opacity: saving ? 0.6 : 1 }}>
+            {saving ? "Creating…" : "Create Student"}
+          </button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+// ─── Student table view ───────────────────────────────────────────────────────
+
+function StudentTableView({
+  students, sortKey, sortDir, onSort, isAdmin, isTeacher,
+  onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete,
+}: {
+  students: StudentRow[];
+  sortKey: "name" | "centerName" | "course" | "balance" | "status";
+  sortDir: 1 | -1;
+  onSort: (k: "name" | "centerName" | "course" | "balance" | "status") => void;
+  isAdmin: boolean;
+  isTeacher: boolean;
+  onEdit: (s: StudentRow) => void;
+  onRequestDeactivation: (s: StudentRow) => void;
+  onRequestBreak: (s: StudentRow) => void;
+  onClearHistory?: (s: StudentRow) => void;
+  onDelete?: (s: StudentRow) => void;
+}) {
+  const sorted = useMemo(() => {
+    const arr = [...students];
+    arr.sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === "balance") cmp = a.balance - b.balance;
+      else cmp = String(a[sortKey] ?? "").localeCompare(String(b[sortKey] ?? ""));
+      return cmp * sortDir;
+    });
+    return arr;
+  }, [students, sortKey, sortDir]);
+
+  const arrow = (k: typeof sortKey) => (sortKey === k ? (sortDir === 1 ? " ▲" : " ▼") : "");
+  const sortableTh = (k: typeof sortKey, label: string) => (
+    <th style={{ ...p.th, cursor: "pointer", userSelect: "none" as const }} onClick={() => onSort(k)}>{label}{arrow(k)}</th>
+  );
+
+  return (
+    <div style={p.tableWrap}>
+      <table style={p.table}>
+        <thead>
+          <tr>
+            <th style={p.th}>ID</th>
+            {sortableTh("name", "Name")}
+            <th style={p.th}>Email</th>
+            <th style={p.th}>Admission</th>
+            {sortableTh("centerName", "Centre")}
+            <th style={p.th}>Type</th>
+            {sortableTh("course", "Instrument / Course")}
+            <th style={p.th}>Fee</th>
+            {sortableTh("balance", "Balance")}
+            {sortableTh("status", "Status")}
+            <th style={p.th}>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((s, i) => (
+            <StudentRow
+              key={s.id}
+              student={s}
+              index={i}
+              isAdmin={isAdmin}
+              isTeacher={isTeacher}
+              onEdit={() => onEdit(s)}
+              onRequestDeactivation={() => onRequestDeactivation(s)}
+              onRequestBreak={() => onRequestBreak(s)}
+              onClearHistory={onClearHistory ? () => onClearHistory(s) : undefined}
+              onDelete={onDelete ? () => onDelete(s) : undefined}
+            />
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -1966,7 +2525,7 @@ export function LedgerEditor({
         tx.id,
         { amount: amt, method: txMethod, date: txDate, status: txStatus, note: txNote.trim() || null },
         currentUserUid,
-        currentUserRole as "admin" | "super_admin",
+        currentUserRole as import("@/types").Role,
       );
       setEditingTxId(null);
       onChanged(); // refetches transactions + recomputes the student's balance
@@ -1986,7 +2545,7 @@ export function LedgerEditor({
     if (txDeleteResetTimer.current) clearTimeout(txDeleteResetTimer.current);
     setTxDeletePending(null);
     setTxDeleteSubmitting(true);
-    deleteTransaction(txId, currentUserUid, currentUserRole as "admin" | "super_admin")
+    deleteTransaction(txId, currentUserUid, currentUserRole as import("@/types").Role)
       .then(() => {
         setEditingTxId(null);
         onChanged(); // refetches transactions + recomputes the student's balance

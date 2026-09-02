@@ -19,7 +19,7 @@ import type { Alert, AlertType, AlertSeverity, AlertStatus } from "@/types/alert
 
 export default function AlertsPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <AlertsContent />
     </ProtectedRoute>
   );

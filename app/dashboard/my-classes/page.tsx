@@ -84,7 +84,7 @@ interface StudentData {
 
 export default function MyClassesPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.ADMIN, ROLES.SUPER_ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.ADMIN, ROLES.SUPER_ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <MyClassesContent />
     </ProtectedRoute>
   );

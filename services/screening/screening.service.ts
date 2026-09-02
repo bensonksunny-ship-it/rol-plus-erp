@@ -12,11 +12,18 @@ import { db } from "@/services/firebase/firebase";
 import type { ScreeningResult } from "@/types";
 import { initStudentSyllabus } from "@/services/syllabus/lm-syllabus.service";
 
+/** Firestore rejects `undefined` field values — drop those keys before writing. */
+function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, v]) => v !== undefined),
+  ) as T;
+}
+
 export async function saveScreening(
   data: Omit<ScreeningResult, "id">,
 ): Promise<string> {
   const ref  = doc(collection(db, "screenings"));
-  const full: ScreeningResult = { ...data, id: ref.id };
+  const full = stripUndefined({ ...data, id: ref.id }) as ScreeningResult;
   await setDoc(ref, full);
   if (data.studentId) {
     await updateDoc(doc(db, "users", data.studentId), {
@@ -74,6 +81,16 @@ export async function getAdmissionsByTeacher(teacherUid: string): Promise<Record
 
 export async function updateAdmission(id: string, data: Record<string, unknown>): Promise<void> {
   await updateDoc(doc(db, "admissions", id), { ...data, updatedAt: new Date().toISOString() });
+}
+
+/**
+ * Reassign an application to a different wing. An application is a single record
+ * with one `wing` — this moves it (it leaves the source wing's list and appears
+ * in the target wing's list). Nothing is duplicated; a later delete only ever
+ * removes it from the one wing it now belongs to.
+ */
+export async function moveAdmissionToWing(id: string, wing: string): Promise<void> {
+  await updateDoc(doc(db, "admissions", id), { wing, updatedAt: new Date().toISOString() });
 }
 
 export async function deleteAdmission(id: string): Promise<void> {

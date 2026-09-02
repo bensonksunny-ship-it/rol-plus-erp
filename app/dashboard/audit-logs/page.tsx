@@ -16,6 +16,7 @@ import {
 import { db } from "@/config/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
+import { CAPABILITIES } from "@/config/permissions";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import type { AuditLog } from "@/types/audit";
@@ -39,7 +40,7 @@ function threeMonthsAgo(): Timestamp {
 
 export default function AuditLogsPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]} requiredCapability={CAPABILITIES.AUDIT_VIEW}>
       <AuditLogsContent />
     </ProtectedRoute>
   );

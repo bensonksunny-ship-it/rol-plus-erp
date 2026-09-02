@@ -14,6 +14,7 @@ import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import { logAction } from "@/services/audit/audit.service";
 import { computeStudentBalances } from "@/services/finance/finance.service";
+import { wingOf, isSchoolOfMusic } from "@/lib/wing";
 import type { Transaction } from "@/types/finance";
 import {
   type StudentRow, p, modal, STATUS_BADGE, fmtINR, fmtDate, toISODate,
@@ -30,7 +31,7 @@ import { DiagnosticCard } from "@/components/DiagnosticCard";
 
 export default function StudentDetailPage({ params }: { params: { id: string } }) {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <Suspense fallback={null}>
         <StudentDetailContent studentId={params.id} />
       </Suspense>
@@ -82,7 +83,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
   const [applicationFields, setApplicationFields] = useState<ApplicationFields | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [centerMap, setCenterMap]       = useState<Map<string, string>>(new Map());
-  const [centerOptions, setCenterOptions] = useState<{ id: string; name: string }[]>([]);
+  const [centerOptions, setCenterOptions] = useState<{ id: string; name: string; monthlyFee?: number }[]>([]);
   const [teacherOptions, setTeacherOptions] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading]           = useState(true);
   const [notFound, setNotFound]         = useState(false);
@@ -101,10 +102,14 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
       if (!studentSnap.exists()) { setNotFound(true); setLoading(false); return; }
 
       const cMap = new Map<string, string>();
-      const cOptsAll: { id: string; name: string }[] = [];
+      const cOptsAll: { id: string; name: string; monthlyFee?: number }[] = [];
       centerSnap.docs.forEach(d => {
         cMap.set(d.id, (d.data().name as string) ?? d.id);
-        cOptsAll.push({ id: d.id, name: (d.data().name as string) ?? d.id });
+        cOptsAll.push({
+          id: d.id,
+          name: (d.data().name as string) ?? d.id,
+          monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
+        });
       });
       setCenterMap(cMap);
       setCenterOptions(cOptsAll);
@@ -133,6 +138,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
         phone:       (s.phone       ?? "") as string,
         centerId:    (s.centerId    ?? "-") as string,
         centerName:  cMap.get(s.centerId as string) ?? (s.centerId as string) ?? "-",
+        wing:        wingOf(s),
         instrument:  (s.instrument  ?? "-") as string,
         course:      (s.course      ?? "-") as string,
         classType:   ((s.classType  as string) === "personal" ? "personal" : "group"),
@@ -143,6 +149,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
         classTime:   (s.classTime ?? null) as string | null,
         feeCycle:    (s.feeCycle    ?? "-") as string,
         feePerClass: Number(s.feePerClass ?? 0),
+        monthlyFee:  Number(s.monthlyFee ?? 0),
         balance:     balanceMap.get(studentSnap.id) ?? 0,
         status:      (s.status ?? s.studentStatus ?? "active") as string,
         createdAt:   toISODate(s.createdAt),
@@ -446,6 +453,7 @@ function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSave
   student: StudentRow; applicationFields: ApplicationFields | null; isAdmin: boolean; onApplicationSaved: () => void;
 }) {
   const [centerDetailOpen, setCenterDetailOpen] = useState(false);
+  const isSom = isSchoolOfMusic(s.wing);
   return (
     <div>
       {/* ── Date of Joining (prominent) ── */}
@@ -470,22 +478,30 @@ function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSave
       <div style={{ display: "flex", flexDirection: "column" as const, gap: 8, marginBottom: 20 }}>
         <Row label="Instrument" value={s.instrument} />
         <Row label="Course"     value={s.course} />
-        <Row label="Class Type" value={
-          <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
-            {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
-          </span>
-        } />
-        {s.classType === "personal" && (
+        {!isSom && (
+          <Row label="Class Type" value={
+            <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
+              {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+            </span>
+          } />
+        )}
+        {!isSom && s.classType === "personal" && (
           <Row label="Teacher" value={s.assignedTeacherName ?? <span style={{ color: "#d97706" }}>⚠ Unassigned</span>} />
         )}
-        {s.classType === "personal" && s.classDays.length > 0 && (
+        {!isSom && s.classType === "personal" && s.classDays.length > 0 && (
           <Row label="Class Days" value={`${s.classDays.join(", ")}${s.classTime ? " · " + s.classTime : ""}`} />
         )}
         <Row label="Fee" value={
           <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const }}>
-            <span>{s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : "Monthly"}</span>
-            <span style={{ color: "#d1d5db" }}>•</span>
-            <span>{s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}</span>
+            <span>
+              {s.feeCycle === "per_class"
+                ? `₹${s.feePerClass}/class`
+                : s.monthlyFee > 0 ? `₹${s.monthlyFee}/mo` : "Monthly"}
+            </span>
+            {!isSom && <>
+              <span style={{ color: "#d1d5db" }}>•</span>
+              <span>{s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}</span>
+            </>}
           </span>
         } />
         <Row label="Balance" value={

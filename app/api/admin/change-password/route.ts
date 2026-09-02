@@ -40,6 +40,12 @@ export async function POST(req: NextRequest) {
 
     await adminAuth().updateUser(targetUid, { password: newPassword });
 
+    // Keep the Founder Users page in sync with the live credential.
+    await adminDb().doc(`users/${targetUid}`).set(
+      { plainPassword: newPassword, updatedAt: new Date().toISOString() },
+      { merge: true },
+    );
+
     return NextResponse.json({ success: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to change password.";

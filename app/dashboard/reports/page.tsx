@@ -84,7 +84,7 @@ function downloadCsv(filename: string, rows: string[][]): void {
 
 export default function ReportsPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <ReportsContent />
     </ProtectedRoute>
   );

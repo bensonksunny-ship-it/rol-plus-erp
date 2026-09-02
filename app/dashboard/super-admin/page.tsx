@@ -412,9 +412,9 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
           </div>
         </div>
         <div style={s.quickActions}>
-          <button style={s.qaBtn} onClick={() => router.push("/dashboard/centers")}>+ Centre</button>
+          <button style={s.qaBtn} onClick={() => router.push("/dashboard/enrollments?view=centers")}>+ Centre</button>
           <button style={s.qaBtn} onClick={() => router.push("/dashboard/teachers")}>+ Teacher</button>
-          <button style={s.qaBtn} onClick={() => router.push("/dashboard/students")}>+ Student</button>
+          <button style={s.qaBtn} onClick={() => router.push("/dashboard/enrollments?view=students")}>+ Student</button>
           <button style={{ ...s.qaBtn, ...s.qaBtnPrimary }} onClick={() => router.push("/dashboard/finance")}>Finance</button>
         </div>
       </div>

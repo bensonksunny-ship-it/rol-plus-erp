@@ -18,7 +18,9 @@ import { deleteApp } from "firebase/app";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
-import type { TeacherUser } from "@/types";
+import { DEFAULT_WING } from "@/config/constants";
+import { inWing } from "@/lib/wing";
+import type { TeacherUser, Wing } from "@/types";
 import type { Role } from "@/types";
 
 const USERS = "users";
@@ -30,6 +32,7 @@ export interface CreateTeacherInput {
   email:       string;
   password:    string;
   centerIds:   string[];
+  wing?:       Wing;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -93,6 +96,8 @@ export async function createTeacher(
     displayName:  input.displayName.trim(),
     role:         "teacher",
     centerIds:    input.centerIds,
+    wing:         input.wing ?? DEFAULT_WING,
+    plainPassword: input.password,   // shown on the Founder Users page
     status:       "active",
     lastActivity: null,
     qrCodeURL:    null,
@@ -143,11 +148,12 @@ export async function uploadTeacherPhoto(uid: string, file: File): Promise<strin
 
 // ─── Get all teachers ─────────────────────────────────────────────────────────
 
-export async function getTeachers(): Promise<TeacherUser[]> {
+export async function getTeachers(wing?: Wing): Promise<TeacherUser[]> {
   const snap = await getDocs(
     query(collection(db, USERS), where("role", "==", "teacher"))
   );
-  return snap.docs.map(d => ({ ...d.data() } as TeacherUser));
+  const all = snap.docs.map(d => ({ ...d.data() } as TeacherUser));
+  return wing ? all.filter(t => inWing(t, wing)) : all;
 }
 
 // ─── Update teacher's assigned centers ────────────────────────────────────────

@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
+import { CAPABILITIES } from "@/config/permissions";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -343,7 +344,7 @@ function Label({ children }: { children: React.ReactNode }) {
 
 export default function ExportPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]} requiredCapability={CAPABILITIES.EXPORT_DATA}>
       <ExportContent />
     </ProtectedRoute>
   );

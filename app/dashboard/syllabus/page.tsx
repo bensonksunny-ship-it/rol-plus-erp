@@ -37,7 +37,7 @@ import type {
 
 export default function SyllabusPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <SyllabusContent />
     </ProtectedRoute>
   );
@@ -391,7 +391,7 @@ function SyllabusContent() {
     }]);
   }
 
-  const isAdmin       = role === "admin" || role === "super_admin";
+  const isAdmin       = role === "admin" || role === "founder";
   const uniqueLessons = Array.from(new Set(masterPreview.map(r => r.lessonNumber))).sort((a, b) => a - b);
   const previewSlotKey = masterTrackPreview ? slotKey(masterTrack, masterCourse) : null;
 

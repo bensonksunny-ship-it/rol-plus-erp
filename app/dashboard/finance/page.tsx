@@ -9,6 +9,8 @@ import {
 } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import { useAuth } from "@/hooks/useAuth";
+import { useWing } from "@/hooks/useWing";
+import { inWing, isSchoolOfMusic } from "@/lib/wing";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import {
@@ -104,7 +106,7 @@ function minMonth(): string {
 
 export default function FinancePage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <Suspense fallback={null}>
         <FinanceContent />
       </Suspense>
@@ -118,6 +120,8 @@ type DrillDown = null | "collected" | "overdue" | "prepay";
 
 function FinanceContent() {
   const { user, isAdmin, isSuperAdmin }      = useAuth();
+  const { wing }                            = useWing();
+  const isSom                                = isSchoolOfMusic(wing);
   const canManageTx                          = isAdmin || isSuperAdmin;
   const searchParams                         = useSearchParams();
   const [drillDown, setDrillDown]            = useState<DrillDown>(null);
@@ -197,19 +201,26 @@ function FinanceContent() {
         getDocs(query(collection(db, "attendance"), where("status", "==", "present"))),
       ]);
 
+      const wingCenterDocs = centerSnap.docs.filter(d => inWing(d.data(), wing));
+      const wingCenterIds  = new Set(wingCenterDocs.map(d => d.id));
       const cMap = new Map<string, { name: string; centerCode: string }>();
-      centerSnap.docs.forEach(d => cMap.set(d.id, {
+      wingCenterDocs.forEach(d => cMap.set(d.id, {
         name:       (d.data().name       as string) ?? d.id,
         centerCode: (d.data().centerCode as string) ?? "—",
       }));
-      setCenters(centerSnap.docs.map(d => ({
+      setCenters(wingCenterDocs.map(d => ({
         id: d.id,
         name:       (d.data().name       as string) ?? d.id,
         centerCode: (d.data().centerCode as string) ?? "—",
       })));
 
-      // Store ALL transactions (month filtering happens in useMemo/render)
-      const sortedTx = txData.sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
+      // Store transactions for this wing (month filtering happens in useMemo/render).
+      // A transaction with no centerId is legacy ROL+ data.
+      const wingTx = txData.filter(t => {
+        const cid = (t as { centerId?: string }).centerId;
+        return cid ? wingCenterIds.has(cid) : wing === "rol_plus";
+      });
+      const sortedTx = wingTx.sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
       setTransactions(sortedTx);
 
       // ── Attendance count + dates for the selected month ───────────────────
@@ -245,7 +256,12 @@ function FinanceContent() {
 
       const balanceMap = computeStudentBalances(txData, isCurrent ? undefined : monthEnd);
 
-      setStudents(studentSnap.docs.map(d => {
+      setStudents(studentSnap.docs
+        .filter(d => {
+          const cid = (d.data().centerId ?? "") as string;
+          return cid ? wingCenterIds.has(cid) : inWing(d.data(), wing);
+        })
+        .map(d => {
         const s           = d.data();
         const c           = cMap.get(s.centerId as string);
         const feePerClass = Number(s.feePerClass ?? 0);
@@ -290,7 +306,7 @@ function FinanceContent() {
     const interval = setInterval(() => fetchAll(selectedMonth), 30_000);
     return () => clearInterval(interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedMonth]);
+  }, [selectedMonth, wing]);
 
   // ── Fee-due generated this month per student ────────────────────────────────
   // Reconciles every due against the payments credited to it, so a part-paid
@@ -646,7 +662,7 @@ function FinanceContent() {
     }
     try {
       const editorUid  = user?.uid ?? "unknown";
-      const editorRole = isSuperAdmin ? "super_admin" : "admin";
+      const editorRole = user?.role ?? "admin";
       await editTransaction(txId, patch, editorUid, editorRole);
       await fetchAll(selectedMonth);
       toast("Transaction updated", "success");
@@ -663,7 +679,7 @@ function FinanceContent() {
     }
     try {
       const deleterUid  = user?.uid ?? "unknown";
-      const deleterRole = isSuperAdmin ? "super_admin" : "admin";
+      const deleterRole = user?.role ?? "admin";
       await deleteTransaction(txId, deleterUid, deleterRole);
       await fetchAll(selectedMonth);
       toast("Transaction deleted", "success");
@@ -835,16 +851,20 @@ function FinanceContent() {
           label="Active Students"
           value={loading ? "…" : String(summary.activeCount)}
           accent="#059669" icon="🎓"
-          hint={loading ? undefined : `${summary.groupCount} group · ${summary.personalCount} personal`}
+          hint={loading ? undefined : isSom
+            ? `${summary.prepayCount} prepaid · monthly`
+            : `${summary.groupCount} group · ${summary.personalCount} personal`}
         />
         <SummaryCard
-          label="Prepay Collected"
+          label={isSom ? "Advance Collected" : "Prepay Collected"}
           value={loading ? "…" : fmtINR(summary.prepayCollected)}
           accent="#9d174d" icon="⬆"
           urgent={summary.lowCreditCount > 0}
           hint={loading ? undefined : summary.lowCreditCount > 0
             ? `⚠ ${summary.lowCreditCount} due unpaid · ${summary.prepayCount} prepay`
-            : `${summary.prepayCount} prepay · Postpay ${fmtINR(summary.postpayCollected)}`}
+            : isSom
+              ? `${summary.prepayCount} students`
+              : `${summary.prepayCount} prepay · Postpay ${fmtINR(summary.postpayCollected)}`}
           active={drillDown === "prepay"}
           onClick={() => setDrillDown(d => d === "prepay" ? null : "prepay")}
         />
@@ -867,13 +887,15 @@ function FinanceContent() {
               onChange={e => setStudentSearch(e.target.value)}
               style={{ ...st.searchInput, flex: 1 }}
             />
-            <select value={filterType} onChange={e => setFilterType(e.target.value)} style={st.filterSelect}>
-              <option value="all">All Types</option>
-              <option value="group">👥 Group</option>
-              <option value="personal">👤 Personal</option>
-              <option value="postpay">⬇ Postpay</option>
-              <option value="prepay">⬆ Prepay</option>
-            </select>
+            {!isSom && (
+              <select value={filterType} onChange={e => setFilterType(e.target.value)} style={st.filterSelect}>
+                <option value="all">All Types</option>
+                <option value="group">👥 Group</option>
+                <option value="personal">👤 Personal</option>
+                <option value="postpay">⬇ Postpay</option>
+                <option value="prepay">⬆ Prepay</option>
+              </select>
+            )}
             <select value={feeStatusFilter} onChange={e => setFeeStatusFilter(e.target.value as "all" | "pending")} style={st.filterSelect}>
               <option value="all">All Fee Status</option>
               <option value="pending">⚠ Pending balance</option>
@@ -1023,7 +1045,9 @@ function FinanceContent() {
                             {/* Mobile: type + paid/due status as plain text */}
                             {isMobile && (
                               <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 4 }}>
-                                {s.classType === "personal" ? "Personal" : "Group"} · {s.feeCycle === "monthly" ? "Monthly" : "Per Class"}
+                                {isSom
+                                  ? `Monthly ${fmtINR(s.monthlyFee)}`
+                                  : `${s.classType === "personal" ? "Personal" : "Group"} · ${s.feeCycle === "monthly" ? "Monthly" : "Per Class"}`}
                                 {paidMap.has(s.uid) ? (
                                   <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                                 ) : feeDueMap.has(s.uid) ? (
@@ -1039,12 +1063,23 @@ function FinanceContent() {
                           {/* Type — desktop only */}
                           {!isMobile && (
                             <td style={st.td}>
-                              <div style={{ fontSize: 13, color: "var(--color-text-primary)" }}>
-                                {s.classType === "personal" ? "Personal" : "Group"}
-                              </div>
-                              <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
-                                {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
-                              </div>
+                              {isSom ? (
+                                <>
+                                  <div style={{ fontSize: 13, color: "var(--color-text-primary)" }}>
+                                    {fmtINR(s.monthlyFee)}<span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}> / mo</span>
+                                  </div>
+                                  <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>Prepaid</div>
+                                </>
+                              ) : (
+                                <>
+                                  <div style={{ fontSize: 13, color: "var(--color-text-primary)" }}>
+                                    {s.classType === "personal" ? "Personal" : "Group"}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
+                                    {s.feeCycle === "monthly" ? "Monthly" : "Per Class"} · {isPrepay ? "Prepay" : "Postpay"}
+                                  </div>
+                                </>
+                              )}
                             </td>
                           )}
 

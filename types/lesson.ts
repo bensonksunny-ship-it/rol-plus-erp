@@ -1,9 +1,30 @@
 import type { Timestamp } from "firebase/firestore";
+import type { Wing } from "./index";
 
 // ─── Collections ──────────────────────────────────────────────────────────────
-// lessons                  — master lesson definitions (center-wide OR student-specific)
+// lessons                  — master lesson definitions (center-wide, student-specific,
+//                            OR wing syllabus — keyed by wing + level + instrument)
 // lesson_items             — ordered activities within a lesson: concept / exercise / songsheet
 // student_lesson_progress  — per-student attempt + completion tracking per item
+
+// ─── Wing syllabus keys ───────────────────────────────────────────────────────
+// Rol's School of Music runs 9 syllabi: 3 levels × 3 instruments.
+export type SyllabusLevel      = "introduction" | "intermediate" | "advanced";
+export type SyllabusInstrument = "keyboard" | "guitar" | "drums";
+
+export const SYLLABUS_LEVELS: SyllabusLevel[]           = ["introduction", "intermediate", "advanced"];
+export const SYLLABUS_INSTRUMENTS: SyllabusInstrument[] = ["keyboard", "guitar", "drums"];
+
+export const SYLLABUS_LEVEL_LABELS: Record<SyllabusLevel, string> = {
+  introduction: "Introduction",
+  intermediate: "Intermediate",
+  advanced:     "Advanced",
+};
+export const SYLLABUS_INSTRUMENT_LABELS: Record<SyllabusInstrument, string> = {
+  keyboard: "Keyboard",
+  guitar:   "Guitar",
+  drums:    "Drums",
+};
 
 // ─── Lesson ───────────────────────────────────────────────────────────────────
 
@@ -14,6 +35,9 @@ export interface Lesson {
   order:        number;          // strict sequence (no skipping)
   centerId:     string | null;   // set for center-wide lessons
   studentId:    string | null;   // set for student-specific lessons
+  wing?:        Wing | null;               // set for wing syllabus lessons
+  level?:       SyllabusLevel | null;      // wing syllabus: which of the 3 levels
+  instrument?:  SyllabusInstrument | null; // wing syllabus: which of the 3 instruments
   createdAt:    Timestamp | string;
   updatedAt:    Timestamp | string;
 }

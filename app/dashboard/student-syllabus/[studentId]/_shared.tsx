@@ -59,7 +59,7 @@ export function StudentSyllabusContent({ studentId, hideBackBar, viewOnly }: { s
   // student's full profile page) — send them back to that profile. Students
   // viewing their own syllabus have no Students list to return to, so send
   // them to their own dashboard instead.
-  const isStaff = role === "admin" || role === "super_admin" || role === "teacher";
+  const isStaff = role === "admin" || role === "founder" || role === "teacher";
   function goBack() {
     if (isStaff) router.push(`/dashboard/students/${studentId}?tab=syllabus`);
     else router.push("/dashboard");
@@ -183,7 +183,7 @@ export function StudentSyllabusContent({ studentId, hideBackBar, viewOnly }: { s
   const progressPct = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 0;
 
   // Check if current user is teacher/admin (can add attempts)
-  const canModify = role === "admin" || role === "super_admin" || role === "teacher";
+  const canModify = role === "admin" || role === "founder" || role === "teacher";
 
   return (
     <div>

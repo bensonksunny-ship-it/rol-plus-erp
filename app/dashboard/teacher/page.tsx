@@ -88,7 +88,7 @@ type View =
 
 export default function TeacherDashboardPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.ADMIN, ROLES.SUPER_ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.ADMIN, ROLES.SUPER_ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <Suspense fallback={<div style={{ padding: "60px 0", textAlign: "center", color: "#9ca3af" }}>Loading…</div>}>
         <TeacherDashboardContent />
       </Suspense>

@@ -1,11 +1,23 @@
 import type {
   ROLES,
+  WINGS,
   USER_STATUS,
   STUDENT_STATUS,
   CENTER_STATUS,
   APPROVAL_STATUS,
   ATTENDANCE_MODE,
 } from "@/config/constants";
+
+// ─── Wing ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Wing — which of the two music schools a record belongs to.
+ *  - "rol_plus"        : ROL+ Music Academy (the original)
+ *  - "school_of_music" : Rol's School of Music
+ * Documents created before wings existed have no `wing` field and are read as
+ * "rol_plus" (see lib/wing.ts wingOf()).
+ */
+export type Wing = (typeof WINGS)[keyof typeof WINGS];
 
 // ─── Class Type ───────────────────────────────────────────────────────────────
 
@@ -51,6 +63,30 @@ interface UserBase {
   email: string;
   displayName: string;
   status: UserStatus;
+  /**
+   * wing — which music school this account belongs to. Optional in the type
+   * because legacy docs predate it; readers should treat a missing value as
+   * "rol_plus" (lib/wing.ts wingOf()). Founder accounts are wing-agnostic — the
+   * value is a home wing only; cross-wing access comes from the wing.switch
+   * capability + useWing().
+   */
+  wing?: Wing;
+  /**
+   * loginId — School of Music accounts sign in with this instead of an email.
+   * The email stored in Firebase Auth is a synthetic `${loginId}@<domain>`
+   * (see config/constants loginIdToAuthEmail); `email` on the doc stays the
+   * real contact address. Absent for email-login (ROL+) accounts.
+   */
+  loginId?: string;
+  /**
+   * plainPassword — the password last set for this account, stored in clear so
+   * the Founder-only Users page can display working credentials for staff.
+   * Written on account creation (member / staff / teacher / admin) and on an
+   * admin password reset. Absent for accounts created before this field existed
+   * and for students (whose password is their admission number). Never exposed
+   * outside the Founder Users view.
+   */
+  plainPassword?: string;
   lastActivity: string | null;   // ISO — last login or action timestamp
   qrCodeURL: string | null;      // generated QR for identity / attendance scanning
   photoURL?: string | null;      // uploaded profile picture (Firebase Storage download URL)
@@ -76,13 +112,21 @@ export interface StudentUser extends UserBase {
    *   "group"    → part of a batch/group class at the center
    *   "personal" → private / one-on-one class (teacher-to-student directly)
    * Both group and personal students can use "monthly" or "per_class" billing.
+   * School of Music (wing 2) students are always "group".
    */
   classType: ClassType;
   /**
    * billingMode — how fees are collected for this student.
    * Defaults to "postpay" for existing students without this field.
+   * School of Music (wing 2) students are always "prepay".
    */
   billingMode: BillingMode;
+  /**
+   * monthlyFee — ₹ charged per month when feeCycle === "monthly". Captured at
+   * enrolment for School of Music (wing 2); on ROL+ it is set/edited via
+   * Finance → "Adjust fee". `feePerClass` is used instead for per-class billing.
+   */
+  monthlyFee?: number;
   /**
    * assignedTeacherUid — only relevant when classType === "personal".
    * Points to the TeacherUser.uid responsible for this student's one-on-one sessions.
@@ -131,10 +175,39 @@ export interface TeacherUser extends UserBase {
 }
 
 /**
- * AdminUser / SuperAdminUser — no center or student fields.
+ * AdminUser — staff/leadership accounts with no center or student fields.
+ * Covers the ROL+ `admin` role and the School of Music `founder` / `director` /
+ * `chief_teacher` roles (all share the same shape). `founder` is also the value
+ * ROLES.SUPER_ADMIN resolves to.
  */
 export interface AdminUser extends UserBase {
-  role: typeof ROLES.ADMIN | typeof ROLES.SUPER_ADMIN;
+  role:
+    | typeof ROLES.ADMIN
+    | typeof ROLES.FOUNDER
+    | typeof ROLES.DIRECTOR
+    | typeof ROLES.CHIEF_TEACHER;
+  centerId?: never;
+  currentBalance?: never;
+  studentStatus?: never;
+  deactivationReason?: never;
+  deactivationRequestedBy?: never;
+  deactivationApprovalStatus?: never;
+  breakRequestedBy?: never;
+  breakRequestedAt?: never;
+  breakStartDate?: never;
+  breakReason?: never;
+  breakApprovalStatus?: never;
+  centerIds?: never;
+  childUids?: never;
+}
+
+/**
+ * ParentUser — Rol's School of Music parent portal. Read-only; sees only the
+ * students listed in childUids.
+ */
+export interface ParentUser extends UserBase {
+  role: typeof ROLES.PARENT;
+  childUids: string[];           // uids of StudentUser docs this parent may view
   centerId?: never;
   currentBalance?: never;
   studentStatus?: never;
@@ -150,11 +223,24 @@ export interface AdminUser extends UserBase {
 }
 
 /**
+ * MemberUser — Rol's School of Music generic account (login-id sign-in).
+ * No centre / student / leadership fields.
+ */
+export interface MemberUser extends UserBase {
+  role: typeof ROLES.MEMBER;
+  centerId?: never;
+  currentBalance?: never;
+  studentStatus?: never;
+  centerIds?: never;
+  childUids?: never;
+}
+
+/**
  * Discriminated union — use this as the canonical User type everywhere.
  * TypeScript narrows fields automatically on role check:
  *   if (user.role === "student") → user.centerId is string (not null)
  */
-export type User = StudentUser | TeacherUser | AdminUser;
+export type User = StudentUser | TeacherUser | AdminUser | ParentUser | MemberUser;
 
 // ─── Center (atomic unit: location + time slot) ───────────────────────────────
 
@@ -167,6 +253,13 @@ export interface Center {
   teacherUid: string;            // exactly one teacher per center
   studentUids: string[];         // fast lookup — mirrors User.centerId assignments
   status: CenterStatus;
+  wing?: Wing;                    // owning music school — legacy docs = "rol_plus"
+  /**
+   * monthlyFee — School of Music (wing 2) standard batch fee in ₹. Pre-fills the
+   * per-student Monthly Fee at enrolment (the student value is still editable).
+   * Absent on ROL+ / legacy centres.
+   */
+  monthlyFee?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -182,6 +275,7 @@ export interface AttendanceRecord {
   mode: AttendanceMode;          // "manual" entries are flagged automatically
   markedBy: string;              // uid of teacher or admin
   flagReason: "manual" | "late" | "suspicious" | null;  // null = no flag
+  wing?: Wing;                    // owning music school — legacy docs = "rol_plus"
   createdAt: string;
 }
 
@@ -197,6 +291,7 @@ export interface FinanceRecord {
   lastPaymentDate: string | null; // last successful payment — separate from paidDate
   status: "paid" | "unpaid" | "overdue";
   alertSent: boolean;            // finance is flexible: alerts only, no blocking
+  wing?: Wing;                    // owning music school — legacy docs = "rol_plus"
   createdAt: string;
 }
 
@@ -208,7 +303,8 @@ export interface SyllabusItem {
   order: number;                 // sequence is strictly enforced — no skipping
   title: string;
   completedAt: string | null;
-  adminOverride: boolean;        // only admin/super_admin may set true to skip
+  adminOverride: boolean;        // only roles with syllabus.override may set true to skip
+  wing?: Wing;                   // owning music school — legacy docs = "rol_plus"
 }
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
@@ -293,6 +389,7 @@ export interface ScreeningResult {
   screenedBy:      string;
   screenedAt:      string;
   studentId:       string | null;
+  wing?:           Wing;   // owning music school — legacy docs = "rol_plus"
 }
 
 // ─── Auth Session ─────────────────────────────────────────────────────────────
@@ -312,6 +409,29 @@ export function isTeacher(user: User): user is TeacherUser {
   return user.role === "teacher";
 }
 
+/**
+ * isAdmin — any staff/leadership account (no centre/student fields).
+ * Covers founder, admin, director, chief_teacher. Also matches the legacy
+ * "super_admin" value in case a doc slips through before backfill.
+ */
 export function isAdmin(user: User): user is AdminUser {
-  return user.role === "admin" || user.role === "super_admin";
+  return (
+    user.role === "admin" ||
+    user.role === "founder" ||
+    user.role === "director" ||
+    user.role === "chief_teacher" ||
+    (user.role as string) === "super_admin"
+  );
+}
+
+export function isFounder(user: User): user is AdminUser {
+  return user.role === "founder" || (user.role as string) === "super_admin";
+}
+
+export function isParent(user: User): user is ParentUser {
+  return user.role === "parent";
+}
+
+export function isMember(user: User): user is MemberUser {
+  return user.role === "member";
 }

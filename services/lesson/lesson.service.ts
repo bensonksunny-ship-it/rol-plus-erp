@@ -23,9 +23,12 @@ import type {
   CreateLessonItemInput,
   ExcelImportRow,
   LessonProgressSummary,
+  SyllabusLevel,
+  SyllabusInstrument,
 } from "@/types/lesson";
 import { MAX_ATTEMPTS_BY_TYPE } from "@/types/lesson";
-import type { Role } from "@/types";
+import type { Role, Wing } from "@/types";
+import { wingOf, DEFAULT_WING } from "@/lib/wing";
 
 // ─── Collection names ─────────────────────────────────────────────────────────
 
@@ -88,6 +91,7 @@ export async function createLesson(
       order:        data.order,
       centerId:     data.centerId  ?? null,
       studentId:    data.studentId ?? null,
+      wing:         data.wing      ?? null,
       createdAt:    serverTimestamp(),
       updatedAt:    serverTimestamp(),
     });
@@ -136,6 +140,38 @@ export async function getLessonsByStudent(studentId: string): Promise<Lesson[]> 
 }
 
 /**
+ * All wing syllabus lessons for a wing (across every level + instrument).
+ * Used by the import screen to show per-slot counts. Safe as a server-side
+ * filter — wing syllabus lessons are always stamped.
+ */
+export async function getWingLessons(wing: Wing): Promise<Lesson[]> {
+  try {
+    const snap = await getDocs(
+      query(collection(db, LESSONS), where("wing", "==", wing))
+    );
+    return snap.docs
+      .map(d => ({ id: d.id, ...d.data() }) as Lesson)
+      .sort((a, b) => a.order - b.order);
+  } catch (err) {
+    throw new Error(friendlyError(err));
+  }
+}
+
+/**
+ * One wing syllabus — the lessons for a single (wing, level, instrument) slot.
+ * Rol's School of Music runs 9 of these (3 levels × 3 instruments); a student
+ * is assigned exactly one at enrolment.
+ */
+export async function getWingSyllabus(
+  wing: Wing,
+  level: SyllabusLevel,
+  instrument: SyllabusInstrument,
+): Promise<Lesson[]> {
+  const all = await getWingLessons(wing);
+  return all.filter(l => l.level === level && l.instrument === instrument);
+}
+
+/**
  * Get ALL lessons for a student:
  *   - center-wide lessons (lesson.centerId == student.centerId)
  *   - student-specific lessons (lesson.studentId == studentId)
@@ -148,18 +184,27 @@ export async function getLessonsForStudent(
   try {
     const studentSnap = await getDocFromServer(doc(db, "users", studentId));
     if (!studentSnap.exists()) throw new Error(`USER_NOT_FOUND: ${studentId}`);
-    const centerId: string | null = (studentSnap.data().centerId as string) ?? null;
+    const studentData = studentSnap.data();
+    const centerId: string | null = (studentData.centerId as string) ?? null;
+    const studentWing = wingOf(studentData);
+    const sylLevel      = studentData.syllabusLevel as SyllabusLevel | undefined;
+    const sylInstrument = studentData.syllabusInstrument as SyllabusInstrument | undefined;
 
-    // Fetch center-wide + student-specific lessons in parallel
-    const [centerLessons, studentLessons] = await Promise.all([
+    // Fetch center-wide + student-specific + wing-syllabus lessons in parallel.
+    // The wing syllabus applies only to non-default-wing students who have been
+    // assigned a (level, instrument) slot at enrolment.
+    const [centerLessons, studentLessons, wingLessons] = await Promise.all([
       centerId ? getLessonsByCenter(centerId) : Promise.resolve([]),
       getLessonsByStudent(studentId),
+      studentWing !== DEFAULT_WING && sylLevel && sylInstrument
+        ? getWingSyllabus(studentWing, sylLevel, sylInstrument)
+        : Promise.resolve([]),
     ]);
 
     // Merge and sort by order — dedup by id in case of overlap
     const seen = new Set<string>();
     const allLessons: Lesson[] = [];
-    for (const l of [...centerLessons, ...studentLessons]) {
+    for (const l of [...centerLessons, ...studentLessons, ...wingLessons]) {
       if (!seen.has(l.id)) {
         seen.add(l.id);
         allLessons.push(l);
@@ -596,16 +641,21 @@ export interface ImportResult {
   errors:  string[];
 }
 
+export type LessonImportScope =
+  | { centerId: string; studentId: null;   wing?: null; level?: null; instrument?: null }
+  | { centerId: null;   studentId: string; wing?: null; level?: null; instrument?: null }
+  | { centerId: null;   studentId: null;   wing: Wing;  level: SyllabusLevel; instrument: SyllabusInstrument };
+
 export async function bulkImportLessons(
   rows:          ExcelImportRow[],
-  scope:         { centerId: string; studentId: null } | { centerId: null; studentId: string },
+  scope:         LessonImportScope,
   initiatorId:   string,
   initiatorRole: Role,
   overwrite:     boolean = false,
 ): Promise<ImportResult> {
   const result: ImportResult = { created: 0, skipped: 0, errors: [] };
 
-  // Validate scope target exists before importing
+  // Validate scope target exists before importing (wing scope has no target doc)
   if (scope.studentId) {
     const studentSnap = await getDocFromServer(doc(db, "users", scope.studentId)).catch(() => null);
     if (!studentSnap?.exists()) {
@@ -633,8 +683,8 @@ export async function bulkImportLessons(
   const lessonOrderMap = new Map<number, number>();
   sortedLessonNumbers.forEach((num, idx) => lessonOrderMap.set(num, idx + 1));
 
-  const scopeField = scope.centerId ? "centerId" : "studentId";
-  const scopeValue = scope.centerId ?? scope.studentId;
+  const scopeField = scope.centerId ? "centerId" : scope.studentId ? "studentId" : "wing";
+  const scopeValue = scope.centerId ?? scope.studentId ?? scope.wing!;
 
   for (const [lessonNumber, lessonRows] of grouped) {
     const firstRow    = lessonRows[0];
@@ -672,15 +722,22 @@ export async function bulkImportLessons(
           where("lessonNumber", "==", lessonNumber),
         )
       );
+      // A wing carries up to 9 syllabi that share `wing` — narrow to this slot.
+      const dupDocs = scope.wing
+        ? dupSnap.docs.filter(d => {
+            const dl = d.data() as Lesson;
+            return dl.level === scope.level && dl.instrument === scope.instrument;
+          })
+        : dupSnap.docs;
 
-      if (!dupSnap.empty) {
+      if (dupDocs.length > 0) {
         if (!overwrite) {
           result.errors.push(`Lesson ${lessonNumber} ("${firstRow.lessonName.trim()}") already exists — skipped`);
           result.skipped++;
           continue;
         }
         // Overwrite: delete existing lesson + items
-        for (const existingDoc of dupSnap.docs) {
+        for (const existingDoc of dupDocs) {
           const existingItemsSnap = await getDocs(
             query(collection(db, LESSON_ITEMS), where("lessonId", "==", existingDoc.id))
           );
@@ -697,6 +754,9 @@ export async function bulkImportLessons(
         order:        lessonOrder,
         centerId:     scope.centerId  ?? null,
         studentId:    scope.studentId ?? null,
+        wing:         scope.wing      ?? null,
+        level:        scope.level     ?? null,
+        instrument:   scope.instrument ?? null,
         createdAt:    serverTimestamp(),
         updatedAt:    serverTimestamp(),
       });
@@ -748,7 +808,7 @@ export async function bulkImportLessons(
     metadata:      {
       created: result.created,
       skipped: result.skipped,
-      scope:   scope.centerId ? `center:${scope.centerId}` : `student:${scope.studentId}`,
+      scope:   scope.centerId ? `center:${scope.centerId}` : scope.studentId ? `student:${scope.studentId}` : `wing:${scope.wing}/${scope.level}/${scope.instrument}`,
     },
   });
 

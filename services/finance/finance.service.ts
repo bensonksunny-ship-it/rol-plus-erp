@@ -12,7 +12,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
-import type { User, StudentUser } from "@/types";
+import type { User, StudentUser, Role } from "@/types";
 import type {
   FeeStructure,
   CreateFeeStructureInput,
@@ -472,7 +472,7 @@ export async function editTransaction(
   txId: string,
   patch: EditableTransactionInput,
   editorUid: string,
-  editorRole: "admin" | "super_admin",
+  editorRole: Role,
 ): Promise<Transaction> {
   if (patch.amount <= 0) throw new Error("INVALID_AMOUNT: amount must be greater than 0");
 
@@ -556,7 +556,7 @@ export async function editTransaction(
 export async function deleteTransaction(
   txId: string,
   deleterUid: string,
-  deleterRole: "admin" | "super_admin",
+  deleterRole: Role,
 ): Promise<void> {
   const txRef  = doc(db, TRANSACTIONS, txId);
   const txSnap = await getDocFromServer(txRef);

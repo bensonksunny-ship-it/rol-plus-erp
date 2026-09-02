@@ -14,7 +14,7 @@ import type { TeacherQuality, Leaderboard } from "@/types/quality";
 
 export default function TeacherScorePage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <TeacherScoreContent />
     </ProtectedRoute>
   );

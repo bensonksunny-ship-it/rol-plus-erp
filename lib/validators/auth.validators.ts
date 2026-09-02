@@ -1,4 +1,5 @@
-import { ROLES, USER_STATUS } from "@/config/constants";
+import { USER_STATUS } from "@/config/constants";
+import { CAPABILITIES, resolveCapabilities } from "@/config/permissions";
 import type { User, Role } from "@/types";
 
 export function isActiveUser(user: User): boolean {
@@ -13,22 +14,32 @@ export function hasAnyRole(user: User, roles: Role[]): boolean {
   return roles.includes(user.role);
 }
 
+/**
+ * Capability check against the default role map (no Firestore override).
+ * Components should prefer useCan() from lib/permissions; this is for
+ * non-React callers and legacy helpers below.
+ */
+function userCan(user: User, cap: string): boolean {
+  return resolveCapabilities(user.role).has(cap as never);
+}
+
 export function canApproveStudentDeactivation(user: User): boolean {
-  return hasAnyRole(user, [ROLES.ADMIN, ROLES.SUPER_ADMIN]);
+  return userCan(user, CAPABILITIES.APPROVALS_MANAGE);
 }
 
 export function canApproveTeacherDeactivation(user: User): boolean {
-  return hasRole(user, ROLES.SUPER_ADMIN);
+  // Teacher lifecycle is staff administration — founder-level only.
+  return userCan(user, CAPABILITIES.STAFF_CREATE_TEACHER) && userCan(user, CAPABILITIES.APPROVALS_MANAGE);
 }
 
 export function canOverrideSyllabus(user: User): boolean {
-  // Strict rule: only admin can skip syllabus order
-  return hasAnyRole(user, [ROLES.ADMIN, ROLES.SUPER_ADMIN]);
+  return userCan(user, CAPABILITIES.SYLLABUS_OVERRIDE);
 }
 
 export function canManuallyMarkAttendance(user: User): boolean {
-  // Manual attendance is allowed but flagged — any active user may do it
-  return isActiveUser(user);
+  // Manual attendance is allowed but flagged — any active user with the
+  // attendance capability may do it.
+  return isActiveUser(user) && userCan(user, CAPABILITIES.ATTENDANCE_MANAGE);
 }
 
 /**

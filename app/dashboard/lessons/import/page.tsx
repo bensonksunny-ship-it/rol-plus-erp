@@ -5,18 +5,25 @@ import { useSearchParams } from "next/navigation";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
-import { ROLES } from "@/config/constants";
+import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { useAuth } from "@/hooks/useAuth";
-import { bulkImportLessons } from "@/services/lesson/lesson.service";
+import { useWing } from "@/hooks/useWing";
+import { bulkImportLessons, getWingLessons } from "@/services/lesson/lesson.service";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
-import type { ExcelImportRow } from "@/types/lesson";
+import type { ExcelImportRow, SyllabusLevel, SyllabusInstrument } from "@/types/lesson";
+import {
+  SYLLABUS_LEVELS,
+  SYLLABUS_INSTRUMENTS,
+  SYLLABUS_LEVEL_LABELS,
+  SYLLABUS_INSTRUMENT_LABELS,
+} from "@/types/lesson";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
 export default function LessonImportPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <Suspense fallback={null}>
         <LessonImportContent />
       </Suspense>
@@ -220,6 +227,8 @@ interface StudentOption { uid: string; displayName: string; studentID: string; a
 
 function LessonImportContent() {
   const { user, role }              = useAuth();
+  const { wing }                    = useWing();
+  const wingImportAllowed           = wing === WINGS.SCHOOL_OF_MUSIC;
   const searchParams                = useSearchParams();
   const [file, setFile]             = useState<File | null>(null);
   const [rawHeaders, setRawHeaders] = useState<string[]>([]);
@@ -228,10 +237,47 @@ function LessonImportContent() {
 
   // Scope — pre-populated from URL params: ?scope=center&id=<centerId>
   //                                     or ?scope=student&id=<studentId>
-  const [scopeType, setScopeType]   = useState<"center" | "student">(
-    searchParams.get("scope") === "student" ? "student" : "center"
+  //                                     or ?scope=wing        (uses active wing)
+  const [scopeType, setScopeType]   = useState<"center" | "student" | "wing">(() => {
+    const s = searchParams.get("scope");
+    if (s === "student") return "student";
+    if (s === "wing")    return "wing";
+    return "center";
+  });
+  const [scopeId, setScopeId]       = useState(() =>
+    searchParams.get("scope") === "wing" ? (searchParams.get("id") ?? "") : (searchParams.get("id") ?? "")
   );
-  const [scopeId, setScopeId]       = useState(searchParams.get("id") ?? "");
+
+  // The "wing" scope always targets the active wing — keep scopeId in sync.
+  useEffect(() => {
+    if (scopeType === "wing") setScopeId(wing);
+  }, [scopeType, wing]);
+
+  // Wing syllabus slot — 3 levels × 3 instruments = 9
+  const [sylLevel, setSylLevel]           = useState<SyllabusLevel>(
+    (searchParams.get("level") as SyllabusLevel) || "introduction",
+  );
+  const [sylInstrument, setSylInstrument] = useState<SyllabusInstrument>(
+    (searchParams.get("instrument") as SyllabusInstrument) || "keyboard",
+  );
+  // Per-slot lesson counts for the active wing (for the status grid)
+  const [wingSlotCounts, setWingSlotCounts] = useState<Record<string, number>>({});
+  const [slotRefresh, setSlotRefresh]       = useState(0);
+  useEffect(() => {
+    if (!wingImportAllowed) return;
+    getWingLessons(WINGS.SCHOOL_OF_MUSIC)
+      .then(ls => {
+        const counts: Record<string, number> = {};
+        for (const l of ls) {
+          if (l.level && l.instrument) {
+            const k = `${l.level}:${l.instrument}`;
+            counts[k] = (counts[k] ?? 0) + 1;
+          }
+        }
+        setWingSlotCounts(counts);
+      })
+      .catch(() => {});
+  }, [wingImportAllowed, slotRefresh]);
   const [centers, setCenters]       = useState<CenterOption[]>([]);
   const [centersLoading, setCentersLoading] = useState(true);
   const [students, setStudents]     = useState<StudentOption[]>([]);
@@ -280,16 +326,20 @@ function LessonImportContent() {
     if (uniqueNums.length === 0) { setExistingCount(null); return; }
 
     setCheckingExisting(true);
-    const scopeField = scopeType === "center" ? "centerId" : "studentId";
+    const scopeField = scopeType === "center" ? "centerId" : scopeType === "student" ? "studentId" : "wing";
     getDocs(query(collection(db, "lessons"), where(scopeField, "==", scopeId.trim())))
       .then(snap => {
-        const existingNums = new Set(snap.docs.map(d => d.data().lessonNumber as number));
+        // Wing scope: 9 syllabi share `wing` — only compare against this slot.
+        const rows = scopeType === "wing"
+          ? snap.docs.filter(d => d.data().level === sylLevel && d.data().instrument === sylInstrument)
+          : snap.docs;
+        const existingNums = new Set(rows.map(d => d.data().lessonNumber as number));
         const overlap = uniqueNums.filter(n => existingNums.has(n));
         setExistingCount(overlap.length);
       })
       .catch(() => setExistingCount(null))
       .finally(() => setCheckingExisting(false));
-  }, [scopeId, scopeType, preview]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [scopeId, scopeType, preview, sylLevel, sylInstrument]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -333,13 +383,20 @@ function LessonImportContent() {
 
     setImporting(true);
     try {
-      const scope = scopeType === "center"
-        ? { centerId: scopeId.trim(), studentId: null as null }
-        : { centerId: null as null,   studentId: scopeId.trim() };
+      const scope =
+        scopeType === "center"
+          ? { centerId: scopeId.trim(), studentId: null as null, wing: null as null }
+          : scopeType === "student"
+            ? { centerId: null as null, studentId: scopeId.trim(), wing: null as null }
+            : {
+                centerId: null as null, studentId: null as null,
+                wing: WINGS.SCHOOL_OF_MUSIC, level: sylLevel, instrument: sylInstrument,
+              };
 
       const res = await bulkImportLessons(preview, scope, user.uid, role ?? "admin", overwrite);
       setResult(res);
       setExistingCount(null);
+      setSlotRefresh(n => n + 1);
       toast(
         `Import complete. Created: ${res.created}, Skipped: ${res.skipped}.`,
         res.errors.length > 0 ? "error" : "success"
@@ -354,7 +411,8 @@ function LessonImportContent() {
 
   function reset() {
     setFile(null); setPreview([]); setValidation(null); setResult(null);
-    setRawHeaders([]); setScopeId(""); setExistingCount(null); setOverwrite(false);
+    setRawHeaders([]); setExistingCount(null); setOverwrite(false);
+    setScopeId(scopeType === "wing" ? wing : "");
     if (fileRef.current) fileRef.current.value = "";
   }
 
@@ -402,9 +460,79 @@ function LessonImportContent() {
               style={{ marginRight: 6 }} />
             Student (individual lessons)
           </label>
+          {wingImportAllowed && (
+            <label style={s.radioLabel}>
+              <input type="radio" checked={scopeType === "wing"}
+                onChange={() => { setScopeType("wing"); setExistingCount(null); }}
+                style={{ marginRight: 6 }} />
+              Wing syllabus — {WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}
+            </label>
+          )}
         </div>
 
-        {scopeType === "center" ? (
+        {scopeType === "wing" ? (
+          <>
+            <div style={{ ...s.infoNote, marginBottom: 12 }}>
+              {WING_LABELS[WINGS.SCHOOL_OF_MUSIC]} runs <strong>9 syllabi</strong> — 3 levels ×
+              3 instruments. Pick the slot this file belongs to. A student is assigned one slot
+              (instrument from their application, level chosen by staff) at enrolment.
+            </div>
+            <div style={{ display: "flex", gap: 12, marginBottom: 14, flexWrap: "wrap" as const }}>
+              <div>
+                <label style={{ ...s.cardTitle, marginBottom: 6, display: "block" }}>Level</label>
+                <select value={sylLevel} onChange={e => setSylLevel(e.target.value as SyllabusLevel)} style={s.select}>
+                  {SYLLABUS_LEVELS.map(lv => (
+                    <option key={lv} value={lv}>{SYLLABUS_LEVEL_LABELS[lv]}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ ...s.cardTitle, marginBottom: 6, display: "block" }}>Instrument</label>
+                <select value={sylInstrument} onChange={e => setSylInstrument(e.target.value as SyllabusInstrument)} style={s.select}>
+                  {SYLLABUS_INSTRUMENTS.map(inst => (
+                    <option key={inst} value={inst}>{SYLLABUS_INSTRUMENT_LABELS[inst]}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* 3×3 slot status */}
+            <div style={{ overflowX: "auto" as const }}>
+              <table style={{ borderCollapse: "collapse" as const, fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...s.th, textAlign: "left" as const }} />
+                    {SYLLABUS_INSTRUMENTS.map(inst => (
+                      <th key={inst} style={s.th}>{SYLLABUS_INSTRUMENT_LABELS[inst]}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {SYLLABUS_LEVELS.map(lv => (
+                    <tr key={lv}>
+                      <td style={{ ...s.td, fontWeight: 700 }}>{SYLLABUS_LEVEL_LABELS[lv]}</td>
+                      {SYLLABUS_INSTRUMENTS.map(inst => {
+                        const n = wingSlotCounts[`${lv}:${inst}`] ?? 0;
+                        const active = lv === sylLevel && inst === sylInstrument;
+                        return (
+                          <td key={inst} style={{
+                            ...s.td, textAlign: "center" as const, cursor: "pointer",
+                            outline: active ? "2px solid #4f46e5" : "none",
+                            background: n > 0 ? "#dcfce7" : "#fef2f2",
+                            color: n > 0 ? "#15803d" : "#b91c1c", fontWeight: 600,
+                          }}
+                          onClick={() => { setSylLevel(lv); setSylInstrument(inst); }}>
+                            {n > 0 ? `${n} lesson${n !== 1 ? "s" : ""}` : "empty"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : scopeType === "center" ? (
           centersLoading ? (
             <div style={s.loadingText}>Loading centers…</div>
           ) : centers.length === 0 ? (
@@ -452,7 +580,7 @@ function LessonImportContent() {
               <span style={s.existingNone}>✓ No conflicting lessons found — all {uniqueLessons.length} lesson{uniqueLessons.length !== 1 ? "s" : ""} are new</span>
             ) : (
               <span style={s.existingConflict}>
-                ⚠ {existingCount} of {uniqueLessons.length} lesson{uniqueLessons.length !== 1 ? "s" : ""} already exist in this {scopeType}
+                ⚠ {existingCount} of {uniqueLessons.length} lesson{uniqueLessons.length !== 1 ? "s" : ""} already exist in {scopeType === "wing" ? `${SYLLABUS_LEVEL_LABELS[sylLevel]} ${SYLLABUS_INSTRUMENT_LABELS[sylInstrument]}` : `this ${scopeType}`}
               </span>
             )}
           </div>
@@ -588,7 +716,9 @@ function LessonImportContent() {
           )}
           {result.created > 0 && result.errors.length === 0 && (
             <div style={{ marginTop: 8, fontSize: 12, color: "#166534" }}>
-              All lessons imported successfully. Go to Syllabus to assign them to students.
+              {scopeType === "wing"
+                ? `Saved to the ${SYLLABUS_LEVEL_LABELS[sylLevel]} ${SYLLABUS_INSTRUMENT_LABELS[sylInstrument]} syllabus. Students assigned this slot pick it up automatically.`
+                : "All lessons imported successfully. Go to Syllabus to assign them to students."}
             </div>
           )}
         </div>

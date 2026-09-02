@@ -5,8 +5,12 @@ import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import Link from "next/link";
 import { useAuthContext } from "@/features/auth/AuthContext";
+import { useWing } from "@/hooks/useWing";
 import { saveScreening } from "@/services/screening/screening.service";
-import type { ScreeningConfig } from "@/types";
+import type { ScreeningConfig, ScreeningResult } from "@/types";
+
+/** The saved fast-track screening, handed back to an embedding wizard. */
+export type FastTrackScreeningResult = Omit<ScreeningResult, "id"> & { id: string };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Grade = "High" | "Medium" | "Low";
@@ -21,12 +25,6 @@ const GRADE_CFG: Record<Grade, { border: string; bg: string; color: string; badg
   High:   { border: "#16a34a", bg: "#f0fdf4", color: "#15803d", badgeBg: "#dcfce7" },
   Medium: { border: "#d97706", bg: "#fffbeb", color: "#92400e", badgeBg: "#fef3c7" },
   Low:    { border: "#dc2626", bg: "#fef2f2", color: "#991b1b", badgeBg: "#fee2e2" },
-};
-
-const SLAB_CFG: Record<string, { border: string; bg: string; color: string; glow: string }> = {
-  "Zeta Slab":    { border: "#16a34a", bg: "#f0fdf4", color: "#15803d", glow: "rgba(22,163,74,0.12)"  },
-  "Epsilon Slab": { border: "#d97706", bg: "#fffbeb", color: "#92400e", glow: "rgba(217,119,6,0.12)"  },
-  "Delta Slab":   { border: "#dc2626", bg: "#fef2f2", color: "#991b1b", glow: "rgba(220,38,38,0.12)"  },
 };
 
 const INSTRUMENTS = ["Piano", "Keyboard", "Guitar", "Violin", "Drums", "Vocal", "None"] as const;
@@ -112,14 +110,6 @@ function computeSlabConfig(r: Grade, d: Grade, p: Grade): ScreeningConfig {
     metronome: true, metronomeBpm: 70, handIntegration: "Hands Together",
     chords: "Basic Blocks", songsheetDifficulty: "Mid-Tier",
   };
-}
-
-function slabReason(r: Grade, d: Grade, p: Grade): string {
-  const all = [r, d, p];
-  if (all.every(g => g === "High")) return "All three HIGH → peak performance placement";
-  if (all.some(g => g === "Low"))   return "One or more LOW → foundational track required";
-  const h = all.filter(g => g === "High").length;
-  return `${h} HIGH / ${3 - h} MEDIUM → accelerated intermediate placement`;
 }
 
 // ─── Shared design primitives ─────────────────────────────────────────────────
@@ -263,11 +253,28 @@ function StudentSearch({ studentName, setStudentName, studentQuery, setStudentQu
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
-export function FastTrackContent({ onBack }: { onBack?: () => void } = {}) {
+export function FastTrackContent({
+  onBack,
+  onSaved,
+  lockedStudentName,
+}: {
+  onBack?:  () => void;
+  /**
+   * When provided, the screening is saved and handed back instead of showing
+   * the built-in success card — used by the Wing 2 admissions wizard.
+   */
+  onSaved?: (screening: FastTrackScreeningResult) => void;
+  /**
+   * When set (wizard context), the student is already known — the name is fixed
+   * and the "link to enrolled student" search is hidden.
+   */
+  lockedStudentName?: string;
+} = {}) {
   const { user } = useAuthContext();
+  const { wing } = useWing();
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
-  const [studentName,   setStudentName]   = useState("");
+  const [studentName,   setStudentName]   = useState(lockedStudentName ?? "");
   const [studentQuery,  setStudentQuery]  = useState("");
   const [allStudents,   setAllStudents]   = useState<StudentOption[]>([]);
   const [linkedStudent, setLinkedStudent] = useState<StudentOption | null>(null);
@@ -329,17 +336,23 @@ export function FastTrackContent({ onBack }: { onBack?: () => void } = {}) {
     if (!canSave || !slabConfig || avgScore === null || saving) return;
     setSaving(true); setSaveErr("");
     try {
-      await saveScreening({
+      const payload: Omit<ScreeningResult, "id"> = {
+        wing,
         screeningType: "fast-track", childName: studentName.trim(),
-        stageReadiness: performanceGoal || undefined,
-        academicGoals: priorInstruments.length ? priorInstruments.join(", ") : undefined,
-        practiceCommitment: sightReading || undefined,
         rhythmSyncGrade: rhythmGrade!, dexterityGrade: dexGrade!, pitchEchoGrade: pitchGrade!,
         rhythmScore: GRADE_SCORE[rhythmGrade!], pitchScore: GRADE_SCORE[pitchGrade!], motorScore: GRADE_SCORE[dexGrade!],
         averageScore: avgScore, config: slabConfig,
         screenedBy: user?.uid ?? "", screenedAt: new Date().toISOString(),
         studentId: linkedStudent?.uid ?? null,
-      });
+        ...(performanceGoal ? { stageReadiness: performanceGoal } : {}),
+        ...(priorInstruments.length ? { academicGoals: priorInstruments.join(", ") } : {}),
+        ...(sightReading ? { practiceCommitment: sightReading } : {}),
+      };
+      const screeningId = await saveScreening(payload);
+      if (onSaved) {
+        onSaved({ ...payload, id: screeningId });
+        return;
+      }
       setSaved(true);
     } catch (err) {
       setSaveErr(err instanceof Error ? err.message : "Failed to save.");
@@ -360,16 +373,20 @@ export function FastTrackContent({ onBack }: { onBack?: () => void } = {}) {
   const gradeValues  = [rhythmGrade, dexGrade, pitchGrade] as const;
 
   // ── Success ────────────────────────────────────────────────────────────────
-  if (saved && slabConfig) {
-    const sc = SLAB_CFG[slabConfig.track] ?? SLAB_CFG["Epsilon Slab"];
+  if (saved) {
     return (
       <div style={{ maxWidth: 520, margin: "40px auto", padding: "0 16px" }}>
-        <div style={{ ...card, border: `2px solid ${sc.border}`, background: sc.bg, boxShadow: `0 8px 40px ${sc.glow}`, textAlign: "center", padding: "48px 36px" }}>
+        <div style={{ ...card, border: "2px solid #16a34a", background: "#f0fdf4", boxShadow: "0 8px 40px rgba(22,163,74,0.12)", textAlign: "center", padding: "48px 36px" }}>
           <div style={{ fontSize: 52, marginBottom: 20 }}>✅</div>
           <div style={{ fontSize: 10, color: "#9ca3af", letterSpacing: "0.1em", marginBottom: 8, fontFamily: "monospace" }}>{assessmentId}</div>
-          <div style={{ fontSize: 28, fontWeight: 900, color: sc.color, marginBottom: 6 }}>{slabConfig.track}</div>
-          <div style={{ fontSize: 15, color: "#6b7280", marginBottom: 4 }}>{studentName}</div>
-          <div style={{ fontSize: 13, color: "#374151", marginBottom: 32 }}>{slabConfig.syllabusStrategy}</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#15803d", marginBottom: 6 }}>Assessment Saved</div>
+          <div style={{ fontSize: 15, color: "#6b7280", marginBottom: 10 }}>{studentName}</div>
+          {avgScore !== null && (
+            <div style={{ fontSize: 14, color: "#374151", marginBottom: 4 }}>
+              Composite score <strong>{avgScore.toFixed(2)}</strong> / 5
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 32 }}>Fast Track — same syllabus for every student</div>
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" as const }}>
             <button onClick={reset} style={{ ...btnBase, background: ACCENT, color: "#fff" }}>+ New Assessment</button>
             {onBack
@@ -396,7 +413,7 @@ export function FastTrackContent({ onBack }: { onBack?: () => void } = {}) {
           <div style={{ width: 42, height: 42, borderRadius: 12, background: ACCENT, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>⚡</div>
           <div>
             <div style={{ fontSize: 19, fontWeight: 900, color: "#78350f" }}>Fast Track Assessment</div>
-            <div style={{ fontSize: 12, color: "#92400e", opacity: 0.8, marginTop: 2 }}>Ages 7–30 · Clinical Protocol · Slab Auto-Mapper</div>
+            <div style={{ fontSize: 12, color: "#92400e", opacity: 0.8, marginTop: 2 }}>Ages 7–30 · Clinical Protocol · Score Record</div>
           </div>
         </div>
         <div style={{ textAlign: "right" as const }}>
@@ -417,7 +434,11 @@ export function FastTrackContent({ onBack }: { onBack?: () => void } = {}) {
 
           <div style={{ ...card, gridColumn: "span 12" }}>
             <div style={labelStyle}>Student</div>
-            <StudentSearch {...{ studentName, setStudentName, studentQuery, setStudentQuery, linkedStudent, setLinkedStudent, showDropdown, setShowDropdown, filteredStudents, studsLoading }} />
+            {lockedStudentName ? (
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#111" }}>{lockedStudentName}</div>
+            ) : (
+              <StudentSearch {...{ studentName, setStudentName, studentQuery, setStudentQuery, linkedStudent, setLinkedStudent, showDropdown, setShowDropdown, filteredStudents, studsLoading }} />
+            )}
           </div>
 
           <div style={{ ...card, gridColumn: "span 7" }}>
@@ -560,7 +581,6 @@ export function FastTrackContent({ onBack }: { onBack?: () => void } = {}) {
 
       {/* ── Step 3: Result ─────────────────────────────────────────────────── */}
       {step === 3 && allGraded && slabConfig && avgScore !== null && (() => {
-        const sc = SLAB_CFG[slabConfig.track] ?? SLAB_CFG["Epsilon Slab"];
         return (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 14 }}>
 
@@ -580,42 +600,19 @@ export function FastTrackContent({ onBack }: { onBack?: () => void } = {}) {
               );
             })}
 
-            {/* Logic */}
-            <div style={{ ...card, gridColumn: "span 12", background: "#f8f9fb", padding: "14px 20px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", letterSpacing: "0.08em", flexShrink: 0 }}>LOGIC</span>
-                <div style={{ flex: 1, height: 1, background: "#e5e7eb" }} />
-                <span style={{ fontSize: 12, color: "#374151" }}>{slabReason(rhythmGrade!, dexGrade!, pitchGrade!)}</span>
-              </div>
-            </div>
-
-            {/* Slab result */}
-            <div style={{ ...card, gridColumn: "span 12", border: `2px solid ${sc.border}`, background: sc.bg, boxShadow: `0 0 32px ${sc.glow}` }}>
-              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 16, marginBottom: 22 }}>
+            {/* Composite score */}
+            <div style={{ ...card, gridColumn: "span 12", border: "2px solid #d1d5db", background: "#f8f9fb" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 16 }}>
                 <div>
-                  <div style={{ fontSize: 10, color: "#9ca3af", letterSpacing: "0.08em", marginBottom: 6, fontFamily: "monospace" }}>ASSIGNED SLAB</div>
-                  <div style={{ fontSize: 34, fontWeight: 900, color: sc.color, lineHeight: 1 }}>{slabConfig.track}</div>
-                  <div style={{ fontSize: 13, color: "#6b7280", marginTop: 8 }}>{slabConfig.syllabusStrategy}</div>
-                </div>
-                <div style={{ textAlign: "right" as const }}>
                   <div style={{ fontSize: 10, color: "#9ca3af", letterSpacing: "0.08em", marginBottom: 6, fontFamily: "monospace" }}>COMPOSITE SCORE</div>
-                  <div style={{ fontSize: 40, fontWeight: 900, color: sc.color, lineHeight: 1 }}>
+                  <div style={{ fontSize: 40, fontWeight: 900, color: "#111", lineHeight: 1 }}>
                     {avgScore.toFixed(2)}<span style={{ fontSize: 14, fontWeight: 400, color: "#9ca3af" }}>/5</span>
                   </div>
                 </div>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-                {([
-                  { label: "Metronome",     value: slabConfig.metronome ? `Yes — ${slabConfig.metronomeBpm} BPM` : "No" },
-                  { label: "Hand Integ.",   value: slabConfig.handIntegration },
-                  { label: "Chords",        value: slabConfig.chords === false ? "None" : slabConfig.chords as string },
-                  { label: "Song Diff.",    value: slabConfig.songsheetDifficulty },
-                ] as { label: string; value: string }[]).map(f => (
-                  <div key={f.label} style={{ background: "rgba(255,255,255,0.65)", borderRadius: 10, padding: "10px 12px" }}>
-                    <div style={{ fontSize: 9, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 3 }}>{f.label}</div>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "#111" }}>{f.value}</div>
-                  </div>
-                ))}
+                <div style={{ fontSize: 12, color: "#6b7280", maxWidth: 260, textAlign: "right" as const, lineHeight: 1.5 }}>
+                  Every Fast Track student follows the same syllabus. These marks are recorded on
+                  the student&apos;s profile for reference only.
+                </div>
               </div>
             </div>
 

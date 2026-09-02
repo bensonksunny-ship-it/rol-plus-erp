@@ -7,7 +7,7 @@ import { KeyboardScreeningContent } from "./KeyboardScreeningContent";
 
 export default function KeyboardScreeningPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.ADMIN, ROLES.SUPER_ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.ADMIN, ROLES.SUPER_ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <Suspense fallback={<div style={{ padding: "60px 0", textAlign: "center", color: "#9ca3af" }}>Loading…</div>}>
         <KeyboardScreeningContent />
       </Suspense>

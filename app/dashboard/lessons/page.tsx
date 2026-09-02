@@ -7,6 +7,7 @@ import { db } from "@/config/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuth } from "@/hooks/useAuth";
+import { CAPABILITIES } from "@/config/permissions";
 import { getLessonsByCenter, getLessonsByStudent } from "@/services/lesson/lesson.service";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -16,7 +17,7 @@ import type { Lesson } from "@/types/lesson";
 
 export default function LessonsPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <LessonsContent />
     </ProtectedRoute>
   );
@@ -39,7 +40,8 @@ interface CenterOption {
 // ─── Content ──────────────────────────────────────────────────────────────────
 
 function LessonsContent() {
-  const { user, role }                  = useAuth();
+  const { user, role, can }             = useAuth();
+  const canManageLessons                = can(CAPABILITIES.LESSONS_MANAGE);
   const router                          = useRouter();
   const [scopeType, setScopeType]       = useState<"center" | "student">("center");
   const [centers, setCenters]           = useState<CenterOption[]>([]);
@@ -119,7 +121,7 @@ function LessonsContent() {
       {/* Header */}
       <div style={s.header}>
         <h1 style={s.heading}>Lessons</h1>
-        {(role === "admin" || role === "super_admin") && (
+        {canManageLessons && (
           <button
             onClick={() => router.push("/dashboard/lessons/import")}
             style={s.importBtn}
@@ -267,7 +269,7 @@ function LessonsContent() {
         <div style={s.emptyState}>
           <div style={s.emptyIcon}>📚</div>
           <div style={s.emptyText}>Select a center or student and click "Load Lessons".</div>
-          {(role === "admin" || role === "super_admin") && (
+          {canManageLessons && (
             <div style={s.emptyHint}>
               No lessons yet? <button onClick={() => router.push("/dashboard/lessons/import")} style={s.linkBtn}>Import from Excel</button>
             </div>

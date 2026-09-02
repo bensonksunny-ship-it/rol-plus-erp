@@ -47,7 +47,19 @@ export async function getUserProfile(uid: string): Promise<User | null> {
   const ref  = doc(db, "users", uid);
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
-  return snap.data() as User;
+  return normalizeProfile(snap.data() as Record<string, unknown>);
+}
+
+/**
+ * Bridge legacy user docs to the current role model:
+ *  - "super_admin" → "founder" (renamed; backfill script does this permanently,
+ *    this covers docs not yet migrated).
+ */
+function normalizeProfile(data: Record<string, unknown>): User {
+  if (data.role === "super_admin") {
+    return { ...data, role: "founder" } as unknown as User;
+  }
+  return data as unknown as User;
 }
 
 /**
@@ -58,12 +70,16 @@ async function ensureUserDocument(user: FirebaseUser): Promise<boolean> {
   const snap    = await getDoc(userRef);
   if (snap.exists()) return true;
 
+  // A Firebase Auth user with no Firestore profile is NOT automatically an
+  // admin — that let anyone who reached Auth in as an admin. Create an inert
+  // pending record; signIn() then rejects with ACCOUNT_INACTIVE until a
+  // founder/director provisions the real role + wing via the Staff screen.
   await setDoc(userRef, {
     uid:          user.uid,
     email:        user.email || "",
     displayName:  user.displayName || "",
-    role:         "admin",
-    status:       "active",
+    role:         "pending",
+    status:       "pending",
     lastActivity: serverTimestamp(),
     createdAt:    serverTimestamp(),
     updatedAt:    serverTimestamp(),

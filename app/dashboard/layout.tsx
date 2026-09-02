@@ -7,8 +7,10 @@ import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useWing } from "@/hooks/useWing";
 import { clearPersistedSession, signOut } from "@/services/firebase/auth.service";
-import { ROLES } from "@/config/constants";
+import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
+import { CAPABILITIES, type Capability } from "@/config/permissions";
 
 // ─── Alert count hook ──────────────────────────────────────────────────────────
 function useAlertCount(enabled: boolean): number {
@@ -35,12 +37,19 @@ function useAlertCount(enabled: boolean): number {
 }
 
 // ─── Nav config ───────────────────────────────────────────────────────────────
+// Visibility rule: an item shows when the user's role is in `roles` AND — when
+// `capability` is set — the user holds (one of) that capability. The Founder
+// holds every capability and ROL+ `admin` holds every ROL+ capability, so the
+// capability gate only ever narrows the two School-of-Music leadership roles.
 interface NavItem {
   label:        string;
   icon:         string;
   href:         string | ((uid: string, role: string) => string);
   matchPrefix?: string;
   roles:        string[];
+  capability?:  Capability | Capability[];
+  /** When set, the item only shows while this wing is active. */
+  wing?:        string;
 }
 
 interface NavGroup {
@@ -49,15 +58,18 @@ interface NavGroup {
   items: NavItem[];
 }
 
+const C = CAPABILITIES;
+
+// Roles that see the operational / leadership dashboard.
+const LEADERSHIP: string[] = [ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER];
+
 const NAV_TOP: NavItem[] = [
-  // Admin / Super Admin
-  { label: "Center Suite", icon: "⊞", href: "/dashboard",            roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Centers",      icon: "🏫", href: "/dashboard/centers",    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Teachers",     icon: "👥", href: "/dashboard/teachers",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Admins",       icon: "👤", href: "/dashboard/admins",     roles: [ROLES.SUPER_ADMIN] },
-  { label: "Students",     icon: "🎓", href: "/dashboard/students",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-  { label: "Syllabus",     icon: "📚", href: "/dashboard/syllabus",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  // Leadership (Founder / Admin / Director / Chief Teacher)
+  { label: "Center Suite", icon: "⊞", href: "/dashboard",            roles: LEADERSHIP, capability: C.DASHBOARD_VIEW },
+  { label: "Enrollments",  icon: "🏫", href: "/dashboard/enrollments", roles: LEADERSHIP, capability: [C.CENTRES_MANAGE, C.CENTRES_EDIT_SCHEDULE, C.STUDENTS_VIEW_ALL, C.STUDENTS_MANAGE], matchPrefix: "/dashboard/enrollments,/dashboard/centers,/dashboard/students" },
+  { label: "Staff",        icon: "🪪", href: "/dashboard/staff",      roles: LEADERSHIP, capability: C.STAFF_VIEW, matchPrefix: "/dashboard/staff,/dashboard/teachers,/dashboard/admins" },
+  { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance", roles: LEADERSHIP, capability: C.ATTENDANCE_VIEW_ALL },
+  { label: "Syllabus",     icon: "📚", href: "/dashboard/syllabus",   roles: LEADERSHIP, capability: C.SYLLABUS_MANAGE },
   // Teacher
   { label: "Faculty Suite", icon: "🎓", href: "/dashboard/teacher",    roles: [ROLES.TEACHER], matchPrefix: "/dashboard/teacher" },
   { label: "My Classes",    icon: "📋", href: "/dashboard/my-classes", roles: [ROLES.TEACHER] },
@@ -72,37 +84,55 @@ const NAV_TOP: NavItem[] = [
   { label: "Fees",   icon: "₹",  href: "/dashboard/my-fees",         roles: [ROLES.STUDENT] },
   { label: "Streak", icon: "🔥", href: "/dashboard/my-attendance",   roles: [ROLES.STUDENT] },
   { label: "Badges",     icon: "🏅", href: "/dashboard/my-achievements", roles: [ROLES.STUDENT] },
-  // Screening — last for all roles that can see it
-  { label: "Screening", icon: "🎹", href: "/dashboard/screening",      roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER], matchPrefix: "/dashboard/screening" },
+  // Parent
+  { label: "My Family", icon: "👪", href: "/dashboard/parent", roles: [ROLES.PARENT], matchPrefix: "/dashboard/parent" },
+  // Member (generic School of Music account)
+  { label: "My Account", icon: "👤", href: "/dashboard/account", roles: [ROLES.MEMBER], matchPrefix: "/dashboard/account" },
+  // ROL+: Screening hub (screening + applications). School of Music: the
+  // Admissions page (applications list + Fast-Track wizard, all in one).
+  { label: "Screening",  icon: "🎹", href: "/dashboard/screening",  roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/screening",  wing: WINGS.ROL_PLUS },
+  { label: "Admissions", icon: "📝", href: "/dashboard/admissions", roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/admissions", wing: WINGS.SCHOOL_OF_MUSIC },
+  { label: "Registry",   icon: "📖", href: "/dashboard/registry",   roles: LEADERSHIP, capability: C.STUDENTS_VIEW_ALL, matchPrefix: "/dashboard/registry", wing: WINGS.SCHOOL_OF_MUSIC },
+  // Founder-only — kept last in the sidebar.
+  { label: "Users",        icon: "🧑‍💻", href: "/dashboard/users", roles: [ROLES.FOUNDER], capability: C.USERS_MANAGE, matchPrefix: "/dashboard/users" },
 ];
 
 const NAV_GROUPS: NavGroup[] = [
   {
     label: "Finance", icon: "₹",
     items: [
-      { label: "Finance", icon: "₹", href: "/dashboard/finance", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Finance", icon: "₹", href: "/dashboard/finance", roles: LEADERSHIP, capability: C.FINANCE_VIEW },
     ],
   },
   {
     label: "Insights & Reports", icon: "📊",
     items: [
-      { label: "Analytics",    icon: "📊", href: "/dashboard/analytics",      roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Export",       icon: "⬇", href: "/dashboard/export",          roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Analytics",    icon: "📊", href: "/dashboard/analytics",      roles: LEADERSHIP, capability: C.ANALYTICS_VIEW },
+      { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: LEADERSHIP, capability: C.LEADERBOARDS_VIEW },
+      { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: LEADERSHIP, capability: C.TEACHER_SCORE_VIEW_ALL },
+      { label: "Export",       icon: "⬇", href: "/dashboard/export",          roles: LEADERSHIP, capability: C.EXPORT_DATA },
     ],
   },
   {
     label: "System Admin", icon: "⚙️",
     items: [
-      { label: "Alerts",     icon: "🔔", href: "/dashboard/alerts",     roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "Audit Logs", icon: "📋", href: "/dashboard/audit-logs", roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
-      { label: "History",    icon: "🕐", href: "/dashboard/history",    roles: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      { label: "Alerts",     icon: "🔔", href: "/dashboard/alerts",     roles: LEADERSHIP, capability: C.ALERTS_VIEW },
+      { label: "Audit Logs", icon: "📋", href: "/dashboard/audit-logs", roles: LEADERSHIP, capability: C.AUDIT_VIEW },
+      { label: "History",    icon: "🕐", href: "/dashboard/history",    roles: LEADERSHIP, capability: C.AUDIT_VIEW },
     ],
   },
 ];
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Students", "Faculty Suite", "My Classes", "Screening"];
+/** Shared visibility test for a nav item. */
+function navVisible(item: NavItem, role: string, caps: Set<Capability>, wing: string): boolean {
+  if (!item.roles.includes(role)) return false;
+  if (item.wing && item.wing !== wing) return false;
+  if (!item.capability) return true;
+  const list = Array.isArray(item.capability) ? item.capability : [item.capability];
+  return list.some((c) => caps.has(c));
+}
+
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Enrollments", "Staff", "Faculty Suite", "My Classes", "My Family", "Screening", "Admissions", "Registry"];
 
 interface ResolvedNavItem extends NavItem {
   resolvedHref: string;
@@ -207,9 +237,38 @@ function NavGroups({
   );
 }
 
+// ─── Wing switcher (Founder only) ─────────────────────────────────────────────
+function WingSwitcher({ wing, onChange }: { wing: string; onChange: (w: string) => void }) {
+  return (
+    <label style={ws.wrap}>
+      <span style={ws.caption}>Wing</span>
+      <select
+        value={wing}
+        onChange={(e) => onChange(e.target.value)}
+        style={ws.select}
+        aria-label="Active wing"
+      >
+        <option value={WINGS.ROL_PLUS}>{WING_LABELS[WINGS.ROL_PLUS]}</option>
+        <option value={WINGS.SCHOOL_OF_MUSIC}>{WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}</option>
+      </select>
+    </label>
+  );
+}
+
+const ws: Record<string, React.CSSProperties> = {
+  wrap:    { display: "flex", flexDirection: "column", gap: 3, padding: "8px 12px 10px" },
+  caption: { fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--color-text-muted)" },
+  select:  {
+    width: "100%", fontSize: 12, fontWeight: 600, padding: "6px 8px", borderRadius: 7,
+    border: "1px solid var(--color-border)", background: "var(--color-surface-2)",
+    color: "var(--color-text-primary)", cursor: "pointer", fontFamily: "inherit",
+  },
+};
+
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, capabilities } = useAuth();
+  const { wing, canSwitch: canSwitchWing, setWing } = useWing();
   const router            = useRouter();
   const pathname          = usePathname();
   const isMobile          = useIsMobile();
@@ -218,8 +277,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const redirectingRef  = useRef(false);
   const hasRestoredRef  = useRef(false);
 
-  const canSeeAlerts = user?.role === ROLES.SUPER_ADMIN || user?.role === ROLES.ADMIN;
+  const canSeeAlerts = capabilities.has(CAPABILITIES.ALERTS_VIEW);
   const alertCount   = useAlertCount(canSeeAlerts);
+
+  // Roles that live on the leadership dashboard (never bounced off /dashboard).
+  const isLeadershipRole = !!user && LEADERSHIP.includes(user.role);
+  const isStaffPersistRole = user?.role === ROLES.ADMIN || user?.role === ROLES.FOUNDER
+    || user?.role === ROLES.DIRECTOR || user?.role === ROLES.CHIEF_TEACHER;
 
   useEffect(() => {
     if (loading) return;
@@ -236,12 +300,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     if (user.role === ROLES.STUDENT && pathname === "/dashboard") {
       router.replace("/dashboard/student");
     }
+    if (user.role === ROLES.PARENT && pathname === "/dashboard") {
+      router.replace("/dashboard/parent");
+    }
+    if (user.role === ROLES.MEMBER && pathname === "/dashboard") {
+      router.replace("/dashboard/account");
+    }
   }, [loading, user, pathname, router]);
 
-  // Save current path so admin/super_admin can resume after reopening
+  // Save current path so leadership roles can resume after reopening
   useEffect(() => {
     if (!user) return;
-    if (user.role !== ROLES.ADMIN && user.role !== ROLES.SUPER_ADMIN) return;
+    if (!isStaffPersistRole) return;
     if (pathname === "/dashboard") return;
     const save = () => localStorage.setItem("rol_nav", JSON.stringify({ path: pathname, ts: Date.now() }));
     save();
@@ -253,7 +323,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // Restore last path if app reopened within 5 minutes
   useEffect(() => {
     if (hasRestoredRef.current || loading || !user) return;
-    if (user.role !== ROLES.ADMIN && user.role !== ROLES.SUPER_ADMIN) return;
+    if (!isStaffPersistRole) return;
     if (pathname !== "/dashboard") return;
     hasRestoredRef.current = true;
     try {
@@ -272,7 +342,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     const { role, uid } = user;
     for (const group of NAV_GROUPS) {
       const hasActive = group.items
-        .filter(item => item.roles.includes(role))
+        .filter(item => navVisible(item, role, capabilities, wing))
         .some(item => {
           const href = typeof item.href === "function" ? item.href(uid, role) : item.href;
           if (pathname === href) return true;
@@ -285,7 +355,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname, user?.uid, user?.role]);
+  }, [pathname, user?.uid, user?.role, capabilities, wing]);
 
   // ── Derived nav data ────────────────────────────────────────────────────────
   // These hooks must run on every render (including the loading/no-user renders
@@ -295,26 +365,26 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // Flat list — used for pageTitle, bottomNav, isActive
   const visibleNav = useMemo(() => (
     !user ? [] : [...NAV_TOP, ...NAV_GROUPS.flatMap(g => g.items)]
-      .filter(item => item.roles.includes(user.role))
+      .filter(item => navVisible(item, user.role, capabilities, wing))
       .map(item => ({
         ...item,
         resolvedHref: typeof item.href === "function"
           ? item.href(user.uid, user.role)
           : item.href,
       }))
-  ), [user]);
+  ), [user, capabilities, wing]);
 
   // Top-level standalone items (rendered above accordion groups)
   const topNavItems = useMemo(() => (
     !user ? [] : NAV_TOP
-      .filter(item => item.roles.includes(user.role))
+      .filter(item => navVisible(item, user.role, capabilities, wing))
       .map(item => ({
         ...item,
         resolvedHref: typeof item.href === "function"
           ? item.href(user.uid, user.role)
           : item.href,
       }))
-  ), [user]);
+  ), [user, capabilities, wing]);
 
   // Grouped list — used for the accordion sidebar
   const visibleGroups: ResolvedNavGroup[] = useMemo(() => (
@@ -322,7 +392,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       .map(group => ({
         ...group,
         visibleItems: group.items
-          .filter(item => item.roles.includes(user.role))
+          .filter(item => navVisible(item, user.role, capabilities, wing))
           .map(item => ({
             ...item,
             resolvedHref: typeof item.href === "function"
@@ -331,7 +401,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           })),
       }))
       .filter(g => g.visibleItems.length > 0)
-  ), [user]);
+  ), [user, capabilities, wing]);
 
   const isActive = useCallback((item: ResolvedNavItem): boolean => {
     if (pathname === item.resolvedHref) return true;
@@ -405,6 +475,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
             <button onClick={() => setDrawerOpen(false)} style={s.closeBtn}>✕</button>
           </div>
+          {canSwitchWing && <WingSwitcher wing={wing} onChange={(w) => setWing(w as typeof wing)} />}
           <nav style={s.drawerNav}>
             <NavGroups
               topNavItems={topNavItems}
@@ -477,6 +548,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
         </div>
 
+        {canSwitchWing && <WingSwitcher wing={wing} onChange={(w) => setWing(w as typeof wing)} />}
+
         <nav style={s.nav}>
           <NavGroups
             topNavItems={topNavItems}
@@ -509,7 +582,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       <div style={s.rightPanel}>
         <header style={s.topbar}>
           <div style={s.topbarBread}>
-            <span style={s.breadRoot}>ROL's Plus</span>
+            <span style={s.breadRoot}>{isLeadershipRole ? (WING_LABELS[wing] ?? "ROL's Plus") : "ROL's Plus"}</span>
             <span style={s.breadSep}>/</span>
             <span style={s.breadPage}>{pageTitle}</span>
           </div>

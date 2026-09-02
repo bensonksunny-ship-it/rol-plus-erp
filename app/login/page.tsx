@@ -4,7 +4,7 @@
 import { useState, useEffect, useRef } from "react";
 import { persistSessionToken, signIn } from "@/services/firebase/auth.service";
 import { useAuth } from "@/hooks/useAuth";
-import { ROLE_ROUTES } from "@/config/constants";
+import { ROLE_ROUTES, resolveSignInIdentifier } from "@/config/constants";
 
 const ERROR_MESSAGES: Record<string, string> = {
   "AUTH/USER_NOT_FOUND":         "Account not found. Contact your administrator.",
@@ -49,7 +49,9 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const session = await signIn(email.trim(), password);
+      // Accepts an email (ROL+) or a bare School-of-Music login id, which is
+      // expanded to its synthetic auth email.
+      const session = await signIn(resolveSignInIdentifier(email), password);
       persistSessionToken(session.token);
 
       // DO NOT navigate here. Firebase's onAuthStateChanged will fire with the
@@ -119,9 +121,9 @@ export default function LoginPage() {
         {/* Form */}
         <form onSubmit={handleSubmit} style={s.form} noValidate className="animate-fadeIn delay-100">
 
-          {/* Email */}
+          {/* Email or Login ID */}
           <div style={s.field}>
-            <label style={s.label} htmlFor="email">Email address</label>
+            <label style={s.label} htmlFor="email">Email or Login ID</label>
             <div style={{ position: "relative" }}>
               <span style={s.inputIcon}>
                 <svg width="14" height="14" viewBox="0 0 20 20" fill="none">
@@ -131,14 +133,16 @@ export default function LoginPage() {
               </span>
               <input
                 id="email"
-                type="email"
+                type="text"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
                 onFocus={() => setFocused("email")}
                 onBlur={() => setFocused(null)}
-                placeholder="you@example.com"
+                placeholder="you@example.com or login id"
                 required
-                autoComplete="email"
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
                 style={{ ...s.input, ...(focused === "email" ? s.inputFocused : {}) }}
               />
             </div>

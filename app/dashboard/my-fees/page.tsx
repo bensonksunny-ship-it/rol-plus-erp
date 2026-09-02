@@ -61,6 +61,7 @@ function MyFeesContent() {
   const [balance, setBalance]        = useState<number | null>(null);
   const [transactions, setTx]        = useState<Transaction[]>([]);
   const [feeStructure, setFeeStr]    = useState<FeeStructure | null>(null);
+  const [monthlyFee, setMonthlyFee]  = useState<number>(0);
   const [loading, setLoading]        = useState(true);
   const [error, setError]            = useState<string | null>(null);
 
@@ -79,6 +80,8 @@ function MyFeesContent() {
       ]);
 
       const userData = userSnap.exists() ? userSnap.data() : {};
+
+      setMonthlyFee(Number(userData.monthlyFee ?? 0));
 
       const centerId = (userData.centerId as string) ?? null;
       if (centerId) {
@@ -168,6 +171,23 @@ function MyFeesContent() {
             <div style={s.feeItem}>
               <div style={s.feeItemLabel}>Late Fee</div>
               <div style={s.feeItemVal}>{fmtINR(feeStructure.lateFee)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Monthly fee (School of Music — per-student, no centre fee structure) */}
+      {!feeStructure && monthlyFee > 0 && (
+        <div style={s.feeStructCard}>
+          <div style={s.feeStructTitle}>Fee Structure</div>
+          <div style={s.feeStructGrid}>
+            <div style={s.feeItem}>
+              <div style={s.feeItemLabel}>Monthly Fee</div>
+              <div style={s.feeItemVal}>{fmtINR(monthlyFee)}</div>
+            </div>
+            <div style={s.feeItem}>
+              <div style={s.feeItemLabel}>Billing Cycle</div>
+              <div style={s.feeItemVal}>Monthly · Prepaid</div>
             </div>
           </div>
         </div>

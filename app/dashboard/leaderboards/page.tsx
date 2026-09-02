@@ -19,7 +19,7 @@ import type { Leaderboard, RankEntry } from "@/types/quality";
 
 export default function LeaderboardsPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
       <LeaderboardsContent />
     </ProtectedRoute>
   );
