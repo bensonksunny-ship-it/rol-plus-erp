@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  collection, getDocs, query, where, writeBatch, doc, serverTimestamp, Timestamp,
+  collection, getDocs, query, where, writeBatch, doc, updateDoc, serverTimestamp, Timestamp,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -15,7 +15,7 @@ import { CAPABILITIES } from "@/config/permissions";
 import { useAuth } from "@/hooks/useAuth";
 import { wingOf } from "@/lib/wing";
 import { parseFile, normalizeHeader } from "@/lib/xlsx-parser";
-import { formatAdmissionNo, looksLikeAdmissionNo, reserveAdmissionSeq } from "@/lib/admissionNumber";
+import { formatAdmissionNo, reserveAdmissionSeq } from "@/lib/admissionNumber";
 import { logAction } from "@/services/audit/audit.service";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
 
@@ -42,6 +42,16 @@ function screeningGradeOf(s: Record<string, unknown>): string {
   if (sc?.config?.track) return sc.config.track;
   return "—";
 }
+
+/** Sort key: the last 3 digits of an admission number, as a number.
+ *  "ROLCC02092025103" → 103 · "—" / no digits → Infinity (sorts last). */
+function admTail(admissionNo: string): number {
+  const digits = (admissionNo || "").replace(/\D/g, "");
+  return digits ? parseInt(digits.slice(-3), 10) : Number.POSITIVE_INFINITY;
+}
+
+// Editable status choices shown in the registry Status dropdown.
+const STATUS_OPTIONS = ["Confirm", "Cancelled", "Hold"] as const;
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 function fmtDate(iso: string): string {
@@ -100,11 +110,10 @@ function parseSheetDate(raw: string): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
-// Canonical column order — used ONLY when pasted rows have no header line.
-// Wing and Batch are recognised by header name only (they can't be positioned
-// reliably without one), so they're not in this fallback order.
+// Column order assumed ONLY for a header-less paste. Columns are otherwise
+// always mapped by their header name — no content guessing.
 const REGISTRY_COLUMNS = [
-  "name", "dateofadmission", "centre",
+  "name", "dateofadmission", "wing", "centre", "batch",
   "phonenumber", "admissionno", "course", "status", "screeninggrade",
 ];
 const HEADER_WORDS = /name|wing|centre|center|batch|admission|phone|mobile|course|instrument|status|date|screening|grade/i;
@@ -182,6 +191,12 @@ function RegistryContent() {
   const [showImport, setShowImport] = useState(false);
   const [pastedText, setPastedText] = useState("");
 
+  // ── Bulk delete ──────────────────────────────────────────────────────────
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmDelete, setConfirmDelete] = useState<null | "selected" | "all">(null);
+  const [confirmText, setConfirmText] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -190,14 +205,14 @@ function RegistryContent() {
         getDocs(collection(db, "centers")),
       ]);
 
+      // Only School-of-Music centres — never surface a centre from the other wing.
       const centreName = new Map<string, string>();
       const centreList: { id: string; name: string; code: string }[] = [];
       centreSnap.docs.forEach(d => {
+        if (wingOf(d.data()) !== WING) return;
         const nm = (d.data().name as string) ?? d.id;
         centreName.set(d.id, nm);
-        if (wingOf(d.data()) === WING) {
-          centreList.push({ id: d.id, name: nm, code: (d.data().centerCode as string) ?? "" });
-        }
+        centreList.push({ id: d.id, name: nm, code: (d.data().centerCode as string) ?? "" });
       });
       setCentres(centreList);
 
@@ -225,7 +240,9 @@ function RegistryContent() {
             .map(v => String(v ?? "").trim())
             .filter(v => v && v !== "-" && v !== "—" && v !== phone);
           const admissionNo = admCandidates[0] || "—";
-          if (admissionNo !== "—") admNos.add(admissionNo);
+          // Store a spaces-stripped, upper-cased key so the importer can match
+          // "ROLCC 20112017101" against "ROLCC20112017101".
+          if (admissionNo !== "—") admNos.add(admissionNo.replace(/\s+/g, "").toUpperCase());
           return {
             uid:         d.id,
             name:        (s.displayName ?? s.name ?? "—") as string,
@@ -239,7 +256,13 @@ function RegistryContent() {
             screening:   screeningGradeOf(s),
           };
         })
-        .sort((a, b) => (a.admittedOn || "9999").localeCompare(b.admittedOn || "9999"));
+        .sort((a, b) => {
+          // Ascending by the last 3 digits of the admission number (…101, …102, …103).
+          // Rows with no admission number fall to the bottom, then ordered by date.
+          const ka = admTail(a.admissionNo), kb = admTail(b.admissionNo);
+          if (ka !== kb) return ka - kb;
+          return (a.admittedOn || "9999").localeCompare(b.admittedOn || "9999");
+        });
 
       setExistingAdmNos(admNos);
       setEntries(list);
@@ -252,10 +275,11 @@ function RegistryContent() {
 
   useEffect(() => { load(); }, [load]);
 
-  const statuses = useMemo(
-    () => Array.from(new Set(entries.map(e => e.status))).sort(),
-    [entries],
-  );
+  const statuses = useMemo(() => {
+    const found = new Set(entries.map(e => e.status));
+    const others = Array.from(found).filter(s => !STATUS_OPTIONS.includes(s as typeof STATUS_OPTIONS[number])).sort();
+    return [...STATUS_OPTIONS, ...others];
+  }, [entries]);
 
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -273,6 +297,80 @@ function RegistryContent() {
       );
     });
   }, [entries, q, statusFilter]);
+
+  // Keep the selection in sync with what's actually on the register.
+  useEffect(() => {
+    setSelected(prev => {
+      const live = new Set(entries.map(e => e.uid));
+      const next = new Set(Array.from(prev).filter(uid => live.has(uid)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [entries]);
+
+  const visibleUids  = useMemo(() => rows.map(r => r.uid), [rows]);
+  const allVisibleSelected = visibleUids.length > 0 && visibleUids.every(uid => selected.has(uid));
+
+  function toggleRow(uid: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid); else next.add(uid);
+      return next;
+    });
+  }
+  function toggleAllVisible() {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (allVisibleSelected) visibleUids.forEach(uid => next.delete(uid));
+      else visibleUids.forEach(uid => next.add(uid));
+      return next;
+    });
+  }
+
+  async function changeStatus(uid: string, status: string) {
+    const prev = entries.find(e => e.uid === uid)?.status;
+    if (status === prev) return;
+    setEntries(cur => cur.map(e => e.uid === uid ? { ...e, status } : e));
+    try {
+      await updateDoc(doc(db, "users", uid), { status, updatedAt: serverTimestamp() });
+      logAction({
+        action: "REGISTRY_STATUS_CHANGE",
+        initiatorId:   user?.uid ?? "unknown",
+        initiatorRole: user?.role ?? ROLES.FOUNDER,
+        approverId: null, approverRole: null, reason: null,
+        metadata: { uid, from: prev ?? null, to: status },
+      });
+    } catch (err) {
+      console.error("Registry status update failed:", err);
+      setEntries(cur => cur.map(e => e.uid === uid ? { ...e, status: prev ?? e.status } : e));
+    }
+  }
+
+  async function runDelete(uids: string[]) {
+    if (uids.length === 0) return;
+    setDeleting(true);
+    try {
+      for (let i = 0; i < uids.length; i += 400) {
+        const batch = writeBatch(db);
+        for (const uid of uids.slice(i, i + 400)) batch.delete(doc(db, "users", uid));
+        await batch.commit();
+      }
+      logAction({
+        action: "REGISTRY_BULK_DELETE",
+        initiatorId:   user?.uid ?? "unknown",
+        initiatorRole: user?.role ?? ROLES.FOUNDER,
+        approverId: null, approverRole: null, reason: null,
+        metadata: { count: uids.length, all: uids.length === entries.length },
+      });
+      setSelected(new Set());
+      setConfirmDelete(null);
+      setConfirmText("");
+      await load();
+    } catch (err) {
+      console.error("Registry bulk delete failed:", err);
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   return (
     <div>
@@ -297,46 +395,111 @@ function RegistryContent() {
           {canImport && (
             <button style={s.importBtn} onClick={() => setShowImport(true)}>⬆ Import Excel</button>
           )}
+          {canImport && entries.length > 0 && (
+            <button
+              style={{ ...s.printBtn, color: "#b91c1c", borderColor: "#fecaca", background: "#fef2f2" }}
+              onClick={() => { setConfirmText(""); setConfirmDelete("all"); }}
+            >
+              🗑 Delete all
+            </button>
+          )}
           <button style={s.printBtn} onClick={() => window.print()}>🖨 Print</button>
         </div>
       </div>
+
+      {canImport && selected.size > 0 && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12, marginBottom: 12,
+          background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 14px",
+        }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "#991b1b" }}>{selected.size} selected</span>
+          <button
+            onClick={() => setConfirmDelete("selected")}
+            style={{ ...s.printBtn, color: "#fff", background: "#dc2626", border: "none" }}
+          >
+            🗑 Delete {selected.size}
+          </button>
+          <button onClick={() => setSelected(new Set())} style={{ ...s.printBtn, fontSize: 12 }}>Clear</button>
+        </div>
+      )}
 
       <div style={s.card}>
         {loading ? (
           <div style={s.empty}>Loading…</div>
         ) : (
-          <div style={{ overflowX: "auto" }}>
+          <div className="registry-scroll" style={{ overflow: "auto", maxHeight: "calc(100vh - 210px)" }}>
+            <style>{`
+              .registry-scroll { scrollbar-width: auto; scrollbar-color: #9ca3af var(--color-bg); }
+              .registry-scroll::-webkit-scrollbar { width: 18px; height: 18px; }
+              .registry-scroll::-webkit-scrollbar-track { background: var(--color-bg); border-radius: 9px; }
+              .registry-scroll::-webkit-scrollbar-thumb {
+                background: #9ca3af; border-radius: 9px;
+                border: 4px solid var(--color-bg);
+              }
+              .registry-scroll::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+              .registry-scroll::-webkit-scrollbar-corner { background: var(--color-bg); }
+            `}</style>
             <table style={s.table}>
               <thead>
                 <tr>
+                  {canImport && (
+                    <th style={{ ...s.th, width: 34 }}>
+                      <input type="checkbox" checked={allVisibleSelected}
+                        onChange={toggleAllVisible} style={{ cursor: "pointer" }} />
+                    </th>
+                  )}
                   {["SL", "Name", "Date Of Admission", "Centre", "Batch", "Phone number", "Admission number", "Course", "Status", "Screening grade"]
                     .map(h => <th key={h} style={s.th}>{h}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {rows.length === 0 && (
-                  <tr><td colSpan={10} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "28px 0" }}>
+                  <tr><td colSpan={canImport ? 11 : 10} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "28px 0" }}>
                     {entries.length === 0 ? "No students on the register yet." : "No matches."}
                   </td></tr>
                 )}
                 {rows.map((e, i) => (
-                  <tr key={e.uid} style={s.tr}>
+                  <tr key={e.uid} style={{ ...s.tr, ...(selected.has(e.uid) ? { background: "#fef2f2" } : {}) }}>
+                    {canImport && (
+                      <td style={s.td}>
+                        <input type="checkbox" checked={selected.has(e.uid)}
+                          onChange={() => toggleRow(e.uid)} style={{ cursor: "pointer" }} />
+                      </td>
+                    )}
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{i + 1}</td>
                     <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>{e.name}</td>
                     <td style={s.td}>{fmtDate(e.admittedOn)}</td>
                     <td style={s.td}>{e.centre}</td>
                     <td style={s.td}>{e.batch}</td>
                     <td style={s.td}>{e.phone}</td>
-                    <td style={s.td}><span style={s.code}>{e.admissionNo}</span></td>
+                    <td style={{ ...s.td, fontSize: 15, fontWeight: 700, color: "var(--color-text-primary)", whiteSpace: "nowrap" }}>{e.admissionNo}</td>
                     <td style={s.td}>{e.course}</td>
                     <td style={s.td}>
-                      <span style={statusStyle(e.status)}>{e.status}</span>
+                      {canImport ? (
+                        <select
+                          value={STATUS_OPTIONS.includes(e.status as typeof STATUS_OPTIONS[number]) ? e.status : "__current"}
+                          onChange={ev => changeStatus(e.uid, ev.target.value)}
+                          style={{
+                            ...statusStyle(e.status),
+                            border: "1px solid var(--color-border)", cursor: "pointer",
+                            fontSize: 12, padding: "3px 6px", textTransform: "none",
+                          }}
+                        >
+                          {!STATUS_OPTIONS.includes(e.status as typeof STATUS_OPTIONS[number]) && (
+                            <option value="__current" disabled>{e.status}</option>
+                          )}
+                          {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                        </select>
+                      ) : (
+                        <span style={statusStyle(e.status)}>{e.status}</span>
+                      )}
                     </td>
                     <td style={s.td}>{e.screening}</td>
                   </tr>
                 ))}
                 {canImport && (
                   <tr style={s.pasteTr}>
+                    <td style={s.td} />
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>＋</td>
                     <td colSpan={9} style={{ padding: 0 }}>
                       <input
@@ -374,9 +537,52 @@ function RegistryContent() {
           onDone={() => { setShowImport(false); setPastedText(""); load(); }}
         />
       )}
+
+      {confirmDelete && (() => {
+        const isAll  = confirmDelete === "all";
+        const target = isAll ? entries.map(e => e.uid) : Array.from(selected);
+        const ready  = !isAll || confirmText.trim().toUpperCase() === "DELETE";
+        return (
+          <div style={dm.overlay} onClick={e => { if (e.target === e.currentTarget && !deleting) { setConfirmDelete(null); setConfirmText(""); } }}>
+            <div style={dm.box}>
+              <div style={{ fontSize: 34, marginBottom: 8 }}>🗑️</div>
+              <div style={{ fontSize: 17, fontWeight: 800, color: "#111", marginBottom: 6 }}>
+                {isAll ? `Delete the entire register?` : `Delete ${target.length} student${target.length !== 1 ? "s" : ""}?`}
+              </div>
+              <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 18, lineHeight: 1.5 }}>
+                {isAll
+                  ? `This permanently removes all ${target.length} students from the ${WING_LABELS[WING]} register. It cannot be undone.`
+                  : `This permanently removes the selected records from the register. It cannot be undone.`}
+              </div>
+              {isAll && (
+                <input
+                  autoFocus
+                  value={confirmText}
+                  onChange={e => setConfirmText(e.target.value)}
+                  placeholder="Type DELETE to confirm"
+                  style={{ ...s.search, minWidth: 0, width: "100%", boxSizing: "border-box", marginBottom: 16 }}
+                />
+              )}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => { setConfirmDelete(null); setConfirmText(""); }} disabled={deleting}
+                  style={{ ...s.printBtn }}>Cancel</button>
+                <button onClick={() => runDelete(target)} disabled={deleting || !ready || target.length === 0}
+                  style={{ ...s.printBtn, background: "#dc2626", border: "none", color: "#fff", opacity: deleting || !ready ? 0.5 : 1 }}>
+                  {deleting ? "Deleting…" : isAll ? `Delete all ${target.length}` : `Delete ${target.length}`}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
+
+const dm: Record<string, React.CSSProperties> = {
+  overlay: { position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 },
+  box: { background: "#fff", borderRadius: 16, padding: "26px 26px", maxWidth: 420, width: "100%", boxShadow: "0 24px 64px rgba(0,0,0,0.25)", textAlign: "center" },
+};
 
 // ─── Import modal ─────────────────────────────────────────────────────────────
 
@@ -418,12 +624,7 @@ function ImportModal({
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [parseErr, setParseErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ imported: number; skipped: number; failed: number; generated: number } | null>(null);
-
-  // Centre-confirmation step: raw rows held back until every unrecognised centre
-  // name has been resolved (mapped to an existing centre, or kept as typed).
-  const [pendingRows, setPendingRows] = useState<Record<string, string>[] | null>(null);
-  const [centreChoices, setCentreChoices] = useState<Record<string, string>>({}); // lc name → "" keep / centreId
+  const [result, setResult] = useState<{ imported: number; skipped: number; failed: number; generated: number; centres: string[] } | null>(null);
 
   const centreByName = useMemo(() => {
     const m = new Map<string, { id: string; code: string }>();
@@ -441,103 +642,57 @@ function ImportModal({
     return "";
   }
 
-  function rawCentre(r: Record<string, string>): string {
-    return pick(r, "centre", "center", "branch", "location");
-  }
-
-  /** Turn parsed rows into validated preview rows. `choices` maps a lowercased
-   *  unrecognised centre name to "" (keep as typed) or an existing centre id. */
-  function buildPreview(rows: Record<string, string>[], choices: Record<string, string> = {}): PreviewRow[] {
+  /** Map parsed rows (keyed by header name) straight to preview rows. Every
+   *  value is kept EXACTLY as it appears in the sheet — no column guessing,
+   *  no reformatting, no recombining. A row is only skipped when it has no
+   *  name, or an admission number that's already on the register. */
+  function buildPreview(rows: Record<string, string>[]): PreviewRow[] {
     const seen = new Set<string>();
     return rows.map((r, i) => {
-      const name = pick(r, "name", "studentname", "fullname");
-      // Distinct columns — phone never feeds the admission number and vice versa.
-      const phone = pick(r, "phonenumber", "phoneno", "phone", "mobilenumber", "mobileno", "mobile", "contactnumber", "contactno", "contact");
-      let admissionNo = pick(r, "admissionno", "admissionnumber", "admissionnumberno", "admno", "admissionid");
-      let centreRaw = pick(r, "centre", "center", "branch", "location");
-      const batch = pick(r, "batch", "batchname", "batchno", "batchnumber");
-      const wingRaw = pick(r, "wing", "school", "branchwing");
+      const name        = pick(r, "name", "studentname", "fullname");
+      const admittedOn  = parseSheetDate(pick(r, "dateofadmission", "admissiondate", "doa", "date"));
+      const centreRaw   = pick(r, "centre", "center", "centrename", "centername", "branch", "location");
+      const batch       = pick(r, "batch", "batchname", "batchno", "batchnumber");
+      const phone       = pick(r, "phonenumber", "phoneno", "phone", "mobilenumber", "mobileno", "mobile", "contactnumber", "contactno", "contact");
+      const admissionNo = pick(r, "admissionno", "admissionnumber", "admissionnumberno", "admno", "admissionid");
+      const course      = pick(r, "course", "instrument");
+      const status      = pick(r, "status");
+      const screening   = pick(r, "screeninggrade", "screeningscore", "grade", "screening");
 
-      // Salvage: sometimes the admission code sits in another column (often the
-      // Centre column). If admission number is blank but a cell holds an
-      // admission-code-shaped value that isn't the phone, use it.
-      if (!admissionNo) {
-        if (looksLikeAdmissionNo(centreRaw) && centreRaw !== phone) {
-          admissionNo = centreRaw;
-          centreRaw = "";
-        } else {
-          const salvaged = Object.values(r).find(
-            v => v && v.trim() !== phone && looksLikeAdmissionNo(v),
-          );
-          if (salvaged) admissionNo = salvaged.trim();
-        }
-      }
-
-      // Resolve centre: exact name match → a confirmed choice → free text.
-      const lc = centreRaw.toLowerCase();
-      let centreId: string | null = null;
-      let centreCode = "";
-      let centreConfirmed = false;
-      const nameMatch = centreRaw ? centreByName.get(lc) : undefined;
-      if (nameMatch) {
-        centreId = nameMatch.id; centreCode = nameMatch.code;
-      } else if (centreRaw && lc in choices) {
-        centreConfirmed = true;
-        const chosen = choices[lc];
-        if (chosen) {
-          const c = centreById.get(chosen);
-          centreId = chosen; centreCode = c?.code ?? "";
-        }
-      }
+      // Match a centre name to a centre doc for display only — an unmatched
+      // centre is kept as free text, never rejected.
+      const nameMatch = centreRaw ? centreByName.get(centreRaw.trim().toLowerCase()) : undefined;
+      const centreId  = nameMatch?.id ?? null;
 
       const auto = !admissionNo;
-      const dupInFile = admissionNo && seen.has(admissionNo);
-      if (admissionNo) seen.add(admissionNo);
-      const duplicate = !!admissionNo && (existingAdmNos.has(admissionNo) || !!dupInFile);
-
-      // A missing name blocks the row; so does a Wing column that clearly says
-      // ROL+ (this is the School of Music register). Everything else is stored
-      // exactly as given, an unmatched centre included.
-      const wingIsRolPlus = /rol\s*\+|rol\s*plus|music\s*academy|\bacademy\b/i.test(wingRaw)
-        && !/school\s*of\s*music|\bsom\b|\brsm\b/i.test(wingRaw);
-      let error: string | null = null;
-      if (!name) error = "Name is required";
-      else if (wingIsRolPlus) error = `Wing is "${wingRaw}", not School of Music`;
-      else if (phone && admissionNo && phone === admissionNo) error = "Phone number and admission number are the same";
+      const key  = admissionNo.replace(/\s+/g, "").toUpperCase();
+      const dupInFile = key && seen.has(key);
+      if (key) seen.add(key);
+      const duplicate = !!key && (existingAdmNos.has(key) || !!dupInFile);
 
       return {
         sl: i + 1,
         name,
-        admittedOn: parseSheetDate(pick(r, "dateofadmission", "admissiondate", "doa", "date")),
+        admittedOn,
         centreRaw,
         centreId,
-        centreCode,
-        centreUnmatched: !!centreRaw && !centreId && !centreConfirmed,
+        centreCode: nameMatch?.code ?? "",
+        centreUnmatched: !!centreRaw && !centreId,
         batch,
         phone,
         admissionNo,
         auto,
-        course: pick(r, "course", "instrument"),
-        status: pick(r, "status") || "active",
-        screening: pick(r, "screeninggrade", "screeningscore", "grade", "screening"),
-        error,
+        course,
+        status: status || "active",
+        screening,
+        error: name ? null : "Name is required",
         duplicate,
       };
     });
   }
 
-  /** After any parse: if a pasted centre name isn't a known centre, hold the
-   *  rows and ask the user to confirm each one before previewing. */
   function ingest(rows: Record<string, string>[]) {
-    setPreview([]); setResult(null); setPendingRows(null);
-    const unknown = Array.from(new Set(
-      rows.map(rawCentre).filter(c => c && !centreByName.has(c.toLowerCase())),
-    ));
-    if (unknown.length > 0) {
-      setPendingRows(rows);
-      setCentreChoices(Object.fromEntries(unknown.map(c => [c.toLowerCase(), ""])));
-      return;
-    }
+    setResult(null);
     setPreview(buildPreview(rows));
   }
 
@@ -546,7 +701,7 @@ function ImportModal({
     e.target.value = "";
     if (!f) return;
     setFileName(f.name);
-    setParseErr(""); setResult(null); setPreview([]); setPendingRows(null);
+    setParseErr(""); setResult(null); setPreview([]);
 
     const res = await parseFile(f);
     if (res.error) { setParseErr(res.error); return; }
@@ -555,7 +710,7 @@ function ImportModal({
   }
 
   function parsePaste(text: string) {
-    setParseErr(""); setResult(null); setPreview([]); setPendingRows(null);
+    setParseErr(""); setResult(null); setPreview([]);
     const rows = parsePastedTable(text);
     if (rows.length === 0) {
       setParseErr("Paste rows copied straight from Excel or Google Sheets — one student per line.");
@@ -565,29 +720,22 @@ function ImportModal({
   }
   const handlePasteParse = () => parsePaste(pasteText);
 
-  const unknownCentreList = useMemo(() => {
-    if (!pendingRows) return [] as { raw: string; count: number }[];
-    const counts = new Map<string, { raw: string; count: number }>();
-    for (const r of pendingRows) {
-      const c = rawCentre(r);
-      if (!c || centreByName.has(c.toLowerCase())) continue;
-      const k = c.toLowerCase();
-      const e = counts.get(k) ?? { raw: c, count: 0 };
-      e.count++; counts.set(k, e);
+  // Distinct centre names in the current preview, split into known / new.
+  const centreSummary = useMemo(() => {
+    const known = new Set<string>();
+    const fresh = new Set<string>();
+    for (const r of preview) {
+      if (!r.centreRaw) continue;
+      (r.centreId || centreByName.has(r.centreRaw.toLowerCase()) ? known : fresh)
+        .add(r.centreId ? (centreById.get(r.centreId)?.name ?? r.centreRaw) : r.centreRaw);
     }
-    return Array.from(counts.values());
-  }, [pendingRows]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function confirmCentres() {
-    if (!pendingRows) return;
-    setPreview(buildPreview(pendingRows, centreChoices));
-    setPendingRows(null);
-  }
+    return { known: [...known], fresh: [...fresh] };
+  }, [preview]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** "Paste by column" mode: zip the per-column lists together by row. A column
    *  with a single value is broadcast to every row (same centre / date). */
   function parseColumns() {
-    setParseErr(""); setResult(null); setPreview([]); setPendingRows(null);
+    setParseErr(""); setResult(null); setPreview([]);
     const lists: Record<string, string[]> = {};
     let maxLen = 0;
     for (const f of COL_FIELDS) {
@@ -685,7 +833,10 @@ function ImportModal({
         reason: null,
         metadata: { imported, skipped: skipCount, failed, generated: autoRows.length, source: mode === "file" ? (fileName || "file") : mode },
       }).catch(() => {});
-      setResult({ imported, skipped: skipCount, failed, generated: autoRows.length });
+      setResult({
+        imported, skipped: skipCount, failed, generated: autoRows.length,
+        centres: [...centreSummary.known, ...centreSummary.fresh],
+      });
     } finally {
       setBusy(false);
     }
@@ -707,20 +858,28 @@ function ImportModal({
               <div style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>
                 {result.imported} added · {result.generated} auto-numbered · {result.skipped} skipped (duplicates) · {result.failed} failed
               </div>
+              {result.centres.length > 0 && (
+                <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginTop: 8 }}>
+                  Centres uploaded: {result.centres.join(" · ")}
+                </div>
+              )}
               <button style={{ ...s.primaryBtn, marginTop: 20 }} onClick={onDone}>Done</button>
             </div>
           ) : (
             <>
               <p style={{ fontSize: 12.5, color: "var(--color-text-secondary)", marginTop: 0, lineHeight: 1.6 }}>
-                Column headers (any order, punctuation ignored): <code style={s.cols}>Name · Date Of Admission · Wing · Centre · Phone number · Admission no. · Course · Status · Screening grade</code> — plus an optional <code style={{ fontSize: 11 }}>Batch</code> column.
+                <strong>Keep the header row</strong> in your file or paste. Columns are matched by
+                their header name — <code style={s.cols}>Name · Date Of Admission · Centre · Batch · Phone number · Admission number · Course · Status · Screening grade</code> — in any order; unknown columns are ignored.
                 <br />
-                Every value is stored exactly as written — centre, admission number and status are
-                kept verbatim (a centre that isn't in the system is just free text). If a row has no
-                admission number one is generated as <code style={{ fontSize: 11 }}>ROLCC + DDMMYYYY + sequence</code>.
+                Every cell is stored exactly as written — nothing is reformatted, merged, or moved
+                between columns. Each field comes only from its own column: <code style={{ fontSize: 11 }}>Centre</code> from the Centre column,
+                <code style={{ fontSize: 11 }}>Batch</code> from the Batch column, and so on. A centre that isn&apos;t in the system is kept
+                as plain text.
+                If a row has no admission number, one is generated as <code style={{ fontSize: 11 }}>ROLCC + DDMMYYYY + sequence</code>.
                 Only rows with no name, or an admission number already on the register, are skipped.
               </p>
 
-              {!pendingRows && preview.length === 0 && (<>
+              {preview.length === 0 && (<>
               <div style={s.modeTabs}>
                 {([
                   ["file", "📄 Upload file"],
@@ -794,35 +953,21 @@ function ImportModal({
 
               {parseErr && <div style={s.err}>{parseErr}</div>}
 
-              {pendingRows && unknownCentreList.length > 0 && (
+              {preview.length > 0 && (centreSummary.known.length > 0 || centreSummary.fresh.length > 0) && (
                 <div style={s.confirmBox}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", marginBottom: 4 }}>
-                    Confirm {unknownCentreList.length} centre{unknownCentreList.length === 1 ? "" : "s"}
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--color-text-primary)", marginBottom: 6 }}>
+                    Centres in this file
                   </div>
-                  <div style={{ fontSize: 11.5, color: "var(--color-text-muted)", marginBottom: 12 }}>
-                    These names in the paste aren&apos;t centres in the system. For each one, keep it
-                    as typed or point it at an existing centre.
-                  </div>
-                  {unknownCentreList.map(u => (
-                    <div key={u.raw} style={s.confirmRow}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{u.raw}</span>
-                        <span style={{ fontSize: 11, color: "var(--color-text-muted)" }}> · {u.count} student{u.count === 1 ? "" : "s"}</span>
-                      </div>
-                      <select
-                        style={s.select}
-                        value={centreChoices[u.raw.toLowerCase()] ?? ""}
-                        onChange={e => setCentreChoices(c => ({ ...c, [u.raw.toLowerCase()]: e.target.value }))}
-                      >
-                        <option value="">Keep as &quot;{u.raw}&quot;</option>
-                        {centres.map(c => <option key={c.id} value={c.id}>→ {c.name}</option>)}
-                      </select>
+                  {centreSummary.known.length > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginBottom: 4 }}>
+                      Matched: {centreSummary.known.join(" · ")}
                     </div>
-                  ))}
-                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-                    <button style={s.ghostBtn} onClick={() => setPendingRows(null)}>Cancel</button>
-                    <button style={s.primaryBtn} onClick={confirmCentres}>Confirm &amp; preview</button>
-                  </div>
+                  )}
+                  {centreSummary.fresh.length > 0 && (
+                    <div style={{ fontSize: 12, color: "#1d4ed8" }}>
+                      New (kept as typed): {centreSummary.fresh.join(" · ")}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -898,7 +1043,7 @@ const s: Record<string, React.CSSProperties> = {
   printBtn: { background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: "var(--color-text-secondary)", cursor: "pointer" },
   card: { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, padding: 20 },
   table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
-  th: { textAlign: "left", padding: "10px 12px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-secondary)", borderBottom: "2px solid var(--color-border)", background: "var(--color-bg)", whiteSpace: "nowrap" },
+  th: { textAlign: "left", padding: "10px 12px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-secondary)", borderBottom: "2px solid var(--color-border)", background: "var(--color-bg)", whiteSpace: "nowrap", position: "sticky", top: 0, zIndex: 2 },
   tr: { borderBottom: "1px solid var(--color-border)" },
   td: { padding: "11px 12px", color: "var(--color-text-secondary)", verticalAlign: "middle", whiteSpace: "nowrap" },
   code: { fontFamily: "monospace", fontSize: 12, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4 },
@@ -922,8 +1067,7 @@ const s: Record<string, React.CSSProperties> = {
   colGrid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 },
   colLabel: { display: "block", fontSize: 10.5, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.04em", color: "var(--color-text-muted)", marginBottom: 3 },
   colBox: { width: "100%", boxSizing: "border-box", padding: "7px 9px", borderRadius: 7, border: "1px solid var(--color-border)", background: "var(--color-bg)", color: "var(--color-text-primary)", fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", outline: "none", resize: "vertical" as const },
-  confirmBox: { marginTop: 12, border: "1px solid #bfdbfe", background: "#eff6ff", borderRadius: 10, padding: "14px 16px" },
-  confirmRow: { display: "flex", alignItems: "center", gap: 10, padding: "6px 0", flexWrap: "wrap" as const },
+  confirmBox: { marginTop: 12, border: "1px solid #bfdbfe", background: "#eff6ff", borderRadius: 10, padding: "12px 14px" },
   cols: { display: "inline-block", marginTop: 6, fontSize: 11.5, background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: 6, padding: "4px 8px" },
   err: { background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#991b1b", marginTop: 10 },
   pill: { display: "inline-block", padding: "2px 8px", borderRadius: 99, fontSize: 10.5, fontWeight: 700 },
