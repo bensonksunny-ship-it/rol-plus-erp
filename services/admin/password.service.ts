@@ -6,12 +6,14 @@ export interface ChangePasswordResult {
 }
 
 /**
- * Directly sets a new password for another admin's Firebase Auth account.
- * Requires the caller to be signed in as a super admin — enforced server-side
+ * Directly sets a new password for another account's Firebase Auth login
+ * (any role — the account must already have one, i.e. hasLogin === true).
+ * Requires the caller to be signed in as the Founder — enforced server-side
  * in /api/admin/change-password (Admin SDK; client SDK can't set another
- * user's password).
+ * user's password). Used by the Founder Users page — the only place in the
+ * app that manages login credentials.
  */
-export async function changeAdminPassword(
+export async function resetUserPassword(
   targetUid:   string,
   newPassword: string,
 ): Promise<ChangePasswordResult> {

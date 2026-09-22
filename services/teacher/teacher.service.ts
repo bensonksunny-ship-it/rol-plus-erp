@@ -9,12 +9,6 @@ import {
   where,
   serverTimestamp,
 } from "firebase/firestore";
-import {
-  createUserWithEmailAndPassword,
-  getAuth,
-  signOut as fbSignOut,
-} from "firebase/auth";
-import { deleteApp } from "firebase/app";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
@@ -30,45 +24,22 @@ const USERS = "users";
 export interface CreateTeacherInput {
   displayName: string;
   email:       string;
-  password:    string;
   centerIds:   string[];
   wing?:       Wing;
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Create a secondary Firebase App instance so we can call
- * createUserWithEmailAndPassword without displacing the current
- * admin session.
- */
-async function createAuthUserInSecondaryApp(
-  email:    string,
-  password: string,
-): Promise<string> {
-  const { initializeApp }   = await import("firebase/app");
-  const { default: primaryApp } = await import("@/services/firebase/firebase");
-
-  const secondaryApp  = initializeApp(primaryApp.options, `teacher-create-${Date.now()}`);
-  const secondaryAuth = getAuth(secondaryApp);
-
-  try {
-    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
-    return cred.user.uid;
-  } finally {
-    await fbSignOut(secondaryAuth).catch(() => {});
-    await deleteApp(secondaryApp).catch(() => {});
-  }
 }
 
 // ─── Create teacher ───────────────────────────────────────────────────────────
 
 /**
- * Creates a Firebase Auth user + Firestore user doc with role:"teacher".
+ * Creates a profile-only Firestore user doc with role:"teacher" — no Firebase
+ * Auth account. A login is provisioned separately, only via the Founder
+ * Users page's "Create login" action (services/member/member.service.ts
+ * createLoginForUser()), which also migrates this doc to the real Auth uid.
  * centerIds are written at creation time and also synced back to each
- * center's teacherUid field.
+ * center's teacherUid field (using this doc's placeholder id in the
+ * meantime — createLoginForUser() re-syncs it once a login exists).
  *
- * Throws on duplicate email (Firestore or Firebase Auth).
+ * Throws on duplicate email.
  */
 export async function createTeacher(
   input:         CreateTeacherInput,
@@ -85,10 +56,8 @@ export async function createTeacher(
     throw new Error(`EMAIL_IN_USE: "${email}" is already registered`);
   }
 
-  // ── Create Firebase Auth user ─────────────────────────────────────────────
-  const uid = await createAuthUserInSecondaryApp(email, input.password);
-
-  // ── Write Firestore user doc ──────────────────────────────────────────────
+  // ── Write Firestore user doc (placeholder id — no Auth account yet) ──────
+  const uid = doc(collection(db, USERS)).id;
   const userRef = doc(db, USERS, uid);
   await setDoc(userRef, {
     uid,
@@ -97,7 +66,8 @@ export async function createTeacher(
     role:         "teacher",
     centerIds:    input.centerIds,
     wing:         input.wing ?? DEFAULT_WING,
-    plainPassword: input.password,   // shown on the Founder Users page
+    createdVia:   "manual",
+    hasLogin:     false,
     status:       "active",
     lastActivity: null,
     qrCodeURL:    null,

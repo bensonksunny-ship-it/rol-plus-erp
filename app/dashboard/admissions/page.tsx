@@ -376,6 +376,7 @@ function ReviewEnrol({
         currentBalance:     0,
         status:             "active",
         studentStatus:      "active",
+        createdVia:      "import",
         createdAt:       serverTimestamp(),
         updatedAt:       serverTimestamp(),
       });

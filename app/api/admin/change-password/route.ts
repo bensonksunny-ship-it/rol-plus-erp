@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
     const callerSnap = await adminDb().doc(`users/${decoded.uid}`).get();
     const callerRole = callerSnap.exists ? (callerSnap.data()?.role as string | undefined) : undefined;
     if (callerRole !== ROLES.SUPER_ADMIN) {
-      return NextResponse.json({ error: "Only super admins can change admin passwords." }, { status: 403 });
+      return NextResponse.json({ error: "Only the Founder can reset a login's password." }, { status: 403 });
     }
 
     const body = await req.json().catch(() => null) as { targetUid?: string; newPassword?: string } | null;
@@ -33,9 +33,8 @@ export async function POST(req: NextRequest) {
     if (!targetSnap.exists) {
       return NextResponse.json({ error: "Target user not found." }, { status: 404 });
     }
-    const targetRole = targetSnap.data()?.role as string | undefined;
-    if (targetRole !== ROLES.ADMIN && targetRole !== ROLES.SUPER_ADMIN) {
-      return NextResponse.json({ error: "Target user is not an admin." }, { status: 400 });
+    if (!targetSnap.data()?.hasLogin) {
+      return NextResponse.json({ error: "This account has no login to reset." }, { status: 400 });
     }
 
     await adminAuth().updateUser(targetUid, { password: newPassword });

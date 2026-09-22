@@ -8,6 +8,7 @@ import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { inWing } from "@/lib/wing";
+import { getCached, setCached } from "@/lib/dataCache";
 import {
   createTeacher,
   getTeachers,
@@ -39,9 +40,12 @@ export function TeachersContent() {
   const [tab, setTab]             = useState<Tab>("teachers");
   const [showCreate, setShowCreate] = useState(false);
 
-  const [teachers, setTeachers] = useState<TeacherUser[]>([]);
-  const [centers,  setCenters]  = useState<Center[]>([]);
-  const [loading,  setLoading]  = useState(true);
+  // Seed from the last visit's cache so switching back to this tab renders
+  // instantly instead of a blank loading state — load() below still always
+  // re-fetches to stay fresh.
+  const [teachers, setTeachers] = useState<TeacherUser[]>(() => getCached(`teachers:${wing}:teachers`) ?? []);
+  const [centers,  setCenters]  = useState<Center[]>(() => getCached(`teachers:${wing}:centers`) ?? []);
+  const [loading,  setLoading]  = useState(() => !getCached<TeacherUser[]>(`teachers:${wing}:teachers`));
   const [editTarget,   setEditTarget]   = useState<TeacherUser | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<TeacherUser | null>(null);
   const [viewTarget,        setViewTarget]        = useState<TeacherUser | null>(null);
@@ -50,8 +54,6 @@ export function TeachersContent() {
   // Create form
   const [name,     setName]     = useState("");
   const [email,    setEmail]    = useState("");
-  const [password, setPassword] = useState("");
-  const [showPw,   setShowPw]   = useState(false);
   const [selectedCenters, setSelectedCenters] = useState<string[]>([]);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
 
@@ -61,13 +63,20 @@ export function TeachersContent() {
   const [submitting, setSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg,   setErrorMsg]   = useState<string | null>(null);
-  const [attStats,        setAttStats]        = useState<Record<string, { present: number; absent: number; break: number; cancelled: number; total: number }>>({});
-  const [attByCenter,     setAttByCenter]     = useState<Record<string, Record<string, { present: number; absent: number; break: number; cancelled: number; total: number }>>>({});
+  const [attStats,        setAttStats]        = useState<Record<string, { present: number; absent: number; break: number; cancelled: number; total: number }>>(() => getCached(`teachers:${wing}:attStats`) ?? {});
+  const [attByCenter,     setAttByCenter]     = useState<Record<string, Record<string, { present: number; absent: number; break: number; cancelled: number; total: number }>>>(() => getCached(`teachers:${wing}:attByCenter`) ?? {});
   const [expandedTeacher, setExpandedTeacher] = useState<string | null>(null);
 
   // ── Load ──────────────────────────────────────────────────────────────────
 
   async function load() {
+    const cachedTeachers = getCached<TeacherUser[]>(`teachers:${wing}:teachers`);
+    if (cachedTeachers) {
+      setTeachers(cachedTeachers);
+      setCenters(getCached(`teachers:${wing}:centers`) ?? []);
+      setAttStats(getCached(`teachers:${wing}:attStats`) ?? {});
+      setAttByCenter(getCached(`teachers:${wing}:attByCenter`) ?? {});
+    }
     try {
       const thisMonth  = new Date().toISOString().slice(0, 7);
       const monthStart = thisMonth + "-01";
@@ -77,12 +86,14 @@ export function TeachersContent() {
         getDocs(query(collection(db, "attendance"), where("date", ">=", monthStart))),
       ]);
 
-      setTeachers(teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName)));
-      setCenters(
-        centerSnap.docs
-          .map(d => ({ id: d.id, ...d.data() } as Center))
-          .filter(c => inWing(c, wing)),
-      );
+      const sortedTeachers = teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      setTeachers(sortedTeachers);
+      setCached(`teachers:${wing}:teachers`, sortedTeachers);
+      const wingCenters = centerSnap.docs
+        .map(d => ({ id: d.id, ...d.data() } as Center))
+        .filter(c => inWing(c, wing));
+      setCenters(wingCenters);
+      setCached(`teachers:${wing}:centers`, wingCenters);
 
       const centreTeacher: Record<string, string> = {};
       centerSnap.docs.forEach(d => {
@@ -119,6 +130,8 @@ export function TeachersContent() {
 
       setAttStats(stats);
       setAttByCenter(byCenter);
+      setCached(`teachers:${wing}:attStats`, stats);
+      setCached(`teachers:${wing}:attByCenter`, byCenter);
     } catch (err) {
       console.error("Failed to load teachers:", err);
     } finally {
@@ -137,11 +150,10 @@ export function TeachersContent() {
     setErrorMsg(null);
     if (!name.trim())        return setErrorMsg("Name is required.");
     if (!email.trim())       return setErrorMsg("Email is required.");
-    if (password.length < 6) return setErrorMsg("Password must be at least 6 characters.");
     setSubmitting(true);
     try {
       const created = await createTeacher(
-        { displayName: name.trim(), email: email.trim(), password, centerIds: selectedCenters, wing },
+        { displayName: name.trim(), email: email.trim(), centerIds: selectedCenters, wing },
         user?.uid ?? "unknown",
         (user?.role ?? ROLES.ADMIN) as Parameters<typeof createTeacher>[2],
       );
@@ -153,18 +165,13 @@ export function TeachersContent() {
           console.error("Failed to upload teacher photo:", photoErr);
         }
       }
-      setSuccessMsg("Teacher created successfully.");
-      setName(""); setEmail(""); setPassword(""); setSelectedCenters([]); setPhotoFile(null);
+      setSuccessMsg("Teacher added. Create their login from the Users page when they're ready to sign in.");
+      setName(""); setEmail(""); setSelectedCenters([]); setPhotoFile(null);
       setLoading(true);
       await load();
       setShowCreate(false);
     } catch (err: unknown) {
-      const code = (err as { code?: string }).code ?? "";
-      if (code === "auth/email-already-in-use") {
-        setErrorMsg("This email is already registered in Firebase Auth.");
-      } else {
-        setErrorMsg(err instanceof Error ? err.message : "Failed to create teacher.");
-      }
+      setErrorMsg(err instanceof Error ? err.message : "Failed to create teacher.");
     } finally {
       setSubmitting(false);
     }
@@ -337,22 +344,7 @@ export function TeachersContent() {
                     <input style={s.input} type="email" value={email}
                       onChange={e => setEmail(e.target.value)}
                       placeholder="teacher@rolsplus.com" required />
-                  </Field>
-                  <Field label="Password">
-                    <div style={{ position: "relative" }}>
-                      <input
-                        style={{ ...s.input, paddingRight: 52 }}
-                        type={showPw ? "text" : "password"}
-                        value={password}
-                        onChange={e => setPassword(e.target.value)}
-                        placeholder="Min. 6 characters"
-                        required minLength={6}
-                      />
-                      <button type="button" tabIndex={-1}
-                        onClick={() => setShowPw(v => !v)} style={s.showHide}>
-                        {showPw ? "Hide" : "Show"}
-                      </button>
-                    </div>
+                    <span style={{ fontSize: 11, color: "#9ca3af" }}>Contact email only — no login is created here. Add one from the Users page when they're ready to sign in.</span>
                   </Field>
                   <Field label="Profile Picture (optional)">
                     <PhotoUploadField file={photoFile} name={name || "New Teacher"} onChange={setPhotoFile} />
@@ -370,7 +362,7 @@ export function TeachersContent() {
                   <button type="submit"
                     style={{ ...s.btnPrimary, opacity: submitting ? 0.6 : 1, minWidth: 140 }}
                     disabled={submitting}>
-                    {submitting ? "Creating…" : "Create Teacher"}
+                    {submitting ? "Adding…" : "Add Teacher"}
                   </button>
                 </div>
               </form>

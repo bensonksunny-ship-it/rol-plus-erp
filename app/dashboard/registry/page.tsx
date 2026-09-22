@@ -4,9 +4,9 @@
 // of every School-of-Music student, in admission order. Read-only, plus an
 // Excel/CSV bulk import.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  collection, getDocs, query, where, writeBatch, doc, updateDoc, serverTimestamp, Timestamp,
+  collection, getDocs, onSnapshot, query, where, writeBatch, doc, updateDoc, serverTimestamp, Timestamp,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -17,6 +17,7 @@ import { wingOf } from "@/lib/wing";
 import { parseFile, normalizeHeader } from "@/lib/xlsx-parser";
 import { formatAdmissionNo, reserveAdmissionSeq } from "@/lib/admissionNumber";
 import { logAction } from "@/services/audit/audit.service";
+import { getCached, setCached } from "@/lib/dataCache";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
 
 const WING = WINGS.SCHOOL_OF_MUSIC;
@@ -52,6 +53,31 @@ function admTail(admissionNo: string): number {
 
 // Editable status choices shown in the registry Status dropdown.
 const STATUS_OPTIONS = ["Confirm", "Cancelled", "Hold"] as const;
+
+// The `status` field on a student doc is shared verbatim with the Students
+// page (values: active / inactive / deactivation_requested / break_requested /
+// on_break). These two translate between that vocabulary and the Registry's
+// own Confirm / Cancelled / Hold labels, so a status change on either page
+// shows up correctly on the other without stranding the student in a status
+// the other page doesn't recognise.
+function toRegistryStatus(status: string): string {
+  const v = status.trim().toLowerCase();
+  if (v === "active") return "Confirm";
+  if (v === "inactive") return "Cancelled";
+  return status; // Hold, and any other free-text status, pass through as-is
+}
+function fromRegistryStatus(label: string): string {
+  if (label === "Confirm") return "active";
+  if (label === "Cancelled") return "inactive";
+  return label; // "Hold" and anything else pass through unchanged
+}
+
+/** Firestore auto-IDs are long base62 strings ("0vaLT30ROyvq…") — never a
+ *  human centre name. Used so a failed name lookup never leaks a raw ID into
+ *  the CENTRE column; it falls back to a plain placeholder instead. */
+function looksLikeDocId(v: string): boolean {
+  return /^[A-Za-z0-9]{15,}$/.test(v.trim());
+}
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 function fmtDate(iso: string): string {
@@ -182,10 +208,17 @@ function RegistryContent() {
   const { user, can } = useAuth();
   const canImport = can(CAPABILITIES.STUDENTS_MANAGE);
 
-  const [entries, setEntries] = useState<Entry[]>([]);
-  const [centres, setCentres] = useState<{ id: string; name: string; code: string }[]>([]);
-  const [existingAdmNos, setExistingAdmNos] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
+  // Seed from the last visit's cache so revisiting this page via the sidebar
+  // renders instantly instead of a blank loading state — the effect below
+  // still always re-fetches/re-subscribes to stay fresh.
+  const [entries, setEntries] = useState<Entry[]>(() => getCached<Entry[]>("registry:entries") ?? []);
+  const [centres, setCentres] = useState<{ id: string; name: string; code: string }[]>(
+    () => getCached("registry:centres") ?? [],
+  );
+  const [existingAdmNos, setExistingAdmNos] = useState<Set<string>>(
+    () => getCached<Set<string>>("registry:admNos") ?? new Set(),
+  );
+  const [loading, setLoading] = useState(() => !getCached<Entry[]>("registry:entries"));
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [showImport, setShowImport] = useState(false);
@@ -197,86 +230,115 @@ function RegistryContent() {
   const [confirmText, setConfirmText] = useState("");
   const [deleting, setDeleting] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [studSnap, centreSnap] = await Promise.all([
-        getDocs(query(collection(db, "users"), where("role", "==", "student"))),
-        getDocs(collection(db, "centers")),
-      ]);
+  // Centres change rarely — fetch once. Students, and in particular their
+  // `status` field (written from this page, the Students page, and the
+  // Centers "Add Active Students" picker alike) are watched live so a status
+  // change anywhere shows up here immediately, without a manual refresh.
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
 
-      // Only School-of-Music centres — never surface a centre from the other wing.
-      const centreName = new Map<string, string>();
-      const centreList: { id: string; name: string; code: string }[] = [];
-      centreSnap.docs.forEach(d => {
-        if (wingOf(d.data()) !== WING) return;
-        const nm = (d.data().name as string) ?? d.id;
-        centreName.set(d.id, nm);
-        centreList.push({ id: d.id, name: nm, code: (d.data().centerCode as string) ?? "" });
-      });
-      setCentres(centreList);
+    (async () => {
+      try {
+        const centreSnap = await getDocs(collection(db, "centers"));
+        if (cancelled) return;
 
-      const admNos = new Set<string>();
-      const list: Entry[] = studSnap.docs
-        .filter(d => wingOf(d.data()) === WING)
-        .map(d => {
-          const s = d.data();
-          // `centerId` may be "" for records whose centre was entered as free
-          // text (e.g. "ROLCC"). Show the centre name if we can resolve it,
-          // otherwise the raw value exactly as stored.
-          const centreRef = String(s.centerId || s.centre || "");
-          const inst = s.syllabusInstrument as SyllabusInstrument | undefined;
-          const course =
-            (typeof s.course === "string" && s.course) ||
-            (inst && SYLLABUS_INSTRUMENT_LABELS[inst]) ||
-            (Array.isArray(s.instruments) ? s.instruments.map(String).join(", ") : "") ||
-            "—";
-          // Phone and admission number are separate fields. Guard against
-          // legacy/dirty docs where one leaked into the other: never show a
-          // value in the Admission-number column that is identical to the phone,
-          // and don't fall back to studentID when it's just the phone again.
-          const phone = String(s.phone ?? "").trim();
-          const admCandidates = [s.admissionNumber, s.admissionNo, s.studentID]
-            .map(v => String(v ?? "").trim())
-            .filter(v => v && v !== "-" && v !== "—" && v !== phone);
-          const admissionNo = admCandidates[0] || "—";
-          // Store a spaces-stripped, upper-cased key so the importer can match
-          // "ROLCC 20112017101" against "ROLCC20112017101".
-          if (admissionNo !== "—") admNos.add(admissionNo.replace(/\s+/g, "").toUpperCase());
-          return {
-            uid:         d.id,
-            name:        (s.displayName ?? s.name ?? "—") as string,
-            admittedOn:  toISO(s.dateOfAdmission ?? s.admissionDate ?? s.createdAt),
-            centre:      centreName.get(centreRef) || centreRef || "—",
-            batch:       String(s.batch ?? "").trim() || "—",
-            phone:       phone || "—",
-            admissionNo,
-            course,
-            status:      (s.status ?? s.studentStatus ?? "active") as string,
-            screening:   screeningGradeOf(s),
-          };
-        })
-        .sort((a, b) => {
-          // Ascending by the last 3 digits of the admission number (…101, …102, …103).
-          // Rows with no admission number fall to the bottom, then ordered by date.
-          const ka = admTail(a.admissionNo), kb = admTail(b.admissionNo);
-          if (ka !== kb) return ka - kb;
-          return (a.admittedOn || "9999").localeCompare(b.admittedOn || "9999");
+        // `centreList`/`centreName` (School-of-Music only) drive the centre
+        // picker and import matching — never suggest a centre from the other
+        // wing there. `centreNameAll` additionally resolves display names for
+        // legacy/mistagged centre docs (created before wing-tagging existed)
+        // so a student record pointing at one doesn't fall back to a raw
+        // Firestore ID in the table.
+        const centreName = new Map<string, string>();
+        const centreNameAll = new Map<string, string>();
+        const centreList: { id: string; name: string; code: string }[] = [];
+        centreSnap.docs.forEach(d => {
+          const nm = (d.data().name as string) ?? d.id;
+          centreNameAll.set(d.id, nm);
+          if (wingOf(d.data()) !== WING) return;
+          centreName.set(d.id, nm);
+          centreList.push({ id: d.id, name: nm, code: (d.data().centerCode as string) ?? "" });
         });
+        setCentres(centreList);
+        setCached("registry:centres", centreList);
 
-      setExistingAdmNos(admNos);
-      setEntries(list);
-    } catch (err) {
-      console.error("Registry load failed:", err);
-    } finally {
-      setLoading(false);
-    }
+        unsubscribe = onSnapshot(
+          query(collection(db, "users"), where("role", "==", "student")),
+          studSnap => {
+            const admNos = new Set<string>();
+            const list: Entry[] = studSnap.docs
+              .filter(d => wingOf(d.data()) === WING)
+              .map(d => {
+                const s = d.data();
+                // `centerId` may be "" for records whose centre was entered as free
+                // text (e.g. "ROLCC"). Resolve the name against SoM centres first,
+                // then any centre regardless of wing (covers legacy/mistagged
+                // centre docs created before wing-tagging existed). If neither
+                // resolves and the stored value is a raw Firestore doc ID, show a
+                // plain placeholder instead of leaking the hash into the table.
+                const centreRef = String(s.centerId || s.centre || "");
+                const resolvedCentreName = centreName.get(centreRef) || centreNameAll.get(centreRef);
+                const inst = s.syllabusInstrument as SyllabusInstrument | undefined;
+                const course =
+                  (typeof s.course === "string" && s.course) ||
+                  (inst && SYLLABUS_INSTRUMENT_LABELS[inst]) ||
+                  (Array.isArray(s.instruments) ? s.instruments.map(String).join(", ") : "") ||
+                  "—";
+                // Phone and admission number are separate fields. Guard against
+                // legacy/dirty docs where one leaked into the other: never show a
+                // value in the Admission-number column that is identical to the phone,
+                // and don't fall back to studentID when it's just the phone again.
+                const phone = String(s.phone ?? "").trim();
+                const admCandidates = [s.admissionNumber, s.admissionNo, s.studentID]
+                  .map(v => String(v ?? "").trim())
+                  .filter(v => v && v !== "-" && v !== "—" && v !== phone);
+                const admissionNo = admCandidates[0] || "—";
+                // Store a spaces-stripped, upper-cased key so the importer can match
+                // "ROLCC 20112017101" against "ROLCC20112017101".
+                if (admissionNo !== "—") admNos.add(admissionNo.replace(/\s+/g, "").toUpperCase());
+                return {
+                  uid:         d.id,
+                  name:        (s.displayName ?? s.name ?? "—") as string,
+                  admittedOn:  toISO(s.dateOfAdmission ?? s.admissionDate ?? s.createdAt),
+                  centre:      resolvedCentreName || (centreRef && !looksLikeDocId(centreRef) ? centreRef : "—"),
+                  batch:       String(s.batch ?? "").trim() || "—",
+                  phone:       phone || "—",
+                  admissionNo,
+                  course,
+                  status:      (s.status ?? s.studentStatus ?? "active") as string,
+                  screening:   screeningGradeOf(s),
+                };
+              })
+              .sort((a, b) => {
+                // Ascending by the last 3 digits of the admission number (…101, …102, …103).
+                // Rows with no admission number fall to the bottom, then ordered by date.
+                const ka = admTail(a.admissionNo), kb = admTail(b.admissionNo);
+                if (ka !== kb) return ka - kb;
+                return (a.admittedOn || "9999").localeCompare(b.admittedOn || "9999");
+              });
+
+            setExistingAdmNos(admNos);
+            setEntries(list);
+            setLoading(false);
+            setCached("registry:admNos", admNos);
+            setCached("registry:entries", list);
+          },
+          err => {
+            console.error("Registry live update failed:", err);
+            setLoading(false);
+          },
+        );
+      } catch (err) {
+        console.error("Registry load failed:", err);
+        setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; if (unsubscribe) unsubscribe(); };
   }, []);
 
-  useEffect(() => { load(); }, [load]);
-
   const statuses = useMemo(() => {
-    const found = new Set(entries.map(e => e.status));
+    const found = new Set(entries.map(e => toRegistryStatus(e.status)));
     const others = Array.from(found).filter(s => !STATUS_OPTIONS.includes(s as typeof STATUS_OPTIONS[number])).sort();
     return [...STATUS_OPTIONS, ...others];
   }, [entries]);
@@ -284,7 +346,7 @@ function RegistryContent() {
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return entries.filter(e => {
-      if (statusFilter !== "all" && e.status !== statusFilter) return false;
+      if (statusFilter !== "all" && toRegistryStatus(e.status) !== statusFilter) return false;
       if (!needle) return true;
       return (
         e.name.toLowerCase().includes(needle) ||
@@ -326,18 +388,22 @@ function RegistryContent() {
     });
   }
 
-  async function changeStatus(uid: string, status: string) {
+  async function changeStatus(uid: string, label: string) {
+    // `label` is a Registry-vocabulary choice (Confirm / Cancelled / Hold).
+    // Write back the canonical Students-page status so the Students page
+    // keeps recognising this student in its own status filters.
     const prev = entries.find(e => e.uid === uid)?.status;
-    if (status === prev) return;
-    setEntries(cur => cur.map(e => e.uid === uid ? { ...e, status } : e));
+    const next = fromRegistryStatus(label);
+    if (next === prev) return;
+    setEntries(cur => cur.map(e => e.uid === uid ? { ...e, status: next } : e));
     try {
-      await updateDoc(doc(db, "users", uid), { status, updatedAt: serverTimestamp() });
+      await updateDoc(doc(db, "users", uid), { status: next, studentStatus: next, updatedAt: serverTimestamp() });
       logAction({
         action: "REGISTRY_STATUS_CHANGE",
         initiatorId:   user?.uid ?? "unknown",
         initiatorRole: user?.role ?? ROLES.FOUNDER,
         approverId: null, approverRole: null, reason: null,
-        metadata: { uid, from: prev ?? null, to: status },
+        metadata: { uid, from: prev ?? null, to: next },
       });
     } catch (err) {
       console.error("Registry status update failed:", err);
@@ -364,7 +430,7 @@ function RegistryContent() {
       setSelected(new Set());
       setConfirmDelete(null);
       setConfirmText("");
-      await load();
+      // The live student subscription picks up the deletions automatically.
     } catch (err) {
       console.error("Registry bulk delete failed:", err);
     } finally {
@@ -475,24 +541,27 @@ function RegistryContent() {
                     <td style={{ ...s.td, fontSize: 15, fontWeight: 700, color: "var(--color-text-primary)", whiteSpace: "nowrap" }}>{e.admissionNo}</td>
                     <td style={s.td}>{e.course}</td>
                     <td style={s.td}>
-                      {canImport ? (
-                        <select
-                          value={STATUS_OPTIONS.includes(e.status as typeof STATUS_OPTIONS[number]) ? e.status : "__current"}
-                          onChange={ev => changeStatus(e.uid, ev.target.value)}
-                          style={{
-                            ...statusStyle(e.status),
-                            border: "1px solid var(--color-border)", cursor: "pointer",
-                            fontSize: 12, padding: "3px 6px", textTransform: "none",
-                          }}
-                        >
-                          {!STATUS_OPTIONS.includes(e.status as typeof STATUS_OPTIONS[number]) && (
-                            <option value="__current" disabled>{e.status}</option>
-                          )}
-                          {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-                        </select>
-                      ) : (
-                        <span style={statusStyle(e.status)}>{e.status}</span>
-                      )}
+                      {(() => {
+                        const displayStatus = toRegistryStatus(e.status);
+                        return canImport ? (
+                          <select
+                            value={STATUS_OPTIONS.includes(displayStatus as typeof STATUS_OPTIONS[number]) ? displayStatus : "__current"}
+                            onChange={ev => changeStatus(e.uid, ev.target.value)}
+                            style={{
+                              ...statusStyle(displayStatus),
+                              border: "1px solid var(--color-border)", cursor: "pointer",
+                              fontSize: 12, padding: "3px 6px", textTransform: "none",
+                            }}
+                          >
+                            {!STATUS_OPTIONS.includes(displayStatus as typeof STATUS_OPTIONS[number]) && (
+                              <option value="__current" disabled>{displayStatus}</option>
+                            )}
+                            {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                        ) : (
+                          <span style={statusStyle(displayStatus)}>{displayStatus}</span>
+                        );
+                      })()}
                     </td>
                     <td style={s.td}>{e.screening}</td>
                   </tr>
@@ -534,7 +603,7 @@ function RegistryContent() {
           initiatorRole={user?.role ?? ROLES.FOUNDER}
           initialPaste={pastedText}
           onClose={() => { setShowImport(false); setPastedText(""); }}
-          onDone={() => { setShowImport(false); setPastedText(""); load(); }}
+          onDone={() => { setShowImport(false); setPastedText(""); }}
         />
       )}
 
@@ -799,7 +868,11 @@ function ImportModal({
             admissionNumber: admNo,
             admissionNoAutoGenerated: r.auto,
             studentID:      admNo,
-            centre:         r.centreId ?? r.centreRaw,
+            // Keep the human-readable name (exactly as typed) in `centre` and the
+            // matched Firestore doc id separately in `centerId` — never collapse
+            // the two, or every centre-name lookup downstream has to fall back
+            // to a raw id whenever this record's name can't be resolved another way.
+            centre:         r.centreRaw,
             centerId:       r.centreId ?? "",
             batch:          r.batch || null,
             course:         r.course,
@@ -814,6 +887,7 @@ function ImportModal({
             createdAt:      r.admittedOn ? Timestamp.fromDate(new Date(r.admittedOn)) : serverTimestamp(),
             importedAt:     serverTimestamp(),
             source:         "registry-import",
+            createdVia:     "import",
           });
         }
         try {

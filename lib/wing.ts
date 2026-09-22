@@ -4,7 +4,7 @@
 
 import { where, type QueryConstraint } from "firebase/firestore";
 import { DEFAULT_WING, WINGS } from "@/config/constants";
-import type { Wing } from "@/types";
+import type { Role, User, Wing } from "@/types";
 
 export { WINGS, DEFAULT_WING };
 
@@ -55,4 +55,37 @@ export function wingConstraint(wing: Wing): QueryConstraint {
  */
 export function canFilterWingServerSide(wing: Wing): boolean {
   return wing !== DEFAULT_WING;
+}
+
+/**
+ * Every role this user holds in `wing` — their explicit per-wing assignment
+ * (`user.roles[wing]`), which may be one role or several at once (e.g. Admin
+ * and Teacher together — each grants its own hub/capabilities). A value
+ * written before multi-role support was a bare Role string; read as a
+ * single-role list. Falls back to the legacy scalar `role` if `wing` happens
+ * to be their home wing, else empty (no access in that wing).
+ */
+export function getRolesForWing(user: User | null | undefined, wing: Wing): Role[] {
+  if (!user) return [];
+  const explicit = user.roles?.[wing];
+  if (explicit) return Array.isArray(explicit) ? explicit : [explicit];
+  return wingOf(user) === wing && user.role ? [user.role] : [];
+}
+
+/**
+ * This user's primary role in `wing` — the first of getRolesForWing(), or
+ * null with no access in that wing. Use this where only a single role is
+ * needed (sorting, a legacy single-role display); use getRolesForWing() when
+ * every hub a user can switch into matters.
+ */
+export function getRoleForWing(user: User | null | undefined, wing: Wing): Role | null {
+  return getRolesForWing(user, wing)[0] ?? null;
+}
+
+/** Every wing this user holds a role in (their home wing always counts). */
+export function getUserWings(user: User | null | undefined): Wing[] {
+  if (!user) return [];
+  const explicit = Object.keys(user.roles ?? {}) as Wing[];
+  const home = wingOf(user);
+  return explicit.includes(home) ? explicit : [...explicit, home];
 }

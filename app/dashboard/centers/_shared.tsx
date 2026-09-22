@@ -1,19 +1,21 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getDocs, collection, query, where } from "firebase/firestore";
+import { useRouter } from "next/navigation";
+import { getDocs, collection, query, where, doc, writeBatch, serverTimestamp } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { getCenters, createCenter, updateCenter } from "@/services/center/center.service";
 import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
-import type { Center } from "@/types";
+import type { Center, Wing } from "@/types";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import { useAuth } from "@/hooks/useAuth";
 import { useWing } from "@/hooks/useWing";
-import { isSchoolOfMusic } from "@/lib/wing";
+import { isSchoolOfMusic, inWing } from "@/lib/wing";
+import { getCached, setCached } from "@/lib/dataCache";
 import { deleteCenter } from "@/services/admin/delete.service";
 import { parseFile } from "@/lib/xlsx-parser";
 
@@ -117,8 +119,16 @@ const ATT_STATUS_COLOR: Record<string, { bg: string; fg: string }> = {
 // ─── Center Detail data types ────────────────────────────────────────────────
 
 interface CenterAttRec { id: string; studentUid: string; date: string; status: string; }
-interface CenterStudentRec { uid: string; name: string; status: string; createdAt: string; }
+interface CenterStudentRec { uid: string; name: string; admissionNo: string; status: string; createdAt: string; }
 interface CenterTxRec { amount: number; date: string; status: string; type?: string; method?: string; }
+interface PickedStudent { uid: string; name: string; admissionNo: string; createdAt: string; }
+
+/** A student counts as "active" whether their `status` field carries the
+ *  Students page's own vocabulary ("active") or the Registry's ("confirm" /
+ *  "confirmed") — matches the definition used everywhere else in the app. */
+function isActiveStudentStatus(status: string): boolean {
+  return /^(active|confirm|confirmed)$/i.test((status || "").trim());
+}
 
 function isManualPayment(t: CenterTxRec): boolean {
   return t.status === "completed" && t.type !== "fee_due" && t.type !== "charge" && t.method !== "auto" && t.method !== "auto-monthly";
@@ -126,7 +136,7 @@ function isManualPayment(t: CenterTxRec): boolean {
 
 // ─── View Modal (tabbed: Attendance History / Graphs & Insights) ───────────────
 
-type ViewTab = "attendance" | "insights";
+type ViewTab = "attendance" | "students" | "insights";
 
 function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () => void; teachers: TeacherUser[] }) {
   const raw = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
@@ -159,6 +169,7 @@ function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () 
           return {
             uid: d.id,
             name: (st.displayName ?? st.name ?? "-") as string,
+            admissionNo: (st.admissionNo ?? st.admissionNumber ?? "") as string,
             status: (st.status ?? st.studentStatus ?? "active") as string,
             createdAt: toISODateLocal(st.createdAt),
           };
@@ -187,6 +198,48 @@ function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () 
     students.forEach(s => m.set(s.uid, s.name));
     return m;
   }, [students]);
+
+  // Sets exactly `activeUids` active and every other student at this centre
+  // inactive — the "active roster" for the centre.
+  async function updateActiveRoster(activeUids: Set<string>) {
+    const batch = writeBatch(db);
+    let changed = 0;
+    students.forEach(s => {
+      const newStatus = activeUids.has(s.uid) ? "active" : "inactive";
+      if (s.status === newStatus) return;
+      changed++;
+      batch.update(doc(db, "users", s.uid), {
+        status:        newStatus,
+        studentStatus: newStatus,
+        updatedAt:     serverTimestamp(),
+      });
+    });
+    if (changed > 0) await batch.commit();
+    setStudents(prev => prev.map(s => ({ ...s, status: activeUids.has(s.uid) ? "active" : "inactive" })));
+  }
+
+  // Assigns existing/new students to this centre and marks them Active —
+  // updates their `centerId` (the source of truth for centre membership) and
+  // folds them straight into local state so the roster/count reflect it immediately.
+  async function addStudentsToCenter(picked: PickedStudent[]) {
+    const batch = writeBatch(db);
+    picked.forEach(p => {
+      batch.update(doc(db, "users", p.uid), {
+        centerId:      center.id,
+        status:        "active",
+        studentStatus: "active",
+        updatedAt:     serverTimestamp(),
+      });
+    });
+    await batch.commit();
+    setStudents(prev => {
+      const existing = new Set(prev.map(s => s.uid));
+      const additions = picked
+        .filter(p => !existing.has(p.uid))
+        .map(p => ({ uid: p.uid, name: p.name, admissionNo: p.admissionNo, status: "active", createdAt: p.createdAt }));
+      return [...prev, ...additions];
+    });
+  }
 
   return (
     <div style={modalStyles.overlay} onClick={onClose}>
@@ -218,6 +271,9 @@ function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () 
           <button onClick={() => setTab("attendance")} style={{ ...viewStyles.tabBtn, ...(tab === "attendance" ? viewStyles.tabBtnActive : {}) }}>
             Attendance History
           </button>
+          <button onClick={() => setTab("students")} style={{ ...viewStyles.tabBtn, ...(tab === "students" ? viewStyles.tabBtnActive : {}) }}>
+            Students
+          </button>
           <button onClick={() => setTab("insights")} style={{ ...viewStyles.tabBtn, ...(tab === "insights" ? viewStyles.tabBtnActive : {}) }}>
             Graphs &amp; Insights
           </button>
@@ -228,6 +284,13 @@ function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () 
             <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
           ) : tab === "attendance" ? (
             <CenterAttendanceHistoryTab records={attRecs} studentMap={studentMap} />
+          ) : tab === "students" ? (
+            <CenterStudentsTab
+              students={students}
+              onUpdateStatuses={updateActiveRoster}
+              onAddStudents={addStudentsToCenter}
+              wing={center.wing}
+            />
           ) : (
             <CenterInsightsTab records={attRecs} students={students} transactions={txs} />
           )}
@@ -323,6 +386,334 @@ function CenterAttendanceHistoryTab({ records, studentMap }: {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Students Tab (roster + active/inactive management) ────────────────────
+
+function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: {
+  students: CenterStudentRec[];
+  onUpdateStatuses: (activeUids: Set<string>) => Promise<void>;
+  onAddStudents: (picked: PickedStudent[]) => Promise<void>;
+  wing: Wing | undefined;
+}) {
+  const [search, setSearch]             = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
+  const [selected, setSelected]         = useState<Set<string>>(
+    () => new Set(students.filter(s => s.status === "active").map(s => s.uid))
+  );
+  const [saving, setSaving]     = useState(false);
+  const [msg, setMsg]           = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [showAdd, setShowAdd]   = useState(false);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return students
+      .filter(s => {
+        if (q && !s.name.toLowerCase().includes(q) && !s.admissionNo.toLowerCase().includes(q)) return false;
+        const isActive = selected.has(s.uid);
+        if (statusFilter === "active" && !isActive) return false;
+        if (statusFilter === "inactive" && isActive) return false;
+        return true;
+      })
+      // Active students first, then alphabetically by name within each group.
+      .sort((a, b) => {
+        const aActive = selected.has(a.uid);
+        const bActive = selected.has(b.uid);
+        if (aActive !== bActive) return aActive ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+  }, [students, search, statusFilter, selected]);
+
+  const existingUids = useMemo(() => new Set(students.map(s => s.uid)), [students]);
+
+  async function handleAssign(picked: PickedStudent[]) {
+    setMsg(null);
+    await onAddStudents(picked);
+    setSelected(prev => {
+      const next = new Set(prev);
+      picked.forEach(p => next.add(p.uid));
+      return next;
+    });
+    setShowAdd(false);
+    setMsg({ type: "success", text: `${picked.length} student${picked.length !== 1 ? "s" : ""} added as Active.` });
+  }
+
+  const dirty = useMemo(() => {
+    const currentActive = new Set(students.filter(s => s.status === "active").map(s => s.uid));
+    if (currentActive.size !== selected.size) return true;
+    for (const uid of selected) if (!currentActive.has(uid)) return true;
+    return false;
+  }, [students, selected]);
+
+  function toggle(uid: string) {
+    setMsg(null);
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid); else next.add(uid);
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setMsg(null);
+    try {
+      await onUpdateStatuses(selected);
+      setMsg({ type: "success", text: "Active roster updated." });
+    } catch (err) {
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to update roster." });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div>
+      {showAdd && (
+        <AddStudentsModal
+          wing={wing}
+          excludeUids={existingUids}
+          onClose={() => setShowAdd(false)}
+          onAssign={handleAssign}
+        />
+      )}
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by name or ID…"
+            style={{ ...formStyles.input, width: 200 }}
+          />
+          <select
+            value={statusFilter}
+            onChange={e => setStatusFilter(e.target.value as "all" | "active" | "inactive")}
+            style={{ ...formStyles.input, width: "auto" }}
+          >
+            <option value="all">All statuses</option>
+            <option value="active">Active only</option>
+            <option value="inactive">Inactive only</option>
+          </select>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+          <button onClick={() => setShowAdd(true)} style={{ ...formStyles.submitBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
+            + Add Active Students
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!dirty || saving}
+            style={{ ...formStyles.submitBtn, opacity: !dirty || saving ? 0.5 : 1 }}
+          >
+            {saving ? "Saving…" : `Set ${selected.size} Active`}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 11.5, color: "#9ca3af", marginBottom: 10 }}>
+        Check the students who should be active — everyone else at this centre is marked Inactive when you save.
+      </div>
+
+      {msg && (
+        <div style={{
+          marginBottom: 12, fontSize: 12.5, padding: "9px 12px", borderRadius: 8,
+          background: msg.type === "success" ? "#f0fdf4" : "#fef2f2",
+          border: `1px solid ${msg.type === "success" ? "#bbf7d0" : "#fecaca"}`,
+          color: msg.type === "success" ? "#16a34a" : "#dc2626",
+        }}>
+          {msg.text}
+        </div>
+      )}
+
+      {students.length === 0 ? (
+        <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>No students enrolled at this centre yet.</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No students match.</div>
+      ) : (
+        <div style={{ maxHeight: 420, overflowY: "auto" as const, border: "1px solid #e5e7eb", borderRadius: 8 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+            <thead>
+              <tr>
+                <th style={{ ...viewStyles.histTh, width: 36 }}></th>
+                <th style={viewStyles.histTh}>Student</th>
+                <th style={viewStyles.histTh}>ID</th>
+                <th style={viewStyles.histTh}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((s, i) => {
+                const isSelected = selected.has(s.uid);
+                return (
+                  <tr key={s.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
+                    <td style={viewStyles.histTd}>
+                      <input type="checkbox" checked={isSelected} onChange={() => toggle(s.uid)} />
+                    </td>
+                    <td style={viewStyles.histTd}>{s.name}</td>
+                    <td style={viewStyles.histTd}>{s.admissionNo || "—"}</td>
+                    <td style={viewStyles.histTd}>
+                      <StatusBadge status={isSelected ? "active" : "inactive"} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Add Active Students modal (search across all students, assign to centre) ──
+
+function AddStudentsModal({ wing, excludeUids, onClose, onAssign }: {
+  wing: Wing | undefined;
+  excludeUids: Set<string>;
+  onClose: () => void;
+  onAssign: (picked: PickedStudent[]) => Promise<void>;
+}) {
+  const [loading, setLoading]     = useState(true);
+  const [candidates, setCandidates] = useState<(PickedStudent & { centerName: string; status: string })[]>([]);
+  const [search, setSearch]       = useState("");
+  const [selected, setSelected]   = useState<Set<string>>(new Set());
+  const [saving, setSaving]       = useState(false);
+  const [error, setError]         = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const [stuSnap, centerSnap] = await Promise.all([
+          getDocs(query(collection(db, "users"), where("role", "==", "student"))),
+          getDocs(collection(db, "centers")),
+        ]);
+        if (cancelled) return;
+        const centerMap = new Map<string, string>();
+        centerSnap.docs.forEach(d => centerMap.set(d.id, (d.data().name as string) ?? d.id));
+        const list = stuSnap.docs
+          .filter(d => !wing || inWing(d.data(), wing))
+          .map(d => {
+            const st = d.data();
+            const centerId = (st.centerId ?? "") as string;
+            return {
+              uid:         d.id,
+              name:        (st.displayName ?? st.name ?? "-") as string,
+              admissionNo: (st.admissionNo ?? st.admissionNumber ?? "") as string,
+              createdAt:   toISODateLocal(st.createdAt),
+              centerName:  centerId ? (centerMap.get(centerId) ?? centerId) : "Unassigned",
+              status:      (st.status ?? st.studentStatus ?? "active") as string,
+            };
+          })
+          .filter(s => !excludeUids.has(s.uid))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setCandidates(list);
+      } catch (err) {
+        console.error("[AddStudentsModal] load error:", err);
+        setError("Failed to load students.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wing]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return candidates;
+    return candidates.filter(s => s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q));
+  }, [candidates, search]);
+
+  function toggle(uid: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid); else next.add(uid);
+      return next;
+    });
+  }
+
+  async function handleAssign() {
+    const picked = candidates.filter(c => selected.has(c.uid));
+    if (picked.length === 0) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onAssign(picked.map(({ uid, name, admissionNo, createdAt }) => ({ uid, name, admissionNo, createdAt })));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to assign students.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={modalStyles.overlay} onClick={onClose}>
+      <div style={{ ...modalStyles.box, maxWidth: 520, maxHeight: "80vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
+        <div style={modalStyles.header}>
+          <span style={modalStyles.title}>Add Active Students</span>
+          <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
+        </div>
+
+        <div style={{ padding: "14px 20px 0" }}>
+          <input
+            autoFocus
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by name or admission no…"
+            style={{ ...formStyles.input, width: "100%", boxSizing: "border-box" as const }}
+          />
+        </div>
+
+        <div style={{ padding: "12px 20px", flex: 1, overflowY: "auto" as const }}>
+          {loading ? (
+            <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
+          ) : filtered.length === 0 ? (
+            <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>
+              {candidates.length === 0 ? "No other students available to add." : "No students match."}
+            </div>
+          ) : (
+            <div style={{ border: "1px solid #e5e7eb", borderRadius: 8 }}>
+              {filtered.map((s, i) => {
+                const isSelected = selected.has(s.uid);
+                return (
+                  <label key={s.uid} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", fontSize: 12.5, cursor: "pointer",
+                    background: isSelected ? "#eef2ff" : i % 2 === 0 ? "#fff" : "#fafafa",
+                    borderBottom: "1px solid #f3f4f6",
+                  }}>
+                    <input type="checkbox" checked={isSelected} onChange={() => toggle(s.uid)} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, color: "#111827" }}>{s.name}</div>
+                      <div style={{ fontSize: 11, color: "#9ca3af" }}>
+                        {s.admissionNo || "no adm. no."} · {s.centerName}{s.status !== "active" ? ` · ${s.status}` : ""}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <div style={{ margin: "0 20px 10px", fontSize: 12, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, padding: "7px 10px" }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{ ...modalStyles.body, borderTop: "1px solid #e5e7eb", flexDirection: "row" as const, justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>{selected.size} selected</span>
+          <button
+            onClick={handleAssign}
+            disabled={selected.size === 0 || saving}
+            style={{ ...formStyles.submitBtn, opacity: selected.size === 0 || saving ? 0.5 : 1 }}
+          >
+            {saving ? "Assigning…" : `Assign ${selected.size || ""} as Active`}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -478,9 +869,15 @@ function CentersContent() {
   const { user, role }              = useAuth();
   const { wing }                    = useWing();
   const isSom                       = isSchoolOfMusic(wing);
-  const [centers, setCenters]       = useState<Center[]>([]);
-  const [teachers, setTeachers]     = useState<TeacherUser[]>([]);
-  const [loading, setLoading]       = useState(true);
+  // Seed from the last visit's cache so switching back to Centers renders
+  // instantly instead of a blank loading state — fetchCenters() below still
+  // always re-fetches to stay fresh.
+  const [centers, setCenters]       = useState<Center[]>(() => getCached(`centers:${wing}:centers`) ?? []);
+  const [teachers, setTeachers]     = useState<TeacherUser[]>(() => getCached(`centers:${wing}:teachers`) ?? []);
+  const [activeCounts, setActiveCounts] = useState<Map<string, number>>(
+    () => getCached(`centers:${wing}:activeCounts`) ?? new Map(),
+  );
+  const [loading, setLoading]       = useState(() => !getCached<Center[]>(`centers:${wing}:centers`));
   const [showForm, setShowForm]     = useState(false);
   const [editTarget, setEditTarget] = useState<Center | null>(null);
   const [viewTarget, setViewTarget] = useState<Center | null>(null);
@@ -565,13 +962,34 @@ function CentersContent() {
   }
 
   async function fetchCenters() {
+    const cachedCenters = getCached<Center[]>(`centers:${wing}:centers`);
+    if (cachedCenters) {
+      setCenters(cachedCenters);
+      setTeachers(getCached(`centers:${wing}:teachers`) ?? []);
+      setActiveCounts(getCached(`centers:${wing}:activeCounts`) ?? new Map());
+    }
     try {
-      const [data, teacherList] = await Promise.all([
+      const [data, teacherList, studentSnap] = await Promise.all([
         getCenters(wing),
         getTeachers(wing),
+        getDocs(query(collection(db, "users"), where("role", "==", "student"))),
       ]);
       setCenters(data);
-      setTeachers(teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName)));
+      setCached(`centers:${wing}:centers`, data);
+      const sortedTeachers = teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      setTeachers(sortedTeachers);
+      setCached(`centers:${wing}:teachers`, sortedTeachers);
+
+      const counts = new Map<string, number>();
+      studentSnap.docs.forEach(d => {
+        const st = d.data();
+        if (!isActiveStudentStatus((st.status ?? st.studentStatus ?? "active") as string)) return;
+        const cid = (st.centerId ?? "") as string;
+        if (!cid) return;
+        counts.set(cid, (counts.get(cid) ?? 0) + 1);
+      });
+      setActiveCounts(counts);
+      setCached(`centers:${wing}:activeCounts`, counts);
     } catch (err) {
       console.error("Failed to fetch centers:", err);
     } finally {
@@ -849,6 +1267,7 @@ function CentersContent() {
           {centers.map(center => (
             <CenterCard key={center.id} center={center}
               teachers={teachers}
+              activeCount={activeCounts.get(center.id) ?? 0}
               onView={() => setViewTarget(center)}
               onEdit={() => openEdit(center)}
               onDelete={() => setDeleteTarget(center)} />
@@ -861,15 +1280,21 @@ function CentersContent() {
 
 // ─── Card ──────────────────────────────────────────────────────────────────────
 
-function CenterCard({ center, teachers, onView, onEdit, onDelete }: {
-  center: Center; teachers: TeacherUser[];
+function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }: {
+  center: Center; teachers: TeacherUser[]; activeCount: number;
   onView: () => void; onEdit: () => void; onDelete: () => void;
 }) {
+  const router = useRouter();
   const [hover, setHover]     = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const raw = center as Center & { centerCode?: string };
   const teacher = teachers.find(t => t.uid === center.teacherUid);
+
+  function goToActiveStudents(e: React.MouseEvent) {
+    e.stopPropagation();
+    router.push(`/dashboard/enrollments?view=students&center=${encodeURIComponent(center.id)}&status=active`);
+  }
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -923,12 +1348,201 @@ function CenterCard({ center, teachers, onView, onEdit, onDelete }: {
         <span style={styles.cardMetaLabel}>Schedule</span>
         <span>{center.timeSlot || "-"}</span>
       </div>
+      <button
+        onClick={goToActiveStudents}
+        style={styles.activeStudentsBadge}
+        title="View active students at this centre"
+      >
+        🎓 {activeCount} Active Student{activeCount !== 1 ? "s" : ""} →
+      </button>
       {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
         <div style={styles.cardMeta}>
           <span style={styles.cardMetaLabel}>Monthly Fee</span>
           <span>₹{center.monthlyFee.toLocaleString("en-IN")}</span>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// ─── Add Center modal (standalone — usable from the Students view too) ─────────
+// Bundles the same creation form CentersContent uses inline, plus a reference
+// list of every existing centre name so a caller elsewhere in the app (e.g.
+// the Students view's "+ Add Center" button) can create a centre without
+// navigating away, while still seeing what already exists to avoid duplicates.
+
+export function AddCenterModal({ onClose, onCreated }: { onClose: () => void; onCreated?: () => void }) {
+  const { wing } = useWing();
+  const isSom = isSchoolOfMusic(wing);
+  const [centers, setCenters] = useState<Center[]>([]);
+  const [teachers, setTeachers] = useState<TeacherUser[]>([]);
+  const [loadingList, setLoadingList] = useState(true);
+  const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [saving, setSaving] = useState(false);
+  const [dayError, setDayError] = useState("");
+  const [err, setErr] = useState("");
+  const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoadingList(true);
+      try {
+        const [c, t] = await Promise.all([getCenters(wing), getTeachers(wing)]);
+        if (cancelled) return;
+        setCenters(c);
+        setTeachers(t.sort((a, b) => a.displayName.localeCompare(b.displayName)));
+      } catch (e) {
+        console.error("[AddCenterModal] load error:", e);
+      } finally {
+        if (!cancelled) setLoadingList(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wing]);
+
+  const existingNamesLC = useMemo(
+    () => new Set(centers.map(c => c.name.trim().toLowerCase())),
+    [centers],
+  );
+  const trimmedName = form.name.trim();
+  const isDuplicateName = trimmedName !== "" && existingNamesLC.has(trimmedName.toLowerCase());
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
+    setErr(""); setSuccess("");
+    setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
+  }
+  function handleDaysChange(days: Day[]) {
+    setForm(prev => ({ ...prev, daysOfWeek: days }));
+    if (days.length > 0) setDayError("");
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(""); setSuccess("");
+    if (form.daysOfWeek.length === 0) { setDayError("Select at least 1 day."); return; }
+    if (isDuplicateName) { setErr(`A centre named "${trimmedName}" already exists.`); return; }
+    setSaving(true);
+    const timeSlot = `${form.daysOfWeek.join("/")} ${form.startTime}–${form.endTime}`;
+    const somFee = isSom ? { monthlyFee: form.monthlyFee ? Number(form.monthlyFee) : 0 } : {};
+    try {
+      await createCenter({
+        name: trimmedName, location: "", timeSlot,
+        teacherUid: form.teacherUid.trim(), studentUids: [],
+        status: form.status, wing, ...somFee,
+      } as Parameters<typeof createCenter>[0]);
+      setSuccess(`Centre "${trimmedName}" created.`);
+      setForm({ ...EMPTY_FORM });
+      setDayError("");
+      setCenters(await getCenters(wing));
+      onCreated?.();
+    } catch (err) {
+      console.error("Failed to create center:", err);
+      setErr(err instanceof Error ? err.message : "Failed to create centre.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={modalStyles.overlay} onClick={onClose}>
+      <div style={{ ...modalStyles.box, maxWidth: 760, maxHeight: "88vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
+        <div style={modalStyles.header}>
+          <span style={modalStyles.title}>+ Add Center</span>
+          <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
+        </div>
+        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+          <form onSubmit={handleSubmit} style={{ flex: 1, padding: "18px 20px", overflowY: "auto" as const }}>
+            <div style={formStyles.grid}>
+              <FormField label="Name" required>
+                <input name="name" value={form.name} onChange={handleChange} required
+                  placeholder="e.g. Koramangala Center" style={formStyles.input} />
+                {isDuplicateName && (
+                  <span style={formStyles.errorText}>A centre named &ldquo;{trimmedName}&rdquo; already exists.</span>
+                )}
+              </FormField>
+              <FormField label="Assigned Teacher" required>
+                <select name="teacherUid" value={form.teacherUid} onChange={handleChange} required style={formStyles.input}>
+                  <option value="">— Select a teacher —</option>
+                  {teachers.map(t => (
+                    <option key={t.uid} value={t.uid}>{t.displayName} ({t.email})</option>
+                  ))}
+                </select>
+              </FormField>
+              <FormField label="Status">
+                <select name="status" value={form.status} onChange={handleChange} style={formStyles.input}>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </FormField>
+              {isSom && (
+                <FormField label="Standard Monthly Fee (₹)">
+                  <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee}
+                    onChange={handleChange} placeholder="e.g. 2000" style={formStyles.input} />
+                </FormField>
+              )}
+              <FormField label="Start Time" required>
+                <input name="startTime" type="time" value={form.startTime} onChange={handleChange}
+                  required style={formStyles.input} />
+              </FormField>
+              <FormField label="End Time" required>
+                <input name="endTime" type="time" value={form.endTime} onChange={handleChange}
+                  required style={formStyles.input} />
+              </FormField>
+              <FormField label="Days of Week" required fullWidth>
+                <DayChips selected={form.daysOfWeek} onChange={handleDaysChange} />
+                {dayError && <span style={formStyles.errorText}>{dayError}</span>}
+              </FormField>
+            </div>
+
+            {err && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#dc2626", marginTop: 4 }}>
+                {err}
+              </div>
+            )}
+            {success && (
+              <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#16a34a", marginTop: 4 }}>
+                ✓ {success}
+              </div>
+            )}
+
+            <div style={{ ...formStyles.actions, marginTop: 16 }}>
+              <button type="submit" disabled={saving || isDuplicateName}
+                style={{ ...formStyles.submitBtn, opacity: saving || isDuplicateName ? 0.6 : 1 }}>
+                {saving ? "Creating…" : "Create Center"}
+              </button>
+            </div>
+          </form>
+
+          {/* Existing centres — reference list to avoid duplicate names */}
+          <div style={{ width: 220, flexShrink: 0, borderLeft: "1px solid #e5e7eb", padding: "18px 16px", overflowY: "auto" as const, background: "#f9fafb" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 10 }}>
+              Existing Centres {loadingList ? "" : `(${centers.length})`}
+            </div>
+            {loadingList ? (
+              <div style={{ fontSize: 12, color: "#9ca3af" }}>Loading…</div>
+            ) : centers.length === 0 ? (
+              <div style={{ fontSize: 12, color: "#9ca3af" }}>No centres yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
+                {[...centers].sort((a, b) => a.name.localeCompare(b.name)).map(c => {
+                  const isMatch = trimmedName !== "" && c.name.trim().toLowerCase() === trimmedName.toLowerCase();
+                  return (
+                    <div key={c.id} style={{
+                      fontSize: 12.5, padding: "4px 8px", borderRadius: 6,
+                      background: isMatch ? "#fef2f2" : "transparent",
+                      color: isMatch ? "#dc2626" : "#374151",
+                      fontWeight: isMatch ? 700 : 500,
+                    }}>
+                      {c.name}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1022,6 +1636,11 @@ const styles: Record<string, React.CSSProperties> = {
   cardMeta:    { display: "flex", flexDirection: "column", gap: 2, fontSize: 13, color: "var(--color-text-primary)" },
   cardMetaLabel:{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.04em" },
   codeChip:    { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4, fontWeight: 600 },
+  activeStudentsBadge: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+    background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", borderRadius: 8,
+    padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", textAlign: "left",
+  },
   badge:       { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" },
 };
 

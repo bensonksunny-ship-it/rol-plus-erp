@@ -1,18 +1,16 @@
 "use client";
 
-import { useState, useEffect, useMemo, type FormEvent } from "react";
+import { useState, useEffect } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES } from "@/config/permissions";
-import { useAuth } from "@/hooks/useAuth";
 import { useWing } from "@/hooks/useWing";
 import { inWing } from "@/lib/wing";
-import { createStaffUser, getStaffUsers, setParentChildren, type StaffRole } from "@/services/staff/staff.service";
-import { createTeacher } from "@/services/teacher/teacher.service";
+import { getCached, setCached } from "@/lib/dataCache";
+import { getStaffUsers, setParentChildren } from "@/services/staff/staff.service";
 import { TeachersContent } from "@/app/dashboard/teachers/manager";
-import { AdminsContent } from "@/app/dashboard/admins/manager";
 import type { User } from "@/types";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -35,17 +33,14 @@ export default function StaffPage() {
   );
 }
 
-type StaffTab = "staff" | "teachers" | "admins";
+type StaffTab = "staff" | "teachers";
 
 function StaffShell() {
-  const { user } = useAuth();
   const [tab, setTab] = useState<StaffTab>("staff");
-  const showAdmins = user?.role === ROLES.FOUNDER;
 
   const tabs: { key: StaffTab; label: string; icon: string }[] = [
     { key: "staff", label: "Staff", icon: "🪪" },
     { key: "teachers", label: "Teachers", icon: "👥" },
-    ...(showAdmins ? [{ key: "admins" as StaffTab, label: "Admins", icon: "👤" }] : []),
   ];
 
   return (
@@ -65,7 +60,6 @@ function StaffShell() {
 
       {tab === "staff" && <StaffContent />}
       {tab === "teachers" && <TeachersContent />}
-      {tab === "admins" && showAdmins && <AdminsContent />}
     </div>
   );
 }
@@ -73,52 +67,39 @@ function StaffShell() {
 interface StudentOpt { uid: string; label: string }
 
 function StaffContent() {
-  const { user, can } = useAuth();
   const { wing } = useWing();
 
-  const [rows, setRows] = useState<User[]>([]);
-  const [students, setStudents] = useState<StudentOpt[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-
-  // form
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [role, setRole] = useState<StaffRole | typeof ROLES.TEACHER | "">("");
-  const [childUids, setChildUids] = useState<string[]>([]);
-
-  // which roles this user may create
-  const creatable = useMemo(() => {
-    const list: Array<{ value: StaffRole | typeof ROLES.TEACHER; label: string }> = [];
-    if (can(CAPABILITIES.STAFF_CREATE_DIRECTOR)) list.push({ value: ROLES.DIRECTOR, label: "Director" });
-    if (can(CAPABILITIES.STAFF_CREATE_CHIEF_TEACHER)) list.push({ value: ROLES.CHIEF_TEACHER, label: "Chief Teacher" });
-    if (can(CAPABILITIES.STAFF_CREATE_TEACHER)) list.push({ value: ROLES.TEACHER, label: "Teacher" });
-    if (can(CAPABILITIES.STAFF_CREATE_PARENT)) list.push({ value: ROLES.PARENT, label: "Parent" });
-    return list;
-  }, [can]);
+  // Seed from the last visit's cache so revisiting this page via the sidebar
+  // renders instantly instead of a blank loading state — load() below still
+  // always re-fetches to stay fresh.
+  const [rows, setRows] = useState<User[]>(() => getCached<User[]>(`staff:${wing}:rows`) ?? []);
+  const [students, setStudents] = useState<StudentOpt[]>(() => getCached(`staff:${wing}:students`) ?? []);
+  const [loading, setLoading] = useState(() => !getCached<User[]>(`staff:${wing}:rows`));
 
   async function load() {
-    setLoading(true);
+    const cachedRows = getCached<User[]>(`staff:${wing}:rows`);
+    const cachedStudents = getCached<StudentOpt[]>(`staff:${wing}:students`);
+    if (cachedRows) setRows(cachedRows);
+    if (cachedStudents) setStudents(cachedStudents);
+    setLoading(!cachedRows);
     try {
       const [staff, studentSnap] = await Promise.all([
         getStaffUsers(wing),
         getDocs(query(collection(db, "users"), where("role", "==", "student"))),
       ]);
       setRows(staff);
-      setStudents(
-        studentSnap.docs
-          .filter(d => inWing(d.data(), wing))
-          .map(d => {
-            const s = d.data();
-            return {
-              uid: d.id,
-              label: `${(s.displayName ?? s.name ?? "—") as string}${s.studentID ? ` · ${s.studentID}` : ""}`,
-            };
-          }),
-      );
+      setCached(`staff:${wing}:rows`, staff);
+      const studentOpts = studentSnap.docs
+        .filter(d => inWing(d.data(), wing))
+        .map(d => {
+          const s = d.data();
+          return {
+            uid: d.id,
+            label: `${(s.displayName ?? s.name ?? "—") as string}${s.studentID ? ` · ${s.studentID}` : ""}`,
+          };
+        });
+      setStudents(studentOpts);
+      setCached(`staff:${wing}:students`, studentOpts);
     } catch (err) {
       console.error("Staff load failed:", err);
     } finally {
@@ -128,51 +109,6 @@ function StaffContent() {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [wing]);
-
-  function resetForm() {
-    setName(""); setEmail(""); setPassword(""); setRole(""); setChildUids([]);
-  }
-
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    setMsg(null);
-    if (!name.trim()) return setMsg({ kind: "err", text: "Name is required." });
-    if (!email.trim()) return setMsg({ kind: "err", text: "Email is required." });
-    if (password.length < 6) return setMsg({ kind: "err", text: "Password must be at least 6 characters." });
-    if (!role) return setMsg({ kind: "err", text: "Pick a role." });
-
-    setBusy(true);
-    try {
-      if (role === ROLES.TEACHER) {
-        await createTeacher(
-          { displayName: name.trim(), email: email.trim(), password, centerIds: [], wing },
-          user?.uid ?? "unknown",
-          user?.role ?? ROLES.FOUNDER,
-        );
-      } else {
-        await createStaffUser(
-          {
-            displayName: name.trim(),
-            email: email.trim(),
-            password,
-            role: role as StaffRole,
-            wing,
-            childUids: role === ROLES.PARENT ? childUids : undefined,
-          },
-          user?.uid ?? "unknown",
-          user?.role ?? ROLES.FOUNDER,
-        );
-      }
-      setMsg({ kind: "ok", text: `${ROLE_LABEL[role]} account created.` });
-      resetForm();
-      setShowForm(false);
-      load();
-    } catch (err) {
-      setMsg({ kind: "err", text: err instanceof Error ? err.message : "Creation failed." });
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function handleChildChange(parentUid: string, uids: string[]) {
     try {
@@ -190,49 +126,11 @@ function StaffContent() {
           <h1 style={s.title}>Staff</h1>
           <p style={s.subtitle}>{WING_LABELS[wing] ?? "—"} · accounts &amp; roles</p>
         </div>
-        {creatable.length > 0 && (
-          <button style={showForm ? s.btnGhost : s.btnPrimary} onClick={() => { setShowForm(v => !v); setMsg(null); }}>
-            {showForm ? "✕ Cancel" : "+ Add Staff"}
-          </button>
-        )}
       </div>
 
-      {msg && <div style={msg.kind === "ok" ? s.bannerOk : s.bannerErr}>{msg.text}</div>}
-
-      {showForm && (
-        <form style={s.card} onSubmit={handleSubmit}>
-          <div style={s.grid2}>
-            <Field label="Full Name">
-              <input style={s.input} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Priya Nair" />
-            </Field>
-            <Field label="Role">
-              <select style={s.input} value={role} onChange={e => setRole(e.target.value as StaffRole)}>
-                <option value="">— Select —</option>
-                {creatable.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </Field>
-            <Field label="Email">
-              <input style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="name@example.com" />
-            </Field>
-            <Field label="Password">
-              <input style={s.input} type="text" value={password} onChange={e => setPassword(e.target.value)} placeholder="Min. 6 characters" />
-            </Field>
-          </div>
-
-          {role === ROLES.PARENT && (
-            <Field label="Linked children">
-              <ChildPicker options={students} value={childUids} onChange={setChildUids} />
-            </Field>
-          )}
-
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
-            <button type="button" style={s.btnGhost} onClick={() => { setShowForm(false); resetForm(); }}>Cancel</button>
-            <button type="submit" disabled={busy} style={{ ...s.btnPrimary, opacity: busy ? 0.6 : 1 }}>
-              {busy ? "Creating…" : "Create Account"}
-            </button>
-          </div>
-        </form>
-      )}
+      <p style={{ fontSize: 12, color: "var(--color-text-muted)", marginTop: -12, marginBottom: 20 }}>
+        Leadership and parent accounts are created from the <strong>Users</strong> page.
+      </p>
 
       <div style={s.card}>
         <p style={s.cardTitle}>All staff <span style={{ color: "var(--color-text-secondary)", fontWeight: 400 }}>({rows.length})</span></p>
@@ -270,15 +168,6 @@ function StaffContent() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={s.field}>
-      <label style={s.label}>{label}</label>
-      {children}
     </div>
   );
 }

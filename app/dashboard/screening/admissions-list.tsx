@@ -510,6 +510,7 @@ export function AdmissionsList({
         musicalSkill:    str(adm.musicalSkill),
         photo:           str(adm.photo) || null,
         wing,
+        createdVia:      "import",
         createdAt:       serverTimestamp(),
       });
       await deleteAdmission(str(adm.id));

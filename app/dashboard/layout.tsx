@@ -8,9 +8,11 @@ import { db } from "@/services/firebase/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useWing } from "@/hooks/useWing";
+import { useRoleHub } from "@/hooks/useRoleHub";
 import { clearPersistedSession, signOut } from "@/services/firebase/auth.service";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES, type Capability } from "@/config/permissions";
+import type { Role } from "@/types";
 
 // ─── Alert count hook ──────────────────────────────────────────────────────────
 function useAlertCount(enabled: boolean): number {
@@ -67,7 +69,7 @@ const NAV_TOP: NavItem[] = [
   // Leadership (Founder / Admin / Director / Chief Teacher)
   { label: "Center Suite", icon: "⊞", href: "/dashboard",            roles: LEADERSHIP, capability: C.DASHBOARD_VIEW },
   { label: "Enrollments",  icon: "🏫", href: "/dashboard/enrollments", roles: LEADERSHIP, capability: [C.CENTRES_MANAGE, C.CENTRES_EDIT_SCHEDULE, C.STUDENTS_VIEW_ALL, C.STUDENTS_MANAGE], matchPrefix: "/dashboard/enrollments,/dashboard/centers,/dashboard/students" },
-  { label: "Staff",        icon: "🪪", href: "/dashboard/staff",      roles: LEADERSHIP, capability: C.STAFF_VIEW, matchPrefix: "/dashboard/staff,/dashboard/teachers,/dashboard/admins" },
+  { label: "Staff",        icon: "🪪", href: "/dashboard/staff",      roles: LEADERSHIP, capability: C.STAFF_VIEW, matchPrefix: "/dashboard/staff,/dashboard/teachers" },
   { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance", roles: LEADERSHIP, capability: C.ATTENDANCE_VIEW_ALL },
   { label: "Syllabus",     icon: "📚", href: "/dashboard/syllabus",   roles: LEADERSHIP, capability: C.SYLLABUS_MANAGE },
   // Teacher
@@ -170,6 +172,7 @@ function NavGroups({
           <Link
             key={item.resolvedHref}
             href={item.resolvedHref}
+            prefetch={true}
             onClick={onNavigate}
             style={{ ...s.navItem, ...(active ? s.navItemActive : {}), marginBottom: 4 }}
           >
@@ -214,6 +217,7 @@ function NavGroups({
                     <Link
                       key={item.resolvedHref}
                       href={item.resolvedHref}
+                      prefetch={true}
                       onClick={onNavigate}
                       style={{ ...s.navItem, ...s.navItemSub, ...(active ? s.navItemActive : {}) }}
                     >
@@ -237,8 +241,9 @@ function NavGroups({
   );
 }
 
-// ─── Wing switcher (Founder only) ─────────────────────────────────────────────
-function WingSwitcher({ wing, onChange }: { wing: string; onChange: (w: string) => void }) {
+// ─── Wing switcher — shown to anyone who can view more than one wing ──────────
+// (Founder, via wing.switch; or a staff member holding roles in both wings.)
+function WingSwitcher({ wing, wings, onChange }: { wing: string; wings: string[]; onChange: (w: string) => void }) {
   return (
     <label style={ws.wrap}>
       <span style={ws.caption}>Wing</span>
@@ -248,8 +253,7 @@ function WingSwitcher({ wing, onChange }: { wing: string; onChange: (w: string) 
         style={ws.select}
         aria-label="Active wing"
       >
-        <option value={WINGS.ROL_PLUS}>{WING_LABELS[WINGS.ROL_PLUS]}</option>
-        <option value={WINGS.SCHOOL_OF_MUSIC}>{WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}</option>
+        {wings.map(w => <option key={w} value={w}>{WING_LABELS[w] ?? w}</option>)}
       </select>
     </label>
   );
@@ -265,10 +269,41 @@ const ws: Record<string, React.CSSProperties> = {
   },
 };
 
+// ─── Role/hub switcher — shown to anyone holding more than one role in the
+// active wing (e.g. both Admin and Teacher). Each role has its own hub —
+// switching navigates there, it doesn't just relabel the current page.
+const ROLE_LABEL: Record<string, string> = {
+  [ROLES.FOUNDER]: "Founder",
+  [ROLES.ADMIN]: "Admin",
+  [ROLES.DIRECTOR]: "Director",
+  [ROLES.CHIEF_TEACHER]: "Chief Teacher",
+  [ROLES.TEACHER]: "Teacher",
+  [ROLES.STUDENT]: "Student",
+  [ROLES.PARENT]: "Parent",
+  [ROLES.MEMBER]: "Member",
+};
+
+function RoleHubSwitcher({ role, roles, onChange }: { role: string; roles: string[]; onChange: (r: string) => void }) {
+  return (
+    <label style={ws.wrap}>
+      <span style={ws.caption}>Hub</span>
+      <select
+        value={role}
+        onChange={(e) => onChange(e.target.value)}
+        style={ws.select}
+        aria-label="Active hub"
+      >
+        {roles.map(r => <option key={r} value={r}>{ROLE_LABEL[r] ?? r}</option>)}
+      </select>
+    </label>
+  );
+}
+
 // ─── Layout ───────────────────────────────────────────────────────────────────
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const { user, loading, capabilities } = useAuth();
-  const { wing, canSwitch: canSwitchWing, setWing } = useWing();
+  const { wing, canSwitch: canSwitchWing, setWing, availableWings } = useWing();
+  const { role: activeRole, canSwitch: canSwitchRole, setRole: setActiveRole, availableRoles } = useRoleHub();
   const router            = useRouter();
   const pathname          = usePathname();
   const isMobile          = useIsMobile();
@@ -307,6 +342,16 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       router.replace("/dashboard/account");
     }
   }, [loading, user, pathname, router]);
+
+  // Switching hubs lands on the shared /dashboard route, which the effect
+  // above then routes onward to that role's specific hub (Teacher/Student/
+  // Parent/Member) or leaves in place for leadership roles. Navigating away
+  // from the current page first avoids ProtectedRoute bouncing to /login
+  // because the new role isn't in the current page's allowed list.
+  const handleRoleSwitch = useCallback((r: string) => {
+    setActiveRole(r as Role);
+    router.replace("/dashboard");
+  }, [setActiveRole, router]);
 
   // Save current path so leadership roles can resume after reopening
   useEffect(() => {
@@ -475,7 +520,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
             <button onClick={() => setDrawerOpen(false)} style={s.closeBtn}>✕</button>
           </div>
-          {canSwitchWing && <WingSwitcher wing={wing} onChange={(w) => setWing(w as typeof wing)} />}
+          {canSwitchWing && <WingSwitcher wing={wing} wings={availableWings} onChange={(w) => setWing(w as typeof wing)} />}
+          {canSwitchRole && activeRole && <RoleHubSwitcher role={activeRole} roles={availableRoles} onChange={handleRoleSwitch} />}
           <nav style={s.drawerNav}>
             <NavGroups
               topNavItems={topNavItems}
@@ -515,6 +561,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 <Link
                   key={item.resolvedHref}
                   href={item.resolvedHref}
+                  prefetch={true}
                   className={`rl-bn-item${active ? " rl-active" : ""}`}
                 >
                   <span className="rl-bn-icon">{item.icon}</span>
@@ -548,7 +595,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
         </div>
 
-        {canSwitchWing && <WingSwitcher wing={wing} onChange={(w) => setWing(w as typeof wing)} />}
+        {canSwitchWing && <WingSwitcher wing={wing} wings={availableWings} onChange={(w) => setWing(w as typeof wing)} />}
+        {canSwitchRole && activeRole && <RoleHubSwitcher role={activeRole} roles={availableRoles} onChange={handleRoleSwitch} />}
 
         <nav style={s.nav}>
           <NavGroups

@@ -337,6 +337,22 @@ input, textarea, select { font-family: inherit; font-size: inherit; outline: non
   color: var(--color-accent);
 }
 
+/* ── Admin row highlight (Users page) ────────────────────────────────────── */
+/* Same selector weight as the zebra-stripe rule above, placed after it, so it
+   wins the tie instead of being silently overridden by the striping. */
+tbody tr.row-admin {
+  background: var(--color-accent-dim) !important;
+  box-shadow: inset 3px 0 0 var(--color-accent-border);
+}
+
+/* ── Print — A4 report layout ────────────────────────────────────────────── */
+@media print {
+  @page { size: A4; margin: 12mm; }
+  html, body { height: auto !important; overflow: visible !important; background: #fff !important; }
+  aside, header, .rl-bn { display: none !important; }
+  main { padding: 0 !important; overflow: visible !important; height: auto !important; }
+}
+
 .rl-bn-icon {
   font-size: 22px;
   line-height: 1;

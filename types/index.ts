@@ -72,6 +72,30 @@ interface UserBase {
    */
   wing?: Wing;
   /**
+   * roles — per-wing role assignments, e.g. { rol_plus: ["admin", "teacher"], school_of_music: ["teacher"] }.
+   * Lets one account hold one or more roles (or none at all) in each wing — e.g. Admin
+   * and Teacher at once in the same wing, each granting its own hub/capabilities. Falls
+   * back to the legacy scalar `role` (for the account's home `wing`) when a wing has no
+   * entry here — see lib/wing.ts getRolesForWing() / getRoleForWing() / getUserWings().
+   * A value written before multi-role support (a bare Role string, not an array) is read
+   * as a single-role list. Populated going forward by the Founder Users page's "Manage
+   * Roles" action; pre-existing accounts have no entries here at all and keep working
+   * purely off `role`/`wing`.
+   */
+  roles?: Partial<Record<Wing, Role[] | Role>>;
+  /**
+   * createdVia — how this account came to exist:
+   *  - "manual" : deliberately added as a system user (Users "+ Add User",
+   *               the Teachers "+ Add Teacher" form, or the New Student form).
+   *  - "import" : an auto-generated placeholder from a bulk import or an
+   *               enrollment/screening wizard (registry import, admissions
+   *               wizard, screening "complete admission" enroll) — a business
+   *               record in its own module, not a Users-page system user.
+   * Absent on docs created before this field existed; treated as "manual" so
+   * existing accounts stay visible (see app/dashboard/users/page.tsx).
+   */
+  createdVia?: "manual" | "import";
+  /**
    * loginId — School of Music accounts sign in with this instead of an email.
    * The email stored in Firebase Auth is a synthetic `${loginId}@<domain>`
    * (see config/constants loginIdToAuthEmail); `email` on the doc stays the
@@ -87,6 +111,21 @@ interface UserBase {
    * outside the Founder Users view.
    */
   plainPassword?: string;
+  /**
+   * mustResetPassword — the account should be prompted to change its password
+   * at next sign-in. Set true when a login is created with a system-assigned
+   * initial password (e.g. a student's admission number).
+   */
+  mustResetPassword?: boolean;
+  /**
+   * hasLogin — whether this account has a real Firebase Auth account (can
+   * sign in). Every account creation flow outside the Users page now creates
+   * a profile-only record (this false/absent); a login is provisioned only
+   * via the Users page's "Create login" action, which also migrates the doc
+   * to a new id equal to the new Auth uid — see
+   * services/member/member.service.ts createLoginForUser().
+   */
+  hasLogin?: boolean;
   lastActivity: string | null;   // ISO — last login or action timestamp
   qrCodeURL: string | null;      // generated QR for identity / attendance scanning
   photoURL?: string | null;      // uploaded profile picture (Firebase Storage download URL)

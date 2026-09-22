@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo, Suspense } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   collection, getDocs, setDoc, updateDoc, doc, getDoc,
   query, where, serverTimestamp, addDoc, increment,
@@ -21,6 +21,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic, wingOf } from "@/lib/wing";
+import { getCached, setCached } from "@/lib/dataCache";
 import Link from "next/link";
 import {
   clearStudentHistory,
@@ -29,6 +30,7 @@ import {
 } from "@/services/admin/delete.service";
 import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
+import { AddCenterModal } from "../centers/_shared";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -64,7 +66,12 @@ export interface StudentRow {
   createdAt: string;   // ISO date — joining date, "" if unknown
 }
 
-type StudentTab = "active" | "requests" | "break_requests" | "on_break" | "inactive";
+type StudentTab = "active" | "inactive";
+
+/** Finer-grained status breakdown used by the Insights panel's chart — wider
+ *  than the two list tabs, since "on break" / pending-request counts are
+ *  still useful at a glance even though they no longer get their own tab. */
+type StatusPickKey = "active" | "inactive" | "on_break" | "break_requests" | "requests";
 
 interface EditForm {
   name:               string;
@@ -96,6 +103,8 @@ const EMPTY_CREATE = {
   classDays: [] as string[],
   classTime: "",
   feeCycle: "monthly", feePerClass: "", monthlyFee: "", status: "active",
+  // Most students are records only, not app users — a login is opt-in per student.
+  createLogin: false,
 };
 
 type CreateForm = typeof EMPTY_CREATE;
@@ -152,11 +161,36 @@ export function toISODate(v: unknown): string {
 
 export const STATUS_BADGE: Record<string, React.CSSProperties> = {
   active:                 { background: "#dcfce7", color: "#16a34a" },
+  confirm:                { background: "#dcfce7", color: "#16a34a" },
+  confirmed:              { background: "#dcfce7", color: "#16a34a" },
   inactive:               { background: "#f3f4f6", color: "#6b7280" },
+  cancelled:              { background: "#f3f4f6", color: "#6b7280" },
+  canceled:               { background: "#f3f4f6", color: "#6b7280" },
   deactivation_requested: { background: "#fef3c7", color: "#d97706" },
   break_requested:        { background: "#e0f2fe", color: "#0369a1" },
   on_break:               { background: "#f0f9ff", color: "#0284c7" },
 };
+
+/** A student counts as "active" whether their `status` field carries the
+ *  Students page's own vocabulary ("active") or the Registry's ("confirm" /
+ *  "confirmed") — historical Registry imports/edits can leave either spelling
+ *  on the shared field, and both mean the same thing: an enrolled student. */
+export function isActiveStatus(status: string): boolean {
+  return /^(active|confirm|confirmed)$/i.test((status || "").trim());
+}
+
+/** The Registry-vocabulary counterpart — "cancelled"/"canceled" is the same
+ *  thing as "inactive" on the shared `status` field. */
+export function isInactiveStatus(status: string): boolean {
+  return /^(inactive|cancelled|canceled)$/i.test((status || "").trim());
+}
+
+/** Firestore auto-IDs are long base62 strings ("41IW9G1vBvPxQKJG55Hz") — never
+ *  a human centre name. Used so a failed name lookup never leaks a raw id into
+ *  a group header or table cell; it falls back to a plain placeholder instead. */
+function looksLikeCenterId(v: string): boolean {
+  return /^[A-Za-z0-9]{15,}$/.test(v.trim());
+}
 
 // ─── Spinner ───────────────────────────────────────────────────────────────────
 
@@ -203,16 +237,23 @@ function StudentsContent() {
   const { wing }                        = useWing();
   const isSom                           = isSchoolOfMusic(wing);
   const router                          = useRouter();
+  const searchParams                    = useSearchParams();
   const { isAllowed, filterCentres, teacherCentreIds, isTeacherRole } = useCentreAccess();
-  const [students, setStudents]         = useState<StudentRow[]>([]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [centerMap, setCenterMap]       = useState<Map<string, string>>(new Map());
-  const [centerOptions, setCenterOpts]  = useState<{ id: string; name: string; monthlyFee?: number }[]>([]);
-  const [teacherOptions, setTeacherOpts] = useState<{ id: string; name: string }[]>([]);
-  const [teacherMap, setTeacherMap]     = useState<Map<string, string>>(new Map());
-  const [loading, setLoading]           = useState(true);
+  // Seed from the last visit's cache so switching back to Students renders
+  // instantly instead of a blank loading state — fetchData() below still
+  // always re-fetches to stay fresh.
+  const [students, setStudents]         = useState<StudentRow[]>(() => getCached(`students:${wing}:students`) ?? []);
+  const [transactions, setTransactions] = useState<Transaction[]>(() => getCached(`students:${wing}:transactions`) ?? []);
+  const [centerMap, setCenterMap]       = useState<Map<string, string>>(() => getCached(`students:${wing}:centerMap`) ?? new Map());
+  const [centerOptions, setCenterOpts]  = useState<{ id: string; name: string; monthlyFee?: number }[]>(() => getCached(`students:${wing}:centerOptions`) ?? []);
+  const [teacherOptions, setTeacherOpts] = useState<{ id: string; name: string }[]>(() => getCached(`students:${wing}:teacherOptions`) ?? []);
+  const [teacherMap, setTeacherMap]     = useState<Map<string, string>>(() => getCached(`students:${wing}:teacherMap`) ?? new Map());
+  const [loading, setLoading]           = useState(() => !getCached<StudentRow[]>(`students:${wing}:students`));
   const [tab, setTab]                   = useState<StudentTab>("active");
+  const [requestsOpen, setRequestsOpen] = useState(false);
+  const [breakRequestsOpen, setBreakRequestsOpen] = useState(false);
   const [showForm, setShowForm]         = useState(false);
+  const [showAddCenter, setShowAddCenter] = useState(false);
   const [form, setForm]                 = useState({ ...EMPTY_CREATE });
   const [saving, setSaving]             = useState(false);
   const [editTarget, setEditTarget]         = useState<StudentRow | null>(null);
@@ -225,7 +266,7 @@ function StudentsContent() {
 
   // ── UI prefs (persisted) ───────────────────────────────────────────────────
   const [insightsOpen, setInsightsOpen] = useState(false);
-  const [listView, setListView]         = useState<"cards" | "table">("cards");
+  const [listView, setListView]         = useState<"cards" | "table">("table");
   const [sortKey, setSortKey]           = useState<"name" | "centerName" | "course" | "balance" | "status">("name");
   const [sortDir, setSortDir]           = useState<1 | -1>(1);
   useEffect(() => {
@@ -259,6 +300,17 @@ function StudentsContent() {
   const [filterFeeStatus, setFilterFeeStatus]   = useState("all");
   const [filterClassType, setFilterClassType]   = useState("all");
 
+  // Deep-link support: a "View active students" link from a Centre card lands
+  // here as ?center=<id>&status=active — pick those up once on arrival so the
+  // Centre filter and tab reflect what was clicked, without further clicks.
+  useEffect(() => {
+    const centerParam = searchParams.get("center");
+    const statusParam = searchParams.get("status");
+    if (centerParam) setFilterCenter(centerParam);
+    if (statusParam === "active" || statusParam === "inactive") setTab(statusParam);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   // Leadership roles that manage students. NOTE: chief_teacher is included here
   // for full student management on this screen; the finer split (no hard-delete
   // / no deactivation approval for chief_teacher) is a later capability pass.
@@ -267,6 +319,15 @@ function StudentsContent() {
   const isTeacher = role === ROLES.TEACHER;
 
   async function fetchData() {
+    const cachedStudents = getCached<StudentRow[]>(`students:${wing}:students`);
+    if (cachedStudents) {
+      setStudents(cachedStudents);
+      setTransactions(getCached(`students:${wing}:transactions`) ?? []);
+      setCenterMap(getCached(`students:${wing}:centerMap`) ?? new Map());
+      setCenterOpts(getCached(`students:${wing}:centerOptions`) ?? []);
+      setTeacherOpts(getCached(`students:${wing}:teacherOptions`) ?? []);
+      setTeacherMap(getCached(`students:${wing}:teacherMap`) ?? new Map());
+    }
     try {
       const [studentSnap, centerSnap, teacherSnap, txSnap] = await Promise.all([
         getDocs(query(collection(db, "users"), where("role", "==", "student"))),
@@ -281,22 +342,32 @@ function StudentsContent() {
       const txs = txSnap.docs.map(d => ({ id: d.id, ...d.data() }) as Transaction);
       const balanceMap = computeStudentBalances(txs);
       setTransactions(txs);
+      setCached(`students:${wing}:transactions`, txs);
 
+      // `cMap` (this wing only) drives the filter/edit dropdowns. `cMapAll`
+      // additionally resolves display names for legacy/mistagged centre docs
+      // (created before wing-tagging existed) so a student record pointing at
+      // one doesn't fall back to a raw Firestore id in the group headers.
       const cMap = new Map<string, string>();
+      const cMapAll = new Map<string, string>();
       const cOptsAll: { id: string; name: string; monthlyFee?: number }[] = [];
-      centerSnap.docs
-        .filter(d => inWing(d.data(), wing))
-        .forEach(d => {
-          cMap.set(d.id, (d.data().name as string) ?? d.id);
-          cOptsAll.push({
-            id: d.id,
-            name: (d.data().name as string) ?? d.id,
-            monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
-          });
+      centerSnap.docs.forEach(d => {
+        const nm = (d.data().name as string) ?? d.id;
+        cMapAll.set(d.id, nm);
+        if (!inWing(d.data(), wing)) return;
+        cMap.set(d.id, nm);
+        cOptsAll.push({
+          id: d.id,
+          name: nm,
+          monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
         });
+      });
       setCenterMap(cMap);
+      setCached(`students:${wing}:centerMap`, cMap);
       // Teachers: show only their assigned centres in the filter dropdown
-      setCenterOpts(filterCentres(cOptsAll));
+      const filteredCenterOpts = filterCentres(cOptsAll);
+      setCenterOpts(filteredCenterOpts);
+      setCached(`students:${wing}:centerOptions`, filteredCenterOpts);
 
       const tMap = new Map<string, string>();
       const tOptsAll: { id: string; name: string }[] = [];
@@ -308,13 +379,16 @@ function StudentsContent() {
           tOptsAll.push({ id: d.id, name: tName });
         });
       setTeacherMap(tMap);
+      setCached(`students:${wing}:teacherMap`, tMap);
       setTeacherOpts(tOptsAll);
+      setCached(`students:${wing}:teacherOptions`, tOptsAll);
 
       const allStudentsRaw = studentSnap.docs
         .filter(d => inWing(d.data(), wing))
         .map(d => {
         const s = d.data();
         const assignedTUid = (s.assignedTeacherUid ?? null) as string | null;
+        const centerIdRaw = String(s.centerId ?? "").trim();
         return {
           id:          d.id,
           name:        (s.displayName ?? s.name ?? "-") as string,
@@ -322,8 +396,9 @@ function StudentsContent() {
           studentID:   (s.studentID   ?? "-") as string,
           admissionNo: (s.admissionNo ?? s.admissionNumber ?? "-") as string,
           phone:       (s.phone       ?? "") as string,
-          centerId:    (s.centerId    ?? "-") as string,
-          centerName:  cMap.get(s.centerId as string) ?? (s.centerId as string) ?? "-",
+          centerId:    centerIdRaw || "-",
+          centerName:  cMap.get(centerIdRaw) || cMapAll.get(centerIdRaw)
+            || (centerIdRaw && !looksLikeCenterId(centerIdRaw) ? centerIdRaw : "Unassigned Center"),
           wing:        wingOf(s),
           instrument:  (s.instrument  ?? "-") as string,
           course:      (s.course      ?? "-") as string,
@@ -352,6 +427,7 @@ function StudentsContent() {
         ? allStudentsRaw.filter(s => teacherCentreIds.includes(s.centerId))
         : allStudentsRaw;
       setStudents(allStudents);
+      setCached(`students:${wing}:students`, allStudents);
     } catch (err) {
       console.error("Failed to fetch students:", err);
     } finally {
@@ -382,17 +458,18 @@ function StudentsContent() {
   }
 
   // ── Tab-split lists ─────────────────────────────────────────────────────────
-  const activeStudents       = students.filter(s => s.status === "active");
+  // Two top-level tabs only. A pending deactivation/break request hasn't
+  // actually changed the student's standing yet, so it stays in Active
+  // (surfaced via the header badges instead of its own tab); an approved
+  // break moves the student to Inactive, same as deactivated/cancelled.
   const requestStudents      = students.filter(s => s.status === "deactivation_requested");
   const breakRequestStudents = students.filter(s => s.status === "break_requested");
   const onBreakStudents      = students.filter(s => s.status === "on_break");
-  const inactiveStudents     = students.filter(s => s.status === "inactive");
+  const activeStudents       = students.filter(s =>
+    isActiveStatus(s.status) || s.status === "deactivation_requested" || s.status === "break_requested");
+  const inactiveStudents     = students.filter(s => isInactiveStatus(s.status) || s.status === "on_break");
 
-  const baseList = tab === "active" ? activeStudents
-    : tab === "requests" ? requestStudents
-    : tab === "break_requests" ? breakRequestStudents
-    : tab === "on_break" ? onBreakStudents
-    : inactiveStudents;
+  const baseList = tab === "active" ? activeStudents : inactiveStudents;
 
   // Unique courses + instruments for filter dropdowns
   const courses     = useMemo(() => Array.from(new Set(students.map(s => s.course).filter(Boolean))).sort(), [students]);
@@ -415,6 +492,13 @@ function StudentsContent() {
     return list;
   }, [baseList, search, filterCenter, filterCourse, filterInstrument, filterFeeStatus, filterClassType]);
 
+  // Inactive tab holds both truly-inactive students and on-break ones; the
+  // latter keep their dedicated "End Break" panel instead of the standard
+  // edit/deactivate row actions, so they're split out before the normal
+  // table/card rendering below.
+  const filteredOnBreak = tab === "inactive" ? filtered.filter(s => s.status === "on_break") : [];
+  const filteredRest    = tab === "inactive" ? filtered.filter(s => s.status !== "on_break") : filtered;
+
   function buildCenterGroups(students: StudentRow[]) {
     const map = new Map<string, { centerId: string; centerName: string; students: StudentRow[] }>();
     students.forEach(s => {
@@ -425,21 +509,25 @@ function StudentsContent() {
   }
 
   const groupedByCenter = useMemo(() => {
-    const groupStudents    = filtered.filter(s => s.classType !== "personal");
-    const personalStudents = filtered.filter(s => s.classType === "personal");
+    const groupStudents    = filteredRest.filter(s => s.classType !== "personal");
+    const personalStudents = filteredRest.filter(s => s.classType === "personal");
     return {
       group:    buildCenterGroups(groupStudents),
       personal: buildCenterGroups(personalStudents),
     };
-  }, [filtered]);
+  }, [filteredRest]);
 
   // ── Create student ─────────────────────────────────────────────────────────
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     const errs: Record<string, string> = {};
     if (!form.name.trim())        errs.name = "Required";
-    if (!form.email.trim())       errs.email = "Required";
-    else if (!/\S+@\S+\.\S+/.test(form.email)) errs.email = "Enter a valid email";
+    if (form.createLogin) {
+      if (!form.email.trim())     errs.email = "Required for a login";
+      else if (!/\S+@\S+\.\S+/.test(form.email)) errs.email = "Enter a valid email";
+    } else if (form.email.trim() && !/\S+@\S+\.\S+/.test(form.email)) {
+      errs.email = "Enter a valid email";
+    }
     if (!form.admissionNo.trim()) errs.admissionNo = "Required";
     if (!form.centerId.trim())    errs.centerId = "Pick a centre";
     if (!form.instrument.trim())  errs.instrument = "Required";
@@ -451,23 +539,31 @@ function StudentsContent() {
 
     setSaving(true);
     try {
-      const dupEmail = await getDocs(query(collection(db, "users"), where("email", "==", form.email.trim().toLowerCase())));
-      if (!dupEmail.empty) { toast("Email already in use.", "error"); return; }
-
-      const { initializeApp } = await import("firebase/app");
-      const { default: primaryApp } = await import("@/services/firebase/firebase");
-      const secondaryApp  = initializeApp(primaryApp.options, `student-create-${Date.now()}`);
-      const secondaryAuth = getAuth(secondaryApp);
+      const trimmedEmail = form.email.trim().toLowerCase();
+      if (trimmedEmail) {
+        const dupEmail = await getDocs(query(collection(db, "users"), where("email", "==", trimmedEmail)));
+        if (!dupEmail.empty) { toast("Email already in use.", "error"); return; }
+      }
 
       let uid: string;
-      try {
-        const cred = await createUserWithEmailAndPassword(
-          secondaryAuth, form.email.trim().toLowerCase(), form.admissionNo.trim()
-        );
-        uid = cred.user.uid;
-      } finally {
-        await fbSignOut(secondaryAuth).catch(() => {});
-        await deleteApp(secondaryApp).catch(() => {});
+      if (form.createLogin) {
+        const { initializeApp } = await import("firebase/app");
+        const { default: primaryApp } = await import("@/services/firebase/firebase");
+        const secondaryApp  = initializeApp(primaryApp.options, `student-create-${Date.now()}`);
+        const secondaryAuth = getAuth(secondaryApp);
+
+        try {
+          const cred = await createUserWithEmailAndPassword(
+            secondaryAuth, trimmedEmail, form.admissionNo.trim()
+          );
+          uid = cred.user.uid;
+        } finally {
+          await fbSignOut(secondaryAuth).catch(() => {});
+          await deleteApp(secondaryApp).catch(() => {});
+        }
+      } else {
+        // No login — just a Firestore record, no Firebase Auth account.
+        uid = doc(collection(db, "users")).id;
       }
 
       const seq       = await getNextStudentSeq();
@@ -475,7 +571,7 @@ function StudentsContent() {
 
       await setDoc(doc(db, "users", uid), {
         uid, name: form.name.trim(), displayName: form.name.trim(),
-        email:       form.email.trim().toLowerCase(),
+        email:       trimmedEmail,
         studentID,
         admissionNo: form.admissionNo.trim(),
         phone:       form.phone.trim(),
@@ -496,7 +592,9 @@ function StudentsContent() {
         studentStatus: form.status,   // mirror for type-system compatibility
         role:        "student",
         wing:        wing,
-        mustResetPassword: true,
+        createdVia:  "manual",
+        hasLogin:          form.createLogin,
+        mustResetPassword: form.createLogin,
         currentBalance: 0,
         deactivationRequestedBy: null,
         deactivationRequestedAt: null,
@@ -513,14 +611,19 @@ function StudentsContent() {
 
       logAction({ action: "STUDENT_CREATED", initiatorId: user?.uid ?? "", initiatorRole: role ?? "admin",
         approverId: null, approverRole: null, reason: null,
-        metadata: { uid, studentID, name: form.name.trim(), email: form.email.trim().toLowerCase() } });
+        metadata: { uid, studentID, name: form.name.trim(), email: trimmedEmail, hasLogin: form.createLogin } });
 
       setForm({ ...EMPTY_CREATE });
       setFormErrors({});
       setShowForm(false);
       setLoading(true);
       await fetchData();
-      toast(`Student created. ID: ${studentID}`, "success");
+      toast(
+        form.createLogin
+          ? `Student created. ID: ${studentID}`
+          : `Student added. ID: ${studentID} (no login created — record only).`,
+        "success"
+      );
     } catch (err) {
       toast(`Failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     } finally {
@@ -653,7 +756,7 @@ function StudentsContent() {
   }
 
   return (
-    <div style={p.page}>
+    <div className="mx-auto max-w-[794px]" style={p.page}>
       <ToastContainer toasts={toasts} onRemove={remove} />
 
       {/* ── Header ── */}
@@ -670,15 +773,21 @@ function StudentsContent() {
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           {requestStudents.length > 0 && (
-            <div style={p.deactivationBadge} onClick={() => setTab("requests")}>
+            <div style={p.deactivationBadge} onClick={() => setRequestsOpen(true)}>
               ⚠ Deactivation Requests ({requestStudents.length})
             </div>
           )}
           {breakRequestStudents.length > 0 && (
             <div style={{ ...p.deactivationBadge, background: "#e0f2fe", color: "#0369a1", borderColor: "#7dd3fc" }}
-              onClick={() => setTab("break_requests")}>
+              onClick={() => setBreakRequestsOpen(true)}>
               ☕ Break Requests ({breakRequestStudents.length})
             </div>
+          )}
+          {isAdmin && (
+            <button onClick={() => setShowAddCenter(true)}
+              style={{ ...p.addBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
+              + Add Center
+            </button>
           )}
           {(isAdmin || isTeacher) && (
             <button onClick={() => { setFormErrors({}); setEditTarget(null); setShowForm(true); }} style={p.addBtn}>
@@ -694,7 +803,12 @@ function StudentsContent() {
         centerOptions={centerOptions}
         open={insightsOpen}
         onToggle={toggleInsights}
-        onPickStatus={setTab}
+        onPickStatus={key => {
+          if (key === "break_requests") setBreakRequestsOpen(true);
+          else if (key === "requests") setRequestsOpen(true);
+          else if (key === "on_break") setTab("inactive");
+          else setTab(key);
+        }}
       />
 
       {/* ── Filter Bar ── */}
@@ -753,28 +867,10 @@ function StudentsContent() {
 
       {/* ── Tabs ── */}
       <div style={p.tabs}>
-        {(["active", "requests", "break_requests", "on_break", "inactive"] as StudentTab[]).map(t => (
+        {(["active", "inactive"] as StudentTab[]).map(t => (
           <button key={t} onClick={() => setTab(t)}
             style={{ ...p.tab, ...(tab === t ? p.tabActive : {}) }}>
-            {t === "active" ? `Active (${activeStudents.length})`
-              : t === "requests" ? (
-                <span>
-                  Deactivation
-                  {requestStudents.length > 0 && (
-                    <span style={p.tabBadge}>{requestStudents.length}</span>
-                  )}
-                </span>
-              )
-              : t === "break_requests" ? (
-                <span>
-                  Break Requests
-                  {breakRequestStudents.length > 0 && (
-                    <span style={{ ...p.tabBadge, background: "#0369a1" }}>{breakRequestStudents.length}</span>
-                  )}
-                </span>
-              )
-              : t === "on_break" ? `On Break (${onBreakStudents.length})`
-              : `Inactive (${inactiveStudents.length})`}
+            {t === "active" ? `Active (${activeStudents.length})` : `Inactive (${inactiveStudents.length})`}
           </button>
         ))}
       </div>
@@ -787,30 +883,25 @@ function StudentsContent() {
           <EmptyState icon="👥" title="No students found"
             hint={search ? `No results for "${search}"` : "Try adjusting your filters"} />
         </div>
-      ) : tab === "requests" ? (
-        <RequestsPanel
-          requests={filtered}
-          centerMap={centerMap}
-          onApprove={approveDeactivation}
-          onReject={rejectDeactivation}
-        />
-      ) : tab === "break_requests" ? (
-        <BreakRequestsPanel
-          requests={filtered}
-          centerMap={centerMap}
-          onApprove={(s, startDate) => approveBreak(s, startDate)}
-          onReject={rejectBreak}
-        />
-      ) : tab === "on_break" ? (
-        <OnBreakPanel
-          students={filtered}
-          centerMap={centerMap}
-          onEndBreak={endBreak}
-          isAdmin={isAdmin}
-        />
-      ) : listView === "table" ? (
+      ) : (
+        <div>
+          {/* On-break students keep their dedicated End Break action, shown
+              above the rest of the Inactive list. */}
+          {tab === "inactive" && filteredOnBreak.length > 0 && (
+            <div style={{ marginBottom: filteredRest.length > 0 ? 24 : 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#0369a1", letterSpacing: 0.5, textTransform: "uppercase" as const, marginBottom: 14, paddingBottom: 6, borderBottom: "2px solid #e0f2fe" }}>
+                ☕ On Break
+              </div>
+              <OnBreakPanel
+                students={filteredOnBreak}
+                onEndBreak={endBreak}
+                isAdmin={isAdmin}
+              />
+            </div>
+          )}
+          {filteredRest.length === 0 ? null : listView === "table" ? (
         <StudentTableView
-          students={filtered}
+          students={filteredRest}
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={toggleSort}
@@ -841,7 +932,7 @@ function StudentsContent() {
                       {group.students.length}
                     </span>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
+                  <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
                     {group.students.map(s => (
                       <StudentCard key={s.id} student={s} onClick={() => router.push(`/dashboard/students/${s.id}`)} />
                     ))}
@@ -866,7 +957,7 @@ function StudentsContent() {
                       {group.students.length}
                     </span>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
+                  <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
                     {group.students.map(s => (
                       <StudentCard key={s.id} student={s} onClick={() => router.push(`/dashboard/students/${s.id}`)} />
                     ))}
@@ -874,6 +965,8 @@ function StudentsContent() {
                 </div>
               ))}
             </>
+          )}
+        </div>
           )}
         </div>
       )}
@@ -891,6 +984,14 @@ function StudentsContent() {
         onClose={() => { setShowForm(false); setFormErrors({}); }}
         onSubmit={handleCreate}
       />
+
+      {/* ── Add Center modal ── */}
+      {showAddCenter && (
+        <AddCenterModal
+          onClose={() => setShowAddCenter(false)}
+          onCreated={() => fetchData()}
+        />
+      )}
 
       {/* ── Edit Modal ── */}
       {editTarget && (
@@ -980,27 +1081,76 @@ function StudentsContent() {
           isAdmin={isAdmin}
         />
       )}
+
+      {/* ── Deactivation Requests overlay ── */}
+      {requestsOpen && (
+        <div style={modal.overlay} onClick={() => setRequestsOpen(false)}>
+          <div style={modal.box} onClick={e => e.stopPropagation()}>
+            <div style={modal.header}>
+              <div>
+                <div style={modal.title}>Deactivation Requests</div>
+                <div style={modal.subtitle}>Pending admin approval — students stay Active until resolved.</div>
+              </div>
+              <button onClick={() => setRequestsOpen(false)} style={modal.closeBtn}>✕</button>
+            </div>
+            <div style={modal.body}>
+              <RequestsPanel
+                requests={requestStudents}
+                onApprove={s => { approveDeactivation(s); }}
+                onReject={s => { rejectDeactivation(s); }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Break Requests overlay ── */}
+      {breakRequestsOpen && (
+        <div style={modal.overlay} onClick={() => setBreakRequestsOpen(false)}>
+          <div style={modal.box} onClick={e => e.stopPropagation()}>
+            <div style={modal.header}>
+              <div>
+                <div style={modal.title}>Break Requests</div>
+                <div style={modal.subtitle}>Pending admin approval — students stay Active until resolved.</div>
+              </div>
+              <button onClick={() => setBreakRequestsOpen(false)} style={modal.closeBtn}>✕</button>
+            </div>
+            <div style={modal.body}>
+              <BreakRequestsPanel
+                requests={breakRequestStudents}
+                onApprove={(s, startDate) => approveBreak(s, startDate)}
+                onReject={s => rejectBreak(s)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── Student Row ───────────────────────────────────────────────────────────────
 
-function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
+function StudentRow({ student: s, index, isAdmin, isTeacher, expanded, onToggleExpand, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
   student: StudentRow; index: number; isAdmin: boolean; isTeacher: boolean;
+  expanded: boolean; onToggleExpand: () => void;
   onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
   onClearHistory?: () => void; onDelete?: () => void;
 }) {
   const [hover, setHover] = useState(false);
-  const rowBg = hover ? "#f0f4ff" : index % 2 === 0 ? "#fff" : "#fafafa";
+  const rowBg = expanded ? "#eef2ff" : hover ? "#f0f4ff" : index % 2 === 0 ? "#fff" : "#fafafa";
+  const ellipsis: React.CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const };
   return (
-    <tr style={{ background: rowBg, transition: "background 0.12s" }}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+    <>
+    <tr style={{ background: rowBg, transition: "background 0.12s", cursor: "pointer" }}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      onClick={onToggleExpand}>
+      <td style={{ ...p.td, textAlign: "center" as const }}><span style={p.expandChevron}>{expanded ? "▾" : "▸"}</span></td>
       <td style={p.td}><span style={p.idChip}>{s.studentID}</span></td>
-      <td style={{ ...p.td, fontWeight: 600, color: "#111827", minWidth: 130 }}>{s.name}</td>
-      <td style={{ ...p.td, fontSize: 12, color: "#6b7280", minWidth: 160 }}>{s.email}</td>
+      <td style={{ ...p.td, ...ellipsis, fontWeight: 600, color: "#111827", maxWidth: 100 }} title={s.name}>{s.name}</td>
+      <td style={{ ...p.td, ...ellipsis, fontSize: 11, color: "#6b7280", maxWidth: 110 }} title={s.email}>{s.email}</td>
       <td style={p.td}><span style={p.admChip}>{s.admissionNo}</span></td>
-      <td style={{ ...p.td, minWidth: 110 }}>{s.centerName}</td>
+      <td style={{ ...p.td, ...ellipsis, maxWidth: 80 }} title={s.centerName}>{s.centerName}</td>
       <td style={p.td}>
         <span style={{
           ...p.badge,
@@ -1011,19 +1161,19 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
           {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
         </span>
         {s.classType === "personal" && (
-          <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 3, lineHeight: 1.5, ...ellipsis, maxWidth: 100 }}>
             {s.assignedTeacherName
               ? `🎓 ${s.assignedTeacherName}`
               : <span style={{ color: "#d97706" }}>⚠ Unassigned</span>}
             {s.classDays.length > 0 && (
-              <div>{s.classDays.join(", ")}{s.classTime ? ` · ${s.classTime}` : ""}</div>
+              <div style={ellipsis}>{s.classDays.join(", ")}{s.classTime ? ` · ${s.classTime}` : ""}</div>
             )}
           </div>
         )}
       </td>
       <td style={p.td}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "#111827" }}>{s.instrument}</div>
-        <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{s.course}</div>
+        <div style={{ fontSize: 11, fontWeight: 600, color: "#111827", ...ellipsis, maxWidth: 100 }} title={s.instrument}>{s.instrument}</div>
+        <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2, ...ellipsis, maxWidth: 100 }} title={s.course}>{s.course}</div>
       </td>
       <td style={p.td}>
         <span style={{
@@ -1039,7 +1189,7 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
         <div style={{ marginTop: 3 }}>
           <span style={{
             ...p.badge,
-            fontSize: 10,
+            fontSize: 9,
             ...(s.billingMode === "prepay"
               ? { background: "#fef3c7", color: "#92400e" }
               : { background: "#f3f4f6", color: "#374151" }),
@@ -1052,47 +1202,114 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, onEdit, onRequestDe
         {fmtINR(s.balance)}
       </td>
       <td style={p.td}>
-        <span style={{ ...p.badge, ...(STATUS_BADGE[s.status] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
+        <span style={{ ...p.badge, ...ellipsis, maxWidth: 76, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
           {s.status.replace(/_/g, " ")}
         </span>
       </td>
-      <td style={{ ...p.td, minWidth: 240 }}>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const }}>
-          {(isAdmin || isTeacher) && (
-            <button onClick={onEdit} style={p.editBtn}>✏ Edit</button>
-          )}
-          {(isAdmin || isTeacher) && s.status === "active" && (
-            <button onClick={onRequestDeactivation} style={p.deactBtn}>Deactivate</button>
-          )}
-          {(isAdmin || isTeacher) && s.status === "active" && (
-            <button onClick={onRequestBreak}
-              style={{ ...p.editBtn, background: "#e0f2fe", color: "#0369a1", borderColor: "#7dd3fc" }}>
-              ☕ Break
-            </button>
-          )}
-          <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.syllabusBtn}>
-            Syllabus
-          </Link>
-          {onClearHistory && (
-            <button onClick={onClearHistory} style={p.clearBtn} title="Clear student history">
-              🗑 History
-            </button>
-          )}
-          {onDelete && (
-            <button onClick={onDelete} style={p.deleteBtn} title="Delete student permanently">
-              ✕ Delete
-            </button>
-          )}
-        </div>
+      <td style={{ ...p.td, textAlign: "right" as const }}>
+        <StudentActionsMenu
+          student={s} isAdmin={isAdmin} isTeacher={isTeacher}
+          onEdit={onEdit} onRequestDeactivation={onRequestDeactivation} onRequestBreak={onRequestBreak}
+          onClearHistory={onClearHistory} onDelete={onDelete}
+        />
       </td>
     </tr>
+    {expanded && (
+      <tr>
+        <td colSpan={12} style={p.tdDetail}>
+          <div style={p.detailGrid}>
+            <div>
+              <div style={p.detailLabel}>Email</div>
+              <div style={p.detailValue}>{s.email || "—"}</div>
+            </div>
+            <div>
+              <div style={p.detailLabel}>Phone</div>
+              <div style={p.detailValue}>{s.phone || "—"}</div>
+            </div>
+            <div>
+              <div style={p.detailLabel}>Enrolled</div>
+              <div style={p.detailValue}>{s.createdAt ? s.createdAt.slice(0, 10) : "—"}</div>
+            </div>
+            <div>
+              <div style={p.detailLabel}>Fee status</div>
+              <div style={p.detailValue}>
+                {s.balance > 0 ? `₹${s.balance.toLocaleString("en-IN")} due` : "Fully paid"}
+                {" · "}{s.billingMode === "prepay" ? "Prepay" : "Postpay"}
+                {" · "}{s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : `₹${s.monthlyFee}/mo`}
+              </div>
+            </div>
+            <div>
+              <div style={p.detailLabel}>Assigned centre</div>
+              <div style={p.detailValue}>{s.centerName || "—"}</div>
+            </div>
+            {s.classType === "personal" && (
+              <div>
+                <div style={p.detailLabel}>Teacher / schedule</div>
+                <div style={p.detailValue}>
+                  {s.assignedTeacherName ?? "Unassigned"}
+                  {s.classDays.length > 0 && ` · ${s.classDays.join(", ")}`}
+                  {s.classTime ? ` · ${s.classTime}` : ""}
+                </div>
+              </div>
+            )}
+          </div>
+        </td>
+      </tr>
+    )}
+    </>
+  );
+}
+
+// ─── Compact actions menu (Table view) ──────────────────────────────────────
+
+function StudentActionsMenu({ student: s, isAdmin, isTeacher, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
+  student: StudentRow; isAdmin: boolean; isTeacher: boolean;
+  onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
+  onClearHistory?: () => void; onDelete?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [open]);
+
+  return (
+    <div ref={menuRef} style={{ position: "relative" as const, display: "inline-block" }}>
+      <button onClick={e => { e.stopPropagation(); setOpen(v => !v); }} style={p.moreBtn} title="Actions" aria-label="Actions">⋮</button>
+      {open && (
+        <div style={{ ...p.menuPanel, bottom: "auto", top: "calc(100% + 4px)" }} onClick={e => e.stopPropagation()}>
+          {(isAdmin || isTeacher) && (
+            <button onClick={() => { setOpen(false); onEdit(); }} style={p.menuItem}>✏ Edit</button>
+          )}
+          {(isAdmin || isTeacher) && isActiveStatus(s.status) && (
+            <button onClick={() => { setOpen(false); onRequestDeactivation(); }} style={{ ...p.menuItem, ...p.menuItemDanger }}>Deactivate</button>
+          )}
+          {(isAdmin || isTeacher) && isActiveStatus(s.status) && (
+            <button onClick={() => { setOpen(false); onRequestBreak(); }} style={p.menuItem}>☕ Break</button>
+          )}
+          <Link href={`/dashboard/student-syllabus/${s.id}`} style={p.menuItem} onClick={() => setOpen(false)}>Syllabus</Link>
+          {onClearHistory && (
+            <button onClick={() => { setOpen(false); onClearHistory(); }} style={p.menuItem}>🗑 Clear History</button>
+          )}
+          {onDelete && (
+            <button onClick={() => { setOpen(false); onDelete(); }} style={{ ...p.menuItem, ...p.menuItemDanger }}>✕ Delete</button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
 // ─── Requests Panel ────────────────────────────────────────────────────────────
 
-function RequestsPanel({ requests, centerMap, onApprove, onReject }: {
-  requests: StudentRow[]; centerMap: Map<string, string>;
+function RequestsPanel({ requests, onApprove, onReject }: {
+  requests: StudentRow[];
   onApprove: (s: StudentRow) => void; onReject: (s: StudentRow) => void;
 }) {
   if (requests.length === 0) {
@@ -1113,7 +1330,7 @@ function RequestsPanel({ requests, centerMap, onApprove, onReject }: {
               <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
                 <span style={p.idChip}>{s.studentID}</span>
                 {" · "}
-                {centerMap.get(s.centerId) ?? s.centerId}
+                {s.centerName}
                 {" · "}
                 {s.course}
               </div>
@@ -1142,8 +1359,8 @@ function RequestsPanel({ requests, centerMap, onApprove, onReject }: {
 
 // ─── Break Requests Panel ─────────────────────────────────────────────────────
 
-function BreakRequestsPanel({ requests, centerMap, onApprove, onReject }: {
-  requests: StudentRow[]; centerMap: Map<string, string>;
+function BreakRequestsPanel({ requests, onApprove, onReject }: {
+  requests: StudentRow[];
   onApprove: (s: StudentRow, startDate: string) => void; onReject: (s: StudentRow) => void;
 }) {
   // Per-row break start date — defaults to today
@@ -1175,7 +1392,7 @@ function BreakRequestsPanel({ requests, centerMap, onApprove, onReject }: {
                 <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
                   <span style={p.idChip}>{s.studentID}</span>
                   {" · "}
-                  {centerMap.get(s.centerId) ?? s.centerId}
+                  {s.centerName}
                   {" · "}
                   {s.course}
                 </div>
@@ -1222,8 +1439,8 @@ function BreakRequestsPanel({ requests, centerMap, onApprove, onReject }: {
 
 // ─── On Break Panel ────────────────────────────────────────────────────────────
 
-function OnBreakPanel({ students, centerMap, onEndBreak, isAdmin }: {
-  students: StudentRow[]; centerMap: Map<string, string>;
+function OnBreakPanel({ students, onEndBreak, isAdmin }: {
+  students: StudentRow[];
   onEndBreak: (s: StudentRow) => void; isAdmin: boolean;
 }) {
   if (students.length === 0) {
@@ -1244,7 +1461,7 @@ function OnBreakPanel({ students, centerMap, onEndBreak, isAdmin }: {
               <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
                 <span style={p.idChip}>{s.studentID}</span>
                 {" · "}
-                {centerMap.get(s.centerId) ?? s.centerId}
+                {s.centerName}
                 {" · "}
                 {s.course}
               </div>
@@ -1872,7 +2089,7 @@ export function DeleteStudentModal({ student, onClose, onDeleted, currentUserUid
 function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: () => void }) {
   const [hover, setHover] = useState(false);
   const initials = s.name.split(" ").map(n => n[0] ?? "").join("").slice(0, 2).toUpperCase() || "?";
-  const statusStyle = STATUS_BADGE[s.status] ?? { background: "#f3f4f6", color: "#6b7280" };
+  const statusStyle = STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" };
   const isDue = s.balance > 0;
   return (
     <div
@@ -1880,32 +2097,31 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
+        display: "flex", alignItems: "center", gap: 14,
         background: "#fff",
         border: `1px solid ${hover ? "#a5b4fc" : "#e5e7eb"}`,
-        borderRadius: 12, padding: "14px 16px", cursor: "pointer",
-        boxShadow: hover ? "0 4px 16px rgba(79,70,229,0.12)" : "0 1px 3px rgba(0,0,0,0.05)",
+        borderRadius: 10, padding: "10px 16px", cursor: "pointer",
+        boxShadow: hover ? "0 4px 16px rgba(79,70,229,0.12)" : "0 1px 2px rgba(0,0,0,0.04)",
         transition: "box-shadow 0.15s, border-color 0.15s",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-        <div style={{
-          width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
-          background: "linear-gradient(135deg, #6d28d9, #4f46e5)",
-          color: "#fff", fontSize: 13, fontWeight: 700,
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          {initials}
-        </div>
-        <div style={{ overflow: "hidden" }}>
-          <div style={{ fontWeight: 600, fontSize: 13, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
-          <span style={p.idChip}>{s.studentID}</span>
-        </div>
+      <div style={{
+        width: 34, height: 34, borderRadius: "50%", flexShrink: 0,
+        background: "linear-gradient(135deg, #6d28d9, #4f46e5)",
+        color: "#fff", fontSize: 12, fontWeight: 700,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        {initials}
       </div>
-      <div style={{ fontSize: 12, color: "#374151", marginBottom: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <div style={{ flex: "1 1 170px", minWidth: 0 }}>
+        <div style={{ fontWeight: 600, fontSize: 13, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
+        <span style={p.idChip}>{s.studentID}</span>
+      </div>
+      <div style={{ flex: "1 1 160px", minWidth: 0, fontSize: 12, color: "#374151", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ fontWeight: 600 }}>{s.instrument}</span>
         {s.course ? <span style={{ color: "#6b7280" }}> · {s.course}</span> : null}
       </div>
-      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const, marginBottom: isDue ? 8 : 0 }}>
+      <div style={{ flex: "0 0 auto", display: "flex", gap: 5, flexWrap: "wrap" as const }}>
         {!isSchoolOfMusic(s.wing) && (
           <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>
             {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
@@ -1913,11 +2129,15 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
         )}
         <span style={{ ...p.badge, ...statusStyle }}>{s.status.replace(/_/g, " ")}</span>
       </div>
-      {isDue && (
-        <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", background: "#fef2f2", padding: "3px 8px", borderRadius: 4, display: "inline-block" }}>
-          Due {fmtINR(s.balance)}
-        </div>
-      )}
+      <div style={{ flex: "0 0 96px", textAlign: "right" as const }}>
+        {isDue ? (
+          <span style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", background: "#fef2f2", padding: "3px 8px", borderRadius: 4, display: "inline-block", whiteSpace: "nowrap" }}>
+            Due {fmtINR(s.balance)}
+          </span>
+        ) : (
+          <span style={{ fontSize: 11, color: "#9ca3af" }}>—</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -1994,7 +2214,7 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
   centerOptions: { id: string; name: string; monthlyFee?: number }[];
   open: boolean;
   onToggle: () => void;
-  onPickStatus: (tab: StudentTab) => void;
+  onPickStatus: (key: StatusPickKey) => void;
 }) {
   const [att, setAtt] = useState<AttAgg | "error" | null>(null);
   const [attLoading, setAttLoading] = useState(false);
@@ -2058,7 +2278,7 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
 
   const stats = useMemo(() => {
     const total = students.length;
-    const active = students.filter(s => s.status === "active").length;
+    const active = students.filter(s => isActiveStatus(s.status)).length;
     const owing = students.filter(s => s.balance > 0);
     const dues = owing.reduce((a, s) => a + s.balance, 0);
     const ym = new Date().toISOString().slice(0, 7);
@@ -2078,11 +2298,11 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
       rows.map(r => ({ ...r, hint: `${r.value} · ${total ? Math.round((r.value / total) * 100) : 0}%` }));
 
     const statusRows = ([
-      { label: "Active", key: "active" as StudentTab, value: active, color: "#16a34a" },
-      { label: "On break", key: "on_break" as StudentTab, value: students.filter(s => s.status === "on_break").length, color: "#0284c7" },
-      { label: "Break req.", key: "break_requests" as StudentTab, value: students.filter(s => s.status === "break_requested").length, color: "#0369a1" },
-      { label: "Deact. req.", key: "requests" as StudentTab, value: students.filter(s => s.status === "deactivation_requested").length, color: "#d97706" },
-      { label: "Inactive", key: "inactive" as StudentTab, value: students.filter(s => s.status === "inactive").length, color: "#6b7280" },
+      { label: "Active", key: "active" as StatusPickKey, value: active, color: "#16a34a" },
+      { label: "On break", key: "on_break" as StatusPickKey, value: students.filter(s => s.status === "on_break").length, color: "#0284c7" },
+      { label: "Break req.", key: "break_requests" as StatusPickKey, value: students.filter(s => s.status === "break_requested").length, color: "#0369a1" },
+      { label: "Deact. req.", key: "requests" as StatusPickKey, value: students.filter(s => s.status === "deactivation_requested").length, color: "#d97706" },
+      { label: "Inactive", key: "inactive" as StatusPickKey, value: students.filter(s => isInactiveStatus(s.status)).length, color: "#6b7280" },
     ]).filter(r => r.value > 0);
 
     const months: { label: string; value: number }[] = [];
@@ -2226,7 +2446,9 @@ function AddStudentDrawer({
 
         <div style={{ padding: "16px 20px", overflowY: "auto" as const, flex: 1 }}>
           <div style={p.hint}>
-            🔐 Login: <strong>email</strong> as username · <strong>admission no.</strong> as password · Student ID is assigned automatically
+            {form.createLogin
+              ? <>🔐 Login: <strong>email</strong> as username · <strong>admission no.</strong> as password · Student ID is assigned automatically</>
+              : <>Most students don't need to sign in — this student is added as a record only. Student ID is assigned automatically.</>}
           </div>
 
           <div style={modal.sectionLabel}>Identity</div>
@@ -2235,11 +2457,19 @@ function AddStudentDrawer({
               <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Arjun Sharma" style={errInput("name")} />
               <DrawerErr msg={errors.name} />
             </Field>
-            <Field label="Email (login username) *">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#374151", cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={form.createLogin}
+                onChange={e => setForm(f => ({ ...f, createLogin: e.target.checked }))}
+              />
+              Create a login for this student (email + password sign-in)
+            </label>
+            <Field label={form.createLogin ? "Email (login username) *" : "Email (optional)"}>
               <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="e.g. arjun@gmail.com" style={errInput("email")} />
               <DrawerErr msg={errors.email} />
             </Field>
-            <Field label="Admission No. (initial password) *">
+            <Field label={form.createLogin ? "Admission No. (initial password) *" : "Admission No."}>
               <input value={form.admissionNo} onChange={e => setForm(f => ({ ...f, admissionNo: e.target.value }))} placeholder="e.g. ADM-2026-001" style={errInput("admissionNo")} />
               <DrawerErr msg={errors.admissionNo} />
             </Field>
@@ -2389,6 +2619,11 @@ function StudentTableView({
     return arr;
   }, [students, sortKey, sortDir]);
 
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  function toggleExpand(id: string) {
+    setExpandedId(prev => (prev === id ? null : id));
+  }
+
   const arrow = (k: typeof sortKey) => (sortKey === k ? (sortDir === 1 ? " ▲" : " ▼") : "");
   const sortableTh = (k: typeof sortKey, label: string) => (
     <th style={{ ...p.th, cursor: "pointer", userSelect: "none" as const }} onClick={() => onSort(k)}>{label}{arrow(k)}</th>
@@ -2399,6 +2634,7 @@ function StudentTableView({
       <table style={p.table}>
         <thead>
           <tr>
+            <th style={{ ...p.th, width: 20 }}></th>
             <th style={p.th}>ID</th>
             {sortableTh("name", "Name")}
             <th style={p.th}>Email</th>
@@ -2420,6 +2656,8 @@ function StudentTableView({
               index={i}
               isAdmin={isAdmin}
               isTeacher={isTeacher}
+              expanded={expandedId === s.id}
+              onToggleExpand={() => toggleExpand(s.id)}
               onEdit={() => onEdit(s)}
               onRequestDeactivation={() => onRequestDeactivation(s)}
               onRequestBreak={() => onRequestBreak(s)}
@@ -2839,17 +3077,22 @@ export const p: Record<string, React.CSSProperties> = {
   },
 
   tableWrap: { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "auto", boxShadow: "0 1px 4px rgba(0,0,0,0.05)" },
-  table:     { width: "100%", minWidth: 1200, borderCollapse: "collapse" as const },
+  table:     { width: "100%", minWidth: 720, borderCollapse: "collapse" as const },
   th: {
-    padding: "11px 14px", textAlign: "left" as const, fontSize: 11, fontWeight: 700,
-    color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.04em",
+    padding: "6px 6px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 700,
+    color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.03em",
     borderBottom: "1px solid #e5e7eb", whiteSpace: "nowrap" as const,
   },
-  td: { padding: "11px 14px", fontSize: 13, color: "#111827", borderBottom: "1px solid #f3f4f6" },
+  td: { padding: "6px 6px", fontSize: 11.5, color: "#111827", borderBottom: "1px solid #f3f4f6" },
+  expandChevron: { display: "inline-block", fontSize: 11, color: "#9ca3af", width: 12, textAlign: "center" as const },
+  tdDetail: { padding: "14px 20px", background: "#f8fafc", borderBottom: "1px solid #e5e7eb", cursor: "default" as const },
+  detailGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "12px 24px" },
+  detailLabel: { fontSize: 9.5, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.04em", color: "#9ca3af", marginBottom: 3 },
+  detailValue: { fontSize: 12.5, color: "#111827" },
 
-  badge: { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" as const },
-  idChip:  { display: "inline-block", fontFamily: "monospace", fontSize: 11, fontWeight: 700, background: "#dbeafe", color: "#1e40af", padding: "2px 7px", borderRadius: 4 },
-  admChip: { display: "inline-block", fontFamily: "monospace", fontSize: 11, fontWeight: 600, background: "#fef9c3", color: "#92400e", padding: "2px 7px", borderRadius: 4 },
+  badge: { display: "inline-block", padding: "1px 6px", borderRadius: 99, fontSize: 9.5, fontWeight: 600, whiteSpace: "nowrap" as const },
+  idChip:  { display: "inline-block", fontFamily: "monospace", fontSize: 9.5, fontWeight: 700, background: "#dbeafe", color: "#1e40af", padding: "1px 5px", borderRadius: 4 },
+  admChip: { display: "inline-block", fontFamily: "monospace", fontSize: 9.5, fontWeight: 600, background: "#fef9c3", color: "#92400e", padding: "1px 5px", borderRadius: 4 },
 
   editBtn:     { background: "#fef3c7", color: "#92400e", border: "1px solid #fde68a", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
   deactBtn:    { background: "#fee2e2", color: "#dc2626", border: "1px solid #fca5a5", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
@@ -2857,7 +3100,7 @@ export const p: Record<string, React.CSSProperties> = {
   clearBtn:    { background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
   deleteBtn:   { background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
 
-  moreBtn:     { background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 8, width: 32, height: 32, fontSize: 16, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 },
+  moreBtn:     { background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 6, width: 24, height: 24, fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 },
   menuPanel:   { position: "absolute" as const, bottom: "calc(100% + 6px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.16)", minWidth: 180, overflow: "hidden", zIndex: 10 },
   menuItem:    { display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 14px", fontSize: 13, fontWeight: 500, color: "#111827", background: "none", border: "none", textAlign: "left" as const, cursor: "pointer", textDecoration: "none", boxSizing: "border-box" as const },
   menuItemDanger: { color: "#dc2626" },
