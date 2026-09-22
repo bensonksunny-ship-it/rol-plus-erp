@@ -4,7 +4,7 @@
 // of every School-of-Music student, in admission order. Read-only, plus an
 // Excel/CSV bulk import.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   collection, getDocs, onSnapshot, query, where, writeBatch, doc, updateDoc, serverTimestamp, Timestamp,
 } from "firebase/firestore";
@@ -224,6 +224,16 @@ function RegistryContent() {
   const [showImport, setShowImport] = useState(false);
   const [pastedText, setPastedText] = useState("");
 
+  // ── Row expansion (accordion detail drawer) ─────────────────────────────
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  function toggleExpanded(uid: string) {
+    setExpandedRows(prev => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid); else next.add(uid);
+      return next;
+    });
+  }
+
   // ── Bulk delete ──────────────────────────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState<null | "selected" | "all">(null);
@@ -439,7 +449,7 @@ function RegistryContent() {
   }
 
   return (
-    <div>
+    <div className="mx-auto max-w-[794px]">
       <div style={s.headerRow}>
         <div>
           <h1 style={s.title}>Registry</h1>
@@ -514,33 +524,31 @@ function RegistryContent() {
                         onChange={toggleAllVisible} style={{ cursor: "pointer" }} />
                     </th>
                   )}
-                  {["SL", "Name", "Date Of Admission", "Centre", "Batch", "Phone number", "Admission number", "Course", "Status", "Screening grade"]
-                    .map(h => <th key={h} style={s.th}>{h}</th>)}
+                  {["SL", "Name", "Status"].map(h => <th key={h} style={s.th}>{h}</th>)}
+                  <th style={{ ...s.th, width: 34 }} />
                 </tr>
               </thead>
               <tbody>
                 {rows.length === 0 && (
-                  <tr><td colSpan={canImport ? 11 : 10} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "28px 0" }}>
+                  <tr><td colSpan={canImport ? 5 : 4} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "28px 0" }}>
                     {entries.length === 0 ? "No students on the register yet." : "No matches."}
                   </td></tr>
                 )}
-                {rows.map((e, i) => (
-                  <tr key={e.uid} style={{ ...s.tr, ...(selected.has(e.uid) ? { background: "#fef2f2" } : {}) }}>
+                {rows.map((e, i) => {
+                  const open = expandedRows.has(e.uid);
+                  return (
+                  <Fragment key={e.uid}>
+                  <tr onClick={() => toggleExpanded(e.uid)}
+                    style={{ ...s.tr, cursor: "pointer", ...(selected.has(e.uid) ? { background: "#fef2f2" } : {}) }}>
                     {canImport && (
-                      <td style={s.td}>
+                      <td style={s.td} onClick={ev => ev.stopPropagation()}>
                         <input type="checkbox" checked={selected.has(e.uid)}
                           onChange={() => toggleRow(e.uid)} style={{ cursor: "pointer" }} />
                       </td>
                     )}
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{i + 1}</td>
                     <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>{e.name}</td>
-                    <td style={s.td}>{fmtDate(e.admittedOn)}</td>
-                    <td style={s.td}>{e.centre}</td>
-                    <td style={s.td}>{e.batch}</td>
-                    <td style={s.td}>{e.phone}</td>
-                    <td style={{ ...s.td, fontSize: 15, fontWeight: 700, color: "var(--color-text-primary)", whiteSpace: "nowrap" }}>{e.admissionNo}</td>
-                    <td style={s.td}>{e.course}</td>
-                    <td style={s.td}>
+                    <td style={s.td} onClick={ev => ev.stopPropagation()}>
                       {(() => {
                         const displayStatus = toRegistryStatus(e.status);
                         return canImport ? (
@@ -563,14 +571,36 @@ function RegistryContent() {
                         );
                       })()}
                     </td>
-                    <td style={s.td}>{e.screening}</td>
+                    <td style={{ ...s.td, color: "var(--color-text-muted)", textAlign: "center" }}>
+                      <span style={{ display: "inline-block", transition: "transform 0.15s", transform: open ? "rotate(90deg)" : "none" }}>▶</span>
+                    </td>
                   </tr>
-                ))}
+                  {open && (
+                    <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
+                      <td colSpan={canImport ? 5 : 4} style={{ padding: 0, background: "var(--color-surface-2)" }}>
+                        <div style={{
+                          display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                          gap: "10px 24px", padding: "14px 20px",
+                        }}>
+                          <DetailField label="Date of Admission" value={fmtDate(e.admittedOn)} />
+                          <DetailField label="Centre" value={e.centre} />
+                          <DetailField label="Batch" value={e.batch} />
+                          <DetailField label="Phone Number" value={e.phone} />
+                          <DetailField label="Admission Number" value={e.admissionNo} emphasize />
+                          <DetailField label="Course" value={e.course} />
+                          <DetailField label="Screening Grade" value={e.screening} />
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  );
+                })}
                 {canImport && (
                   <tr style={s.pasteTr}>
                     <td style={s.td} />
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>＋</td>
-                    <td colSpan={9} style={{ padding: 0 }}>
+                    <td colSpan={3} style={{ padding: 0 }}>
                       <input
                         style={s.pasteCell}
                         value={pastedText}
@@ -672,6 +702,19 @@ interface PreviewRow {
   screening:   string;
   error:       string | null;
   duplicate:   boolean;
+}
+
+function DetailField({ label, value, emphasize }: { label: string; value: string; emphasize?: boolean }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)", marginBottom: 2 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 13, color: "var(--color-text-primary)", fontWeight: emphasize ? 700 : 400 }}>
+        {value || "—"}
+      </div>
+    </div>
+  );
 }
 
 function ImportModal({

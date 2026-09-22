@@ -10,7 +10,6 @@ import { useWing } from "@/hooks/useWing";
 import { inWing } from "@/lib/wing";
 import { getCached, setCached } from "@/lib/dataCache";
 import { getStaffUsers, setParentChildren } from "@/services/staff/staff.service";
-import { TeachersContent } from "@/app/dashboard/teachers/manager";
 import type { User } from "@/types";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -28,39 +27,8 @@ export default function StaffPage() {
       allowedRoles={[ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}
       requiredCapability={CAPABILITIES.STAFF_VIEW}
     >
-      <StaffShell />
+      <StaffContent />
     </ProtectedRoute>
-  );
-}
-
-type StaffTab = "staff" | "teachers";
-
-function StaffShell() {
-  const [tab, setTab] = useState<StaffTab>("staff");
-
-  const tabs: { key: StaffTab; label: string; icon: string }[] = [
-    { key: "staff", label: "Staff", icon: "🪪" },
-    { key: "teachers", label: "Teachers", icon: "👥" },
-  ];
-
-  return (
-    <div>
-      <div style={s.shellTabs}>
-        {tabs.map(t => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            style={{ ...s.shellTab, ...(t.key === tab ? s.shellTabActive : {}) }}
-          >
-            <span>{t.icon}</span>
-            <span>{t.label}</span>
-          </button>
-        ))}
-      </div>
-
-      {tab === "staff" && <StaffContent />}
-      {tab === "teachers" && <TeachersContent />}
-    </div>
   );
 }
 
@@ -129,7 +97,8 @@ function StaffContent() {
       </div>
 
       <p style={{ fontSize: 12, color: "var(--color-text-muted)", marginTop: -12, marginBottom: 20 }}>
-        Leadership and parent accounts are created from the <strong>Users</strong> page.
+        Leadership and parent accounts are created from the <strong>Users</strong> page. Centre assignment and
+        performance tracking for teachers live on <strong>Enrollments → Teachers</strong>.
       </p>
 
       <div style={s.card}>
@@ -203,22 +172,11 @@ function ChildPicker({ options, value, onChange, compact }: {
 }
 
 const s: Record<string, React.CSSProperties> = {
-  shellTabs: { display: "flex", gap: 8, marginBottom: 24, flexWrap: "wrap" },
-  shellTab: { display: "flex", alignItems: "center", gap: 8, padding: "9px 16px", borderRadius: 10, border: "1px solid var(--color-border)", background: "var(--color-surface-2)", color: "var(--color-text-secondary)", fontSize: 13, fontWeight: 600, cursor: "pointer" },
-  shellTabActive: { background: "#ede9fe", borderColor: "#4f46e5", color: "#4338ca" },
   headerRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 },
   title: { fontSize: 22, fontWeight: 700, color: "var(--color-text-primary)", margin: 0 },
   subtitle: { fontSize: 13, color: "var(--color-text-secondary)", marginTop: 4 },
-  btnPrimary: { padding: "9px 18px", background: "var(--color-accent)", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" },
-  btnGhost: { padding: "9px 18px", background: "transparent", color: "var(--color-text-secondary)", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer" },
-  bannerOk: { borderRadius: 8, padding: "10px 16px", fontSize: 13, marginBottom: 16, background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" },
-  bannerErr: { borderRadius: 8, padding: "10px 16px", fontSize: 13, marginBottom: 16, background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" },
   card: { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, padding: 24, marginBottom: 24 },
   cardTitle: { fontSize: 14, fontWeight: 600, color: "var(--color-text-primary)", marginBottom: 20, marginTop: 0 },
-  grid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 20px", marginBottom: 16 },
-  field: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 },
-  label: { fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" },
-  input: { background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "9px 12px", fontSize: 14, color: "var(--color-text-primary)", outline: "none", width: "100%", boxSizing: "border-box" },
   table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
   th: { textAlign: "left", padding: "8px 12px", fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-secondary)", borderBottom: "1px solid var(--color-border)", background: "var(--color-bg)" },
   tr: { borderBottom: "1px solid var(--color-border)" },

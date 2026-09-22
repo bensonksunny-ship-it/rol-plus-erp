@@ -12,8 +12,9 @@ import { CAPABILITIES } from "@/config/permissions";
 import { useAuth } from "@/hooks/useAuth";
 import CentersPage from "../centers/_shared";
 import StudentsPage from "../students/_shared";
+import { TeachersContent } from "../teachers/manager";
 
-type View = "centers" | "students";
+type View = "centers" | "students" | "teachers";
 
 export default function EnrollmentsPage() {
   return (
@@ -40,6 +41,9 @@ function Enrollments() {
     }
     if (can(CAPABILITIES.STUDENTS_MANAGE) || can(CAPABILITIES.STUDENTS_VIEW_ALL)) {
       list.push({ key: "students", label: "Students", icon: "🎓" });
+    }
+    if (can(CAPABILITIES.STAFF_VIEW)) {
+      list.push({ key: "teachers", label: "Teachers", icon: "👥" });
     }
     return list;
   }, [can]);
@@ -74,7 +78,7 @@ function Enrollments() {
       </div>
 
       {/* Each half keeps its own header, data loading and "+ Add …" action. */}
-      {view === "centers" ? <CentersPage /> : <StudentsPage />}
+      {view === "centers" ? <CentersPage /> : view === "students" ? <StudentsPage /> : <TeachersContent />}
     </div>
   );
 }

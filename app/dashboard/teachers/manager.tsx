@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef, Fragment, type FormEvent } from "react";
 import { getDocs, collection, query, where, doc, updateDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
-import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
@@ -18,16 +17,6 @@ import {
 import type { TeacherUser, UserStatus } from "@/types";
 import type { Center } from "@/types";
 import { deleteUser as deleteUserRecord } from "@/services/admin/delete.service";
-
-// ─── Page ─────────────────────────────────────────────────────────────────────
-
-export default function TeachersPage() {
-  return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
-      <TeachersContent />
-    </ProtectedRoute>
-  );
-}
 
 type Tab = "teachers" | "performance";
 
