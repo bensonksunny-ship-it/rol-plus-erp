@@ -50,6 +50,7 @@ export async function createCenter(data: CreateCenterInput): Promise<Center> {
     status:      data.status,
     wing:        data.wing ?? DEFAULT_WING,
     monthlyFee:  data.monthlyFee ?? 0,
+    batches:     data.batches ?? [],
     createdAt:   serverTimestamp(),
     updatedAt:   serverTimestamp(),
   });
@@ -121,6 +122,7 @@ export async function updateCenter(id: string, data: UpdateCenterInput): Promise
   if (data.studentUids !== undefined) payload.studentUids = data.studentUids;
   if (data.status      !== undefined) payload.status      = data.status;
   if (data.monthlyFee  !== undefined) payload.monthlyFee  = data.monthlyFee;
+  if (data.batches     !== undefined) payload.batches     = data.batches;
 
   await updateDoc(ref, payload);
 

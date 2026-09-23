@@ -517,6 +517,9 @@ function CommandCenter() {
           <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Attendance This Month</div>
           <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{monthLabel(thisMonth)} · all student records</div>
         </div>
+        {monthlyTotals.total === 0 && (
+          <div style={{ fontSize: 12.5, color: "#9ca3af", marginBottom: 12 }}>No attendance recorded for this month yet.</div>
+        )}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
           {[
             { label: "Present",   value: monthlyTotals.present,   color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
@@ -1311,6 +1314,12 @@ function WeeklyClassBreakdown() {
         </div>
       </div>
 
+      {!loading && class1.total === 0 && class2.total === 0 && (
+        <div style={{ fontSize: 12.5, color: "#9ca3af", marginBottom: 12 }}>
+          No class sessions scheduled for this week.
+        </div>
+      )}
+
       {[{ title: "Class-1", data: class1, classSlot: 1 as const }, { title: "Class-2", data: class2, classSlot: 2 as const }].map(({ title, data, classSlot }, i) => (
         <div key={title} style={{ marginTop: i === 0 ? 0 : 14 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 8 }}>{title}</div>
@@ -1966,6 +1975,9 @@ function AdminDashboard() {
           <span style={adm.secTitle}>Attendance This Month</span>
           <span style={adm.secSub}>{monthLabel(thisMonth)} · all student records</span>
         </div>
+        {!loading && monthlyTotals.total === 0 && (
+          <div style={adm.emptyRow}>No attendance recorded for this month yet.</div>
+        )}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
           {[
             { label: "Present",   value: monthlyTotals.present,   color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },

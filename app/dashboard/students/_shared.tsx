@@ -30,7 +30,7 @@ import {
 } from "@/services/admin/delete.service";
 import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
-import { AddCenterModal } from "../centers/_shared";
+import type { CenterBatch } from "@/types";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -43,6 +43,7 @@ export interface StudentRow {
   phone:       string;
   centerId:    string;
   centerName:  string;
+  batchId:     string | null;
   wing:        string;   // "rol_plus" | "school_of_music"
   instrument:  string;
   course:      string;
@@ -66,6 +67,13 @@ export interface StudentRow {
   createdAt: string;   // ISO date — joining date, "" if unknown
 }
 
+export interface CenterOption {
+  id: string;
+  name: string;
+  monthlyFee?: number;
+  batches: CenterBatch[];
+}
+
 type StudentTab = "active" | "inactive";
 
 /** Finer-grained status breakdown used by the Insights panel's chart — wider
@@ -79,6 +87,7 @@ interface EditForm {
   admissionNo:        string;
   phone:              string;
   centerId:           string;
+  batchId:            string;
   instrument:         string;
   course:             string;
   classType:          string;   // "group" | "personal"
@@ -96,7 +105,7 @@ const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const EMPTY_CREATE = {
   name: "", email: "", admissionNo: "", phone: "",
-  centerId: "", instrument: "", course: "",
+  centerId: "", batchId: "", instrument: "", course: "",
   classType: "group",
   billingMode: "postpay",
   assignedTeacherUid: "",
@@ -245,7 +254,7 @@ function StudentsContent() {
   const [students, setStudents]         = useState<StudentRow[]>(() => getCached(`students:${wing}:students`) ?? []);
   const [transactions, setTransactions] = useState<Transaction[]>(() => getCached(`students:${wing}:transactions`) ?? []);
   const [centerMap, setCenterMap]       = useState<Map<string, string>>(() => getCached(`students:${wing}:centerMap`) ?? new Map());
-  const [centerOptions, setCenterOpts]  = useState<{ id: string; name: string; monthlyFee?: number }[]>(() => getCached(`students:${wing}:centerOptions`) ?? []);
+  const [centerOptions, setCenterOpts]  = useState<CenterOption[]>(() => getCached(`students:${wing}:centerOptions`) ?? []);
   const [teacherOptions, setTeacherOpts] = useState<{ id: string; name: string }[]>(() => getCached(`students:${wing}:teacherOptions`) ?? []);
   const [teacherMap, setTeacherMap]     = useState<Map<string, string>>(() => getCached(`students:${wing}:teacherMap`) ?? new Map());
   const [loading, setLoading]           = useState(() => !getCached<StudentRow[]>(`students:${wing}:students`));
@@ -253,7 +262,6 @@ function StudentsContent() {
   const [requestsOpen, setRequestsOpen] = useState(false);
   const [breakRequestsOpen, setBreakRequestsOpen] = useState(false);
   const [showForm, setShowForm]         = useState(false);
-  const [showAddCenter, setShowAddCenter] = useState(false);
   const [form, setForm]                 = useState({ ...EMPTY_CREATE });
   const [saving, setSaving]             = useState(false);
   const [editTarget, setEditTarget]         = useState<StudentRow | null>(null);
@@ -267,7 +275,7 @@ function StudentsContent() {
   // ── UI prefs (persisted) ───────────────────────────────────────────────────
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [listView, setListView]         = useState<"cards" | "table">("table");
-  const [sortKey, setSortKey]           = useState<"name" | "centerName" | "course" | "balance" | "status">("name");
+  const [sortKey, setSortKey]           = useState<"name" | "centerName" | "balance" | "status">("name");
   const [sortDir, setSortDir]           = useState<1 | -1>(1);
   useEffect(() => {
     try {
@@ -350,7 +358,7 @@ function StudentsContent() {
       // one doesn't fall back to a raw Firestore id in the group headers.
       const cMap = new Map<string, string>();
       const cMapAll = new Map<string, string>();
-      const cOptsAll: { id: string; name: string; monthlyFee?: number }[] = [];
+      const cOptsAll: CenterOption[] = [];
       centerSnap.docs.forEach(d => {
         const nm = (d.data().name as string) ?? d.id;
         cMapAll.set(d.id, nm);
@@ -360,6 +368,7 @@ function StudentsContent() {
           id: d.id,
           name: nm,
           monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
+          batches: Array.isArray(d.data().batches) ? (d.data().batches as CenterBatch[]) : [],
         });
       });
       setCenterMap(cMap);
@@ -399,6 +408,7 @@ function StudentsContent() {
           centerId:    centerIdRaw || "-",
           centerName:  cMap.get(centerIdRaw) || cMapAll.get(centerIdRaw)
             || (centerIdRaw && !looksLikeCenterId(centerIdRaw) ? centerIdRaw : "Unassigned Center"),
+          batchId:     (s.batchId ?? null) as string | null,
           wing:        wingOf(s),
           instrument:  (s.instrument  ?? "-") as string,
           course:      (s.course      ?? "-") as string,
@@ -576,6 +586,7 @@ function StudentsContent() {
         admissionNo: form.admissionNo.trim(),
         phone:       form.phone.trim(),
         centerId:    form.centerId.trim(),
+        batchId:     form.batchId || null,
         instrument:  form.instrument.trim(),
         course:      form.course.trim(),
         // School of Music (wing 2): every student is a group batch, prepaid,
@@ -783,12 +794,6 @@ function StudentsContent() {
               ☕ Break Requests ({breakRequestStudents.length})
             </div>
           )}
-          {isAdmin && (
-            <button onClick={() => setShowAddCenter(true)}
-              style={{ ...p.addBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
-              + Add Center
-            </button>
-          )}
           {(isAdmin || isTeacher) && (
             <button onClick={() => { setFormErrors({}); setEditTarget(null); setShowForm(true); }} style={p.addBtn}>
               + Add Student
@@ -905,6 +910,7 @@ function StudentsContent() {
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={toggleSort}
+          showStatus={tab !== "active"}
           isAdmin={isAdmin}
           isTeacher={isTeacher}
           onEdit={s => setEditTarget(s)}
@@ -984,14 +990,6 @@ function StudentsContent() {
         onClose={() => { setShowForm(false); setFormErrors({}); }}
         onSubmit={handleCreate}
       />
-
-      {/* ── Add Center modal ── */}
-      {showAddCenter && (
-        <AddCenterModal
-          onClose={() => setShowAddCenter(false)}
-          onCreated={() => fetchData()}
-        />
-      )}
 
       {/* ── Edit Modal ── */}
       {editTarget && (
@@ -1131,8 +1129,8 @@ function StudentsContent() {
 
 // ─── Student Row ───────────────────────────────────────────────────────────────
 
-function StudentRow({ student: s, index, isAdmin, isTeacher, expanded, onToggleExpand, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
-  student: StudentRow; index: number; isAdmin: boolean; isTeacher: boolean;
+function StudentRow({ student: s, index, isAdmin, isTeacher, showStatus, expanded, onToggleExpand, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
+  student: StudentRow; index: number; isAdmin: boolean; isTeacher: boolean; showStatus: boolean;
   expanded: boolean; onToggleExpand: () => void;
   onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
   onClearHistory?: () => void; onDelete?: () => void;
@@ -1146,78 +1144,31 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, expanded, onToggleE
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       onClick={onToggleExpand}>
       <td style={{ ...p.td, textAlign: "center" as const }}><span style={p.expandChevron}>{expanded ? "▾" : "▸"}</span></td>
-      <td style={p.td}><span style={p.idChip}>{s.studentID}</span></td>
-      <td style={{ ...p.td, ...ellipsis, fontWeight: 600, color: "#111827", maxWidth: 100 }} title={s.name}>{s.name}</td>
-      <td style={{ ...p.td, ...ellipsis, fontSize: 11, color: "#6b7280", maxWidth: 110 }} title={s.email}>{s.email}</td>
-      <td style={p.td}><span style={p.admChip}>{s.admissionNo}</span></td>
-      <td style={{ ...p.td, ...ellipsis, maxWidth: 80 }} title={s.centerName}>{s.centerName}</td>
-      <td style={p.td}>
-        <span style={{
-          ...p.badge,
-          ...(s.classType === "personal"
-            ? { background: "#fef9c3", color: "#92400e" }
-            : { background: "#dcfce7", color: "#166534" }),
-        }}>
-          {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
-        </span>
-        {s.classType === "personal" && (
-          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 3, lineHeight: 1.5, ...ellipsis, maxWidth: 100 }}>
-            {s.assignedTeacherName
-              ? `🎓 ${s.assignedTeacherName}`
-              : <span style={{ color: "#d97706" }}>⚠ Unassigned</span>}
-            {s.classDays.length > 0 && (
-              <div style={ellipsis}>{s.classDays.join(", ")}{s.classTime ? ` · ${s.classTime}` : ""}</div>
-            )}
-          </div>
-        )}
-      </td>
-      <td style={p.td}>
-        <div style={{ fontSize: 11, fontWeight: 600, color: "#111827", ...ellipsis, maxWidth: 100 }} title={s.instrument}>{s.instrument}</div>
-        <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2, ...ellipsis, maxWidth: 100 }} title={s.course}>{s.course}</div>
-      </td>
-      <td style={p.td}>
-        <span style={{
-          ...p.badge,
-          ...(s.feeCycle === "per_class"
-            ? { background: "#ede9fe", color: "#7c3aed" }
-            : { background: "#dbeafe", color: "#1d4ed8" }),
-        }}>
-          {s.feeCycle === "per_class"
-            ? `₹${s.feePerClass}/class`
-            : s.monthlyFee > 0 ? `₹${s.monthlyFee}/mo` : "Monthly"}
-        </span>
-        <div style={{ marginTop: 3 }}>
-          <span style={{
-            ...p.badge,
-            fontSize: 9,
-            ...(s.billingMode === "prepay"
-              ? { background: "#fef3c7", color: "#92400e" }
-              : { background: "#f3f4f6", color: "#374151" }),
-          }}>
-            {s.billingMode === "prepay" ? "⬆ Prepay" : "⬇ Postpay"}
-          </span>
-        </div>
-      </td>
+      <td style={{ ...p.td, ...ellipsis, fontWeight: 600, color: "#111827", maxWidth: 160 }} title={s.name}>{s.name}</td>
+      <td style={{ ...p.td, ...ellipsis, maxWidth: 140 }} title={s.centerName}>{s.centerName}</td>
       <td style={{ ...p.td, fontWeight: 700, color: s.balance > 0 ? "#d97706" : "#16a34a" }}>
         {fmtINR(s.balance)}
       </td>
-      <td style={p.td}>
-        <span style={{ ...p.badge, ...ellipsis, maxWidth: 76, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
-          {s.status.replace(/_/g, " ")}
-        </span>
-      </td>
-      <td style={{ ...p.td, textAlign: "right" as const }}>
-        <StudentActionsMenu
-          student={s} isAdmin={isAdmin} isTeacher={isTeacher}
-          onEdit={onEdit} onRequestDeactivation={onRequestDeactivation} onRequestBreak={onRequestBreak}
-          onClearHistory={onClearHistory} onDelete={onDelete}
-        />
-      </td>
+      {showStatus && (
+        <td style={p.td}>
+          <span style={{ ...p.badge, ...ellipsis, maxWidth: 76, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
+            {s.status.replace(/_/g, " ")}
+          </span>
+        </td>
+      )}
     </tr>
     {expanded && (
       <tr>
-        <td colSpan={12} style={p.tdDetail}>
+        <td colSpan={showStatus ? 5 : 4} style={p.tdDetail}>
           <div style={p.detailGrid}>
+            <div>
+              <div style={p.detailLabel}>Student ID</div>
+              <div style={p.detailValue}><span style={p.idChip}>{s.studentID}</span></div>
+            </div>
+            <div>
+              <div style={p.detailLabel}>Admission No.</div>
+              <div style={p.detailValue}><span style={p.admChip}>{s.admissionNo}</span></div>
+            </div>
             <div>
               <div style={p.detailLabel}>Email</div>
               <div style={p.detailValue}>{s.email || "—"}</div>
@@ -1227,31 +1178,46 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, expanded, onToggleE
               <div style={p.detailValue}>{s.phone || "—"}</div>
             </div>
             <div>
-              <div style={p.detailLabel}>Enrolled</div>
+              <div style={p.detailLabel}>Date of Admission</div>
               <div style={p.detailValue}>{s.createdAt ? s.createdAt.slice(0, 10) : "—"}</div>
             </div>
             <div>
-              <div style={p.detailLabel}>Fee status</div>
+              <div style={p.detailLabel}>Type</div>
               <div style={p.detailValue}>
-                {s.balance > 0 ? `₹${s.balance.toLocaleString("en-IN")} due` : "Fully paid"}
-                {" · "}{s.billingMode === "prepay" ? "Prepay" : "Postpay"}
-                {" · "}{s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : `₹${s.monthlyFee}/mo`}
+                {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
+                {s.classType === "personal" && (
+                  <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
+                    {s.assignedTeacherName
+                      ? `🎓 ${s.assignedTeacherName}`
+                      : <span style={{ color: "#d97706" }}>⚠ Unassigned</span>}
+                    {s.classDays.length > 0 && ` · ${s.classDays.join(", ")}`}
+                    {s.classTime ? ` · ${s.classTime}` : ""}
+                  </div>
+                )}
               </div>
             </div>
             <div>
-              <div style={p.detailLabel}>Assigned centre</div>
-              <div style={p.detailValue}>{s.centerName || "—"}</div>
+              <div style={p.detailLabel}>Instrument / Course</div>
+              <div style={p.detailValue}>{s.instrument}{s.course ? ` · ${s.course}` : ""}</div>
             </div>
-            {s.classType === "personal" && (
-              <div>
-                <div style={p.detailLabel}>Teacher / schedule</div>
-                <div style={p.detailValue}>
-                  {s.assignedTeacherName ?? "Unassigned"}
-                  {s.classDays.length > 0 && ` · ${s.classDays.join(", ")}`}
-                  {s.classTime ? ` · ${s.classTime}` : ""}
-                </div>
+            <div>
+              <div style={p.detailLabel}>Billing Frequency</div>
+              <div style={p.detailValue}>
+                {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : s.monthlyFee > 0 ? `₹${s.monthlyFee}/mo` : "Monthly"}
+                {" · "}{s.billingMode === "prepay" ? "Prepay" : "Postpay"}
               </div>
-            )}
+            </div>
+            <div>
+              <div style={p.detailLabel}>Fee status</div>
+              <div style={p.detailValue}>{s.balance > 0 ? `₹${s.balance.toLocaleString("en-IN")} due` : "Fully paid"}</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }} onClick={e => e.stopPropagation()}>
+            <StudentActionsMenu
+              student={s} isAdmin={isAdmin} isTeacher={isTeacher}
+              onEdit={onEdit} onRequestDeactivation={onRequestDeactivation} onRequestBreak={onRequestBreak}
+              onClearHistory={onClearHistory} onDelete={onDelete}
+            />
           </div>
         </td>
       </tr>
@@ -1630,7 +1596,7 @@ export function BreakRequestModal({ student, onClose, onRequested, onApprovedDir
 
 export function EditModal({ student, centerOptions, teacherOptions, transactions, isAdmin, onTransactionsChanged, onClose, onSaved, currentUserUid, currentUserRole }: {
   student:         StudentRow;
-  centerOptions:   { id: string; name: string; monthlyFee?: number }[];
+  centerOptions:   CenterOption[];
   teacherOptions:  { id: string; name: string }[];
   transactions:    Transaction[];
   isAdmin:         boolean;
@@ -1647,6 +1613,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
     admissionNo:        student.admissionNo,
     phone:              student.phone,
     centerId:           student.centerId,
+    batchId:            student.batchId ?? "",
     instrument:         student.instrument,
     course:             student.course,
     classType:          isSom ? "group"  : (student.classType || "group"),
@@ -1685,6 +1652,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         admissionNo:        form.admissionNo.trim(),
         phone:              form.phone.trim(),
         centerId:           form.centerId,
+        batchId:            form.batchId || null,
         instrument:         form.instrument.trim(),
         course:             form.course.trim(),
         classType:          isSom ? "group"  : (form.classType || "group"),
@@ -1725,6 +1693,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         admissionNo:         form.admissionNo.trim(),
         phone:               form.phone.trim(),
         centerId:            form.centerId,
+        batchId:             form.batchId || null,
         instrument:          form.instrument.trim(),
         course:              form.course.trim(),
         classType:           isSom ? "group"  : (form.classType || "group"),
@@ -1789,6 +1758,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                     setForm(prev => ({
                       ...prev,
                       centerId: cid,
+                      batchId: cid === prev.centerId ? prev.batchId : "",
                       monthlyFee: isSom && !prev.monthlyFee && centerFee ? String(centerFee) : prev.monthlyFee,
                     }));
                   }}
@@ -1797,6 +1767,16 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
+              {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).length > 0 && (
+                <Field label="Batch">
+                  <select name="batchId" value={form.batchId} onChange={f} style={p.input}>
+                    <option value="">— No batch —</option>
+                    {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).map(b => (
+                      <option key={b.id} value={b.id}>{b.name || "Unnamed batch"}</option>
+                    ))}
+                  </select>
+                </Field>
+              )}
               {isSom && (
                 <Field label="Monthly Fee (₹) *">
                   <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee} onChange={f} required style={p.input} />
@@ -2211,7 +2191,7 @@ type AttAgg = { overallPct: number; byCourse: BarDatum[]; byCenter: BarDatum[] }
 
 function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }: {
   students: StudentRow[];
-  centerOptions: { id: string; name: string; monthlyFee?: number }[];
+  centerOptions: CenterOption[];
   open: boolean;
   onToggle: () => void;
   onPickStatus: (key: StatusPickKey) => void;
@@ -2414,7 +2394,7 @@ function AddStudentDrawer({
   errors: Record<string, string>;
   isSom: boolean;
   saving: boolean;
-  centerOptions: { id: string; name: string; monthlyFee?: number }[];
+  centerOptions: CenterOption[];
   teacherOptions: { id: string; name: string }[];
   onClose: () => void;
   onSubmit: (e: React.FormEvent) => void;
@@ -2489,6 +2469,7 @@ function AddStudentDrawer({
                   setForm(f => ({
                     ...f,
                     centerId: cid,
+                    batchId: cid === f.centerId ? f.batchId : "",
                     monthlyFee: isSom && !f.monthlyFee && centerFee ? String(centerFee) : f.monthlyFee,
                   }));
                 }}
@@ -2498,6 +2479,16 @@ function AddStudentDrawer({
               </select>
               <DrawerErr msg={errors.centerId} />
             </Field>
+            {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).length > 0 && (
+              <Field label="Batch">
+                <select value={form.batchId} onChange={e => setForm(f => ({ ...f, batchId: e.target.value }))} style={p.input}>
+                  <option value="">— No batch —</option>
+                  {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).map(b => (
+                    <option key={b.id} value={b.id}>{b.name || "Unnamed batch"}</option>
+                  ))}
+                </select>
+              </Field>
+            )}
             {!isSom && (
               <Field label="Class Type *">
                 <select value={form.classType} onChange={e => setForm(f => ({ ...f, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))} style={p.input}>
@@ -2593,13 +2584,17 @@ function AddStudentDrawer({
 // ─── Student table view ───────────────────────────────────────────────────────
 
 function StudentTableView({
-  students, sortKey, sortDir, onSort, isAdmin, isTeacher,
+  students, sortKey, sortDir, onSort, showStatus, isAdmin, isTeacher,
   onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete,
 }: {
   students: StudentRow[];
-  sortKey: "name" | "centerName" | "course" | "balance" | "status";
+  sortKey: "name" | "centerName" | "balance" | "status";
   sortDir: 1 | -1;
-  onSort: (k: "name" | "centerName" | "course" | "balance" | "status") => void;
+  onSort: (k: "name" | "centerName" | "balance" | "status") => void;
+  // The Active tab only ever shows one status ("confirm"/"active") — the
+  // column is noise there. Inactive can hold several (inactive/cancelled/
+  // canceled/…), so it stays visible for that tab.
+  showStatus: boolean;
   isAdmin: boolean;
   isTeacher: boolean;
   onEdit: (s: StudentRow) => void;
@@ -2635,17 +2630,10 @@ function StudentTableView({
         <thead>
           <tr>
             <th style={{ ...p.th, width: 20 }}></th>
-            <th style={p.th}>ID</th>
             {sortableTh("name", "Name")}
-            <th style={p.th}>Email</th>
-            <th style={p.th}>Admission</th>
             {sortableTh("centerName", "Centre")}
-            <th style={p.th}>Type</th>
-            {sortableTh("course", "Instrument / Course")}
-            <th style={p.th}>Fee</th>
             {sortableTh("balance", "Balance")}
-            {sortableTh("status", "Status")}
-            <th style={p.th}>Actions</th>
+            {showStatus && sortableTh("status", "Status")}
           </tr>
         </thead>
         <tbody>
@@ -2656,6 +2644,7 @@ function StudentTableView({
               index={i}
               isAdmin={isAdmin}
               isTeacher={isTeacher}
+              showStatus={showStatus}
               expanded={expandedId === s.id}
               onToggleExpand={() => toggleExpand(s.id)}
               onEdit={() => onEdit(s)}

@@ -9,7 +9,7 @@ import { ROLES, WINGS, WING_LABELS, SOM_LOGIN_DOMAIN } from "@/config/constants"
 import { CAPABILITIES } from "@/config/permissions";
 import { useAuth } from "@/hooks/useAuth";
 import { getRolesForWing, getUserWings, inWing, wingOf } from "@/lib/wing";
-import { cachedFetch, getCached, setCached } from "@/lib/dataCache";
+import { cachedFetch, getCached, invalidateCache, setCached } from "@/lib/dataCache";
 import {
   createMember, createLoginForUser, getAllUsers, setMemberStatus, setWingRoles,
   isValidLoginId, normalizeLoginId,
@@ -98,6 +98,17 @@ function hasLogin(u: { role: string; hasLogin?: unknown; createdVia?: unknown; a
   return true;
 }
 
+/**
+ * A role change for `wing` (via "Manage roles" or the "New user" form) can
+ * add/remove someone from the Teachers/Staff lists on other pages — drop
+ * those pages' cached data so their next visit re-fetches instead of
+ * flashing pre-change data (see lib/dataCache.ts).
+ */
+function invalidateRoleCaches(wing: Wing) {
+  invalidateCache(`teachers:${wing}:teachers`);
+  invalidateCache(`staff:${wing}:rows`);
+}
+
 /** Anything other than a live "active" account counts as inactive here. */
 function isActiveUser(u: { status?: unknown }): boolean {
   return u.status === "active";
@@ -134,6 +145,7 @@ function UsersContent() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [loginId, setLoginId] = useState("");
+  const [authMethod, setAuthMethod] = useState<"loginId" | "email">("loginId");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [newPairs, setNewPairs] = useState<WingRolePair[]>([]);
@@ -232,7 +244,8 @@ function UsersContent() {
   const showAddButton = section === "staff"; // Teachers and Admins sub-tabs both support the login-id form below
 
   function reset() {
-    setName(""); setEmail(""); setLoginId(""); setPassword(""); setNewPairs([]); setNewChildUids([]);
+    setName(""); setEmail(""); setLoginId(""); setAuthMethod("loginId"); setPassword("");
+    setNewPairs([]); setNewChildUids([]);
   }
 
   const newParentWing = newPairs.find(p => p.roles.includes(ROLES.PARENT))?.wing ?? null;
@@ -241,7 +254,11 @@ function UsersContent() {
     e.preventDefault();
     setMsg(null);
     if (!name.trim()) return setMsg({ kind: "err", text: "Name is required." });
-    if (!isValidLoginId(loginId)) return setMsg({ kind: "err", text: "Login ID: 3–32 chars — letters, numbers, . _ - , starting and ending with a letter or number." });
+    if (authMethod === "loginId") {
+      if (!isValidLoginId(loginId)) return setMsg({ kind: "err", text: "Login ID: 3–32 chars — letters, numbers, . _ - , starting and ending with a letter or number." });
+    } else if (!email.trim()) {
+      return setMsg({ kind: "err", text: "Email is required to sign in with an email address." });
+    }
     if (password.length < 6) return setMsg({ kind: "err", text: "Password must be at least 6 characters." });
     if (newPairs.length === 0) return setMsg({ kind: "err", text: "Assign at least one wing and role." });
 
@@ -252,7 +269,8 @@ function UsersContent() {
         {
           displayName: name.trim(),
           email: email.trim(),
-          loginId: normalizeLoginId(loginId),
+          authMethod,
+          loginId: authMethod === "loginId" ? normalizeLoginId(loginId) : undefined,
           password,
           wing: primary.wing,
           role: primary.roles[0],
@@ -261,16 +279,23 @@ function UsersContent() {
         user?.role ?? ROLES.FOUNDER,
       );
       await setWingRoles(uid, primary.wing, primary.roles);
-      for (const p of rest) await setWingRoles(uid, p.wing, p.roles);
+      invalidateRoleCaches(primary.wing);
+      for (const p of rest) { await setWingRoles(uid, p.wing, p.roles); invalidateRoleCaches(p.wing); }
       if (newParentWing && newChildUids.length > 0) await setParentChildren(uid, newChildUids);
-      setMsg({ kind: "ok", text: `User "${normalizeLoginId(loginId)}" created. They sign in with their Login ID and password.` });
+      setMsg({
+        kind: "ok",
+        text: authMethod === "loginId"
+          ? `User "${normalizeLoginId(loginId)}" created. They sign in with their Login ID and password.`
+          : `User created. They sign in with ${email.trim()} and their password.`,
+      });
       reset();
       setShowForm(false);
       load();
     } catch (err) {
       const raw = err instanceof Error ? err.message : "Creation failed.";
       const text = raw.startsWith("LOGIN_ID_IN_USE") ? "That Login ID is already taken."
-        : raw.includes("email-already-in-use") ? "That Login ID is already registered."
+        : raw.startsWith("EMAIL_IN_USE") ? "That email is already registered."
+        : raw.includes("email-already-in-use") ? "That email is already registered."
         : raw;
       setMsg({ kind: "err", text });
     } finally {
@@ -347,30 +372,53 @@ function UsersContent() {
 
       {showAddButton && showForm && (
         <form style={s.card} onSubmit={handleSubmit} autoComplete="off">
-          <p style={s.cardTitle}>New login-id user</p>
+          <p style={s.cardTitle}>New user</p>
+          <div style={{ display: "flex", gap: 14, marginBottom: 14 }}>
+            <label style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+              <input type="radio" checked={authMethod === "loginId"} onChange={() => setAuthMethod("loginId")} />
+              Sign in with a Login ID
+            </label>
+            <label style={{ fontSize: 12.5, display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+              <input type="radio" checked={authMethod === "email"} onChange={() => setAuthMethod("email")} />
+              Sign in with Email (e.g. Gmail)
+            </label>
+          </div>
           <div style={s.grid2}>
             <Field label="Name">
               <input style={s.input} name="new-user-name" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Anil Kumar" autoComplete="off" />
             </Field>
-            <Field label="Email ID">
-              <input style={s.input} name="new-user-email" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="anil@example.com (contact only)" autoComplete="off" />
-            </Field>
-            <Field label="Login ID">
+            <Field label={authMethod === "email" ? "Email ID (used to sign in)" : "Email ID"}>
               <input
-                style={{ ...s.input, fontFamily: "monospace" }}
-                name="new-user-loginid"
-                value={loginId}
-                onChange={e => setLoginId(e.target.value.replace(/\s/g, ""))}
-                placeholder="anilkumar"
-                autoCapitalize="none"
-                spellCheck={false}
+                style={s.input}
+                name="new-user-email"
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="anil@gmail.com"
                 autoComplete="off"
               />
-              <span style={s.hint}>
-                Signs in as <strong>{normalizeLoginId(loginId) || "loginid"}</strong>
-                <span style={{ color: "var(--color-text-muted)" }}> · stored as {normalizeLoginId(loginId) || "loginid"}@{SOM_LOGIN_DOMAIN}</span>
-              </span>
+              {authMethod === "email" && (
+                <span style={s.hint}>Signs in with <strong>{email.trim() || "their email"}</strong> and their password.</span>
+              )}
             </Field>
+            {authMethod === "loginId" && (
+              <Field label="Login ID">
+                <input
+                  style={{ ...s.input, fontFamily: "monospace" }}
+                  name="new-user-loginid"
+                  value={loginId}
+                  onChange={e => setLoginId(e.target.value.replace(/\s/g, ""))}
+                  placeholder="anilkumar"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+                <span style={s.hint}>
+                  Signs in as <strong>{normalizeLoginId(loginId) || "loginid"}</strong>
+                  <span style={{ color: "var(--color-text-muted)" }}> · stored as {normalizeLoginId(loginId) || "loginid"}@{SOM_LOGIN_DOMAIN}</span>
+                </span>
+              </Field>
+            )}
             <Field label="Password">
               <div style={{ position: "relative" }}>
                 <input
@@ -692,55 +740,39 @@ function RoleCheckboxGroup({ value, onChange }: { value: Role[]; onChange: (role
 function WingRolePicker({ pairs, onChange }: {
   pairs: WingRolePair[]; onChange: (pairs: WingRolePair[]) => void;
 }) {
-  const usedWings = new Set(pairs.map(p => p.wing));
-  const availableWings = ALL_WINGS.filter(w => !usedWings.has(w));
-  const [newWing, setNewWing] = useState<Wing | "">("");
-  const [newRoles, setNewRoles] = useState<Role[]>([]);
+  function rolesFor(wing: Wing): Role[] {
+    return pairs.find(p => p.wing === wing)?.roles ?? [];
+  }
 
+  // Checking/unchecking a role chip commits immediately — no separate "Add"
+  // step to forget. Unchecking every role for a wing just removes it from
+  // the pending list (equivalent to no access there).
   function updateRoles(wing: Wing, roles: Role[]) {
-    onChange(pairs.map(p => p.wing === wing ? { ...p, roles } : p));
-  }
-  function revoke(wing: Wing) {
-    onChange(pairs.filter(p => p.wing !== wing));
-  }
-  function addPair() {
-    if (!newWing || newRoles.length === 0) return;
-    onChange([...pairs, { wing: newWing, roles: newRoles }]);
-    setNewWing("");
-    setNewRoles([]);
+    const exists = pairs.some(p => p.wing === wing);
+    if (roles.length === 0) {
+      onChange(pairs.filter(p => p.wing !== wing));
+    } else if (exists) {
+      onChange(pairs.map(p => p.wing === wing ? { ...p, roles } : p));
+    } else {
+      onChange([...pairs, { wing, roles }]);
+    }
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {pairs.length === 0 && (
-        <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>No wing access assigned yet.</div>
-      )}
-      {pairs.map(p => (
-        <div key={p.wing} style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" as const }}>
-          <span style={{ ...s.roleChip, minWidth: 130, textAlign: "center" as const, marginTop: 3 }}>{WING_LABELS[p.wing]}</span>
+      {ALL_WINGS.map(wing => (
+        <div key={wing} style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" as const }}>
+          <span style={{ ...s.roleChip, minWidth: 130, textAlign: "center" as const, marginTop: 3 }}>{WING_LABELS[wing]}</span>
           <div style={{ flex: 1, minWidth: 180 }}>
-            <RoleCheckboxGroup value={p.roles} onChange={roles => updateRoles(p.wing, roles)} />
-            {p.roles.length === 0 && (
+            <RoleCheckboxGroup value={rolesFor(wing)} onChange={roles => updateRoles(wing, roles)} />
+            {rolesFor(wing).length === 0 && (
               <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 4 }}>
-                No roles checked — saving will revoke this wing.
+                No roles checked — no access in this wing.
               </div>
             )}
           </div>
-          <button type="button" style={s.linkBtn} onClick={() => revoke(p.wing)}>Revoke</button>
         </div>
       ))}
-      {availableWings.length > 0 && (
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" as const, paddingTop: 10, borderTop: pairs.length ? "1px dashed var(--color-border)" : "none" }}>
-          <select style={{ ...s.select, minWidth: 130 }} value={newWing} onChange={e => setNewWing(e.target.value as Wing)}>
-            <option value="">+ Add wing…</option>
-            {availableWings.map(w => <option key={w} value={w}>{WING_LABELS[w]}</option>)}
-          </select>
-          <div style={{ flex: 1, minWidth: 180 }}>
-            <RoleCheckboxGroup value={newRoles} onChange={setNewRoles} />
-          </div>
-          <button type="button" style={s.btnGhost} disabled={!newWing || newRoles.length === 0} onClick={addPair}>Add</button>
-        </div>
-      )}
     </div>
   );
 }
@@ -773,6 +805,7 @@ function ManageRolesModal({ target, onClose, onSaved }: {
         const prev = initialMap.get(w) ?? [];
         if (sameRoles(next, prev)) continue;
         await setWingRoles(target.uid, w, next);
+        invalidateRoleCaches(w);
       }
       onSaved();
     } catch (e) {

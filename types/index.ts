@@ -167,6 +167,14 @@ export interface StudentUser extends UserBase {
    */
   monthlyFee?: number;
   /**
+   * batchId — which of the student's centre's named batches (Center.batches)
+   * they belong to, e.g. "Batch A" / "Weekend Morning". Null/absent when the
+   * centre has no batches defined or the student predates batch tracking —
+   * see Registry's Batch column, which falls back to the legacy free-text
+   * `batch` field captured at import when this is unset.
+   */
+  batchId?: string | null;
+  /**
    * assignedTeacherUid — only relevant when classType === "personal".
    * Points to the TeacherUser.uid responsible for this student's one-on-one sessions.
    * Null for group students (or when unassigned).
@@ -299,8 +307,23 @@ export interface Center {
    * Absent on ROL+ / legacy centres.
    */
   monthlyFee?: number;
+  /**
+   * batches — named sub-schedules within this centre (e.g. "Batch A",
+   * "Weekend Morning"), each with its own days/time. Optional: centres that
+   * run as a single block don't need any. A student's StudentUser.batchId
+   * references one of these by id; Registry's Batch column resolves it.
+   */
+  batches?: CenterBatch[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CenterBatch {
+  id: string;                    // client-generated, unique across all centres
+  name: string;                  // e.g. "Batch A", "Weekend Morning"
+  daysOfWeek: string[];          // e.g. ["Mon","Wed","Fri"]
+  startTime: string;             // "HH:MM"
+  endTime: string;               // "HH:MM"
 }
 
 // ─── Attendance ───────────────────────────────────────────────────────────────

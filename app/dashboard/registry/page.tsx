@@ -262,9 +262,19 @@ function RegistryContent() {
         const centreName = new Map<string, string>();
         const centreNameAll = new Map<string, string>();
         const centreList: { id: string; name: string; code: string }[] = [];
+        // Batch ids are client-generated and unique across every centre, so a
+        // flat id → name map (no centreId needed to disambiguate) is enough to
+        // resolve a student's assigned batch regardless of wing.
+        const batchName = new Map<string, string>();
         centreSnap.docs.forEach(d => {
           const nm = (d.data().name as string) ?? d.id;
           centreNameAll.set(d.id, nm);
+          const batches = d.data().batches;
+          if (Array.isArray(batches)) {
+            batches.forEach(b => {
+              if (b && typeof b === "object" && b.id) batchName.set(String(b.id), String(b.name ?? "") || "Unnamed batch");
+            });
+          }
           if (wingOf(d.data()) !== WING) return;
           centreName.set(d.id, nm);
           centreList.push({ id: d.id, name: nm, code: (d.data().centerCode as string) ?? "" });
@@ -311,7 +321,9 @@ function RegistryContent() {
                   name:        (s.displayName ?? s.name ?? "—") as string,
                   admittedOn:  toISO(s.dateOfAdmission ?? s.admissionDate ?? s.createdAt),
                   centre:      resolvedCentreName || (centreRef && !looksLikeDocId(centreRef) ? centreRef : "—"),
-                  batch:       String(s.batch ?? "").trim() || "—",
+                  // Synced batch (from a centre's Batches list) wins when set;
+                  // otherwise fall back to the free-text value captured at import.
+                  batch:       batchName.get(String(s.batchId ?? "")) || String(s.batch ?? "").trim() || "—",
                   phone:       phone || "—",
                   admissionNo,
                   course,

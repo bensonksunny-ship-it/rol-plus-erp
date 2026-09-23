@@ -17,14 +17,14 @@ import { computeStudentBalances } from "@/services/finance/finance.service";
 import { wingOf, isSchoolOfMusic } from "@/lib/wing";
 import type { Transaction } from "@/types/finance";
 import {
-  type StudentRow, p, modal, STATUS_BADGE, fmtINR, fmtDate, toISODate,
+  type StudentRow, type CenterOption, p, modal, STATUS_BADGE, fmtINR, fmtDate, toISODate,
   Row, Field, LedgerEditor, CenterDetailModal,
   EditModal, ClearHistoryModal, DeleteStudentModal, BreakRequestModal,
   HISTORY_STATUS_STYLE, HISTORY_STATUS_LABEL,
 } from "../_shared";
 import { StudentSyllabusContent } from "../../student-syllabus/[studentId]/_shared";
 import { getScreeningByStudent } from "@/services/screening/screening.service";
-import type { ScreeningResult } from "@/types";
+import type { ScreeningResult, CenterBatch } from "@/types";
 import { DiagnosticCard } from "@/components/DiagnosticCard";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
   const [applicationFields, setApplicationFields] = useState<ApplicationFields | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [centerMap, setCenterMap]       = useState<Map<string, string>>(new Map());
-  const [centerOptions, setCenterOptions] = useState<{ id: string; name: string; monthlyFee?: number }[]>([]);
+  const [centerOptions, setCenterOptions] = useState<CenterOption[]>([]);
   const [teacherOptions, setTeacherOptions] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading]           = useState(true);
   const [notFound, setNotFound]         = useState(false);
@@ -102,13 +102,14 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
       if (!studentSnap.exists()) { setNotFound(true); setLoading(false); return; }
 
       const cMap = new Map<string, string>();
-      const cOptsAll: { id: string; name: string; monthlyFee?: number }[] = [];
+      const cOptsAll: CenterOption[] = [];
       centerSnap.docs.forEach(d => {
         cMap.set(d.id, (d.data().name as string) ?? d.id);
         cOptsAll.push({
           id: d.id,
           name: (d.data().name as string) ?? d.id,
           monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
+          batches: Array.isArray(d.data().batches) ? (d.data().batches as CenterBatch[]) : [],
         });
       });
       setCenterMap(cMap);
@@ -138,6 +139,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
         phone:       (s.phone       ?? "") as string,
         centerId:    (s.centerId    ?? "-") as string,
         centerName:  cMap.get(s.centerId as string) ?? (s.centerId as string) ?? "-",
+        batchId:     (s.batchId ?? null) as string | null,
         wing:        wingOf(s),
         instrument:  (s.instrument  ?? "-") as string,
         course:      (s.course      ?? "-") as string,

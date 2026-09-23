@@ -7,7 +7,7 @@ import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { inWing } from "@/lib/wing";
-import { getCached, setCached } from "@/lib/dataCache";
+import { getCached, invalidateCache, setCached } from "@/lib/dataCache";
 import {
   createTeacher,
   getTeachers,
@@ -34,6 +34,11 @@ export function TeachersContent() {
   // re-fetches to stay fresh.
   const [teachers, setTeachers] = useState<TeacherUser[]>(() => getCached(`teachers:${wing}:teachers`) ?? []);
   const [centers,  setCenters]  = useState<Center[]>(() => getCached(`teachers:${wing}:centers`) ?? []);
+  // All centres regardless of wing, id → name only — a teacher can carry a
+  // centerId from a centre outside the current wing filter (legacy/cross-wing
+  // assignment), and `centers` above is wing-scoped for the assignment picker.
+  // Without this, centerName() falls back to the raw Firestore id.
+  const [centerNames, setCenterNames] = useState<Record<string, string>>(() => getCached(`teachers:centerNames`) ?? {});
   const [loading,  setLoading]  = useState(() => !getCached<TeacherUser[]>(`teachers:${wing}:teachers`));
   const [editTarget,   setEditTarget]   = useState<TeacherUser | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<TeacherUser | null>(null);
@@ -63,6 +68,7 @@ export function TeachersContent() {
     if (cachedTeachers) {
       setTeachers(cachedTeachers);
       setCenters(getCached(`teachers:${wing}:centers`) ?? []);
+      setCenterNames(getCached(`teachers:centerNames`) ?? {});
       setAttStats(getCached(`teachers:${wing}:attStats`) ?? {});
       setAttByCenter(getCached(`teachers:${wing}:attByCenter`) ?? {});
     }
@@ -78,11 +84,15 @@ export function TeachersContent() {
       const sortedTeachers = teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName));
       setTeachers(sortedTeachers);
       setCached(`teachers:${wing}:teachers`, sortedTeachers);
-      const wingCenters = centerSnap.docs
-        .map(d => ({ id: d.id, ...d.data() } as Center))
-        .filter(c => inWing(c, wing));
+      const allCenters = centerSnap.docs.map(d => ({ id: d.id, ...d.data() } as Center));
+      const wingCenters = allCenters.filter(c => inWing(c, wing));
       setCenters(wingCenters);
       setCached(`teachers:${wing}:centers`, wingCenters);
+
+      const nameMap: Record<string, string> = {};
+      allCenters.forEach(c => { nameMap[c.id] = c.name; });
+      setCenterNames(nameMap);
+      setCached(`teachers:centerNames`, nameMap);
 
       const centreTeacher: Record<string, string> = {};
       centerSnap.docs.forEach(d => {
@@ -154,6 +164,9 @@ export function TeachersContent() {
           console.error("Failed to upload teacher photo:", photoErr);
         }
       }
+      // A new teacher is a new row on the Founder Users page too — drop its
+      // cache so it re-fetches instead of showing a stale pre-creation list.
+      invalidateCache("users:all");
       setSuccessMsg("Teacher added. Create their login from the Users page when they're ready to sign in.");
       setName(""); setEmail(""); setSelectedCenters([]); setPhotoFile(null);
       setLoading(true);
@@ -206,7 +219,7 @@ export function TeachersContent() {
   }
 
   function centerName(id: string): string {
-    return centers.find(c => c.id === id)?.name ?? id;
+    return centerNames[id] ?? centers.find(c => c.id === id)?.name ?? id;
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -885,8 +898,8 @@ const s: Record<string, React.CSSProperties> = {
   centerCode:   { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "1px 7px", borderRadius: 4, fontWeight: 600, marginLeft: 4 },
 
   badge:        { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 600 },
-  centerTags:   { display: "flex", flexWrap: "wrap" as const, gap: 6 },
-  centerTag:    { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 500, background: "#e0e7ff", color: "#4338ca" },
+  centerTags:   { display: "flex", flexWrap: "wrap" as const, gap: 6, minWidth: 0, maxWidth: "100%" },
+  centerTag:    { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 500, background: "#e0e7ff", color: "#4338ca", maxWidth: "100%", wordBreak: "break-word" as const },
 
   empty:        { textAlign: "center", padding: "40px 0", color: "var(--color-text-secondary)", fontSize: 14 },
 
@@ -940,5 +953,5 @@ const s: Record<string, React.CSSProperties> = {
 
   viewRow:      { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, padding: "10px 0", borderBottom: "1px solid #f3f4f6" },
   viewRowLabel: { fontSize: 12, fontWeight: 600, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.04em", minWidth: 110 },
-  viewRowValue: { fontSize: 13, color: "#111827", textAlign: "right" as const, flex: 1 },
+  viewRowValue: { fontSize: 13, color: "#111827", textAlign: "right" as const, flex: 1, minWidth: 0 },
 };

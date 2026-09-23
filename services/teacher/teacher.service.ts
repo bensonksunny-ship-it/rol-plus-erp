@@ -12,9 +12,9 @@ import {
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
-import { DEFAULT_WING } from "@/config/constants";
-import { inWing } from "@/lib/wing";
-import type { TeacherUser, Wing } from "@/types";
+import { DEFAULT_WING, ROLES } from "@/config/constants";
+import { getRolesForWing } from "@/lib/wing";
+import type { TeacherUser, User, Wing } from "@/types";
 import type { Role } from "@/types";
 
 const USERS = "users";
@@ -118,12 +118,30 @@ export async function uploadTeacherPhoto(uid: string, file: File): Promise<strin
 
 // ─── Get all teachers ─────────────────────────────────────────────────────────
 
+/**
+ * Every account that holds the Teacher role for `wing` — whether that's
+ * their legacy scalar `role` (accounts created directly as a teacher) or a
+ * role granted via the Founder Users page's "Manage roles" (e.g. an Admin
+ * also holding Teacher in some wing). Two targeted queries, merged and
+ * de-duped, then re-checked with getRolesForWing() so the merge can't
+ * include someone whose Teacher access was explicitly revoked via Manage
+ * roles even though their legacy `role` field still says "teacher".
+ */
 export async function getTeachers(wing?: Wing): Promise<TeacherUser[]> {
-  const snap = await getDocs(
-    query(collection(db, USERS), where("role", "==", "teacher"))
-  );
-  const all = snap.docs.map(d => ({ ...d.data() } as TeacherUser));
-  return wing ? all.filter(t => inWing(t, wing)) : all;
+  const queries = [getDocs(query(collection(db, USERS), where("role", "==", "teacher")))];
+  if (wing) {
+    queries.push(getDocs(query(collection(db, USERS), where(`roles.${wing}`, "array-contains", "teacher"))));
+  }
+  const snaps = await Promise.all(queries);
+
+  const byId = new Map<string, TeacherUser>();
+  for (const snap of snaps) {
+    for (const d of snap.docs) byId.set(d.id, { uid: d.id, ...d.data() } as unknown as TeacherUser);
+  }
+  const all = Array.from(byId.values());
+  if (!wing) return all;
+
+  return all.filter(t => getRolesForWing(t as unknown as User, wing).includes(ROLES.TEACHER));
 }
 
 // ─── Update teacher's assigned centers ────────────────────────────────────────

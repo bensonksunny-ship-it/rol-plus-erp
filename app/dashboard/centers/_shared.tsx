@@ -1,20 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getDocs, collection, query, where, doc, writeBatch, serverTimestamp } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { getCenters, createCenter, updateCenter } from "@/services/center/center.service";
 import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
-import { ROLES } from "@/config/constants";
-import type { Center, Wing } from "@/types";
+import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
+import type { Center, CenterBatch, Wing } from "@/types";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import { useAuth } from "@/hooks/useAuth";
 import { useWing } from "@/hooks/useWing";
-import { isSchoolOfMusic, inWing } from "@/lib/wing";
+import { isSchoolOfMusic, inWing, wingOf } from "@/lib/wing";
 import { getCached, setCached } from "@/lib/dataCache";
 import { deleteCenter } from "@/services/admin/delete.service";
 import { parseFile } from "@/lib/xlsx-parser";
@@ -28,11 +28,18 @@ const EMPTY_FORM = {
   name:        "",
   teacherUid:  "",
   status:      "active" as "active" | "inactive",
+  wing:        WINGS.ROL_PLUS as Wing,
   daysOfWeek:  [] as Day[],
   startTime:   "",
   endTime:     "",
-  monthlyFee:  "",
+  batches:     [] as CenterBatch[],
 };
+
+function newBatchId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -72,6 +79,47 @@ function DayChips({ selected, onChange }: { selected: Day[]; onChange: (d: Day[]
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function BatchesEditor({ batches, onChange }: { batches: CenterBatch[]; onChange: (b: CenterBatch[]) => void }) {
+  function addBatch() {
+    onChange([...batches, { id: newBatchId(), name: "", daysOfWeek: [], startTime: "", endTime: "" }]);
+  }
+  function updateBatch(id: string, patch: Partial<CenterBatch>) {
+    onChange(batches.map(b => b.id === id ? { ...b, ...patch } : b));
+  }
+  function removeBatch(id: string) {
+    onChange(batches.filter(b => b.id !== id));
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column" as const, gap: 10 }}>
+      {batches.length === 0 && (
+        <div style={{ fontSize: 12, color: "#9ca3af" }}>
+          No batches yet — students here won&apos;t be split into named groups until you add one.
+        </div>
+      )}
+      {batches.map(b => (
+        <div key={b.id} style={batchStyles.row}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const, alignItems: "center" }}>
+            <input
+              value={b.name}
+              onChange={e => updateBatch(b.id, { name: e.target.value })}
+              placeholder="e.g. Batch A, Weekend Morning"
+              style={{ ...formStyles.input, flex: "1 1 180px" }}
+            />
+            <input type="time" value={b.startTime} onChange={e => updateBatch(b.id, { startTime: e.target.value })}
+              style={{ ...formStyles.input, width: 110 }} />
+            <span style={{ fontSize: 12, color: "#9ca3af" }}>to</span>
+            <input type="time" value={b.endTime} onChange={e => updateBatch(b.id, { endTime: e.target.value })}
+              style={{ ...formStyles.input, width: 110 }} />
+            <button type="button" onClick={() => removeBatch(b.id)} style={batchStyles.removeBtn} title="Remove batch">✕</button>
+          </div>
+          <DayChips selected={b.daysOfWeek as Day[]} onChange={days => updateBatch(b.id, { daysOfWeek: days })} />
+        </div>
+      ))}
+      <button type="button" onClick={addBatch} style={batchStyles.addBtn}>+ Add Batch</button>
     </div>
   );
 }
@@ -138,12 +186,100 @@ function isManualPayment(t: CenterTxRec): boolean {
 
 type ViewTab = "attendance" | "students" | "insights";
 
-function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () => void; teachers: TeacherUser[] }) {
-  const raw = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
+function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
+  center: Center; onClose: () => void; teachers: TeacherUser[]; onSaved?: (updated: Center) => void;
+}) {
+  // Local copy so a saved edit reflects immediately without waiting on the
+  // parent's list to refetch — onSaved still fires so the grid stays in sync.
+  const [center, setCenter] = useState(centerProp);
+  const raw = center as Center & { daysOfWeek?: Day[]; startTime?: string; endTime?: string };
   const teacher = teachers.find(t => t.uid === center.teacherUid);
   const teacherLabel = teacher ? teacher.displayName : center.teacherUid || "-";
+  const { wing: viewingWing } = useWing();
 
-  const [tab, setTab] = useState<ViewTab>("attendance");
+  // ── Edit mode ──────────────────────────────────────────────────────────────
+  const [editing, setEditing]         = useState(false);
+  const [editForm, setEditForm]       = useState({ ...EMPTY_FORM });
+  const [editDayError, setEditDayError] = useState("");
+  const [editErr, setEditErr]         = useState("");
+  const [savingEdit, setSavingEdit]   = useState(false);
+
+  function openEditMode() {
+    setEditForm({
+      name:       center.name,
+      teacherUid: center.teacherUid,
+      status:     center.status as "active" | "inactive",
+      wing:       wingOf(center),
+      daysOfWeek: raw.daysOfWeek ?? [],
+      startTime:  raw.startTime  ?? "",
+      endTime:    raw.endTime    ?? "",
+      batches:    center.batches ?? [],
+    });
+    setEditDayError("");
+    setEditErr("");
+    setEditing(true);
+  }
+
+  function handleEditChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
+    setEditErr("");
+    setEditForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
+  }
+  function handleEditDaysChange(days: Day[]) {
+    setEditForm(prev => ({ ...prev, daysOfWeek: days }));
+    if (days.length > 0) setEditDayError("");
+  }
+  function handleEditBatchesChange(batches: CenterBatch[]) {
+    setEditForm(prev => ({ ...prev, batches }));
+  }
+
+  async function handleSaveEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (editForm.daysOfWeek.length === 0) { setEditDayError("Select at least 1 day."); return; }
+    setSavingEdit(true);
+    setEditErr("");
+    const timeSlot = `${editForm.daysOfWeek.join("/")} ${editForm.startTime}–${editForm.endTime}`;
+    try {
+      await updateCenter(center.id, {
+        name:       editForm.name.trim(),
+        teacherUid: editForm.teacherUid.trim(),
+        status:     editForm.status,
+        timeSlot,
+        batches:    editForm.batches,
+      });
+      // Extra scheduling fields aren't in updateCenter's canonical whitelist —
+      // patched directly, same as the page-level edit form does.
+      const { doc: fsDoc, updateDoc, serverTimestamp } = await import("firebase/firestore");
+      await updateDoc(fsDoc(db, "centers", center.id), {
+        wing:       editForm.wing,
+        daysOfWeek: editForm.daysOfWeek,
+        startTime:  editForm.startTime,
+        endTime:    editForm.endTime,
+        updatedAt:  serverTimestamp(),
+      });
+      const updated = {
+        ...center,
+        name:       editForm.name.trim(),
+        teacherUid: editForm.teacherUid.trim(),
+        status:     editForm.status,
+        wing:       editForm.wing,
+        timeSlot,
+        batches:    editForm.batches,
+        daysOfWeek: editForm.daysOfWeek,
+        startTime:  editForm.startTime,
+        endTime:    editForm.endTime,
+      } as Center & { daysOfWeek: Day[]; startTime: string; endTime: string };
+      setCenter(updated);
+      setEditing(false);
+      onSaved?.(updated);
+    } catch (err) {
+      console.error("[ViewModal] update error:", err);
+      setEditErr(err instanceof Error ? err.message : "Failed to update center.");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  const [tab, setTab] = useState<ViewTab>("students");
   const [attRecs,  setAttRecs]  = useState<CenterAttRec[]>([]);
   const [students, setStudents] = useState<CenterStudentRec[]>([]);
   const [txs,      setTxs]      = useState<CenterTxRec[]>([]);
@@ -252,49 +388,126 @@ function ViewModal({ center, onClose, teachers }: { center: Center; onClose: () 
               <StatusBadge status={center.status} />
             </div>
           </div>
-          <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+            {!editing && (
+              <button onClick={openEditMode} title="Edit center" style={viewStyles.editBtn}>✏ Edit</button>
+            )}
+            <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
+          </div>
         </div>
 
-        {/* Quick facts */}
-        <div style={viewStyles.quickFacts}>
-          <QuickFact label="Teacher"  value={teacherLabel} />
-          <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || center.timeSlot || "-"} />
-          <QuickFact label="Time"     value={raw.startTime && raw.endTime ? `${raw.startTime}–${raw.endTime}` : "-"} />
-          <QuickFact label="Students" value={String(students.length)} />
-          {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
-            <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
-          ) : null}
-        </div>
+        {editing ? (
+          <form onSubmit={handleSaveEdit} style={{ padding: "18px 20px", overflowY: "auto" as const, flex: 1 }}>
+            <div style={formStyles.grid}>
+              <FormField label="Name" required>
+                <input name="name" value={editForm.name} onChange={handleEditChange} required
+                  placeholder="e.g. Koramangala Center" style={formStyles.input} />
+              </FormField>
+              <FormField label="Assigned Teacher" required>
+                <select name="teacherUid" value={editForm.teacherUid} onChange={handleEditChange} required style={formStyles.input}>
+                  <option value="">— Select a teacher —</option>
+                  {teachers.map(t => (
+                    <option key={t.uid} value={t.uid}>{t.displayName}</option>
+                  ))}
+                </select>
+              </FormField>
+              <FormField label="Status">
+                <select name="status" value={editForm.status} onChange={handleEditChange} style={formStyles.input}>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </FormField>
+              <FormField label="Assign Wing" required>
+                <select name="wing" value={editForm.wing} onChange={handleEditChange} required style={formStyles.input}>
+                  <option value={WINGS.ROL_PLUS}>{WING_LABELS[WINGS.ROL_PLUS]}</option>
+                  <option value={WINGS.SCHOOL_OF_MUSIC}>{WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}</option>
+                </select>
+                {editForm.wing !== viewingWing && (
+                  <span style={formStyles.helperText}>
+                    Moving this centre out of the {WING_LABELS[viewingWing]} view.
+                  </span>
+                )}
+              </FormField>
+              <FormField label="Start Time" required>
+                <input name="startTime" type="time" value={editForm.startTime} onChange={handleEditChange}
+                  required style={formStyles.input} />
+              </FormField>
+              <FormField label="End Time" required>
+                <input name="endTime" type="time" value={editForm.endTime} onChange={handleEditChange}
+                  required style={formStyles.input} />
+              </FormField>
+              <FormField label="Days of Week" required fullWidth>
+                <DayChips selected={editForm.daysOfWeek} onChange={handleEditDaysChange} />
+                {editDayError && <span style={formStyles.errorText}>{editDayError}</span>}
+              </FormField>
+              <FormField label="Batches" fullWidth>
+                <BatchesEditor batches={editForm.batches} onChange={handleEditBatchesChange} />
+              </FormField>
+            </div>
 
-        {/* Sub-navigation tabs */}
-        <div style={viewStyles.tabBar}>
-          <button onClick={() => setTab("attendance")} style={{ ...viewStyles.tabBtn, ...(tab === "attendance" ? viewStyles.tabBtnActive : {}) }}>
-            Attendance History
-          </button>
-          <button onClick={() => setTab("students")} style={{ ...viewStyles.tabBtn, ...(tab === "students" ? viewStyles.tabBtnActive : {}) }}>
-            Students
-          </button>
-          <button onClick={() => setTab("insights")} style={{ ...viewStyles.tabBtn, ...(tab === "insights" ? viewStyles.tabBtnActive : {}) }}>
-            Graphs &amp; Insights
-          </button>
-        </div>
+            {editErr && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#dc2626", marginTop: 4 }}>
+                {editErr}
+              </div>
+            )}
 
-        <div style={{ ...modalStyles.body, flex: 1, overflowY: "auto" as const }}>
-          {loading ? (
-            <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
-          ) : tab === "attendance" ? (
-            <CenterAttendanceHistoryTab records={attRecs} studentMap={studentMap} />
-          ) : tab === "students" ? (
-            <CenterStudentsTab
-              students={students}
-              onUpdateStatuses={updateActiveRoster}
-              onAddStudents={addStudentsToCenter}
-              wing={center.wing}
-            />
-          ) : (
-            <CenterInsightsTab records={attRecs} students={students} transactions={txs} />
-          )}
-        </div>
+            <div style={{ ...formStyles.actions, gap: 10, marginTop: 16 }}>
+              <button type="button" onClick={() => setEditing(false)} disabled={savingEdit} style={viewStyles.cancelBtn}>
+                Cancel
+              </button>
+              <button type="submit" disabled={savingEdit} style={{ ...formStyles.submitBtn, opacity: savingEdit ? 0.6 : 1 }}>
+                {savingEdit ? "Saving…" : "Save Changes"}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <>
+            {/* Quick facts */}
+            <div style={viewStyles.quickFacts}>
+              <QuickFact label="Wing"     value={WING_LABELS[wingOf(center)] ?? "-"} />
+              <QuickFact label="Teacher"  value={teacherLabel} />
+              <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || center.timeSlot || "-"} />
+              <QuickFact label="Time"     value={raw.startTime && raw.endTime ? `${raw.startTime}–${raw.endTime}` : "-"} />
+              <QuickFact label="Students" value={String(students.length)} />
+              {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
+                <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
+              ) : null}
+              {(center.batches ?? []).length > 0 && (
+                <QuickFact label="Batches" value={(center.batches ?? []).map(b => b.name || "Unnamed").join(", ")} />
+              )}
+            </div>
+
+            {/* Sub-navigation tabs */}
+            <div style={viewStyles.tabBar}>
+              <button onClick={() => setTab("students")} style={{ ...viewStyles.tabBtn, ...(tab === "students" ? viewStyles.tabBtnActive : {}) }}>
+                Students
+              </button>
+              <button onClick={() => setTab("attendance")} style={{ ...viewStyles.tabBtn, ...(tab === "attendance" ? viewStyles.tabBtnActive : {}) }}>
+                Attendance History
+              </button>
+              <button onClick={() => setTab("insights")} style={{ ...viewStyles.tabBtn, ...(tab === "insights" ? viewStyles.tabBtnActive : {}) }}>
+                Graphs &amp; Insights
+              </button>
+            </div>
+
+            <div style={{ ...modalStyles.body, flex: 1, overflowY: "auto" as const }}>
+              {loading ? (
+                <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
+              ) : tab === "attendance" ? (
+                <CenterAttendanceHistoryTab records={attRecs} studentMap={studentMap} centerName={center.name} />
+              ) : tab === "students" ? (
+                <CenterStudentsTab
+                  students={students}
+                  onUpdateStatuses={updateActiveRoster}
+                  onAddStudents={addStudentsToCenter}
+                  wing={center.wing}
+                />
+              ) : (
+                <CenterInsightsTab records={attRecs} students={students} transactions={txs} />
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -311,13 +524,14 @@ function QuickFact({ label, value }: { label: string; value: string }) {
 
 // ─── Attendance History Tab ─────────────────────────────────────────────────
 
-function CenterAttendanceHistoryTab({ records, studentMap }: {
-  records: CenterAttRec[]; studentMap: Map<string, string>;
+function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
+  records: CenterAttRec[]; studentMap: Map<string, string>; centerName: string;
 }) {
   const [month, setMonth] = useState(currentMonthStr());
+  const [expandedDate, setExpandedDate] = useState<string | null>(null);
 
   const monthRecs = useMemo(
-    () => records.filter(r => r.date.startsWith(month)).sort((a, b) => b.date.localeCompare(a.date)),
+    () => records.filter(r => r.date.startsWith(month)),
     [records, month]
   );
 
@@ -338,6 +552,25 @@ function CenterAttendanceHistoryTab({ records, studentMap }: {
     return Array.from(set).sort().reverse();
   }, [records]);
 
+  // One row per session date — every student's mark that day rolled up into a
+  // center-level summary. Individual marks are still available per row via
+  // the expand toggle, but the aggregate is the default view.
+  const sessions = useMemo(() => {
+    const byDate = new Map<string, CenterAttRec[]>();
+    monthRecs.forEach(r => {
+      if (!byDate.has(r.date)) byDate.set(r.date, []);
+      byDate.get(r.date)!.push(r);
+    });
+    return Array.from(byDate.entries())
+      .map(([date, recs]) => {
+        const present = recs.filter(r => r.status === "present").length;
+        const absent  = recs.filter(r => r.status === "absent").length;
+        const total   = recs.length;
+        return { date, recs, total, present, absent, pct: total > 0 ? (present / total) * 100 : 0 };
+      })
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [monthRecs]);
+
   if (records.length === 0) {
     return <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>No attendance history recorded for this centre yet.</div>;
   }
@@ -357,7 +590,7 @@ function CenterAttendanceHistoryTab({ records, studentMap }: {
         </select>
       </div>
 
-      {monthRecs.length === 0 ? (
+      {sessions.length === 0 ? (
         <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No attendance records for {fmtMonthLong(month)}.</div>
       ) : (
         <div style={{ maxHeight: 420, overflowY: "auto" as const, border: "1px solid #e5e7eb", borderRadius: 8 }}>
@@ -365,21 +598,63 @@ function CenterAttendanceHistoryTab({ records, studentMap }: {
             <thead>
               <tr>
                 <th style={viewStyles.histTh}>Date</th>
-                <th style={viewStyles.histTh}>Student</th>
-                <th style={viewStyles.histTh}>Status</th>
+                <th style={viewStyles.histTh}>Batch / Class</th>
+                <th style={viewStyles.histTh}>Total Enrolled</th>
+                <th style={viewStyles.histTh}>Present</th>
+                <th style={viewStyles.histTh}>Absent</th>
+                <th style={viewStyles.histTh}>Attendance %</th>
+                <th style={{ ...viewStyles.histTh, width: 24 }} />
               </tr>
             </thead>
             <tbody>
-              {monthRecs.map((r, i) => {
-                const sc = ATT_STATUS_COLOR[r.status] ?? { bg: "#f3f4f6", fg: "#374151" };
+              {sessions.map((s, i) => {
+                const open = expandedDate === s.date;
                 return (
-                  <tr key={r.id} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-                    <td style={viewStyles.histTd}>{fmtDateShort(r.date)}</td>
-                    <td style={viewStyles.histTd}>{studentMap.get(r.studentUid) ?? r.studentUid ?? "—"}</td>
-                    <td style={viewStyles.histTd}>
-                      <span style={{ ...styles.badge, background: sc.bg, color: sc.fg }}>{r.status.replace(/_/g, " ") || "—"}</span>
-                    </td>
-                  </tr>
+                  <Fragment key={s.date}>
+                    <tr
+                      onClick={() => setExpandedDate(open ? null : s.date)}
+                      style={{ background: i % 2 === 0 ? "#fff" : "#fafafa", cursor: "pointer" }}
+                    >
+                      <td style={viewStyles.histTd}>{fmtDateShort(s.date)}</td>
+                      <td style={viewStyles.histTd}>{centerName}</td>
+                      <td style={viewStyles.histTd}>{s.total}</td>
+                      <td style={{ ...viewStyles.histTd, color: "#16a34a", fontWeight: 700 }}>{s.present}</td>
+                      <td style={{ ...viewStyles.histTd, color: "#dc2626", fontWeight: 700 }}>{s.absent}</td>
+                      <td style={viewStyles.histTd}>
+                        {s.total > 0 ? `${s.present}/${s.total} (${s.pct.toFixed(1)}%)` : "—"}
+                      </td>
+                      <td style={{ ...viewStyles.histTd, textAlign: "center" as const, color: "#9ca3af" }}>
+                        <span style={{ display: "inline-block", transition: "transform 0.15s", transform: open ? "rotate(90deg)" : "none" }}>▶</span>
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr>
+                        <td colSpan={7} style={{ padding: 0, background: "#f9fafb" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+                            <thead>
+                              <tr>
+                                <th style={{ ...viewStyles.histTh, background: "#f3f4f6" }}>Student</th>
+                                <th style={{ ...viewStyles.histTh, background: "#f3f4f6" }}>Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {s.recs.map(r => {
+                                const sc = ATT_STATUS_COLOR[r.status] ?? { bg: "#f3f4f6", fg: "#374151" };
+                                return (
+                                  <tr key={r.id}>
+                                    <td style={viewStyles.histTd}>{studentMap.get(r.studentUid) ?? r.studentUid ?? "—"}</td>
+                                    <td style={viewStyles.histTd}>
+                                      <span style={{ ...styles.badge, background: sc.bg, color: sc.fg }}>{r.status.replace(/_/g, " ") || "—"}</span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -538,7 +813,7 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
               <tr>
                 <th style={{ ...viewStyles.histTh, width: 36 }}></th>
                 <th style={viewStyles.histTh}>Student</th>
-                <th style={viewStyles.histTh}>ID</th>
+                <th style={viewStyles.histTh}>Admission Number</th>
                 <th style={viewStyles.histTh}>Status</th>
               </tr>
             </thead>
@@ -868,7 +1143,6 @@ export default function CentersPage() {
 function CentersContent() {
   const { user, role }              = useAuth();
   const { wing }                    = useWing();
-  const isSom                       = isSchoolOfMusic(wing);
   // Seed from the last visit's cache so switching back to Centers renders
   // instantly instead of a blank loading state — fetchCenters() below still
   // always re-fetches to stay fresh.
@@ -1008,10 +1282,15 @@ function CentersContent() {
     setForm(prev => ({ ...prev, daysOfWeek: days }));
     if (days.length > 0) setDayError("");
   }
+  function handleBatchesChange(batches: CenterBatch[]) {
+    setForm(prev => ({ ...prev, batches }));
+  }
 
   function openCreate() {
     setEditTarget(null);
-    setForm({ ...EMPTY_FORM });
+    // Default to the wing currently being viewed — still explicit/overridable,
+    // just a sane starting point instead of forcing a blank pick every time.
+    setForm({ ...EMPTY_FORM, wing });
     setDayError("");
     setShowImport(false);
     setShowForm(true);
@@ -1024,10 +1303,11 @@ function CentersContent() {
       name:       center.name,
       teacherUid: center.teacherUid,
       status:     center.status as "active" | "inactive",
+      wing:       wingOf(center),
       daysOfWeek: raw.daysOfWeek ?? [],
       startTime:  raw.startTime  ?? "",
       endTime:    raw.endTime    ?? "",
-      monthlyFee: center.monthlyFee ? String(center.monthlyFee) : "",
+      batches:    center.batches ?? [],
     });
     setDayError("");
     setShowForm(true);
@@ -1045,8 +1325,6 @@ function CentersContent() {
     if (form.daysOfWeek.length === 0) { setDayError("Select at least 1 day."); return; }
     setSaving(true);
     const timeSlot = `${form.daysOfWeek.join("/")} ${form.startTime}–${form.endTime}`;
-    // School of Music centres carry a standard monthly batch fee; ROL+ centres don't.
-    const somFee = isSom ? { monthlyFee: form.monthlyFee ? Number(form.monthlyFee) : 0 } : {};
     try {
       if (editTarget) {
         await updateCenter(editTarget.id, {
@@ -1054,18 +1332,23 @@ function CentersContent() {
           teacherUid: form.teacherUid.trim(),
           status:     form.status,
           timeSlot,
-          ...somFee,
-          // extra fields — passed through by updateCenter's whitelist only for known keys
+          batches:    form.batches,
         });
         // patch extra fields directly since updateCenter whitelists known Center fields
         const { doc: fsDoc, updateDoc, serverTimestamp } = await import("firebase/firestore");
         const { db } = await import("@/config/firebase");
         await updateDoc(fsDoc(db, "centers", editTarget.id), {
+          wing:       form.wing,
           daysOfWeek: form.daysOfWeek,
           startTime:  form.startTime,
           endTime:    form.endTime,
         });
-        toast("Center updated successfully.", "success");
+        toast(
+          form.wing !== wing
+            ? `Center updated and moved to ${WING_LABELS[form.wing]} — it won't appear in this ${WING_LABELS[wing]} view.`
+            : "Center updated successfully.",
+          "success",
+        );
       } else {
         await createCenter({
           name:        form.name.trim(),
@@ -1074,11 +1357,16 @@ function CentersContent() {
           teacherUid:  form.teacherUid.trim(),
           studentUids: [],
           status:      form.status,
-          wing,
-          ...somFee,
+          wing:        form.wing,
+          batches:     form.batches,
           ...(({ daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime }) as object),
         } as Parameters<typeof createCenter>[0]);
-        toast("Center created successfully.", "success");
+        toast(
+          form.wing !== wing
+            ? `Center created under ${WING_LABELS[form.wing]} — switch wings to see it.`
+            : "Center created successfully.",
+          "success",
+        );
       }
       closeForm();
       setLoading(true);
@@ -1096,7 +1384,18 @@ function CentersContent() {
   return (
     <div>
       <ToastContainer toasts={toasts} onRemove={remove} />
-      {viewTarget && <ViewModal center={viewTarget} onClose={() => setViewTarget(null)} teachers={teachers} />}
+      {viewTarget && (
+        <ViewModal
+          center={viewTarget}
+          onClose={() => setViewTarget(null)}
+          teachers={teachers}
+          onSaved={updated => {
+            setCenters(prev => prev.map(c => c.id === updated.id ? updated : c));
+            toast("Center updated successfully.", "success");
+            fetchCenters();
+          }}
+        />
+      )}
       {deleteTarget && (
         <DeleteCenterModal
           center={deleteTarget}
@@ -1205,7 +1504,7 @@ function CentersContent() {
               >
                 <option value="">— Select a teacher —</option>
                 {teachers.map(t => (
-                  <option key={t.uid} value={t.uid}>{t.displayName} ({t.email})</option>
+                  <option key={t.uid} value={t.uid}>{t.displayName}</option>
                 ))}
               </select>
             </FormField>
@@ -1215,21 +1514,17 @@ function CentersContent() {
                 <option value="inactive">Inactive</option>
               </select>
             </FormField>
-            {isSom && (
-              <FormField label="Standard Monthly Fee (₹)">
-                <input
-                  name="monthlyFee"
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={form.monthlyFee}
-                  onChange={handleChange}
-                  placeholder="e.g. 2000"
-                  style={formStyles.input}
-                />
-                <span style={formStyles.helperText}>Pre-fills each student&apos;s monthly fee at enrolment.</span>
-              </FormField>
-            )}
+            <FormField label="Assign Wing" required>
+              <select name="wing" value={form.wing} onChange={handleChange} required style={formStyles.input}>
+                <option value={WINGS.ROL_PLUS}>{WING_LABELS[WINGS.ROL_PLUS]}</option>
+                <option value={WINGS.SCHOOL_OF_MUSIC}>{WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}</option>
+              </select>
+              {isEditing && form.wing !== wing && (
+                <span style={formStyles.helperText}>
+                  Moving this centre out of the {WING_LABELS[wing]} view.
+                </span>
+              )}
+            </FormField>
             <FormField label="Start Time" required>
               <input name="startTime" type="time" value={form.startTime} onChange={handleChange}
                 required style={formStyles.input} />
@@ -1246,6 +1541,9 @@ function CentersContent() {
                   {form.daysOfWeek.join(", ")} · {form.daysOfWeek.length}/6 selected
                 </span>
               )}
+            </FormField>
+            <FormField label="Batches" fullWidth>
+              <BatchesEditor batches={form.batches} onChange={handleBatchesChange} />
             </FormField>
           </div>
           <div style={formStyles.actions}>
@@ -1339,6 +1637,10 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
       </div>
       <div style={styles.cardName}>{center.name}</div>
       <div style={styles.cardMeta}>
+        <span style={styles.cardMetaLabel}>Wing</span>
+        <span>{WING_LABELS[wingOf(center)] ?? "—"}</span>
+      </div>
+      <div style={styles.cardMeta}>
         <span style={styles.cardMetaLabel}>Teacher</span>
         {teacher
           ? <span>{teacher.displayName}</span>
@@ -1361,188 +1663,6 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
           <span>₹{center.monthlyFee.toLocaleString("en-IN")}</span>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-// ─── Add Center modal (standalone — usable from the Students view too) ─────────
-// Bundles the same creation form CentersContent uses inline, plus a reference
-// list of every existing centre name so a caller elsewhere in the app (e.g.
-// the Students view's "+ Add Center" button) can create a centre without
-// navigating away, while still seeing what already exists to avoid duplicates.
-
-export function AddCenterModal({ onClose, onCreated }: { onClose: () => void; onCreated?: () => void }) {
-  const { wing } = useWing();
-  const isSom = isSchoolOfMusic(wing);
-  const [centers, setCenters] = useState<Center[]>([]);
-  const [teachers, setTeachers] = useState<TeacherUser[]>([]);
-  const [loadingList, setLoadingList] = useState(true);
-  const [form, setForm] = useState({ ...EMPTY_FORM });
-  const [saving, setSaving] = useState(false);
-  const [dayError, setDayError] = useState("");
-  const [err, setErr] = useState("");
-  const [success, setSuccess] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoadingList(true);
-      try {
-        const [c, t] = await Promise.all([getCenters(wing), getTeachers(wing)]);
-        if (cancelled) return;
-        setCenters(c);
-        setTeachers(t.sort((a, b) => a.displayName.localeCompare(b.displayName)));
-      } catch (e) {
-        console.error("[AddCenterModal] load error:", e);
-      } finally {
-        if (!cancelled) setLoadingList(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [wing]);
-
-  const existingNamesLC = useMemo(
-    () => new Set(centers.map(c => c.name.trim().toLowerCase())),
-    [centers],
-  );
-  const trimmedName = form.name.trim();
-  const isDuplicateName = trimmedName !== "" && existingNamesLC.has(trimmedName.toLowerCase());
-
-  function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
-    setErr(""); setSuccess("");
-    setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
-  }
-  function handleDaysChange(days: Day[]) {
-    setForm(prev => ({ ...prev, daysOfWeek: days }));
-    if (days.length > 0) setDayError("");
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setErr(""); setSuccess("");
-    if (form.daysOfWeek.length === 0) { setDayError("Select at least 1 day."); return; }
-    if (isDuplicateName) { setErr(`A centre named "${trimmedName}" already exists.`); return; }
-    setSaving(true);
-    const timeSlot = `${form.daysOfWeek.join("/")} ${form.startTime}–${form.endTime}`;
-    const somFee = isSom ? { monthlyFee: form.monthlyFee ? Number(form.monthlyFee) : 0 } : {};
-    try {
-      await createCenter({
-        name: trimmedName, location: "", timeSlot,
-        teacherUid: form.teacherUid.trim(), studentUids: [],
-        status: form.status, wing, ...somFee,
-      } as Parameters<typeof createCenter>[0]);
-      setSuccess(`Centre "${trimmedName}" created.`);
-      setForm({ ...EMPTY_FORM });
-      setDayError("");
-      setCenters(await getCenters(wing));
-      onCreated?.();
-    } catch (err) {
-      console.error("Failed to create center:", err);
-      setErr(err instanceof Error ? err.message : "Failed to create centre.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div style={modalStyles.overlay} onClick={onClose}>
-      <div style={{ ...modalStyles.box, maxWidth: 760, maxHeight: "88vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
-        <div style={modalStyles.header}>
-          <span style={modalStyles.title}>+ Add Center</span>
-          <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
-        </div>
-        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-          <form onSubmit={handleSubmit} style={{ flex: 1, padding: "18px 20px", overflowY: "auto" as const }}>
-            <div style={formStyles.grid}>
-              <FormField label="Name" required>
-                <input name="name" value={form.name} onChange={handleChange} required
-                  placeholder="e.g. Koramangala Center" style={formStyles.input} />
-                {isDuplicateName && (
-                  <span style={formStyles.errorText}>A centre named &ldquo;{trimmedName}&rdquo; already exists.</span>
-                )}
-              </FormField>
-              <FormField label="Assigned Teacher" required>
-                <select name="teacherUid" value={form.teacherUid} onChange={handleChange} required style={formStyles.input}>
-                  <option value="">— Select a teacher —</option>
-                  {teachers.map(t => (
-                    <option key={t.uid} value={t.uid}>{t.displayName} ({t.email})</option>
-                  ))}
-                </select>
-              </FormField>
-              <FormField label="Status">
-                <select name="status" value={form.status} onChange={handleChange} style={formStyles.input}>
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                </select>
-              </FormField>
-              {isSom && (
-                <FormField label="Standard Monthly Fee (₹)">
-                  <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee}
-                    onChange={handleChange} placeholder="e.g. 2000" style={formStyles.input} />
-                </FormField>
-              )}
-              <FormField label="Start Time" required>
-                <input name="startTime" type="time" value={form.startTime} onChange={handleChange}
-                  required style={formStyles.input} />
-              </FormField>
-              <FormField label="End Time" required>
-                <input name="endTime" type="time" value={form.endTime} onChange={handleChange}
-                  required style={formStyles.input} />
-              </FormField>
-              <FormField label="Days of Week" required fullWidth>
-                <DayChips selected={form.daysOfWeek} onChange={handleDaysChange} />
-                {dayError && <span style={formStyles.errorText}>{dayError}</span>}
-              </FormField>
-            </div>
-
-            {err && (
-              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#dc2626", marginTop: 4 }}>
-                {err}
-              </div>
-            )}
-            {success && (
-              <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#16a34a", marginTop: 4 }}>
-                ✓ {success}
-              </div>
-            )}
-
-            <div style={{ ...formStyles.actions, marginTop: 16 }}>
-              <button type="submit" disabled={saving || isDuplicateName}
-                style={{ ...formStyles.submitBtn, opacity: saving || isDuplicateName ? 0.6 : 1 }}>
-                {saving ? "Creating…" : "Create Center"}
-              </button>
-            </div>
-          </form>
-
-          {/* Existing centres — reference list to avoid duplicate names */}
-          <div style={{ width: 220, flexShrink: 0, borderLeft: "1px solid #e5e7eb", padding: "18px 16px", overflowY: "auto" as const, background: "#f9fafb" }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 10 }}>
-              Existing Centres {loadingList ? "" : `(${centers.length})`}
-            </div>
-            {loadingList ? (
-              <div style={{ fontSize: 12, color: "#9ca3af" }}>Loading…</div>
-            ) : centers.length === 0 ? (
-              <div style={{ fontSize: 12, color: "#9ca3af" }}>No centres yet.</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
-                {[...centers].sort((a, b) => a.name.localeCompare(b.name)).map(c => {
-                  const isMatch = trimmedName !== "" && c.name.trim().toLowerCase() === trimmedName.toLowerCase();
-                  return (
-                    <div key={c.id} style={{
-                      fontSize: 12.5, padding: "4px 8px", borderRadius: 6,
-                      background: isMatch ? "#fef2f2" : "transparent",
-                      color: isMatch ? "#dc2626" : "#374151",
-                      fontWeight: isMatch ? 700 : 500,
-                    }}>
-                      {c.name}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1665,6 +1785,12 @@ const chipStyles: Record<string, React.CSSProperties> = {
   chipInactive:{ background: "#f3f4f6", color: "#374151", borderColor: "#e5e7eb" },
 };
 
+const batchStyles: Record<string, React.CSSProperties> = {
+  row:       { display: "flex", flexDirection: "column", gap: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: 10 },
+  removeBtn: { background: "#fff", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 6, width: 28, height: 28, fontSize: 13, cursor: "pointer", flexShrink: 0 },
+  addBtn:    { alignSelf: "flex-start", background: "#fff", color: "#4f46e5", border: "1px solid #c7d2fe", borderRadius: 6, padding: "6px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
+};
+
 const actionStyles: Record<string, React.CSSProperties> = {
   menuBtn: {
     background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 8,
@@ -1714,4 +1840,13 @@ const viewStyles: Record<string, React.CSSProperties> = {
     borderBottom: "1px solid #e5e7eb", background: "#f9fafb", position: "sticky" as const, top: 0,
   },
   histTd: { padding: "9px 12px", fontSize: 12, color: "#111827", borderBottom: "1px solid #f3f4f6" },
+
+  editBtn: {
+    background: "#fff", color: "#4f46e5", border: "1px solid #c7d2fe", borderRadius: 8,
+    padding: "6px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+  },
+  cancelBtn: {
+    background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", borderRadius: 6,
+    padding: "8px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+  },
 };

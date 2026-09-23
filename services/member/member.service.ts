@@ -8,7 +8,6 @@
 import {
   collection,
   deleteDoc,
-  deleteField,
   doc,
   setDoc,
   getDocs,
@@ -37,8 +36,16 @@ const LOGIN_ID_RE = /^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])$/;
 
 export interface CreateMemberInput {
   displayName: string;
-  email:       string;   // real contact email (optional-ish; stored as-is)
-  loginId:     string;   // unique sign-in id
+  /** Contact email. Also the sign-in address when authMethod === "email". */
+  email:       string;
+  /** How this account signs in. Defaults to "loginId" (a login id + the
+   *  synthetic SOM_LOGIN_DOMAIN address) for back-compat; "email" signs in
+   *  with `email` directly — needed for a real address like a Gmail account,
+   *  since a login id can't itself contain "@" (it gets concatenated into
+   *  `${loginId}@<SOM_LOGIN_DOMAIN>`, so an embedded "@" would double up). */
+  authMethod?: "email" | "loginId";
+  /** Required when authMethod === "loginId". */
+  loginId?:    string;
   password:    string;
   wing:        Wing;
   /** Primary role for `wing`. Defaults to plain "member" (no leadership access). */
@@ -72,19 +79,29 @@ export async function createMember(
   initiatorId:   string,
   initiatorRole: Role,
 ): Promise<MemberUser> {
-  const loginId = normalizeLoginId(input.loginId);
-  if (!isValidLoginId(loginId)) {
-    throw new Error("INVALID_LOGIN_ID: use 3–32 chars, letters/numbers/._- , start and end alphanumeric");
-  }
   if (input.password.length < 6) {
     throw new Error("WEAK_PASSWORD: at least 6 characters");
   }
 
-  // Uniqueness — login id
-  const dupId = await getDocs(query(collection(db, USERS), where("loginId", "==", loginId)));
-  if (!dupId.empty) throw new Error(`LOGIN_ID_IN_USE: "${loginId}" is already taken`);
+  const authMethod = input.authMethod ?? "loginId";
+  let authEmail: string;
+  let loginId: string | null = null;
 
-  const authEmail = loginIdToAuthEmail(loginId);
+  if (authMethod === "loginId") {
+    loginId = normalizeLoginId(input.loginId ?? "");
+    if (!isValidLoginId(loginId)) {
+      throw new Error("INVALID_LOGIN_ID: use 3–32 chars, letters/numbers/._- , start and end alphanumeric");
+    }
+    const dupId = await getDocs(query(collection(db, USERS), where("loginId", "==", loginId)));
+    if (!dupId.empty) throw new Error(`LOGIN_ID_IN_USE: "${loginId}" is already taken`);
+    authEmail = loginIdToAuthEmail(loginId);
+  } else {
+    authEmail = input.email.trim().toLowerCase();
+    if (!authEmail) throw new Error("EMAIL_REQUIRED");
+    const dupEmail = await getDocs(query(collection(db, USERS), where("email", "==", authEmail)));
+    if (!dupEmail.empty) throw new Error(`EMAIL_IN_USE: "${authEmail}" is already registered`);
+  }
+
   const uid = await createAuthUser(authEmail, input.password);
   const userRef = doc(db, USERS, uid);
 
@@ -93,10 +110,10 @@ export async function createMember(
     role:         input.role ?? ROLES.MEMBER,
     wing:         input.wing ?? WINGS.SCHOOL_OF_MUSIC,
     displayName:  input.displayName.trim(),
-    email:        input.email.trim().toLowerCase(),   // real contact email
-    loginId,
-    authEmail,                                        // synthetic Firebase Auth email
+    email:        authMethod === "email" ? authEmail : input.email.trim().toLowerCase(),
+    ...(loginId ? { loginId, authEmail } : {}),
     plainPassword: input.password,                    // shown on the Founder Users page
+    hasLogin:     true,
     createdVia:   "manual",
     status:       "active",
     lastActivity: null,
@@ -114,7 +131,7 @@ export async function createMember(
     approverId:    null,
     approverRole:  null,
     reason:        null,
-    metadata:      { uid, loginId, wing: input.wing },
+    metadata:      { uid, authMethod, loginId, wing: input.wing },
   });
 
   const snap = await getDocFromServer(userRef);
@@ -165,8 +182,13 @@ export async function setMemberStatus(uid: string, status: "active" | "inactive"
  */
 export async function setWingRoles(uid: string, wing: Wing, roles: Role[] | null): Promise<void> {
   const unique = roles ? Array.from(new Set(roles)) : [];
+  // Always write an explicit array, even when empty — deleteField() would
+  // clear the override and let getRolesForWing() fall back to the legacy
+  // scalar `role` field, silently undoing a revoke for anyone whose only
+  // source of that role was the fallback (e.g. unchecking "Teacher" for a
+  // teacher's own home wing would otherwise resurrect it immediately).
   await updateDoc(doc(db, USERS, uid), {
-    [`roles.${wing}`]: unique.length === 0 ? deleteField() : unique,
+    [`roles.${wing}`]: unique,
     updatedAt: serverTimestamp(),
   });
 }
