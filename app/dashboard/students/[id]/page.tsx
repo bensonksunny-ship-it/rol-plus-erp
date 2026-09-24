@@ -24,7 +24,8 @@ import {
 } from "../_shared";
 import { StudentSyllabusContent } from "../../student-syllabus/[studentId]/_shared";
 import { getScreeningByStudent } from "@/services/screening/screening.service";
-import type { ScreeningResult, CenterBatch } from "@/types";
+import type { ScreeningResult } from "@/types";
+import { effectiveBatches } from "@/lib/batches";
 import { DiagnosticCard } from "@/components/DiagnosticCard";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
@@ -109,7 +110,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
           id: d.id,
           name: (d.data().name as string) ?? d.id,
           monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
-          batches: Array.isArray(d.data().batches) ? (d.data().batches as CenterBatch[]) : [],
+          batches: effectiveBatches(d.id, d.data()),
         });
       });
       setCenterMap(cMap);

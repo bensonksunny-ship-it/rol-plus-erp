@@ -9,6 +9,7 @@ import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import type { Center, CenterBatch, Wing } from "@/types";
+import { DEFAULT_BATCH_NAME } from "@/lib/batches";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -97,7 +98,8 @@ function BatchesEditor({ batches, onChange }: { batches: CenterBatch[]; onChange
     <div style={{ display: "flex", flexDirection: "column" as const, gap: 10 }}>
       {batches.length === 0 && (
         <div style={{ fontSize: 12, color: "#9ca3af" }}>
-          No batches yet — students here won&apos;t be split into named groups until you add one.
+          No batches yet — the centre&apos;s days &amp; time above act as its single {DEFAULT_BATCH_NAME}, and every
+          student here is in it. Adding a batch replaces the {DEFAULT_BATCH_NAME}.
         </div>
       )}
       {batches.map(b => (
@@ -472,9 +474,9 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
               {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
                 <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
               ) : null}
-              {(center.batches ?? []).length > 0 && (
-                <QuickFact label="Batches" value={(center.batches ?? []).map(b => b.name || "Unnamed").join(", ")} />
-              )}
+              <QuickFact label="Batches" value={(center.batches ?? []).length > 0
+                ? (center.batches ?? []).map(b => b.name || "Unnamed").join(", ")
+                : `${DEFAULT_BATCH_NAME} (centre schedule)`} />
             </div>
 
             {/* Sub-navigation tabs */}
@@ -673,74 +675,45 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
   onAddStudents: (picked: PickedStudent[]) => Promise<void>;
   wing: Wing | undefined;
 }) {
-  const [search, setSearch]             = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
-  const [selected, setSelected]         = useState<Set<string>>(
-    () => new Set(students.filter(s => s.status === "active").map(s => s.uid))
-  );
-  const [saving, setSaving]     = useState(false);
+  const [search, setSearch]     = useState("");
   const [msg, setMsg]           = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [showAdd, setShowAdd]   = useState(false);
+  const [removingUid, setRemovingUid] = useState<string | null>(null);
+
+  // Primary view is a strict Active-only roster — Inactive/Cancelled rows
+  // never load here at all. Attaching/activating a student happens exclusively
+  // through "+ Add Active Students" below.
+  const activeStudents = useMemo(() => students.filter(s => s.status === "active"), [students]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return students
-      .filter(s => {
-        if (q && !s.name.toLowerCase().includes(q) && !s.admissionNo.toLowerCase().includes(q)) return false;
-        const isActive = selected.has(s.uid);
-        if (statusFilter === "active" && !isActive) return false;
-        if (statusFilter === "inactive" && isActive) return false;
-        return true;
-      })
-      // Active students first, then alphabetically by name within each group.
-      .sort((a, b) => {
-        const aActive = selected.has(a.uid);
-        const bActive = selected.has(b.uid);
-        if (aActive !== bActive) return aActive ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-  }, [students, search, statusFilter, selected]);
+    return activeStudents
+      .filter(s => !q || s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [activeStudents, search]);
 
   const existingUids = useMemo(() => new Set(students.map(s => s.uid)), [students]);
 
   async function handleAssign(picked: PickedStudent[]) {
     setMsg(null);
     await onAddStudents(picked);
-    setSelected(prev => {
-      const next = new Set(prev);
-      picked.forEach(p => next.add(p.uid));
-      return next;
-    });
     setShowAdd(false);
     setMsg({ type: "success", text: `${picked.length} student${picked.length !== 1 ? "s" : ""} added as Active.` });
   }
 
-  const dirty = useMemo(() => {
-    const currentActive = new Set(students.filter(s => s.status === "active").map(s => s.uid));
-    if (currentActive.size !== selected.size) return true;
-    for (const uid of selected) if (!currentActive.has(uid)) return true;
-    return false;
-  }, [students, selected]);
-
-  function toggle(uid: string) {
-    setMsg(null);
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(uid)) next.delete(uid); else next.add(uid);
-      return next;
-    });
-  }
-
-  async function handleSave() {
-    setSaving(true);
+  // Removes one student from the active roster — the only way left to take a
+  // student out of Active from this tab, now that bulk checkboxes are gone.
+  async function handleDeactivate(uid: string) {
+    setRemovingUid(uid);
     setMsg(null);
     try {
-      await onUpdateStatuses(selected);
-      setMsg({ type: "success", text: "Active roster updated." });
+      const nextActive = new Set(activeStudents.filter(s => s.uid !== uid).map(s => s.uid));
+      await onUpdateStatuses(nextActive);
+      setMsg({ type: "success", text: "Student marked inactive." });
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to update roster." });
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to update." });
     } finally {
-      setSaving(false);
+      setRemovingUid(null);
     }
   }
 
@@ -756,39 +729,15 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
       )}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search by name or ID…"
-            style={{ ...formStyles.input, width: 200 }}
-          />
-          <select
-            value={statusFilter}
-            onChange={e => setStatusFilter(e.target.value as "all" | "active" | "inactive")}
-            style={{ ...formStyles.input, width: "auto" }}
-          >
-            <option value="all">All statuses</option>
-            <option value="active">Active only</option>
-            <option value="inactive">Inactive only</option>
-          </select>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
-          <button onClick={() => setShowAdd(true)} style={{ ...formStyles.submitBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
-            + Add Active Students
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!dirty || saving}
-            style={{ ...formStyles.submitBtn, opacity: !dirty || saving ? 0.5 : 1 }}
-          >
-            {saving ? "Saving…" : `Set ${selected.size} Active`}
-          </button>
-        </div>
-      </div>
-
-      <div style={{ fontSize: 11.5, color: "#9ca3af", marginBottom: 10 }}>
-        Check the students who should be active — everyone else at this centre is marked Inactive when you save.
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search by name or ID…"
+          style={{ ...formStyles.input, width: 200 }}
+        />
+        <button onClick={() => setShowAdd(true)} style={{ ...formStyles.submitBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
+          + Add Active Students
+        </button>
       </div>
 
       {msg && (
@@ -802,8 +751,10 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
         </div>
       )}
 
-      {students.length === 0 ? (
-        <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>No students enrolled at this centre yet.</div>
+      {activeStudents.length === 0 ? (
+        <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>
+          No active students at this centre yet. Use &ldquo;+ Add Active Students&rdquo; to attach some.
+        </div>
       ) : filtered.length === 0 ? (
         <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No students match.</div>
       ) : (
@@ -811,28 +762,35 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
           <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
             <thead>
               <tr>
-                <th style={{ ...viewStyles.histTh, width: 36 }}></th>
                 <th style={viewStyles.histTh}>Student</th>
                 <th style={viewStyles.histTh}>Admission Number</th>
                 <th style={viewStyles.histTh}>Status</th>
+                <th style={{ ...viewStyles.histTh, width: 90 }} />
               </tr>
             </thead>
             <tbody>
-              {filtered.map((s, i) => {
-                const isSelected = selected.has(s.uid);
-                return (
-                  <tr key={s.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-                    <td style={viewStyles.histTd}>
-                      <input type="checkbox" checked={isSelected} onChange={() => toggle(s.uid)} />
-                    </td>
-                    <td style={viewStyles.histTd}>{s.name}</td>
-                    <td style={viewStyles.histTd}>{s.admissionNo || "—"}</td>
-                    <td style={viewStyles.histTd}>
-                      <StatusBadge status={isSelected ? "active" : "inactive"} />
-                    </td>
-                  </tr>
-                );
-              })}
+              {filtered.map((s, i) => (
+                <tr key={s.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
+                  <td style={viewStyles.histTd}>{s.name}</td>
+                  <td style={viewStyles.histTd}>{s.admissionNo || "—"}</td>
+                  <td style={viewStyles.histTd}>
+                    <StatusBadge status="active" />
+                  </td>
+                  <td style={viewStyles.histTd}>
+                    <button
+                      onClick={() => handleDeactivate(s.uid)}
+                      disabled={removingUid === s.uid}
+                      style={{
+                        background: "none", border: "1px solid #e5e7eb", borderRadius: 6,
+                        padding: "3px 9px", fontSize: 11, color: "#6b7280", cursor: "pointer",
+                        opacity: removingUid === s.uid ? 0.5 : 1,
+                      }}
+                    >
+                      {removingUid === s.uid ? "…" : "Deactivate"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -1172,6 +1130,8 @@ function CentersContent() {
     () => new Set(centers.map(c => c.name.trim().toLowerCase())),
     [centers],
   );
+  const activeCentersList   = useMemo(() => centers.filter(c => c.status === "active"), [centers]);
+  const inactiveCentersList = useMemo(() => centers.filter(c => c.status !== "active"), [centers]);
   const newImportNames = useMemo(
     () => importNames.filter(n => !existingNamesLC.has(n.toLowerCase())),
     [importNames, existingNamesLC],
@@ -1555,22 +1515,47 @@ function CentersContent() {
         </form>
       )}
 
-      {/* Grid */}
+      {/* Grid — active centres are the primary view; inactive ones live in
+          their own list below rather than mixed in with a status badge. */}
       {loading ? (
         <div style={styles.stateRow}>Loading…</div>
       ) : centers.length === 0 ? (
         <div style={styles.stateRow}>No centers available.</div>
       ) : (
-        <div style={styles.grid}>
-          {centers.map(center => (
-            <CenterCard key={center.id} center={center}
-              teachers={teachers}
-              activeCount={activeCounts.get(center.id) ?? 0}
-              onView={() => setViewTarget(center)}
-              onEdit={() => openEdit(center)}
-              onDelete={() => setDeleteTarget(center)} />
-          ))}
-        </div>
+        <>
+          {activeCentersList.length === 0 ? (
+            <div style={styles.stateRow}>No active centers.</div>
+          ) : (
+            <div style={styles.grid}>
+              {activeCentersList.map(center => (
+                <CenterCard key={center.id} center={center}
+                  teachers={teachers}
+                  activeCount={activeCounts.get(center.id) ?? 0}
+                  onView={() => setViewTarget(center)}
+                  onEdit={() => openEdit(center)}
+                  onDelete={() => setDeleteTarget(center)} />
+              ))}
+            </div>
+          )}
+
+          {inactiveCentersList.length > 0 && (
+            <div style={{ marginTop: 28 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#6b7280", letterSpacing: 0.5, textTransform: "uppercase" as const, marginBottom: 14, paddingBottom: 6, borderBottom: "2px solid #e5e7eb" }}>
+                Inactive Centers ({inactiveCentersList.length})
+              </div>
+              <div style={styles.grid}>
+                {inactiveCentersList.map(center => (
+                  <CenterCard key={center.id} center={center}
+                    teachers={teachers}
+                    activeCount={activeCounts.get(center.id) ?? 0}
+                    onView={() => setViewTarget(center)}
+                    onEdit={() => openEdit(center)}
+                    onDelete={() => setDeleteTarget(center)} />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -1586,7 +1571,6 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
   const [hover, setHover]     = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const raw = center as Center & { centerCode?: string };
   const teacher = teachers.find(t => t.uid === center.teacherUid);
 
   function goToActiveStudents(e: React.MouseEvent) {
@@ -1609,10 +1593,8 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
       style={{ ...styles.card, ...(hover ? styles.cardHover : {}), cursor: "pointer", position: "relative" }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
     >
-      <div style={styles.cardHeader}>
-        <span style={styles.codeChip}>{raw.centerCode || "-"}</span>
+      <div style={{ ...styles.cardHeader, justifyContent: "flex-end" as const }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <StatusBadge status={center.status} />
           <div ref={menuRef} style={{ position: "relative" }}>
             <button
               onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
@@ -1637,17 +1619,11 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
       </div>
       <div style={styles.cardName}>{center.name}</div>
       <div style={styles.cardMeta}>
-        <span style={styles.cardMetaLabel}>Wing</span>
-        <span>{WING_LABELS[wingOf(center)] ?? "—"}</span>
-      </div>
-      <div style={styles.cardMeta}>
-        <span style={styles.cardMetaLabel}>Teacher</span>
         {teacher
           ? <span>{teacher.displayName}</span>
           : <span style={{ color: "#9ca3af", fontSize: 12 }}>Unassigned</span>}
       </div>
       <div style={styles.cardMeta}>
-        <span style={styles.cardMetaLabel}>Schedule</span>
         <span>{center.timeSlot || "-"}</span>
       </div>
       <button
@@ -1657,12 +1633,6 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
       >
         🎓 {activeCount} Active Student{activeCount !== 1 ? "s" : ""} →
       </button>
-      {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
-        <div style={styles.cardMeta}>
-          <span style={styles.cardMetaLabel}>Monthly Fee</span>
-          <span>₹{center.monthlyFee.toLocaleString("en-IN")}</span>
-        </div>
-      ) : null}
     </div>
   );
 }

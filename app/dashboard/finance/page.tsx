@@ -183,6 +183,7 @@ function FinanceContent() {
   const [filterDate, setFilterDate]          = useState<string>("");
   const [studentSearch, setStudentSearch]    = useState<string>("");
   const [filterType, setFilterType] = useState<string>("all"); // "all"|"group"|"personal"|"prepay"|"postpay"
+  const [centerSortDir, setCenterSortDir] = useState<1 | -1>(1); // default A→Z
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 640);
@@ -388,7 +389,10 @@ function FinanceContent() {
       : 0;
     const overdueStudents = students.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid));
     const pendingBal      = overdueStudents.reduce((acc, s) => acc + (feeDueMap.get(s.uid)?.amount ?? 0), 0);
-    const activeCount     = students.filter(s => s.status === "active").length;
+    const activeStudents  = students.filter(s => s.status === "active");
+    const activeCount     = activeStudents.length;
+    const paidActiveCount = activeStudents.filter(s => paidMap.has(s.uid)).length;
+    const collectionPct   = activeCount > 0 ? Math.round((paidActiveCount / activeCount) * 100) : 0;
     const totalEstFee     = students.reduce((acc, s) => acc + s.estimatedFee, 0);
     const groupCount      = students.filter(s => s.classType === "group").length;
     const personalCount   = students.filter(s => s.classType === "personal").length;
@@ -401,7 +405,7 @@ function FinanceContent() {
     const postpayCollected = postpayStudents.reduce((acc, s) => acc + (paidAmountMap.get(s.uid) ?? 0), 0);
     // Prepay students with fee generated but not yet paid
     const lowCreditCount   = prepayStudents.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid)).length;
-    return { total, todayAmt, pendingBal, activeCount, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
+    return { total, todayAmt, pendingBal, activeCount, paidActiveCount, collectionPct, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
   }, [transactions, students, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap]);
 
   // ── Last tx per student (scoped to selected month) ───────────────────────────
@@ -742,17 +746,13 @@ function FinanceContent() {
       );
     }
     return [...list].sort((a, b) => {
-      // Attended students first; non-attending at bottom
-      const aAttended = a.attendanceCount > 0 ? 0 : 1;
-      const bAttended = b.attendanceCount > 0 ? 0 : 1;
-      if (aAttended !== bAttended) return aAttended - bAttended;
-      // Within attending group: overdue (positive balance) before paid/clear
-      const aOverdue = a.balance > 0 ? 0 : 1;
-      const bOverdue = b.balance > 0 ? 0 : 1;
-      if (aOverdue !== bOverdue) return aOverdue - bOverdue;
+      // Primary: centre name, direction toggled by the Center header click.
+      const centerCmp = a.centerName.localeCompare(b.centerName) * centerSortDir;
+      if (centerCmp !== 0) return centerCmp;
+      // Secondary: student name, always A→Z within a centre.
       return a.name.localeCompare(b.name);
     });
-  }, [students, filterCenter, studentSearch, filterType, feeStatusFilter]);
+  }, [students, filterCenter, studentSearch, filterType, feeStatusFilter, centerSortDir]);
 
   function formatDate(value: unknown): string {
     if (!value || typeof value !== "string") return "-";
@@ -765,7 +765,9 @@ function FinanceContent() {
   // ─────────────────────────────────────────────────────────────────────────────
 
   return (
-    <div>
+    // Full width on mobile, capped + centred on desktop. Side padding comes
+    // from the dashboard layout's <main>, so none is added here.
+    <div className="mx-auto w-full max-w-6xl">
       <ToastContainer toasts={toasts} onRemove={remove} />
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
@@ -829,12 +831,10 @@ function FinanceContent() {
       {/* ── Summary Cards — click one to see the transactions behind it ──────── */}
       <div style={st.cardGrid}>
         <SummaryCard
-          label={`Collected — ${fmtMonth(selectedMonth)}`}
-          value={loading ? "…" : fmtINR(summary.total)}
-          accent="#16a34a" icon="💰"
-          hint={loading ? undefined : isCurrentMonth
-            ? `${fmtINR(summary.todayAmt)} today`
-            : "Historical view"}
+          label={`Collection Rate — ${fmtMonth(selectedMonth)}`}
+          value={loading ? "…" : `${summary.collectionPct}%`}
+          accent="#059669" icon="💰"
+          hint={loading ? undefined : `${summary.paidActiveCount} / ${summary.activeCount} students paid`}
           active={drillDown === "collected"}
           onClick={() => setDrillDown(d => d === "collected" ? null : "collected")}
         />
@@ -982,10 +982,19 @@ function FinanceContent() {
             ) : filteredStudents.length === 0 ? (
               <div style={st.stateRow}>No students found.</div>
             ) : (
-              <table style={{ ...st.table, minWidth: isMobile ? 280 : 860 }}>
+              <table style={{ ...st.table, minWidth: isMobile ? 280 : 960 }}>
                 <thead>
                   <tr>
                     <th style={st.th}>Student</th>
+                    {!isMobile && (
+                      <th
+                        style={{ ...st.th, cursor: "pointer", userSelect: "none" as const }}
+                        onClick={() => setCenterSortDir(d => (d === 1 ? -1 : 1))}
+                        title="Sort by centre"
+                      >
+                        Center {centerSortDir === 1 ? "▲" : "▼"}
+                      </th>
+                    )}
                     {!isMobile && <th style={st.th}>Type</th>}
                     {!isMobile && <th style={st.th}>Amount</th>}
                     <th style={st.th}>Action</th>
@@ -1024,11 +1033,11 @@ function FinanceContent() {
                             openPanel(s.uid, "history", s);
                           }}
                         >
-                          {/* Student + center */}
+                          {/* Student */}
                           <td style={{ ...st.td, minWidth: isMobile ? 180 : 160 }}>
                             <div style={{ fontWeight: 600 }}>{s.name}</div>
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
-                              {s.centerName}{" · "}{s.studentID}
+                              {isMobile ? `${s.centerName} · ${s.studentID}` : s.studentID}
                             </div>
                             <button
                               onClick={(e) => { e.stopPropagation(); setAttPopupUid(s.uid); }}
@@ -1059,6 +1068,11 @@ function FinanceContent() {
                               </div>
                             )}
                           </td>
+
+                          {/* Center — desktop only (folded into the Student cell on mobile) */}
+                          {!isMobile && (
+                            <td style={st.td}>{s.centerName}</td>
+                          )}
 
                           {/* Type — desktop only */}
                           {!isMobile && (
@@ -1127,7 +1141,7 @@ function FinanceContent() {
                         {/* ── Inline panel row ──────────────────────────────── */}
                         {isOpen && (
                           <tr key={`${s.uid}-panel`}>
-                            <td colSpan={isMobile ? 2 : 5} style={{ padding: isMobile ? "0 10px 14px" : "0 14px 16px", background: "#fffbeb" }}>
+                            <td colSpan={isMobile ? 2 : 6} style={{ padding: isMobile ? "0 10px 14px" : "0 14px 16px", background: "#fffbeb" }}>
 
                               {/* ── Attendance info strip ─────────────────────── */}
                               <div style={{

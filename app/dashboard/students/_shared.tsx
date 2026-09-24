@@ -31,6 +31,7 @@ import {
 import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
 import type { CenterBatch } from "@/types";
+import { batchIdToStore, batchSchedule, effectiveBatches, isDefaultBatchId } from "@/lib/batches";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -368,7 +369,7 @@ function StudentsContent() {
           id: d.id,
           name: nm,
           monthlyFee: typeof d.data().monthlyFee === "number" ? (d.data().monthlyFee as number) : undefined,
-          batches: Array.isArray(d.data().batches) ? (d.data().batches as CenterBatch[]) : [],
+          batches: effectiveBatches(d.id, d.data()),
         });
       });
       setCenterMap(cMap);
@@ -586,7 +587,7 @@ function StudentsContent() {
         admissionNo: form.admissionNo.trim(),
         phone:       form.phone.trim(),
         centerId:    form.centerId.trim(),
-        batchId:     form.batchId || null,
+        batchId:     batchIdToStore(centerOptions.find(c => c.id === form.centerId)?.batches, form.batchId),
         instrument:  form.instrument.trim(),
         course:      form.course.trim(),
         // School of Music (wing 2): every student is a group batch, prepaid,
@@ -1144,14 +1145,14 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, showStatus, expande
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       onClick={onToggleExpand}>
       <td style={{ ...p.td, textAlign: "center" as const }}><span style={p.expandChevron}>{expanded ? "▾" : "▸"}</span></td>
-      <td style={{ ...p.td, ...ellipsis, fontWeight: 600, color: "#111827", maxWidth: 160 }} title={s.name}>{s.name}</td>
-      <td style={{ ...p.td, ...ellipsis, maxWidth: 140 }} title={s.centerName}>{s.centerName}</td>
+      <td style={{ ...p.td, ...ellipsis, fontWeight: 600, color: "#111827", maxWidth: 180 }} title={s.name}>{s.name}</td>
+      <td style={{ ...p.td, ...ellipsis, maxWidth: 150 }} title={s.centerName}>{s.centerName}</td>
       <td style={{ ...p.td, fontWeight: 700, color: s.balance > 0 ? "#d97706" : "#16a34a" }}>
         {fmtINR(s.balance)}
       </td>
       {showStatus && (
         <td style={p.td}>
-          <span style={{ ...p.badge, ...ellipsis, maxWidth: 76, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
+          <span style={{ ...p.badge, ...ellipsis, maxWidth: 90, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
             {s.status.replace(/_/g, " ")}
           </span>
         </td>
@@ -1652,7 +1653,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         admissionNo:        form.admissionNo.trim(),
         phone:              form.phone.trim(),
         centerId:           form.centerId,
-        batchId:            form.batchId || null,
+        batchId:            batchIdToStore(centerOptions.find(c => c.id === form.centerId)?.batches, form.batchId),
         instrument:         form.instrument.trim(),
         course:             form.course.trim(),
         classType:          isSom ? "group"  : (form.classType || "group"),
@@ -1693,7 +1694,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         admissionNo:         form.admissionNo.trim(),
         phone:               form.phone.trim(),
         centerId:            form.centerId,
-        batchId:             form.batchId || null,
+        batchId:             batchIdToStore(centerOptions.find(c => c.id === form.centerId)?.batches, form.batchId),
         instrument:          form.instrument.trim(),
         course:              form.course.trim(),
         classType:           isSom ? "group"  : (form.classType || "group"),
@@ -1767,14 +1768,13 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
-              {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).length > 0 && (
+              {form.centerId && (
                 <Field label="Batch">
-                  <select name="batchId" value={form.batchId} onChange={f} style={p.input}>
-                    <option value="">— No batch —</option>
-                    {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).map(b => (
-                      <option key={b.id} value={b.id}>{b.name || "Unnamed batch"}</option>
-                    ))}
-                  </select>
+                  <BatchSelect
+                    batches={centerOptions.find(c => c.id === form.centerId)?.batches ?? []}
+                    value={form.batchId}
+                    onChange={v => setForm(prev => ({ ...prev, batchId: v }))}
+                  />
                 </Field>
               )}
               {isSom && (
@@ -2479,14 +2479,13 @@ function AddStudentDrawer({
               </select>
               <DrawerErr msg={errors.centerId} />
             </Field>
-            {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).length > 0 && (
+            {form.centerId && (
               <Field label="Batch">
-                <select value={form.batchId} onChange={e => setForm(f => ({ ...f, batchId: e.target.value }))} style={p.input}>
-                  <option value="">— No batch —</option>
-                  {(centerOptions.find(c => c.id === form.centerId)?.batches ?? []).map(b => (
-                    <option key={b.id} value={b.id}>{b.name || "Unnamed batch"}</option>
-                  ))}
-                </select>
+                <BatchSelect
+                  batches={centerOptions.find(c => c.id === form.centerId)?.batches ?? []}
+                  value={form.batchId}
+                  onChange={v => setForm(f => ({ ...f, batchId: v }))}
+                />
               </Field>
             )}
             {!isSom && (
@@ -3029,6 +3028,38 @@ export function Field({ label, children }: { label: string; children: React.Reac
   );
 }
 
+// ─── Batch picker ──────────────────────────────────────────────────────────────
+
+/**
+ * `batches` comes from effectiveBatches(): a centre without explicit batches
+ * yields just its default "General Batch", which every student there belongs
+ * to automatically (batchId stays null). Once real batches exist they replace
+ * the default and the student can be placed in one of them.
+ */
+export function BatchSelect({ batches, value, onChange }: {
+  batches:  CenterBatch[];
+  value:    string;
+  onChange: (batchId: string) => void;
+}) {
+  const label = (b: CenterBatch) => {
+    const sched = batchSchedule(b);
+    return `${b.name || "Unnamed batch"}${sched ? ` · ${sched}` : ""}`;
+  };
+  if (batches.length === 1 && isDefaultBatchId(batches[0].id)) {
+    return (
+      <select value="" disabled style={{ ...p.input, color: "#6b7280" }} title="No batches defined for this centre — using the centre schedule">
+        <option value="">{label(batches[0])} (centre schedule)</option>
+      </select>
+    );
+  }
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)} style={p.input}>
+      <option value="">— No batch —</option>
+      {batches.map(b => <option key={b.id} value={b.id}>{label(b)}</option>)}
+    </select>
+  );
+}
+
 // ─── Page styles ───────────────────────────────────────────────────────────────
 
 export const p: Record<string, React.CSSProperties> = {
@@ -3066,22 +3097,22 @@ export const p: Record<string, React.CSSProperties> = {
   },
 
   tableWrap: { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "auto", boxShadow: "0 1px 4px rgba(0,0,0,0.05)" },
-  table:     { width: "100%", minWidth: 720, borderCollapse: "collapse" as const },
+  table:     { width: "100%", minWidth: 760, borderCollapse: "collapse" as const },
   th: {
-    padding: "6px 6px", textAlign: "left" as const, fontSize: 9.5, fontWeight: 700,
-    color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.03em",
+    padding: "10px 10px", textAlign: "left" as const, fontSize: 12, fontWeight: 700,
+    color: "#4b5563", textTransform: "uppercase" as const, letterSpacing: "0.05em",
     borderBottom: "1px solid #e5e7eb", whiteSpace: "nowrap" as const,
   },
-  td: { padding: "6px 6px", fontSize: 11.5, color: "#111827", borderBottom: "1px solid #f3f4f6" },
-  expandChevron: { display: "inline-block", fontSize: 11, color: "#9ca3af", width: 12, textAlign: "center" as const },
+  td: { padding: "10px 10px", fontSize: 13.5, color: "#111827", borderBottom: "1px solid #f3f4f6" },
+  expandChevron: { display: "inline-block", fontSize: 13, color: "#9ca3af", width: 12, textAlign: "center" as const },
   tdDetail: { padding: "14px 20px", background: "#f8fafc", borderBottom: "1px solid #e5e7eb", cursor: "default" as const },
   detailGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "12px 24px" },
-  detailLabel: { fontSize: 9.5, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.04em", color: "#9ca3af", marginBottom: 3 },
-  detailValue: { fontSize: 12.5, color: "#111827" },
+  detailLabel: { fontSize: 10.5, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.04em", color: "#9ca3af", marginBottom: 3 },
+  detailValue: { fontSize: 13.5, color: "#111827" },
 
-  badge: { display: "inline-block", padding: "1px 6px", borderRadius: 99, fontSize: 9.5, fontWeight: 600, whiteSpace: "nowrap" as const },
-  idChip:  { display: "inline-block", fontFamily: "monospace", fontSize: 9.5, fontWeight: 700, background: "#dbeafe", color: "#1e40af", padding: "1px 5px", borderRadius: 4 },
-  admChip: { display: "inline-block", fontFamily: "monospace", fontSize: 9.5, fontWeight: 600, background: "#fef9c3", color: "#92400e", padding: "1px 5px", borderRadius: 4 },
+  badge: { display: "inline-block", padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" as const },
+  idChip:  { display: "inline-block", fontFamily: "monospace", fontSize: 11, fontWeight: 700, background: "#dbeafe", color: "#1e40af", padding: "2px 6px", borderRadius: 4 },
+  admChip: { display: "inline-block", fontFamily: "monospace", fontSize: 11, fontWeight: 600, background: "#fef9c3", color: "#92400e", padding: "2px 6px", borderRadius: 4 },
 
   editBtn:     { background: "#fef3c7", color: "#92400e", border: "1px solid #fde68a", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
   deactBtn:    { background: "#fee2e2", color: "#dc2626", border: "1px solid #fca5a5", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },

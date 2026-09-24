@@ -69,7 +69,6 @@ const NAV_TOP: NavItem[] = [
   // Leadership (Founder / Admin / Director / Chief Teacher)
   { label: "Center Suite", icon: "⊞", href: "/dashboard",            roles: LEADERSHIP, capability: C.DASHBOARD_VIEW },
   { label: "Enrollments",  icon: "🏫", href: "/dashboard/enrollments", roles: LEADERSHIP, capability: [C.CENTRES_MANAGE, C.CENTRES_EDIT_SCHEDULE, C.STUDENTS_VIEW_ALL, C.STUDENTS_MANAGE, C.STAFF_VIEW], matchPrefix: "/dashboard/enrollments,/dashboard/centers,/dashboard/students,/dashboard/teachers" },
-  { label: "Staff",        icon: "🪪", href: "/dashboard/staff",      roles: LEADERSHIP, capability: C.STAFF_VIEW, matchPrefix: "/dashboard/staff" },
   { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance", roles: LEADERSHIP, capability: C.ATTENDANCE_VIEW_ALL },
   { label: "Syllabus",     icon: "📚", href: "/dashboard/syllabus",   roles: LEADERSHIP, capability: C.SYLLABUS_MANAGE },
   // Teacher
@@ -134,7 +133,7 @@ function navVisible(item: NavItem, role: string, caps: Set<Capability>, wing: st
   return list.some((c) => caps.has(c));
 }
 
-const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Enrollments", "Staff", "Faculty Suite", "My Classes", "My Family", "Screening", "Admissions", "Registry"];
+const BOTTOM_NAV_LABELS = ["Center Suite", "Learner's Suite", "Quest", "Fees", "Streak", "Badges", "Attendance", "Enrollments", "Faculty Suite", "My Classes", "My Family", "Screening", "Admissions", "Registry"];
 
 interface ResolvedNavItem extends NavItem {
   resolvedHref: string;

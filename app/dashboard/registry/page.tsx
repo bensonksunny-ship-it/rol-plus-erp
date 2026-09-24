@@ -14,6 +14,7 @@ import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES } from "@/config/permissions";
 import { useAuth } from "@/hooks/useAuth";
 import { wingOf } from "@/lib/wing";
+import { DEFAULT_BATCH_NAME, explicitBatches } from "@/lib/batches";
 import { parseFile, normalizeHeader } from "@/lib/xlsx-parser";
 import { formatAdmissionNo, reserveAdmissionSeq } from "@/lib/admissionNumber";
 import { logAction } from "@/services/audit/audit.service";
@@ -205,8 +206,13 @@ export default function RegistryPage() {
 }
 
 function RegistryContent() {
-  const { user, can } = useAuth();
+  const { user, can, isChiefTeacher, isDirector, isFounder } = useAuth();
   const canImport = can(CAPABILITIES.STUDENTS_MANAGE);
+  // Reactivating a student (Cancelled/Inactive/Hold → Confirm) is restricted
+  // to Chief Teacher / Director — Founder included as the super-admin role
+  // that already has every other capability in this app. Other status moves
+  // (e.g. Confirm → Hold) stay open to anyone with canImport, as before.
+  const canReactivate = isChiefTeacher || isDirector || isFounder;
 
   // Seed from the last visit's cache so revisiting this page via the sidebar
   // renders instantly instead of a blank loading state — the effect below
@@ -266,15 +272,15 @@ function RegistryContent() {
         // flat id → name map (no centreId needed to disambiguate) is enough to
         // resolve a student's assigned batch regardless of wing.
         const batchName = new Map<string, string>();
+        // Centres with no explicit batches run on their main schedule as a
+        // single implicit "General Batch" — their students fall back to it.
+        const defaultBatchCentres = new Set<string>();
         centreSnap.docs.forEach(d => {
           const nm = (d.data().name as string) ?? d.id;
           centreNameAll.set(d.id, nm);
-          const batches = d.data().batches;
-          if (Array.isArray(batches)) {
-            batches.forEach(b => {
-              if (b && typeof b === "object" && b.id) batchName.set(String(b.id), String(b.name ?? "") || "Unnamed batch");
-            });
-          }
+          const batches = explicitBatches(d.data());
+          batches.forEach(b => batchName.set(String(b.id), String(b.name ?? "") || "Unnamed batch"));
+          if (batches.length === 0) defaultBatchCentres.add(d.id);
           if (wingOf(d.data()) !== WING) return;
           centreName.set(d.id, nm);
           centreList.push({ id: d.id, name: nm, code: (d.data().centerCode as string) ?? "" });
@@ -322,8 +328,10 @@ function RegistryContent() {
                   admittedOn:  toISO(s.dateOfAdmission ?? s.admissionDate ?? s.createdAt),
                   centre:      resolvedCentreName || (centreRef && !looksLikeDocId(centreRef) ? centreRef : "—"),
                   // Synced batch (from a centre's Batches list) wins when set;
-                  // otherwise fall back to the free-text value captured at import.
-                  batch:       batchName.get(String(s.batchId ?? "")) || String(s.batch ?? "").trim() || "—",
+                  // otherwise the free-text value captured at import, then the
+                  // centre's default batch if it has no batches of its own.
+                  batch:       batchName.get(String(s.batchId ?? "")) || String(s.batch ?? "").trim()
+                    || (defaultBatchCentres.has(centreRef) ? DEFAULT_BATCH_NAME : "—"),
                   phone:       phone || "—",
                   admissionNo,
                   course,
@@ -417,6 +425,14 @@ function RegistryContent() {
     const prev = entries.find(e => e.uid === uid)?.status;
     const next = fromRegistryStatus(label);
     if (next === prev) return;
+    // Reactivation (anything → active) is gated to Chief Teacher / Director /
+    // Founder — enforced primarily by hiding "Confirm" from the dropdown for
+    // everyone else; this is the same check as a safety net against any other
+    // call path reaching here.
+    if (next === "active" && prev !== "active" && !canReactivate) {
+      console.warn("[Registry] reactivation blocked — requires Chief Teacher, Director, or Founder.");
+      return;
+    }
     setEntries(cur => cur.map(e => e.uid === uid ? { ...e, status: next } : e));
     try {
       await updateDoc(doc(db, "users", uid), { status: next, studentStatus: next, updatedAt: serverTimestamp() });
@@ -563,10 +579,17 @@ function RegistryContent() {
                     <td style={s.td} onClick={ev => ev.stopPropagation()}>
                       {(() => {
                         const displayStatus = toRegistryStatus(e.status);
+                        // Reactivating (moving into Confirm from anything else) needs
+                        // Chief Teacher / Director / Founder — everyone else with
+                        // canImport can still make every other status change.
+                        const options = displayStatus === "Confirm" || canReactivate
+                          ? STATUS_OPTIONS
+                          : STATUS_OPTIONS.filter(o => o !== "Confirm");
                         return canImport ? (
                           <select
                             value={STATUS_OPTIONS.includes(displayStatus as typeof STATUS_OPTIONS[number]) ? displayStatus : "__current"}
                             onChange={ev => changeStatus(e.uid, ev.target.value)}
+                            title={options.length < STATUS_OPTIONS.length ? "Only Chief Teacher, Director, or Founder can reactivate a student." : undefined}
                             style={{
                               ...statusStyle(displayStatus),
                               border: "1px solid var(--color-border)", cursor: "pointer",
@@ -576,7 +599,7 @@ function RegistryContent() {
                             {!STATUS_OPTIONS.includes(displayStatus as typeof STATUS_OPTIONS[number]) && (
                               <option value="__current" disabled>{displayStatus}</option>
                             )}
-                            {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                            {options.map(o => <option key={o} value={o}>{o}</option>)}
                           </select>
                         ) : (
                           <span style={statusStyle(displayStatus)}>{displayStatus}</span>
