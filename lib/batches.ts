@@ -1,4 +1,5 @@
 import type { CenterBatch } from "@/types";
+import { formatTimeRange12 } from "@/lib/timeFormat";
 
 /**
  * Default-batch fallback.
@@ -46,10 +47,10 @@ export function effectiveBatches(centerId: string, data: Record<string, unknown>
   return explicit.length > 0 ? explicit : [defaultBatch(centerId, data)];
 }
 
-/** "Mon/Wed 17:00–18:30" — empty string when the schedule is blank. */
+/** "Mon/Wed 5:00 PM – 6:30 PM" — empty string when the schedule is blank. */
 export function batchSchedule(b: CenterBatch): string {
   const days = b.daysOfWeek.join("/");
-  const time = b.startTime && b.endTime ? `${b.startTime}–${b.endTime}` : "";
+  const time = formatTimeRange12(b.startTime, b.endTime);
   return [days, time].filter(Boolean).join(" ");
 }
 

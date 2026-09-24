@@ -9,7 +9,9 @@ import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import type { Center, CenterBatch, Wing } from "@/types";
-import { DEFAULT_BATCH_NAME } from "@/lib/batches";
+import { DEFAULT_BATCH_NAME, effectiveBatches } from "@/lib/batches";
+import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
+import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -196,7 +198,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
   const [center, setCenter] = useState(centerProp);
   const raw = center as Center & { daysOfWeek?: Day[]; startTime?: string; endTime?: string };
   const teacher = teachers.find(t => t.uid === center.teacherUid);
-  const teacherLabel = teacher ? teacher.displayName : center.teacherUid || "-";
+  const teacherLabel = teacher ? getTeacherDisplayName(teacher) : center.teacherUid || "-";
   const { wing: viewingWing } = useWing();
 
   // ── Edit mode ──────────────────────────────────────────────────────────────
@@ -409,7 +411,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
                 <select name="teacherUid" value={editForm.teacherUid} onChange={handleEditChange} required style={formStyles.input}>
                   <option value="">— Select a teacher —</option>
                   {teachers.map(t => (
-                    <option key={t.uid} value={t.uid}>{t.displayName}</option>
+                    <option key={t.uid} value={t.uid}>{getTeacherDisplayName(t)}</option>
                   ))}
                 </select>
               </FormField>
@@ -468,8 +470,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
             <div style={viewStyles.quickFacts}>
               <QuickFact label="Wing"     value={WING_LABELS[wingOf(center)] ?? "-"} />
               <QuickFact label="Teacher"  value={teacherLabel} />
-              <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || center.timeSlot || "-"} />
-              <QuickFact label="Time"     value={raw.startTime && raw.endTime ? `${raw.startTime}–${raw.endTime}` : "-"} />
+              <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || formatTimesIn12h(center.timeSlot) || "-"} />
+              <QuickFact label="Time"     value={formatTimeRange12(raw.startTime, raw.endTime) || "-"} />
               <QuickFact label="Students" value={String(students.length)} />
               {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
                 <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
@@ -503,6 +505,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
                   onUpdateStatuses={updateActiveRoster}
                   onAddStudents={addStudentsToCenter}
                   wing={center.wing}
+                  centerId={center.id}
+                  centerName={center.name}
                 />
               ) : (
                 <CenterInsightsTab records={attRecs} students={students} transactions={txs} />
@@ -669,11 +673,13 @@ function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
 
 // ─── Students Tab (roster + active/inactive management) ────────────────────
 
-function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: {
+function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing, centerId, centerName }: {
   students: CenterStudentRec[];
   onUpdateStatuses: (activeUids: Set<string>) => Promise<void>;
   onAddStudents: (picked: PickedStudent[]) => Promise<void>;
   wing: Wing | undefined;
+  centerId: string;
+  centerName: string;
 }) {
   const [search, setSearch]     = useState("");
   const [msg, setMsg]           = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -692,7 +698,9 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [activeStudents, search]);
 
-  const existingUids = useMemo(() => new Set(students.map(s => s.uid)), [students]);
+  // Only already-active students are hidden from the picker — inactive ones
+  // registered here are exactly who "+ Add Active Students" should offer.
+  const activeUids = useMemo(() => new Set(activeStudents.map(s => s.uid)), [activeStudents]);
 
   async function handleAssign(picked: PickedStudent[]) {
     setMsg(null);
@@ -722,7 +730,9 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
       {showAdd && (
         <AddStudentsModal
           wing={wing}
-          excludeUids={existingUids}
+          centerId={centerId}
+          centerName={centerName}
+          excludeUids={activeUids}
           onClose={() => setShowAdd(false)}
           onAssign={handleAssign}
         />
@@ -799,16 +809,28 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing }: 
   );
 }
 
-// ─── Add Active Students modal (search across all students, assign to centre) ──
+// ─── Add Active Students modal (students registered at this centre only) ──────
 
-function AddStudentsModal({ wing, excludeUids, onClose, onAssign }: {
+// A student belongs to the centre if their `centerId` matches, any entry of a
+// multi-centre `centerIds` array matches, or — for registry imports whose
+// centre name never resolved to a doc id — their raw `centre` name matches.
+function isRegisteredAtCenter(st: Record<string, unknown>, centerId: string, centerName: string): boolean {
+  if (st.centerId === centerId) return true;
+  if (Array.isArray(st.centerIds) && st.centerIds.includes(centerId)) return true;
+  const raw = typeof st.centre === "string" ? st.centre.trim().toLowerCase() : "";
+  return !!raw && raw === centerName.trim().toLowerCase();
+}
+
+function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, onAssign }: {
   wing: Wing | undefined;
+  centerId: string;
+  centerName: string;
   excludeUids: Set<string>;
   onClose: () => void;
   onAssign: (picked: PickedStudent[]) => Promise<void>;
 }) {
   const [loading, setLoading]     = useState(true);
-  const [candidates, setCandidates] = useState<(PickedStudent & { centerName: string; status: string })[]>([]);
+  const [candidates, setCandidates] = useState<(PickedStudent & { status: string })[]>([]);
   const [search, setSearch]       = useState("");
   const [selected, setSelected]   = useState<Set<string>>(new Set());
   const [saving, setSaving]       = useState(false);
@@ -819,24 +841,17 @@ function AddStudentsModal({ wing, excludeUids, onClose, onAssign }: {
     (async () => {
       setLoading(true);
       try {
-        const [stuSnap, centerSnap] = await Promise.all([
-          getDocs(query(collection(db, "users"), where("role", "==", "student"))),
-          getDocs(collection(db, "centers")),
-        ]);
+        const stuSnap = await getDocs(query(collection(db, "users"), where("role", "==", "student")));
         if (cancelled) return;
-        const centerMap = new Map<string, string>();
-        centerSnap.docs.forEach(d => centerMap.set(d.id, (d.data().name as string) ?? d.id));
         const list = stuSnap.docs
-          .filter(d => !wing || inWing(d.data(), wing))
+          .filter(d => (!wing || inWing(d.data(), wing)) && isRegisteredAtCenter(d.data(), centerId, centerName))
           .map(d => {
             const st = d.data();
-            const centerId = (st.centerId ?? "") as string;
             return {
               uid:         d.id,
               name:        (st.displayName ?? st.name ?? "-") as string,
               admissionNo: (st.admissionNo ?? st.admissionNumber ?? "") as string,
               createdAt:   toISODateLocal(st.createdAt),
-              centerName:  centerId ? (centerMap.get(centerId) ?? centerId) : "Unassigned",
               status:      (st.status ?? st.studentStatus ?? "active") as string,
             };
           })
@@ -852,7 +867,7 @@ function AddStudentsModal({ wing, excludeUids, onClose, onAssign }: {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wing]);
+  }, [wing, centerId, centerName]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -904,7 +919,7 @@ function AddStudentsModal({ wing, excludeUids, onClose, onAssign }: {
             <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
           ) : filtered.length === 0 ? (
             <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>
-              {candidates.length === 0 ? "No other students available to add." : "No students match."}
+              {candidates.length === 0 ? `No unassigned/inactive students found for ${centerName}.` : "No students match."}
             </div>
           ) : (
             <div style={{ border: "1px solid #e5e7eb", borderRadius: 8 }}>
@@ -920,7 +935,7 @@ function AddStudentsModal({ wing, excludeUids, onClose, onAssign }: {
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 600, color: "#111827" }}>{s.name}</div>
                       <div style={{ fontSize: 11, color: "#9ca3af" }}>
-                        {s.admissionNo || "no adm. no."} · {s.centerName}{s.status !== "active" ? ` · ${s.status}` : ""}
+                        {s.admissionNo || "no adm. no."}{s.status !== "active" ? ` · ${s.status}` : ""}
                       </div>
                     </div>
                   </label>
@@ -1114,7 +1129,8 @@ function CentersContent() {
   const [editTarget, setEditTarget] = useState<Center | null>(null);
   const [viewTarget, setViewTarget] = useState<Center | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Center | null>(null);
-  const [form, setForm]             = useState({ ...EMPTY_FORM });
+  const [showMatrix, setShowMatrix] = useState(false);
+  const [form, setForm]           = useState({ ...EMPTY_FORM });
   const [saving, setSaving]         = useState(false);
   const [dayError, setDayError]     = useState("");
   const { toasts, toast, remove }   = useToast();
@@ -1210,7 +1226,7 @@ function CentersContent() {
       ]);
       setCenters(data);
       setCached(`centers:${wing}:centers`, data);
-      const sortedTeachers = teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      const sortedTeachers = teacherList.sort((a, b) => getTeacherDisplayName(a).localeCompare(getTeacherDisplayName(b)));
       setTeachers(sortedTeachers);
       setCached(`centers:${wing}:teachers`, sortedTeachers);
 
@@ -1356,6 +1372,9 @@ function CentersContent() {
           }}
         />
       )}
+      {showMatrix && (
+        <ScheduleMatrixModal centers={centers} teachers={teachers} onClose={() => setShowMatrix(false)} />
+      )}
       {deleteTarget && (
         <DeleteCenterModal
           center={deleteTarget}
@@ -1374,6 +1393,10 @@ function CentersContent() {
       <div style={styles.header}>
         <h1 style={styles.heading}>Centers</h1>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => setShowMatrix(true)}
+            style={{ ...styles.addBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
+            ▦ Teacher Availability
+          </button>
           <button onClick={showImport ? closeImport : openImport}
             style={{ ...styles.addBtn, background: showImport ? "#f3f4f6" : "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
             {showImport ? "Cancel" : "⬆ Import names"}
@@ -1464,7 +1487,7 @@ function CentersContent() {
               >
                 <option value="">— Select a teacher —</option>
                 {teachers.map(t => (
-                  <option key={t.uid} value={t.uid}>{t.displayName}</option>
+                  <option key={t.uid} value={t.uid}>{getTeacherDisplayName(t)}</option>
                 ))}
               </select>
             </FormField>
@@ -1563,6 +1586,20 @@ function CentersContent() {
 
 // ─── Card ──────────────────────────────────────────────────────────────────────
 
+/** Card schedule as two lines: days ("Mon/Wed") and time ("5:00 PM – 6:00 PM"). */
+function splitSchedule(center: Center): { days: string; time: string } {
+  const raw = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
+  if (raw.daysOfWeek?.length || raw.startTime) {
+    return {
+      days: (raw.daysOfWeek ?? []).join("/"),
+      time: formatTimeRange12(raw.startTime, raw.endTime),
+    };
+  }
+  // Legacy docs only carry the combined "Mon/Wed 17:00–18:30" string.
+  const m = /^(.*?)\s*(\d{1,2}:\d{2}.*)$/.exec(center.timeSlot ?? "");
+  return m ? { days: m[1].trim(), time: formatTimesIn12h(m[2].trim()) } : { days: center.timeSlot ?? "", time: "" };
+}
+
 function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }: {
   center: Center; teachers: TeacherUser[]; activeCount: number;
   onView: () => void; onEdit: () => void; onDelete: () => void;
@@ -1572,6 +1609,7 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const teacher = teachers.find(t => t.uid === center.teacherUid);
+  const schedule = splitSchedule(center);
 
   function goToActiveStudents(e: React.MouseEvent) {
     e.stopPropagation();
@@ -1620,22 +1658,205 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
       <div style={styles.cardName}>{center.name}</div>
       <div style={styles.cardMeta}>
         {teacher
-          ? <span>{teacher.displayName}</span>
+          ? <span>{getTeacherDisplayName(teacher)}</span>
           : <span style={{ color: "#9ca3af", fontSize: 12 }}>Unassigned</span>}
       </div>
       <div style={styles.cardMeta}>
-        <span>{center.timeSlot || "-"}</span>
+        <span>{schedule.days || "-"}</span>
+        {schedule.time && <span style={{ fontSize: 12, fontWeight: 500, color: "#4f46e5" }}>{schedule.time}</span>}
       </div>
       <button
         onClick={goToActiveStudents}
         style={styles.activeStudentsBadge}
-        title="View active students at this centre"
+        title={`${activeCount} active student${activeCount !== 1 ? "s" : ""} — view them`}
       >
-        🎓 {activeCount} Active Student{activeCount !== 1 ? "s" : ""} →
+        🎓 {activeCount} →
       </button>
     </div>
   );
 }
+
+// ─── Teacher Schedule & Availability Matrix ─────────────────────────────────────
+
+type SlotEntry = { teacherUid: string; teacherName: string; centerName: string; batchName: string; time: string };
+
+function toMinutes(t: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})/.exec(t ?? "");
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+function ScheduleMatrixModal({ centers, teachers, onClose }: {
+  centers: Center[]; teachers: TeacherUser[]; onClose: () => void;
+}) {
+  const [teacherFilter, setTeacherFilter] = useState("all");
+
+  const teacherName = useMemo(() => {
+    const m = new Map(teachers.map(t => [t.uid, getTeacherDisplayName(t) || t.uid]));
+    return (uid: string) => (uid ? m.get(uid) ?? "Unknown teacher" : "Unassigned");
+  }, [teachers]);
+
+  // Every active centre's batches (or its implicit General Batch) as timed blocks.
+  const blocks = useMemo(() => centers
+    .filter(c => c.status === "active")
+    .flatMap(c => effectiveBatches(c.id, c as unknown as Record<string, unknown>).map(b => ({
+      center: c, batch: b, start: toMinutes(b.startTime), end: toMinutes(b.endTime),
+    })))
+    .filter((x): x is typeof x & { start: number; end: number } =>
+      x.start !== null && x.end !== null && x.end > x.start && x.batch.daysOfWeek.length > 0),
+  [centers]);
+
+  // Hourly rows: 09:00–18:00 by default, widened to cover any class outside that range.
+  const hours = useMemo(() => {
+    let lo = 9, hi = 18;
+    for (const b of blocks) { lo = Math.min(lo, Math.floor(b.start / 60)); hi = Math.max(hi, Math.ceil(b.end / 60) - 1); }
+    return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+  }, [blocks]);
+
+  const visible = teacherFilter === "all" ? blocks : blocks.filter(b => b.center.teacherUid === teacherFilter);
+
+  function cellEntries(day: Day, hour: number): SlotEntry[] {
+    const s = hour * 60, e = s + 60;
+    return visible
+      .filter(b => b.batch.daysOfWeek.includes(day) && b.start < e && b.end > s)
+      .map(b => ({
+        teacherUid:  b.center.teacherUid,
+        teacherName: teacherName(b.center.teacherUid),
+        centerName:  b.center.name,
+        batchName:   b.batch.name,
+        time:        formatTimeRange12(b.batch.startTime, b.batch.endTime),
+      }));
+  }
+
+  // A conflict is one teacher booked at two or more classes overlapping this hour.
+  function isConflict(entries: SlotEntry[]): boolean {
+    const seen = new Set<string>();
+    for (const x of entries) {
+      if (!x.teacherUid) continue;
+      if (seen.has(x.teacherUid)) return true;
+      seen.add(x.teacherUid);
+    }
+    return false;
+  }
+
+  // One tab per active teacher, each tagged with their weekly class count.
+  const teacherTabs = useMemo(() => teachers
+    .filter(t => t.status === "active")
+    .map(t => ({
+      uid:     t.uid,
+      name:    getTeacherDisplayName(t) || t.uid,
+      classes: blocks.filter(b => b.center.teacherUid === t.uid).reduce((n, b) => n + b.batch.daysOfWeek.length, 0),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+  [teachers, blocks]);
+
+  const isAll = teacherFilter === "all";
+  const tabs = [{ uid: "all", name: "All Teachers", classes: null as number | null }, ...teacherTabs];
+
+  return (
+    <div style={modalStyles.overlay} onClick={onClose}>
+      <div style={{ ...modalStyles.box, maxWidth: 1100, width: "calc(100% - 32px)", maxHeight: "90vh", display: "flex", flexDirection: "column" }}
+        onClick={e => e.stopPropagation()}>
+        <div style={modalStyles.header}>
+          <span style={modalStyles.title}>Teacher Schedule &amp; Availability Matrix</span>
+          <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
+        </div>
+
+        {/* Tab bar + legend stay put; only the grid below scrolls. */}
+        <div style={{ flexShrink: 0, borderBottom: "1px solid #e5e7eb", background: "#fafafa" }}>
+          <div role="tablist" style={matrixStyles.tabBar}>
+            {tabs.map(t => {
+              const active = teacherFilter === t.uid;
+              return (
+                <button key={t.uid} role="tab" aria-selected={active} onClick={() => setTeacherFilter(t.uid)}
+                  style={{ ...matrixStyles.tab, ...(active ? matrixStyles.tabActive : {}) }}>
+                  {t.name}
+                  {t.classes !== null && (
+                    <span style={{ ...matrixStyles.tabCount, ...(active ? { background: "#4f46e5", color: "#fff" } : {}) }}>{t.classes}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 12, fontSize: 11.5, color: "#6b7280", flexWrap: "wrap", padding: "0 20px 10px" }}>
+            <span><span style={{ ...matrixStyles.swatch, background: isAll ? "#e0e7ff" : "#4f46e5" }} />{isAll ? "Assigned" : "Busy"}</span>
+            {isAll && <span><span style={{ ...matrixStyles.swatch, background: "#fee2e2" }} />Conflict</span>}
+            <span><span style={{ ...matrixStyles.swatch, background: "rgba(236,253,245,0.5)", border: "1px solid #a7f3d0" }} />{isAll ? "Available" : "Free"}</span>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "0 20px 20px" }}>
+          {(isAll ? blocks : visible).length === 0 && (
+            <div style={{ fontSize: 12.5, color: "#9ca3af", margin: "12px 0 0" }}>
+              {isAll
+                ? "No active centre has days & times set yet — every slot shows as available."
+                : "No classes assigned to this teacher — the whole week is free."}
+            </div>
+          )}
+          <table style={{ borderCollapse: "separate", borderSpacing: 4, width: "100%", minWidth: 760, tableLayout: "fixed" }}>
+            <thead>
+              <tr>
+                <th style={{ ...matrixStyles.th, width: 76 }}>Time</th>
+                {DAYS.map(d => <th key={d} style={matrixStyles.th}>{d}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {hours.map(h => (
+                <tr key={h}>
+                  <td style={matrixStyles.timeCell}>{formatTime12(`${h}:00`)}</td>
+                  {DAYS.map(d => {
+                    const entries = cellEntries(d, h);
+                    if (entries.length === 0) {
+                      return <td key={d} style={{ ...matrixStyles.cell, background: "rgba(236,253,245,0.5)", color: "#059669", textAlign: "center" }}>{isAll ? "Available" : "Free"}</td>;
+                    }
+                    // Single-teacher view: solid accent block naming the centre, no conflict styling.
+                    if (!isAll) {
+                      return (
+                        <td key={d}
+                          title={entries.map(x => `${x.centerName} · ${x.batchName} (${x.time})`).join("\n")}
+                          style={{ ...matrixStyles.cell, background: "#4f46e5", color: "#fff" }}>
+                          {entries.map((x, i) => (
+                            <div key={i} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              <div style={{ fontWeight: 700 }}>{x.centerName}</div>
+                              <div style={{ fontSize: 10.5, opacity: 0.85 }}>{x.time}</div>
+                            </div>
+                          ))}
+                        </td>
+                      );
+                    }
+                    const conflict = isConflict(entries);
+                    return (
+                      <td key={d}
+                        title={entries.map(x => `${x.teacherName} @ ${x.centerName} · ${x.batchName} (${x.time})`).join("\n")}
+                        style={{ ...matrixStyles.cell, background: conflict ? "#fee2e2" : "#e0e7ff", color: conflict ? "#991b1b" : "#3730a3" }}>
+                        {conflict && <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", marginBottom: 2 }}>⚠ Conflict</div>}
+                        {entries.map((x, i) => (
+                          <div key={i} style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {x.teacherName} @ {x.centerName}
+                          </div>
+                        ))}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const matrixStyles: Record<string, React.CSSProperties> = {
+  th:       { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", padding: "10px 4px 6px", textAlign: "center", position: "sticky", top: 0, background: "#fff", zIndex: 1 },
+  tabBar:   { display: "flex", gap: 4, overflowX: "auto", padding: "10px 20px 8px", scrollbarWidth: "thin" },
+  tab:      { flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999, border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
+  tabActive:{ background: "#eef2ff", borderColor: "#a5b4fc", color: "#4338ca" },
+  tabCount: { fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 999, background: "#f3f4f6", color: "#6b7280" },
+  timeCell: { fontSize: 12, fontWeight: 600, color: "#374151", padding: "6px 4px", verticalAlign: "top", whiteSpace: "nowrap" },
+  cell:     { fontSize: 11.5, padding: "6px 8px", borderRadius: 6, verticalAlign: "top", height: 40 },
+  swatch:   { display: "inline-block", width: 10, height: 10, borderRadius: 3, marginRight: 5, verticalAlign: "middle" },
+};
 
 // ─── Delete Center Modal ───────────────────────────────────────────────────────
 

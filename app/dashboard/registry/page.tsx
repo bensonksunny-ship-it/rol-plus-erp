@@ -1,8 +1,8 @@
 "use client";
 
 // Registry — the master register of Rol's School of Music. A single flat table
-// of every School-of-Music student, in admission order. Read-only, plus an
-// Excel/CSV bulk import.
+// of every School-of-Music student, newest uploads first. Per-student Edit
+// Details modal, inline status changes, and an Excel/CSV bulk import.
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -14,6 +14,7 @@ import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES } from "@/config/permissions";
 import { useAuth } from "@/hooks/useAuth";
 import { wingOf } from "@/lib/wing";
+import type { Wing } from "@/types";
 import { DEFAULT_BATCH_NAME, explicitBatches } from "@/lib/batches";
 import { parseFile, normalizeHeader } from "@/lib/xlsx-parser";
 import { formatAdmissionNo, reserveAdmissionSeq } from "@/lib/admissionNumber";
@@ -34,7 +35,15 @@ interface Entry {
   course:      string;
   status:      string;
   screening:   string;   // composite score / imported grade / "—"
+  // Raw values backing the Edit Details modal.
+  centerId:    string;   // centre doc id (either wing), or "" when the centre is free text
+  batchId:     string;
+  email:       string;
+  courseRaw:   string;   // stored `course` only — no instrument fallback
+  addedAt:     number;   // ms when the record was imported/created — newest sorts first
 }
+
+type RegistryCentre = { id: string; name: string; code: string; wing?: Wing; batches?: { id: string; name: string }[] };
 
 /** Human-readable screening grade from a student doc. */
 function screeningGradeOf(s: Record<string, unknown>): string {
@@ -108,6 +117,13 @@ function toISO(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+/** Firestore Timestamp / ISO string → epoch ms; 0 when missing or unparseable. */
+function toMillis(v: unknown): number {
+  const iso = toISO(v);
+  const ms = iso ? Date.parse(iso) : NaN;
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
 /** Parse a spreadsheet date cell (DD/MM/YYYY, YYYY-MM-DD, "5 Jan 2025", Excel serial). */
 function parseSheetDate(raw: string): string | null {
   const v = raw.trim();
@@ -139,19 +155,19 @@ function parseSheetDate(raw: string): string | null {
 
 // Column order assumed ONLY for a header-less paste. Columns are otherwise
 // always mapped by their header name — no content guessing.
+// Wing and Batch are deliberately not paste columns: the wing follows the
+// centre, and batches are picked per row after parsing (see ImportModal).
 const REGISTRY_COLUMNS = [
-  "name", "dateofadmission", "wing", "centre", "batch",
+  "name", "dateofadmission", "centre",
   "phonenumber", "admissionno", "course", "status", "screeninggrade",
 ];
-const HEADER_WORDS = /name|wing|centre|center|batch|admission|phone|mobile|course|instrument|status|date|screening|grade/i;
+const HEADER_WORDS = /name|centre|center|admission|phone|mobile|course|instrument|status|date|screening|grade/i;
 
 // Fields for the "paste by column" mode.
 const COL_FIELDS: { key: string; label: string }[] = [
   { key: "name",            label: "Name" },
   { key: "dateofadmission", label: "Date Of Admission" },
-  { key: "wing",            label: "Wing" },
   { key: "centre",          label: "Centre" },
-  { key: "batch",           label: "Batch" },
   { key: "phonenumber",     label: "Phone number" },
   { key: "admissionno",     label: "Admission no." },
   { key: "course",          label: "Course" },
@@ -163,7 +179,8 @@ const COL_FIELDS: { key: string; label: string }[] = [
  * Parse tabular text pasted from Excel / Google Sheets (tab-delimited), CSV, or
  * a plain 2+-space-aligned table. If the first line doesn't look like a header
  * row, the canonical column order (Name · Date · Centre · Phone ·
- * Admission no. · Course · Status · Screening) is assumed.
+ * Admission no. · Course · Status · Screening) is assumed. Header-matched
+ * Wing / Batch columns are ignored.
  */
 function parsePastedTable(text: string): Record<string, string>[] {
   const lines = text.replace(/\r\n?/g, "\n").split("\n").filter(l => l.trim().length > 0);
@@ -194,6 +211,107 @@ function parsePastedTable(text: string): Record<string, string>[] {
   return rows;
 }
 
+// ─── Paste format guide ───────────────────────────────────────────────────────
+
+// Same column order as REGISTRY_COLUMNS; `keys` mirror buildPreview()'s header aliases.
+const GUIDE_COLUMNS: { label: string; keys: string[]; example: string; note?: string; required?: boolean }[] = [
+  { label: "Name",              keys: ["name", "studentname", "fullname"], example: "Priya Nair", required: true },
+  { label: "Date Of Admission", keys: ["dateofadmission", "admissiondate", "doa", "date"], example: "24/09/2026", note: "DD/MM/YYYY" },
+  { label: "Centre",            keys: ["centre", "center", "centrename", "centername", "branch", "location"], example: "Cinnamon", note: "exact name" },
+  { label: "Phone number",      keys: ["phonenumber", "phoneno", "phone", "mobilenumber", "mobileno", "mobile", "contactnumber", "contactno", "contact"], example: "9876543210" },
+  { label: "Admission no.",     keys: ["admissionno", "admissionnumber", "admissionnumberno", "admno", "admissionid"], example: "", note: "blank = auto" },
+  { label: "Course",            keys: ["course", "instrument"], example: "Keyboard" },
+  { label: "Status",            keys: ["status"], example: "", note: "leave blank" },
+  { label: "Screening Grade",   keys: ["screeninggrade", "screeningscore", "grade", "screening"], example: "" },
+];
+
+/** Column-order reference for pasting. Given pasted text, shows its first rows
+ *  under the columns they'll land in, so a shifted column is obvious. */
+function PasteFormatGuide({ pasted }: { pasted?: string }) {
+  const [copied, setCopied] = useState(false);
+  const rows = useMemo(() => (pasted?.trim() ? parsePastedTable(pasted).slice(0, 3) : []), [pasted]);
+  const live = rows.length > 0;
+
+  async function copyHeader() {
+    try {
+      await navigator.clipboard.writeText(GUIDE_COLUMNS.map(c => c.label).join("\t"));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch { /* clipboard blocked — the header is visible to copy by hand */ }
+  }
+
+  const cell: React.CSSProperties = { padding: "5px 8px", borderRight: "1px solid var(--color-border)", whiteSpace: "nowrap", fontSize: 11.5 };
+  return (
+    <div style={{ border: "1px solid var(--color-border)", borderRadius: 8, background: "var(--color-bg)", marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "8px 10px", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "var(--color-text-primary)" }}>
+          {live ? "Check your columns — each value should sit under the right heading" : "Paste format — columns in this order (copy from Excel / Google Sheets)"}
+        </span>
+        <button type="button" onClick={copyHeader} style={{ ...s.printBtn, fontSize: 11.5, padding: "4px 10px" }}
+          title="Copies the headers tab-separated — paste into row 1 of your spreadsheet">
+          {copied ? "✓ Copied" : "📋 Copy Template Headers"}
+        </button>
+      </div>
+      {/* Expected header row as pill tags, in paste order A → H. */}
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4, padding: "0 10px 8px" }}>
+        {GUIDE_COLUMNS.map((c, i) => (
+          <Fragment key={c.label}>
+            {i > 0 && <span className="text-slate-300 text-xs">|</span>}
+            <span
+              className="bg-slate-100 text-slate-700 font-mono text-xs px-2 py-1 rounded border border-slate-200"
+              title={c.note ? `${c.label} — ${c.note}` : c.label}
+            >
+              {c.label}{c.required && <span className="text-red-600">*</span>}
+            </span>
+          </Fragment>
+        ))}
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead>
+            <tr style={{ background: "var(--color-surface-2)" }}>
+              <td style={{ ...cell, color: "var(--color-text-muted)", fontWeight: 600 }}>#</td>
+              {GUIDE_COLUMNS.map((c, i) => (
+                <td key={c.label} style={{ ...cell, fontWeight: 700, color: "var(--color-text-primary)" }}>
+                  <span style={{ color: "var(--color-text-muted)", fontWeight: 500 }}>{String.fromCharCode(65 + i)} · </span>
+                  {c.label}{c.required && <span style={{ color: "#dc2626" }}> *</span>}
+                  {c.note && <div style={{ fontSize: 10, fontWeight: 500, color: "var(--color-text-muted)" }}>{c.note}</div>}
+                </td>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(live ? rows : [null]).map((r, ri) => (
+              <tr key={ri} style={{ borderTop: "1px solid var(--color-border)" }}>
+                <td style={{ ...cell, color: "var(--color-text-muted)" }}>{live ? ri + 1 : "e.g."}</td>
+                {GUIDE_COLUMNS.map(c => {
+                  const v = r ? (c.keys.map(k => r[k]?.trim()).find(Boolean) ?? "") : c.example;
+                  const missing = live && c.required && !v;
+                  return (
+                    <td key={c.label} style={{
+                      ...cell,
+                      color: missing ? "#dc2626" : live ? "var(--color-text-primary)" : "var(--color-text-muted)",
+                      fontStyle: live ? "normal" : "italic",
+                      maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis",
+                    }}>
+                      {v || (missing ? "missing!" : "—")}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--color-text-muted)", padding: "6px 10px" }}>
+        {live
+          ? "Showing your first rows. If values look shifted, add the header row to your paste (📋 Copy header row) so columns are matched by name."
+          : "With a header row, columns can be in any order and extra/missing ones are fine. Without one, use exactly this order A → H (blank cells are OK, but keep the column)."}
+      </div>
+    </div>
+  );
+}
+
 export default function RegistryPage() {
   return (
     <ProtectedRoute
@@ -218,7 +336,7 @@ function RegistryContent() {
   // renders instantly instead of a blank loading state — the effect below
   // still always re-fetches/re-subscribes to stay fresh.
   const [entries, setEntries] = useState<Entry[]>(() => getCached<Entry[]>("registry:entries") ?? []);
-  const [centres, setCentres] = useState<{ id: string; name: string; code: string }[]>(
+  const [centres, setCentres] = useState<RegistryCentre[]>(
     () => getCached("registry:centres") ?? [],
   );
   const [existingAdmNos, setExistingAdmNos] = useState<Set<string>>(
@@ -240,11 +358,37 @@ function RegistryContent() {
     });
   }
 
+  // Paste row shows the column-format guide while focused.
+  const [pasteFocused, setPasteFocused] = useState(false);
+
+  // ── Edit Details modal ──────────────────────────────────────────────────
+  const [editing, setEditing] = useState<Entry | null>(null);
+
   // ── Bulk delete ──────────────────────────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState<null | "selected" | "all">(null);
   const [confirmText, setConfirmText] = useState("");
   const [deleting, setDeleting] = useState(false);
+
+  // Post-import feedback: once the import modal closes, jump to the top of the
+  // table (newest rows sort first) and tint the just-imported rows for 5 s.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const justImported = useRef<string[]>([]);
+  const [newUids, setNewUids] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (newUids.size === 0) return;
+    const t = setTimeout(() => setNewUids(new Set()), 5000);
+    return () => clearTimeout(t);
+  }, [newUids]);
+
+  function closeImport() {
+    setShowImport(false);
+    setPastedText("");
+    if (justImported.current.length === 0) return;
+    setNewUids(new Set(justImported.current));
+    justImported.current = [];
+    scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   // Centres change rarely — fetch once. Students, and in particular their
   // `status` field (written from this page, the Students page, and the
@@ -259,15 +403,13 @@ function RegistryContent() {
         const centreSnap = await getDocs(collection(db, "centers"));
         if (cancelled) return;
 
-        // `centreList`/`centreName` (School-of-Music only) drive the centre
-        // picker and import matching — never suggest a centre from the other
-        // wing there. `centreNameAll` additionally resolves display names for
-        // legacy/mistagged centre docs (created before wing-tagging existed)
-        // so a student record pointing at one doesn't fall back to a raw
-        // Firestore ID in the table.
+        // The registry is shared by both wings, so `centreList`/`centreName`
+        // (the centre picker, import matching and name resolution) cover every
+        // centre regardless of wing. School-of-Music centres are listed first
+        // so a name that exists in both wings matches the SoM one on import.
         const centreName = new Map<string, string>();
         const centreNameAll = new Map<string, string>();
-        const centreList: { id: string; name: string; code: string }[] = [];
+        const centreList: RegistryCentre[] = [];
         // Batch ids are client-generated and unique across every centre, so a
         // flat id → name map (no centreId needed to disambiguate) is enough to
         // resolve a student's assigned batch regardless of wing.
@@ -281,10 +423,15 @@ function RegistryContent() {
           const batches = explicitBatches(d.data());
           batches.forEach(b => batchName.set(String(b.id), String(b.name ?? "") || "Unnamed batch"));
           if (batches.length === 0) defaultBatchCentres.add(d.id);
-          if (wingOf(d.data()) !== WING) return;
           centreName.set(d.id, nm);
-          centreList.push({ id: d.id, name: nm, code: (d.data().centerCode as string) ?? "" });
+          centreList.push({
+            id: d.id, name: nm, code: (d.data().centerCode as string) ?? "",
+            wing: wingOf(d.data()),
+            batches: batches.map(b => ({ id: String(b.id), name: String(b.name ?? "") || "Unnamed batch" })),
+          });
         });
+        centreList.sort((a, b) =>
+          Number(b.wing === WING) - Number(a.wing === WING) || a.name.localeCompare(b.name));
         setCentres(centreList);
         setCached("registry:centres", centreList);
 
@@ -295,12 +442,13 @@ function RegistryContent() {
             const list: Entry[] = studSnap.docs
               .filter(d => wingOf(d.data()) === WING)
               .map(d => {
-                const s = d.data();
+                // "estimate" so a just-written serverTimestamp() reads as ~now
+                // instead of null while the write is still pending.
+                const s = d.data({ serverTimestamps: "estimate" });
                 // `centerId` may be "" for records whose centre was entered as free
-                // text (e.g. "ROLCC"). Resolve the name against SoM centres first,
-                // then any centre regardless of wing (covers legacy/mistagged
-                // centre docs created before wing-tagging existed). If neither
-                // resolves and the stored value is a raw Firestore doc ID, show a
+                // text (e.g. "ROLCC"). Resolve the name against every centre in
+                // either wing. If it doesn't
+                // resolve and the stored value is a raw Firestore doc ID, show a
                 // plain placeholder instead of leaking the hash into the table.
                 const centreRef = String(s.centerId || s.centre || "");
                 const resolvedCentreName = centreName.get(centreRef) || centreNameAll.get(centreRef);
@@ -337,13 +485,22 @@ function RegistryContent() {
                   course,
                   status:      (s.status ?? s.studentStatus ?? "active") as string,
                   screening:   screeningGradeOf(s),
+                  centerId:    centreName.has(centreRef) ? centreRef : "",
+                  batchId:     String(s.batchId ?? ""),
+                  email:       String(s.email ?? "").trim(),
+                  courseRaw:   typeof s.course === "string" ? s.course : "",
+                  // Imports back-date `createdAt` to the admission date, so the
+                  // upload time lives in `importedAt`; other records use createdAt.
+                  addedAt:     toMillis(s.importedAt) || toMillis(s.createdAt),
                 };
               })
               .sort((a, b) => {
-                // Ascending by the last 3 digits of the admission number (…101, …102, …103).
-                // Rows with no admission number fall to the bottom, then ordered by date.
+                // Ascending by the last 3 digits of the admission number
+                // (…005, …210, …346, …347, …348); rows with no admission number
+                // fall to the bottom. Ties: newest upload first, then by date.
                 const ka = admTail(a.admissionNo), kb = admTail(b.admissionNo);
                 if (ka !== kb) return ka - kb;
+                if (a.addedAt !== b.addedAt) return b.addedAt - a.addedAt;
                 return (a.admittedOn || "9999").localeCompare(b.admittedOn || "9999");
               });
 
@@ -531,7 +688,7 @@ function RegistryContent() {
         {loading ? (
           <div style={s.empty}>Loading…</div>
         ) : (
-          <div className="registry-scroll" style={{ overflow: "auto", maxHeight: "calc(100vh - 210px)" }}>
+          <div ref={scrollRef} className="registry-scroll" style={{ overflow: "auto", maxHeight: "calc(100vh - 210px)" }}>
             <style>{`
               .registry-scroll { scrollbar-width: auto; scrollbar-color: #9ca3af var(--color-bg); }
               .registry-scroll::-webkit-scrollbar { width: 18px; height: 18px; }
@@ -553,7 +710,7 @@ function RegistryContent() {
                     </th>
                   )}
                   {["SL", "Name", "Status"].map(h => <th key={h} style={s.th}>{h}</th>)}
-                  <th style={{ ...s.th, width: 34 }} />
+                  <th style={{ ...s.th, width: canImport ? 72 : 34 }} />
                 </tr>
               </thead>
               <tbody>
@@ -567,7 +724,11 @@ function RegistryContent() {
                   return (
                   <Fragment key={e.uid}>
                   <tr onClick={() => toggleExpanded(e.uid)}
-                    style={{ ...s.tr, cursor: "pointer", ...(selected.has(e.uid) ? { background: "#fef2f2" } : {}) }}>
+                    style={{
+                      ...s.tr, cursor: "pointer", transition: "background 0.6s",
+                      ...(newUids.has(e.uid) ? { background: "rgba(238,242,255,0.8)" } : {}),
+                      ...(selected.has(e.uid) ? { background: "#fef2f2" } : {}),
+                    }}>
                     {canImport && (
                       <td style={s.td} onClick={ev => ev.stopPropagation()}>
                         <input type="checkbox" checked={selected.has(e.uid)}
@@ -575,7 +736,19 @@ function RegistryContent() {
                       </td>
                     )}
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{i + 1}</td>
-                    <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>{e.name}</td>
+                    <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>
+                      {e.name}
+                      {e.admissionNo !== "—" && (
+                        <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 400, color: "var(--color-text-muted)", fontFamily: "ui-monospace, monospace" }}>
+                          {e.admissionNo}
+                        </span>
+                      )}
+                      {newUids.has(e.uid) && (
+                        <span style={{ marginLeft: 8, padding: "1px 7px", borderRadius: 999, fontSize: 10.5, fontWeight: 700, background: "#e0e7ff", color: "#4338ca" }}>
+                          New
+                        </span>
+                      )}
+                    </td>
                     <td style={s.td} onClick={ev => ev.stopPropagation()}>
                       {(() => {
                         const displayStatus = toRegistryStatus(e.status);
@@ -606,7 +779,16 @@ function RegistryContent() {
                         );
                       })()}
                     </td>
-                    <td style={{ ...s.td, color: "var(--color-text-muted)", textAlign: "center" }}>
+                    <td style={{ ...s.td, color: "var(--color-text-muted)", textAlign: "center", whiteSpace: "nowrap" }}>
+                      {canImport && (
+                        <button
+                          onClick={ev => { ev.stopPropagation(); setEditing(e); }}
+                          title="Edit details" aria-label={`Edit details for ${e.name}`}
+                          style={s.iconBtn}
+                        >
+                          ✏
+                        </button>
+                      )}
                       <span style={{ display: "inline-block", transition: "transform 0.15s", transform: open ? "rotate(90deg)" : "none" }}>▶</span>
                     </td>
                   </tr>
@@ -624,7 +806,15 @@ function RegistryContent() {
                           <DetailField label="Admission Number" value={e.admissionNo} emphasize />
                           <DetailField label="Course" value={e.course} />
                           <DetailField label="Screening Grade" value={e.screening} />
+                          {e.email && <DetailField label="Email" value={e.email} />}
                         </div>
+                        {canImport && (
+                          <div style={{ padding: "0 20px 14px" }}>
+                            <button onClick={() => setEditing(e)} style={{ ...s.printBtn, fontSize: 12, padding: "6px 12px" }}>
+                              ✏ Edit Details
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   )}
@@ -635,7 +825,16 @@ function RegistryContent() {
                   <tr style={s.pasteTr}>
                     <td style={s.td} />
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>＋</td>
-                    <td colSpan={3} style={{ padding: 0 }}>
+                    <td colSpan={3} style={{ padding: 0 }}
+                      onFocus={() => setPasteFocused(true)}
+                      onBlur={ev => { if (!ev.currentTarget.contains(ev.relatedTarget as Node | null)) setPasteFocused(false); }}>
+                      {pasteFocused && (
+                        // Header template sits above the input. mouseDown is swallowed so
+                        // clicking the guide (e.g. Copy) never blurs the input and hides it.
+                        <div style={{ padding: "10px 12px 0" }} onMouseDown={ev => ev.preventDefault()}>
+                          <PasteFormatGuide />
+                        </div>
+                      )}
                       <input
                         style={s.pasteCell}
                         value={pastedText}
@@ -667,8 +866,21 @@ function RegistryContent() {
           initiatorId={user?.uid ?? "unknown"}
           initiatorRole={user?.role ?? ROLES.FOUNDER}
           initialPaste={pastedText}
-          onClose={() => { setShowImport(false); setPastedText(""); }}
-          onDone={() => { setShowImport(false); setPastedText(""); }}
+          onClose={closeImport}
+          onDone={closeImport}
+          onImported={uids => { justImported.current = uids; }}
+        />
+      )}
+
+      {editing && (
+        <EditStudentModal
+          entry={editing}
+          centres={centres}
+          existingAdmNos={existingAdmNos}
+          canReactivate={canReactivate}
+          initiatorId={user?.uid ?? "unknown"}
+          initiatorRole={user?.role ?? ROLES.FOUNDER}
+          onClose={() => setEditing(null)}
         />
       )}
 
@@ -718,6 +930,216 @@ const dm: Record<string, React.CSSProperties> = {
   box: { background: "#fff", borderRadius: 16, padding: "26px 26px", maxWidth: 420, width: "100%", boxShadow: "0 24px 64px rgba(0,0,0,0.25)", textAlign: "center" },
 };
 
+// ─── Edit Student Details modal ───────────────────────────────────────────────
+
+/** ISO timestamp → local "YYYY-MM-DD" for a date input ("" when blank/invalid). */
+function isoToDateInput(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+const blankDash = (v: string) => (v === "—" ? "" : v);
+
+function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initiatorId, initiatorRole, onClose }: {
+  entry:          Entry;
+  centres:        RegistryCentre[];
+  existingAdmNos: Set<string>;
+  canReactivate:  boolean;
+  initiatorId:    string;
+  initiatorRole:  string;
+  onClose:        () => void;
+}) {
+  const initial = useMemo(() => ({
+    name:        blankDash(entry.name),
+    admissionNo: blankDash(entry.admissionNo),
+    phone:       blankDash(entry.phone),
+    email:       entry.email,
+    centerId:    entry.centerId,
+    batchId:     entry.batchId,
+    course:      entry.courseRaw || blankDash(entry.course),
+    admittedOn:  isoToDateInput(entry.admittedOn),
+    status:      toRegistryStatus(entry.status),
+  }), [entry]);
+  const [f, setF] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF(prev => ({ ...prev, [k]: v }));
+
+  const centre = centres.find(c => c.id === f.centerId);
+  const centreBatches = centre?.batches ?? [];
+  // Free-text centre from an import that never matched a centre doc — kept
+  // unless the user explicitly picks a real centre.
+  const freeTextCentre = !entry.centerId && entry.centre !== "—" ? entry.centre : "";
+
+  const statusOptions: string[] = initial.status === "Confirm" || canReactivate
+    ? [...STATUS_OPTIONS]
+    : STATUS_OPTIONS.filter(o => o !== "Confirm");
+  if (!statusOptions.includes(initial.status)) statusOptions.unshift(initial.status);
+
+  async function handleSave(ev: React.FormEvent) {
+    ev.preventDefault();
+    const name = f.name.trim();
+    const admNo = f.admissionNo.trim();
+    const email = f.email.trim().toLowerCase();
+    if (!name) return setError("Full name is required.");
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return setError("Enter a valid email address.");
+    const admKey = admNo.replace(/\s+/g, "").toUpperCase();
+    const ownKey = initial.admissionNo.replace(/\s+/g, "").toUpperCase();
+    if (admKey && admKey !== ownKey && existingAdmNos.has(admKey)) {
+      return setError(`Admission number ${admNo} is already used by another student.`);
+    }
+    const nextStatus = fromRegistryStatus(f.status);
+    if (nextStatus === "active" && entry.status !== "active" && !canReactivate) {
+      return setError("Only Chief Teacher, Director, or Founder can reactivate a student.");
+    }
+
+    const patch: Record<string, unknown> = {};
+    const changed: string[] = [];
+    if (name !== initial.name) {
+      const [first, ...rest] = name.split(/\s+/);
+      Object.assign(patch, { displayName: name, name, firstName: first ?? "", lastName: rest.join(" ") });
+      changed.push("name");
+    }
+    if (admNo !== initial.admissionNo) {
+      // All three fields are read as the admission number elsewhere — keep them in step.
+      Object.assign(patch, { admissionNumber: admNo, admissionNo: admNo, studentID: admNo, admissionNoAutoGenerated: false });
+      changed.push("admissionNumber");
+    }
+    if (f.phone.trim() !== initial.phone) { patch.phone = f.phone.trim(); changed.push("phone"); }
+    if (email !== initial.email.toLowerCase()) { patch.email = email; changed.push("email"); }
+    if (f.centerId !== initial.centerId && f.centerId) {
+      Object.assign(patch, { centerId: f.centerId, centre: centre?.name ?? "" });
+      changed.push("centre");
+    }
+    if (f.batchId !== initial.batchId || f.centerId !== initial.centerId) {
+      const b = centreBatches.find(x => x.id === f.batchId);
+      Object.assign(patch, { batchId: b ? b.id : null, batch: b ? b.name : null });
+      if (f.batchId !== initial.batchId) changed.push("batch");
+    }
+    if (f.course.trim() !== initial.course) { patch.course = f.course.trim(); changed.push("course"); }
+    if (f.admittedOn !== initial.admittedOn) {
+      patch.dateOfAdmission = f.admittedOn ? new Date(`${f.admittedOn}T00:00:00`).toISOString() : null;
+      changed.push("dateOfAdmission");
+    }
+    if (f.status !== initial.status) {
+      Object.assign(patch, { status: nextStatus, studentStatus: nextStatus });
+      changed.push("status");
+    }
+
+    if (Object.keys(patch).length === 0) { onClose(); return; }
+
+    setSaving(true);
+    setError("");
+    try {
+      await updateDoc(doc(db, "users", entry.uid), { ...patch, updatedAt: serverTimestamp() });
+      logAction({
+        action: "REGISTRY_STUDENT_EDIT",
+        initiatorId, initiatorRole: initiatorRole as Parameters<typeof logAction>[0]["initiatorRole"],
+        approverId: null, approverRole: null, reason: null,
+        metadata: { uid: entry.uid, fields: changed },
+      });
+      // The registry's live student subscription refreshes the table.
+      onClose();
+    } catch (err) {
+      console.error("Registry student edit failed:", err);
+      setError(err instanceof Error ? err.message : "Failed to save changes.");
+      setSaving(false);
+    }
+  }
+
+  const label: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 5, fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)" };
+  const input: React.CSSProperties = { ...s.search, minWidth: 0, width: "100%", boxSizing: "border-box", fontWeight: 400 };
+
+  return (
+    <div style={dm.overlay} onClick={e => { if (e.target === e.currentTarget && !saving) onClose(); }}>
+      <form onSubmit={handleSave} style={{ ...dm.box, maxWidth: 560, textAlign: "left", maxHeight: "90vh", overflowY: "auto", padding: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 22px", borderBottom: "1px solid #e5e7eb" }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#111" }}>Edit Student Details</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{entry.name}</div>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Close"
+            style={{ background: "none", border: "none", fontSize: 22, color: "#9ca3af", cursor: "pointer" }}>×</button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14, padding: "18px 22px" }}>
+          <label style={label}>Full Name
+            <input style={input} value={f.name} onChange={e => set("name", e.target.value)} required autoFocus />
+          </label>
+          <label style={label}>Admission Number
+            <input style={input} value={f.admissionNo} onChange={e => set("admissionNo", e.target.value)} placeholder="e.g. ROLCC02092025103" />
+          </label>
+          <label style={label}>Phone Number
+            <input style={input} type="tel" value={f.phone} onChange={e => set("phone", e.target.value)} />
+          </label>
+          <label style={label}>Email
+            <input style={input} type="email" value={f.email} onChange={e => set("email", e.target.value)} placeholder="optional" />
+          </label>
+          <label style={label}>Centre
+            <select style={input} value={f.centerId}
+              onChange={e => setF(prev => ({ ...prev, centerId: e.target.value, batchId: "" }))}>
+              <option value="" disabled={!!initial.centerId}>
+                {freeTextCentre ? `${freeTextCentre} (unmatched)` : "— Select a centre —"}
+              </option>
+              {[WINGS.SCHOOL_OF_MUSIC, WINGS.ROL_PLUS].map(w => {
+                const inW = centres.filter(c => (c.wing ?? WINGS.ROL_PLUS) === w);
+                return inW.length > 0 && (
+                  <optgroup key={w} label={WING_LABELS[w]}>
+                    {inW.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </optgroup>
+                );
+              })}
+            </select>
+          </label>
+          <label style={label}>Batch
+            {centreBatches.length > 0 ? (
+              <select style={input} value={f.batchId} onChange={e => set("batchId", e.target.value)}>
+                <option value="">— No batch —</option>
+                {centreBatches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            ) : (
+              <select style={{ ...input, color: "#6b7280" }} disabled value="">
+                <option value="">{f.centerId ? `${DEFAULT_BATCH_NAME} (centre schedule)` : entry.batch}</option>
+              </select>
+            )}
+          </label>
+          <label style={label}>Instrument / Course
+            <input style={input} list="registry-course-options" value={f.course} onChange={e => set("course", e.target.value)} />
+            <datalist id="registry-course-options">
+              {Object.values(SYLLABUS_INSTRUMENT_LABELS).map(l => <option key={l} value={l} />)}
+            </datalist>
+          </label>
+          <label style={label}>Date of Admission
+            <input style={input} type="date" value={f.admittedOn} onChange={e => set("admittedOn", e.target.value)} />
+          </label>
+          <label style={label}>Status
+            <select style={input} value={f.status} onChange={e => set("status", e.target.value)}
+              title={!canReactivate && initial.status !== "Confirm" ? "Only Chief Teacher, Director, or Founder can reactivate a student." : undefined}>
+              {statusOptions.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </label>
+        </div>
+
+        {error && (
+          <div style={{ margin: "0 22px 12px", fontSize: 12.5, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px" }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", padding: "14px 22px", borderTop: "1px solid #e5e7eb" }}>
+          <button type="button" onClick={onClose} disabled={saving} style={s.printBtn}>Cancel</button>
+          <button type="submit" disabled={saving} style={{ ...s.importBtn, opacity: saving ? 0.6 : 1 }}>
+            {saving ? "Saving…" : "Save Changes"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 // ─── Import modal ─────────────────────────────────────────────────────────────
 
 interface PreviewRow {
@@ -728,7 +1150,7 @@ interface PreviewRow {
   centreId:    string | null;
   centreCode:  string;
   centreUnmatched: boolean;
-  batch:       string;
+  batchId:     string;    // picked after parsing from the matched centre's batches; "" = none / General Batch
   phone:       string;
   admissionNo: string;    // explicit from the sheet; "" → auto-generate on import
   auto:        boolean;
@@ -753,15 +1175,16 @@ function DetailField({ label, value, emphasize }: { label: string; value: string
 }
 
 function ImportModal({
-  centres, existingAdmNos, initiatorId, initiatorRole, initialPaste, onClose, onDone,
+  centres, existingAdmNos, initiatorId, initiatorRole, initialPaste, onClose, onDone, onImported,
 }: {
-  centres: { id: string; name: string; code: string }[];
+  centres: RegistryCentre[];
   existingAdmNos: Set<string>;
   initiatorId: string;
   initiatorRole: string;
   initialPaste?: string;
   onClose: () => void;
   onDone: () => void;
+  onImported: (uids: string[]) => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<"file" | "paste" | "columns">(initialPaste ? "paste" : "file");
@@ -775,12 +1198,17 @@ function ImportModal({
 
   const centreByName = useMemo(() => {
     const m = new Map<string, { id: string; code: string }>();
-    centres.forEach(c => m.set(c.name.trim().toLowerCase(), { id: c.id, code: c.code }));
+    // First wins — `centres` lists School-of-Music centres first, so a name
+    // shared by both wings resolves to the SoM centre.
+    centres.forEach(c => {
+      const key = c.name.trim().toLowerCase();
+      if (!m.has(key)) m.set(key, { id: c.id, code: c.code });
+    });
     return m;
   }, [centres]);
   const centreById = useMemo(() => {
-    const m = new Map<string, { name: string; code: string }>();
-    centres.forEach(c => m.set(c.id, { name: c.name, code: c.code }));
+    const m = new Map<string, RegistryCentre>();
+    centres.forEach(c => m.set(c.id, c));
     return m;
   }, [centres]);
 
@@ -799,7 +1227,6 @@ function ImportModal({
       const name        = pick(r, "name", "studentname", "fullname");
       const admittedOn  = parseSheetDate(pick(r, "dateofadmission", "admissiondate", "doa", "date"));
       const centreRaw   = pick(r, "centre", "center", "centrename", "centername", "branch", "location");
-      const batch       = pick(r, "batch", "batchname", "batchno", "batchnumber");
       const phone       = pick(r, "phonenumber", "phoneno", "phone", "mobilenumber", "mobileno", "mobile", "contactnumber", "contactno", "contact");
       const admissionNo = pick(r, "admissionno", "admissionnumber", "admissionnumberno", "admno", "admissionid");
       const course      = pick(r, "course", "instrument");
@@ -825,7 +1252,7 @@ function ImportModal({
         centreId,
         centreCode: nameMatch?.code ?? "",
         centreUnmatched: !!centreRaw && !centreId,
-        batch,
+        batchId: "",
         phone,
         admissionNo,
         auto,
@@ -910,6 +1337,19 @@ function ImportModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Batch is chosen here, after parsing — per row, or for every row at a centre.
+  function setRowBatch(sl: number, batchId: string) {
+    setPreview(p => p.map(r => r.sl === sl ? { ...r, batchId } : r));
+  }
+  function setCentreBatch(centreId: string, batchId: string) {
+    setPreview(p => p.map(r => r.centreId === centreId ? { ...r, batchId } : r));
+  }
+  // Matched centres in the preview that have batches to choose from.
+  const batchCentres = useMemo(() => {
+    const ids = Array.from(new Set(preview.map(r => r.centreId).filter((id): id is string => !!id)));
+    return ids.map(id => centreById.get(id)).filter((c): c is RegistryCentre => !!c && (c.batches?.length ?? 0) > 0);
+  }, [preview, centreById]);
+
   const importable = preview.filter(r => !r.error && !r.duplicate);
   const skipCount = preview.filter(r => r.duplicate && !r.error).length;
   const errorCount = preview.filter(r => r.error).length;
@@ -918,6 +1358,7 @@ function ImportModal({
     if (importable.length === 0 || busy) return;
     setBusy(true);
     let imported = 0, failed = 0;
+    const newIds: string[] = [];
     try {
       // Reserve one sequence per row that needs an auto-generated number.
       const autoRows = importable.filter(r => r.auto);
@@ -930,10 +1371,13 @@ function ImportModal({
       for (let i = 0; i < importable.length; i += 400) {
         const chunk = importable.slice(i, i + 400);
         const batch = writeBatch(db);
+        const chunkIds: string[] = [];
         for (const r of chunk) {
           const admNo = r.admissionNo || generated.get(r.sl) || "";
+          const pickedBatch = r.centreId ? centreById.get(r.centreId)?.batches?.find(b => b.id === r.batchId) : undefined;
           const [first, ...rest] = r.name.trim().split(/\s+/);
           const ref = doc(collection(db, "users"));
+          chunkIds.push(ref.id);
           batch.set(ref, {
             uid:            ref.id,
             role:           "student",
@@ -952,7 +1396,8 @@ function ImportModal({
             // to a raw id whenever this record's name can't be resolved another way.
             centre:         r.centreRaw,
             centerId:       r.centreId ?? "",
-            batch:          r.batch || null,
+            batchId:        pickedBatch?.id ?? null,
+            batch:          pickedBatch?.name ?? null,
             course:         r.course,
             classType:      "group",
             billingMode:    "prepay",
@@ -971,6 +1416,7 @@ function ImportModal({
         try {
           await batch.commit();
           imported += chunk.length;
+          newIds.push(...chunkIds);
         } catch (err) {
           console.error("Registry import batch failed:", err);
           failed += chunk.length;
@@ -985,6 +1431,7 @@ function ImportModal({
         reason: null,
         metadata: { imported, skipped: skipCount, failed, generated: autoRows.length, source: mode === "file" ? (fileName || "file") : mode },
       }).catch(() => {});
+      onImported(newIds);
       setResult({
         imported, skipped: skipCount, failed, generated: autoRows.length,
         centres: [...centreSummary.known, ...centreSummary.fresh],
@@ -1021,11 +1468,13 @@ function ImportModal({
             <>
               <p style={{ fontSize: 12.5, color: "var(--color-text-secondary)", marginTop: 0, lineHeight: 1.6 }}>
                 <strong>Keep the header row</strong> in your file or paste. Columns are matched by
-                their header name — <code style={s.cols}>Name · Date Of Admission · Centre · Batch · Phone number · Admission number · Course · Status · Screening grade</code> — in any order; unknown columns are ignored.
+                their header name — <code style={s.cols}>Name · Date Of Admission · Centre · Phone number · Admission number · Course · Status · Screening grade</code> — in any order; unknown columns are ignored.
+                Leave out <strong>Wing</strong> and <strong>Batch</strong>: the wing comes from the centre, and you pick each
+                student&apos;s batch after pressing <strong>Parse</strong>.
                 <br />
                 Every cell is stored exactly as written — nothing is reformatted, merged, or moved
                 between columns. Each field comes only from its own column: <code style={{ fontSize: 11 }}>Centre</code> from the Centre column,
-                <code style={{ fontSize: 11 }}>Batch</code> from the Batch column, and so on. A centre that isn&apos;t in the system is kept
+                <code style={{ fontSize: 11 }}>Phone number</code> from the Phone column, and so on. A centre that isn&apos;t in the system is kept
                 as plain text.
                 If a row has no admission number, one is generated as <code style={{ fontSize: 11 }}>ROLCC + DDMMYYYY + sequence</code>.
                 Only rows with no name, or an admission number already on the register, are skipped.
@@ -1035,7 +1484,7 @@ function ImportModal({
               <div style={s.modeTabs}>
                 {([
                   ["file", "📄 Upload file"],
-                  ["paste", "📋 Paste table"],
+                  ["paste", "📋 Copy & paste"],
                   ["columns", "🧬 Paste by column"],
                 ] as const).map(([m, label]) => (
                   <button
@@ -1055,16 +1504,17 @@ function ImportModal({
 
               {mode === "paste" && (
                 <>
+                  <PasteFormatGuide pasted={pasteText} />
                   <textarea
                     value={pasteText}
                     onChange={e => setPasteText(e.target.value)}
-                    placeholder={"Paste rows copied from Excel / Google Sheets (header row optional):\n\nAdithya M\t20 November 2017\tROLCC\t\t20112017101\tDrums\tConfirm"}
+                    placeholder={"Paste rows copied from Excel / Google Sheets (header row recommended), then press Parse:\n\nName\tDate Of Admission\tCentre\tPhone number\tAdmission no.\tCourse\tStatus\tScreening Grade\nPriya Nair\t24/09/2026\tCinnamon\t9876543210\t\tKeyboard\t\t"}
                     rows={7}
                     style={s.textarea}
                   />
                   <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
                     <button style={s.primaryBtn} onClick={handlePasteParse} disabled={!pasteText.trim()}>
-                      Preview rows
+                      Parse
                     </button>
                   </div>
                 </>
@@ -1095,7 +1545,7 @@ function ImportModal({
                       onClick={parseColumns}
                       disabled={!Object.values(cols).some(v => (v ?? "").includes("\n"))}
                     >
-                      Preview rows
+                      Parse
                     </button>
                   </div>
                 </>
@@ -1123,6 +1573,29 @@ function ImportModal({
                 </div>
               )}
 
+              {batchCentres.length > 0 && (
+                <div style={s.confirmBox}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--color-text-primary)", marginBottom: 6 }}>
+                    Batches <span style={{ fontWeight: 400, color: "var(--color-text-muted)" }}>— set for every student at a centre, or per row below</span>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
+                    {batchCentres.map(c => {
+                      const ids = new Set(preview.filter(r => r.centreId === c.id).map(r => r.batchId));
+                      return (
+                        <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--color-text-secondary)" }}>
+                          {c.name}
+                          <select value={ids.size === 1 ? [...ids][0] : "__mixed"} onChange={e => setCentreBatch(c.id, e.target.value)} style={s.batchSelect}>
+                            {ids.size > 1 && <option value="__mixed" disabled>Mixed</option>}
+                            <option value="">— No batch —</option>
+                            {c.batches!.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                          </select>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {preview.length > 0 && (
                 <>
                   <div style={{ display: "flex", gap: 14, margin: "14px 0 8px", fontSize: 12, fontWeight: 700, flexWrap: "wrap" as const }}>
@@ -1143,7 +1616,19 @@ function ImportModal({
                             <td style={s.td}>{r.name || <em style={{ color: "#dc2626" }}>missing</em>}</td>
                             <td style={s.td}>{r.admissionNo || <em style={{ color: "#4f46e5" }}>auto</em>}</td>
                             <td style={s.td}>{r.centreRaw || "—"}</td>
-                            <td style={s.td}>{r.batch || "—"}</td>
+                            <td style={s.td}>
+                              {(() => {
+                                const c = r.centreId ? centreById.get(r.centreId) : undefined;
+                                if (!c) return <span style={{ color: "var(--color-text-muted)" }}>—</span>;
+                                if (!c.batches?.length) return <span style={{ color: "var(--color-text-muted)" }}>{DEFAULT_BATCH_NAME}</span>;
+                                return (
+                                  <select value={r.batchId} onChange={e => setRowBatch(r.sl, e.target.value)} style={s.batchSelect}>
+                                    <option value="">— No batch —</option>
+                                    {c.batches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                                  </select>
+                                );
+                              })()}
+                            </td>
                             <td style={s.td}>{r.phone || "—"}</td>
                             <td style={s.td}>{r.course || "—"}</td>
                             <td style={s.td}>{r.admittedOn ? fmtDate(r.admittedOn) : "—"}</td>
@@ -1192,6 +1677,7 @@ const s: Record<string, React.CSSProperties> = {
   search: { background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "var(--color-text-primary)", outline: "none", minWidth: 240 },
   select: { background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "8px 10px", fontSize: 13, color: "var(--color-text-primary)", cursor: "pointer" },
   importBtn: { background: "var(--color-accent)", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: "#fff", cursor: "pointer" },
+  iconBtn: { background: "none", border: "1px solid var(--color-border)", borderRadius: 6, padding: "2px 7px", marginRight: 8, fontSize: 12, color: "var(--color-text-secondary)", cursor: "pointer" },
   printBtn: { background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: "var(--color-text-secondary)", cursor: "pointer" },
   card: { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, padding: 20 },
   table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
@@ -1210,6 +1696,7 @@ const s: Record<string, React.CSSProperties> = {
   modalFoot: { display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 20px", borderTop: "1px solid var(--color-border)" },
   closeBtn: { background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "var(--color-text-muted)", padding: 4 },
   fileInput: { display: "block", fontSize: 13, marginTop: 6 },
+  batchSelect: { fontSize: 12, padding: "3px 6px", borderRadius: 6, border: "1px solid var(--color-border)", background: "var(--color-bg)", color: "var(--color-text-primary)" },
   pasteTr: { borderTop: "2px dashed var(--color-border)", background: "var(--color-surface-2)" },
   pasteCell: { width: "100%", boxSizing: "border-box", border: "none", background: "transparent", padding: "12px", fontSize: 13, color: "var(--color-text-primary)", outline: "none" },
   modeTabs: { display: "flex", gap: 6, margin: "12px 0" },

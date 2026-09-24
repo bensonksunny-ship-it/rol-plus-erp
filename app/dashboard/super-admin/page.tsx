@@ -9,6 +9,7 @@ import { useRouter } from "next/navigation";
 import { getAllTeacherQuality } from "@/services/quality/quality.service";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center } from "@/types";
+import { getTeacherDisplayName } from "@/lib/teacherName";
 
 // ─── Local types ───────────────────────────────────────────────────────────────
 
@@ -137,7 +138,7 @@ function SuperAdminContent() {
           const t = d.data();
           return {
             uid:          d.id,
-            displayName:  (t.displayName ?? t.name ?? d.id) as string,
+            displayName:  getTeacherDisplayName(t) || d.id,
             centerIds:    (t.centerIds as string[]) ?? [],
             status:       (t.status ?? "active") as string,
             lastActivity: (t.lastActivity ?? null) as string | null,

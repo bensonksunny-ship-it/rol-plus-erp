@@ -8,6 +8,7 @@ import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { inWing } from "@/lib/wing";
 import { getCached, invalidateCache, setCached } from "@/lib/dataCache";
+import { getTeacherDisplayName, getTeacherOfficialSubtext } from "@/lib/teacherName";
 import {
   createTeacher,
   getTeachers,
@@ -47,6 +48,7 @@ export function TeachersContent() {
 
   // Create form
   const [name,     setName]     = useState("");
+  const [preferredName, setPreferredName] = useState("");
   const [email,    setEmail]    = useState("");
   const [selectedCenters, setSelectedCenters] = useState<string[]>([]);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
@@ -81,7 +83,7 @@ export function TeachersContent() {
         getDocs(query(collection(db, "attendance"), where("date", ">=", monthStart))),
       ]);
 
-      const sortedTeachers = teacherList.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      const sortedTeachers = teacherList.sort((a, b) => getTeacherDisplayName(a).localeCompare(getTeacherDisplayName(b)));
       setTeachers(sortedTeachers);
       setCached(`teachers:${wing}:teachers`, sortedTeachers);
       const allCenters = centerSnap.docs.map(d => ({ id: d.id, ...d.data() } as Center));
@@ -94,10 +96,11 @@ export function TeachersContent() {
       setCenterNames(nameMap);
       setCached(`teachers:centerNames`, nameMap);
 
+      // Only this wing's centres map to a teacher, so attendance from the other
+      // wing's centres is never counted in the Performance stats.
       const centreTeacher: Record<string, string> = {};
-      centerSnap.docs.forEach(d => {
-        const uid = d.data().teacherUid as string | undefined;
-        if (uid) centreTeacher[d.id] = uid;
+      wingCenters.forEach(c => {
+        if (c.teacherUid) centreTeacher[c.id] = c.teacherUid;
       });
 
       type Counts = { present: number; absent: number; break: number; cancelled: number; total: number };
@@ -152,7 +155,7 @@ export function TeachersContent() {
     setSubmitting(true);
     try {
       const created = await createTeacher(
-        { displayName: name.trim(), email: email.trim(), centerIds: selectedCenters, wing },
+        { displayName: name.trim(), preferredName: preferredName.trim(), email: email.trim(), centerIds: selectedCenters, wing },
         user?.uid ?? "unknown",
         (user?.role ?? ROLES.ADMIN) as Parameters<typeof createTeacher>[2],
       );
@@ -168,7 +171,7 @@ export function TeachersContent() {
       // cache so it re-fetches instead of showing a stale pre-creation list.
       invalidateCache("users:all");
       setSuccessMsg("Teacher added. Create their login from the Users page when they're ready to sign in.");
-      setName(""); setEmail(""); setSelectedCenters([]); setPhotoFile(null);
+      setName(""); setPreferredName(""); setEmail(""); setSelectedCenters([]); setPhotoFile(null);
       setLoading(true);
       await load();
       setShowCreate(false);
@@ -218,6 +221,8 @@ export function TeachersContent() {
     setter(arr.includes(id) ? arr.filter(x => x !== id) : [...arr, id]);
   }
 
+  const wingCenterIds = new Set(centers.map(c => c.id));
+
   function centerName(id: string): string {
     return centerNames[id] ?? centers.find(c => c.id === id)?.name ?? id;
   }
@@ -260,13 +265,13 @@ export function TeachersContent() {
       {/* ── Modals ── */}
       {deleteTarget && (
         <DeleteUserModal
-          name={deleteTarget.displayName}
+          name={getTeacherDisplayName(deleteTarget)}
           role="teacher"
           onClose={() => setDeleteTarget(null)}
           onDeleted={() => {
             setTeachers(prev => prev.filter(t => t.uid !== deleteTarget.uid));
             setDeleteTarget(null);
-            setSuccessMsg(`Teacher "${deleteTarget.displayName}" deleted.`);
+            setSuccessMsg(`Teacher "${getTeacherDisplayName(deleteTarget)}" deleted.`);
           }}
           onError={msg => setErrorMsg(msg)}
           uid={deleteTarget.uid}
@@ -295,7 +300,7 @@ export function TeachersContent() {
         <div style={s.overlay} onClick={() => setEditTarget(null)}>
           <div style={s.modal} onClick={e => e.stopPropagation()}>
             <div style={s.modalHeader}>
-              <span style={s.modalTitle}>Edit Centers — {editTarget.displayName}</span>
+              <span style={s.modalTitle}>Edit Centers — {getTeacherDisplayName(editTarget)}</span>
               <button onClick={() => setEditTarget(null)} style={s.closeBtn}>×</button>
             </div>
             <div style={s.modalBody}>
@@ -341,6 +346,12 @@ export function TeachersContent() {
                     <input style={s.input} type="text" value={name}
                       onChange={e => setName(e.target.value)}
                       placeholder="e.g. Priya Nair" required />
+                  </Field>
+                  <Field label="Display Name (Used across app)">
+                    <input style={s.input} type="text" value={preferredName}
+                      onChange={e => setPreferredName(e.target.value)}
+                      placeholder={name.trim() || "e.g. Priya N"} />
+                    <span style={{ fontSize: 11, color: "#9ca3af" }}>Official full name will only be used for administrative records.</span>
                   </Field>
                   <Field label="Email Address">
                     <input style={s.input} type="email" value={email}
@@ -427,6 +438,7 @@ export function TeachersContent() {
                     <TeacherPerfRow
                       key={t.uid}
                       teacher={t}
+                      centerIds={(t.centerIds ?? []).filter(id => wingCenterIds.has(id))}
                       centerName={centerName}
                       stats={attStats[t.uid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 }}
                       centerStats={attByCenter[t.uid] ?? {}}
@@ -587,13 +599,16 @@ function TeacherCard({ teacher, onView, onEditDetails, onEditCenters, onDelete }
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
     >
       <div style={s.tCardHeader}>
-        <TeacherAvatar photoURL={teacher.photoURL} name={teacher.displayName} size={36} />
+        <TeacherAvatar photoURL={teacher.photoURL} name={getTeacherDisplayName(teacher)} size={36} />
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <StatusBadge status={teacher.status} />
           <TeacherActionsMenu onEditDetails={onEditDetails} onEditCenters={onEditCenters} onDelete={onDelete} />
         </div>
       </div>
-      <div style={s.tName}>{teacher.displayName}</div>
+      <div style={s.tName}>{getTeacherDisplayName(teacher)}</div>
+      {getTeacherOfficialSubtext(teacher) && (
+        <div style={{ fontSize: 11, color: "#9ca3af", marginTop: -2 }}>{getTeacherOfficialSubtext(teacher)}</div>
+      )}
       <div style={s.tEmail}>{teacher.email}</div>
     </div>
   );
@@ -603,13 +618,13 @@ function TeacherCard({ teacher, onView, onEditDetails, onEditCenters, onDelete }
 
 type AttCounts = { present: number; absent: number; break: number; cancelled: number; total: number };
 
-function TeacherPerfRow({ teacher, centerName, stats, centerStats, expanded, onToggle, onEditDetails, onEditCenters, onDelete }: {
-  teacher: TeacherUser; centerName: (id: string) => string;
+function TeacherPerfRow({ teacher, centerIds, centerName, stats, centerStats, expanded, onToggle, onEditDetails, onEditCenters, onDelete }: {
+  teacher: TeacherUser; centerIds: string[]; centerName: (id: string) => string;
   stats: AttCounts; centerStats: Record<string, AttCounts>;
   expanded: boolean; onToggle: () => void;
   onEditDetails: () => void; onEditCenters: () => void; onDelete: () => void;
 }) {
-  const hasCentres = (teacher.centerIds ?? []).length > 0;
+  const hasCentres = centerIds.length > 0;
   return (
     <Fragment>
       <tr
@@ -618,8 +633,13 @@ function TeacherPerfRow({ teacher, centerName, stats, centerStats, expanded, onT
       >
         <td style={{ ...s.td, fontWeight: 600, color: "var(--color-text-primary)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <TeacherAvatar photoURL={teacher.photoURL} name={teacher.displayName} size={26} />
-            {teacher.displayName}
+            <TeacherAvatar photoURL={teacher.photoURL} name={getTeacherDisplayName(teacher)} size={26} />
+            <div>
+              {getTeacherDisplayName(teacher)}
+              {getTeacherOfficialSubtext(teacher) && (
+                <div style={{ fontSize: 11, fontWeight: 400, color: "#9ca3af" }}>{getTeacherOfficialSubtext(teacher)}</div>
+              )}
+            </div>
             {hasCentres && <span style={{ fontSize: 10, color: "#9ca3af" }}>{expanded ? "▼" : "▶"}</span>}
           </div>
         </td>
@@ -628,7 +648,7 @@ function TeacherPerfRow({ teacher, centerName, stats, centerStats, expanded, onT
             <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
           ) : (
             <div style={s.centerTags}>
-              {teacher.centerIds!.map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
+              {centerIds.map(id => <span key={id} style={s.centerTag}>{centerName(id)}</span>)}
             </div>
           )}
         </td>
@@ -656,7 +676,7 @@ function TeacherPerfRow({ teacher, centerName, stats, centerStats, expanded, onT
         <tr style={{ background: "var(--color-surface-2)", borderBottom: "1px solid var(--color-border)" }}>
           <td colSpan={8} style={{ padding: "0 16px 16px 44px" }}>
             <div style={s.perfBreakdownTitle}>Per-centre breakdown</div>
-            {teacher.centerIds!.map(cid => {
+            {centerIds.map(cid => {
               const cs = centerStats[cid] ?? { present: 0, absent: 0, break: 0, cancelled: 0, total: 0 };
               return (
                 <div key={cid} style={s.perfBreakdownRow}>
@@ -687,13 +707,14 @@ function ViewTeacherModal({ teacher, centerName, onClose }: {
     <div style={s.overlay} onClick={onClose}>
       <div style={s.modal} onClick={e => e.stopPropagation()}>
         <div style={s.modalHeader}>
-          <span style={s.modalTitle}>{teacher.displayName}</span>
+          <span style={s.modalTitle}>{getTeacherDisplayName(teacher)}</span>
           <button onClick={onClose} style={s.closeBtn}>×</button>
         </div>
         <div style={s.modalBody}>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
-            <TeacherAvatar photoURL={teacher.photoURL} name={teacher.displayName} size={64} />
+            <TeacherAvatar photoURL={teacher.photoURL} name={getTeacherDisplayName(teacher)} size={64} />
           </div>
+          <ViewRow label="Official Name" value={<span style={{ color: "#6b7280" }}>{teacher.displayName}</span>} />
           <ViewRow label="Email" value={teacher.email} />
           <ViewRow label="Status" value={<StatusBadge status={teacher.status} />} />
           <ViewRow label="Assigned Centers" value={
@@ -723,9 +744,10 @@ function ViewRow({ label, value }: { label: string; value: React.ReactNode }) {
 function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
   teacher: TeacherUser;
   onClose: () => void;
-  onSaved: (updated: { displayName: string; email: string; status: UserStatus; photoURL?: string | null }) => void;
+  onSaved: (updated: { displayName: string; preferredName: string; email: string; status: UserStatus; photoURL?: string | null }) => void;
 }) {
   const [name, setName]       = useState(teacher.displayName);
+  const [preferredName, setPreferredName] = useState(teacher.preferredName ?? "");
   const [email, setEmail]     = useState(teacher.email);
   const [status, setStatus]   = useState<UserStatus>(teacher.status);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
@@ -744,17 +766,18 @@ function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
         photoURL = await uploadTeacherPhoto(teacher.uid, photoFile);
       }
       await updateDoc(doc(db, "users", teacher.uid), {
-        displayName: name.trim(),
-        email:       email.trim().toLowerCase(),
+        displayName:   name.trim(),
+        preferredName: preferredName.trim(),
+        email:         email.trim().toLowerCase(),
         status,
         photoURL,
-        updatedAt:   serverTimestamp(),
+        updatedAt:     serverTimestamp(),
       });
       if (email.trim().toLowerCase() !== teacher.email.toLowerCase()) {
         // Firestore updated; Firebase Auth email update requires server-side Admin SDK.
         console.info("Teacher email changed in Firestore. Firebase Auth email was not updated.");
       }
-      onSaved({ displayName: name.trim(), email: email.trim().toLowerCase(), status, photoURL });
+      onSaved({ displayName: name.trim(), preferredName: preferredName.trim(), email: email.trim().toLowerCase(), status, photoURL });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save.");
     } finally {
@@ -766,7 +789,7 @@ function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
     <div style={s.overlay} onClick={onClose}>
       <div style={s.modal} onClick={e => e.stopPropagation()}>
         <div style={s.modalHeader}>
-          <span style={s.modalTitle}>Edit Details — {teacher.displayName}</span>
+          <span style={s.modalTitle}>Edit Details — {getTeacherDisplayName(teacher)}</span>
           <button onClick={onClose} style={s.closeBtn}>×</button>
         </div>
         <div style={s.modalBody}>
@@ -775,6 +798,11 @@ function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
             <div style={s.grid2}>
               <Field label="Full Name">
                 <input style={s.input} value={name} onChange={e => setName(e.target.value)} required />
+              </Field>
+              <Field label="Display Name (Used across app)">
+                <input style={s.input} value={preferredName} onChange={e => setPreferredName(e.target.value)}
+                  placeholder={name.trim() || "e.g. Priya N"} />
+                <span style={{ fontSize: 11, color: "#9ca3af" }}>Official full name will only be used for administrative records.</span>
               </Field>
               <Field label="Email Address">
                 <input style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} required />
@@ -786,7 +814,7 @@ function EditTeacherDetailsModal({ teacher, onClose, onSaved }: {
                 </select>
               </Field>
               <Field label="Profile Picture">
-                <PhotoUploadField file={photoFile} currentUrl={teacher.photoURL} name={name || teacher.displayName} onChange={setPhotoFile} />
+                <PhotoUploadField file={photoFile} currentUrl={teacher.photoURL} name={preferredName || name || teacher.displayName} onChange={setPhotoFile} />
               </Field>
             </div>
             <div style={s.formActions}>

@@ -1,6 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/services/firebase/firebase-admin";
-import { ROLES } from "@/config/constants";
+import { LEGACY_SUPER_ADMIN_ROLE, ROLES } from "@/config/constants";
+
+const FOUNDER_ROLE_NAMES = new Set([ROLES.FOUNDER, LEGACY_SUPER_ADMIN_ROLE].map(r => r.toLowerCase()));
+const isFounderRole = (r: unknown) => typeof r === "string" && FOUNDER_ROLE_NAMES.has(r.trim().toLowerCase());
+
+/**
+ * Founder check on the caller's user doc — mirrors the client's reading of it:
+ * the legacy "super_admin" value counts as founder (the client auth shim maps
+ * it the same way for docs the backfill hasn't migrated yet), role strings are
+ * compared case-insensitively, and a founder grant in the per-wing `roles` map
+ * counts too.
+ */
+function isFounder(data: Record<string, unknown> | undefined): boolean {
+  if (!data) return false;
+  if (isFounderRole(data.role)) return true;
+  const roles = data.roles;
+  if (roles && typeof roles === "object") {
+    return Object.values(roles as Record<string, unknown>).some(v =>
+      Array.isArray(v) ? v.some(isFounderRole) : isFounderRole(v));
+  }
+  return false;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,8 +34,7 @@ export async function POST(req: NextRequest) {
     const decoded = await adminAuth().verifyIdToken(idToken);
 
     const callerSnap = await adminDb().doc(`users/${decoded.uid}`).get();
-    const callerRole = callerSnap.exists ? (callerSnap.data()?.role as string | undefined) : undefined;
-    if (callerRole !== ROLES.SUPER_ADMIN) {
+    if (!callerSnap.exists || !isFounder(callerSnap.data())) {
       return NextResponse.json({ error: "Only the Founder can reset a login's password." }, { status: 403 });
     }
 

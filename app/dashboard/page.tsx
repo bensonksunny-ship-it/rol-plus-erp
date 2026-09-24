@@ -12,6 +12,7 @@ import { getClassesByCenter } from "@/services/attendance/attendance.service";
 import { getAllTeacherQuality } from "@/services/quality/quality.service";
 import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic } from "@/lib/wing";
+import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center, Wing } from "@/types";
 
@@ -349,7 +350,7 @@ function CommandCenter() {
   }, [feeDueMap, paidSet]);
 
   // Centre rows
-  const teacherNameMap = useMemo(() => Object.fromEntries(teachers.map(t => [t.uid, t.displayName])), [teachers]);
+  const teacherNameMap = useMemo(() => Object.fromEntries(teachers.map(t => [t.uid, getTeacherDisplayName(t)])), [teachers]);
 
   const centreRows: CenterRow[] = useMemo(() => {
     const days60ago = isoDaysAgo(60);
@@ -382,7 +383,7 @@ function CommandCenter() {
   // Teacher leaderboard
   const teacherPerf = useMemo(() => teachers.map(t => {
     const q = quality.find(q => q.teacherId === t.uid);
-    return { uid: t.uid, name: t.displayName, score: q?.score ?? null, factors: q?.factors ?? null };
+    return { uid: t.uid, name: getTeacherDisplayName(t), score: q?.score ?? null, factors: q?.factors ?? null };
   }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1)), [teachers, quality]);
 
   // Monthly revenue trend (last 6 months)
@@ -1541,7 +1542,7 @@ function AdminDashboard() {
           .filter(d => inWing(d.data(), wing))
           .map(d => ({
             uid:         d.id,
-            displayName: (d.data().displayName ?? d.data().name ?? "—") as string,
+            displayName: getTeacherDisplayName(d.data()) || "—",
             centerIds:   (d.data().centerIds   ?? []) as string[],
             status:      (d.data().status      ?? "active") as string,
           })));
@@ -1706,7 +1707,7 @@ function AdminDashboard() {
   // Teacher name lookup
   const adminTeacherMap = useMemo(() => {
     const m: Record<string, string> = {};
-    teachers.forEach(t => { m[t.uid] = t.displayName; });
+    teachers.forEach(t => { m[t.uid] = getTeacherDisplayName(t); });
     return m;
   }, [teachers]);
 

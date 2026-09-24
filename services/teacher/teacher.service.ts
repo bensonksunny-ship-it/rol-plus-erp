@@ -22,10 +22,11 @@ const USERS = "users";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface CreateTeacherInput {
-  displayName: string;
-  email:       string;
-  centerIds:   string[];
-  wing?:       Wing;
+  displayName:    string;
+  preferredName?: string;
+  email:          string;
+  centerIds:      string[];
+  wing?:          Wing;
 }
 
 // ─── Create teacher ───────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ export async function createTeacher(
     uid,
     email,
     displayName:  input.displayName.trim(),
+    preferredName: input.preferredName?.trim() ?? "",
     role:         "teacher",
     centerIds:    input.centerIds,
     wing:         input.wing ?? DEFAULT_WING,

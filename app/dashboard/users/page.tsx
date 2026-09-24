@@ -483,7 +483,13 @@ function UsersContent() {
         <ResetPasswordModal
           target={resetPwTarget}
           onClose={() => setResetPwTarget(null)}
-          onReset={() => setResetPwTarget(null)}
+          onReset={async () => {
+            const who = resetPwTarget.displayName;
+            setResetPwTarget(null);
+            setMsg({ kind: "ok", text: `Password updated for "${who}".` });
+            // Refresh so the Password column shows the new credential.
+            await load();
+          }}
         />
       )}
 

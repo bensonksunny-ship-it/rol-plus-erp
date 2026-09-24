@@ -207,6 +207,8 @@ export interface StudentUser extends UserBase {
 export interface TeacherUser extends UserBase {
   role: typeof ROLES.TEACHER;
   centerIds: string[];           // required — managed exclusively via centers module
+  /** Optional alias shown across the app; `displayName` stays the official full name. See lib/teacherName.ts. */
+  preferredName?: string;
   // Student-specific fields excluded entirely
   centerId?: never;
   currentBalance?: never;

@@ -32,6 +32,8 @@ import { computeStudentBalances, editTransaction, deleteTransaction } from "@/se
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
 import type { CenterBatch } from "@/types";
 import { batchIdToStore, batchSchedule, effectiveBatches, isDefaultBatchId } from "@/lib/batches";
+import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
+import { getTeacherDisplayName } from "@/lib/teacherName";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -2951,7 +2953,7 @@ export function CenterDetailModal({ centerId, onClose }: { centerId: string; onC
         if (teacherUid) {
           const tSnap = await getDoc(doc(db, "users", teacherUid));
           if (!cancelled && tSnap.exists()) {
-            teacherName = ((tSnap.data().displayName ?? tSnap.data().name ?? "—") as string);
+            teacherName = getTeacherDisplayName(tSnap.data()) || "—";
           }
         }
         if (cancelled) return;
@@ -2979,8 +2981,8 @@ export function CenterDetailModal({ centerId, onClose }: { centerId: string; onC
 
   const schedule = data
     ? data.daysOfWeek.length > 0
-      ? `${data.daysOfWeek.join(", ")}${data.startTime ? ` · ${data.startTime}${data.endTime ? "–" + data.endTime : ""}` : ""}`
-      : (data.timeSlot || "—")
+      ? `${data.daysOfWeek.join(", ")}${data.startTime ? ` · ${formatTimeRange12(data.startTime, data.endTime) || formatTime12(data.startTime)}` : ""}`
+      : (formatTimesIn12h(data.timeSlot) || "—")
     : "—";
 
   return (

@@ -12,6 +12,7 @@ import {
 } from "@/services/syllabus/syllabus.service";
 import { getAttendanceByStudent } from "@/services/attendance/attendance.service";
 import type { SyllabusUnit, StudentProgress, StudentSyllabus } from "@/types/syllabus";
+import { getTeacherDisplayName } from "@/lib/teacherName";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -163,7 +164,7 @@ function ReportsContent() {
 
             return {
               uid:           t.uid,
-              name:          (t.name as string) ?? (t.displayName as string) ?? "—",
+              name:          getTeacherDisplayName(t) || "—",
               totalStudents: myStudents.length,
               avgProgress:   totalPct,
               centerIds,
