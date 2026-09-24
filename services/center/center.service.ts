@@ -51,6 +51,8 @@ export async function createCenter(data: CreateCenterInput): Promise<Center> {
     wing:        data.wing ?? DEFAULT_WING,
     monthlyFee:  data.monthlyFee ?? 0,
     batches:     data.batches ?? [],
+    demoClassDate:  data.demoClassDate  ?? "",
+    firstClassDate: data.firstClassDate ?? "",
     createdAt:   serverTimestamp(),
     updatedAt:   serverTimestamp(),
   });
@@ -123,6 +125,8 @@ export async function updateCenter(id: string, data: UpdateCenterInput): Promise
   if (data.status      !== undefined) payload.status      = data.status;
   if (data.monthlyFee  !== undefined) payload.monthlyFee  = data.monthlyFee;
   if (data.batches     !== undefined) payload.batches     = data.batches;
+  if (data.demoClassDate  !== undefined) payload.demoClassDate  = data.demoClassDate;
+  if (data.firstClassDate !== undefined) payload.firstClassDate = data.firstClassDate;
 
   await updateDoc(ref, payload);
 

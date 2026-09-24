@@ -94,8 +94,8 @@ const NAV_TOP: NavItem[] = [
   { label: "Screening",  icon: "🎹", href: "/dashboard/screening",  roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/screening",  wing: WINGS.ROL_PLUS },
   { label: "Admissions", icon: "📝", href: "/dashboard/admissions", roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/admissions", wing: WINGS.SCHOOL_OF_MUSIC },
   { label: "Registry",   icon: "📖", href: "/dashboard/registry",   roles: LEADERSHIP, capability: C.STUDENTS_VIEW_ALL, matchPrefix: "/dashboard/registry", wing: WINGS.SCHOOL_OF_MUSIC },
-  // Founder-only — kept last in the sidebar.
-  { label: "Users",        icon: "🧑‍💻", href: "/dashboard/users", roles: [ROLES.FOUNDER], capability: C.USERS_MANAGE, matchPrefix: "/dashboard/users" },
+  // Founder + Chief Teacher (lower-level accounts only) — kept last in the sidebar.
+  { label: "Users",        icon: "🧑‍💻", href: "/dashboard/users", roles: [ROLES.FOUNDER, ROLES.CHIEF_TEACHER], capability: C.USERS_MANAGE, matchPrefix: "/dashboard/users" },
 ];
 
 const NAV_GROUPS: NavGroup[] = [

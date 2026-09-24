@@ -24,6 +24,7 @@ import { db } from "@/services/firebase/firebase";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { saveAdmission } from "@/services/screening/screening.service";
+import type { Wing } from "@/types";
 
 const s: Record<string, React.CSSProperties> = {
   card: {
@@ -104,7 +105,9 @@ export function MultiOptionGroup({ options, values, onChange }: {
 export function AdmissionFormContent({
   onDone,
   onSubmitted,
-  minimal = false,
+  minimal: minimalProp = false,
+  publicWing,
+  initial,
 }: {
   onDone?: () => void;
   /**
@@ -117,37 +120,57 @@ export function AdmissionFormContent({
    * Hidden fields still submit as empty so the saved record keeps one shape.
    */
   minimal?: boolean;
+  /**
+   * Public /apply page (parents, no login): forces the minimal form for this
+   * wing, loads only that wing's active centres and submits through
+   * /api/public/admissions instead of writing to Firestore directly.
+   */
+  publicWing?: Wing;
+  /** Pre-fill from an enquiry ("Convert to admission"). Read once on mount. */
+  initial?: {
+    studentName?: string;
+    parentName?: string;
+    phone?: string;
+    address1?: string;
+    instrumentsToLearn?: string[];
+  };
 } = {}) {
   const { user } = useAuthContext();
-  const { wing } = useWing();
+  const { wing: activeWing } = useWing();
+  const wing = publicWing ?? activeWing;
+  const minimal = minimalProp || !!publicWing;
+  // 16px inputs stop iOS Safari zooming in on focus.
+  const inputStyle: React.CSSProperties = publicWing ? { ...s.input, fontSize: 16 } : s.input;
+  const [website, setWebsite] = useState(""); // honeypot (public mode only)
 
   // Personal information
   // ROL+ (non-minimal) keeps a single Full Name field. Wing 2 (minimal) splits
   // it into first / middle / last; `effectiveName` is the combined value used
   // everywhere downstream so the saved record keeps one shape.
-  const [fullName,      setFullName]      = useState("");
-  const [firstName,     setFirstName]     = useState("");
+  const nameParts = (initial?.studentName ?? "").trim().split(/s+/).filter(Boolean);
+  const [fullName,      setFullName]      = useState(initial?.studentName?.trim() ?? "");
+  const [firstName,     setFirstName]     = useState(nameParts[0] ?? "");
   const [middleName,    setMiddleName]    = useState("");
-  const [lastName,      setLastName]      = useState("");
+  const [lastName,      setLastName]      = useState(nameParts.slice(1).join(" "));
   const [age,           setAge]           = useState("");
   const [dobDD,         setDobDD]         = useState("");
   const [dobMM,         setDobMM]         = useState("");
   const [dobYYYY,       setDobYYYY]       = useState("");
-  const [parentName,    setParentName]    = useState("");
+  const [parentName,    setParentName]    = useState(initial?.parentName ?? "");
   const [workingStatus, setWorkingStatus] = useState("");
   const [schoolCompany, setSchoolCompany] = useState("");
 
   // Contact information
-  const [phone,    setPhone]    = useState("");
+  const [phone,    setPhone]    = useState(initial?.phone ?? "");
   const [email,    setEmail]    = useState("");
-  const [address1, setAddress1] = useState("");
+  const [address1, setAddress1] = useState(initial?.address1 ?? "");
   const [address2, setAddress2] = useState("");
   const [centre,   setCentre]   = useState("");
   const [centres,  setCentres]  = useState<{ id: string; name: string }[]>([]);
 
   // Musical skills
   const [purposeOfLearning,   setPurposeOfLearning]   = useState("");
-  const [instrumentsToLearn,  setInstrumentsToLearn]  = useState<string[]>([]);
+  const [instrumentsToLearn,  setInstrumentsToLearn]  = useState<string[]>(initial?.instrumentsToLearn ?? []);
   const [previousExperience,  setPreviousExperience]  = useState("");
   const [instrumentsPlayed,   setInstrumentsPlayed]   = useState<string[]>([]);
   const [musicalSkill,        setMusicalSkill]        = useState("");
@@ -166,6 +189,13 @@ export function AdmissionFormContent({
   const [saveErr, setSaveErr] = useState("");
 
   useEffect(() => {
+    if (publicWing) {
+      fetch(`/api/public/admissions?wing=${encodeURIComponent(publicWing)}`)
+        .then(r => r.ok ? r.json() : { centres: [] })
+        .then(d => setCentres(Array.isArray(d.centres) ? d.centres : []))
+        .catch(() => {});
+      return;
+    }
     getDocs(collection(db, "centers"))
       .then(snap => setCentres(snap.docs.map(d => ({ id: d.id, name: (d.data().name as string) ?? d.id }))))
       .catch(() => {});
@@ -247,7 +277,19 @@ export function AdmissionFormContent({
         photo:               photoDataUrl ?? null,
         submittedBy:         user?.uid ?? "",
       };
-      const admissionId = await saveAdmission(payload);
+      let admissionId: string;
+      if (publicWing) {
+        const res  = await fetch("/api/public/admissions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, website }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error ?? "Failed to submit. Please try again.");
+        admissionId = String(data.id ?? "");
+      } else {
+        admissionId = await saveAdmission(payload);
+      }
       if (onSubmitted) {
         onSubmitted(admissionId, payload);
         return;
@@ -279,10 +321,12 @@ export function AdmissionFormContent({
           <div style={{ fontSize: 44, marginBottom: 12 }}>✅</div>
           <div style={{ fontSize: 20, fontWeight: 800, color: "#15803d", marginBottom: 8 }}>Application Submitted</div>
           <div style={{ fontSize: 14, color: "#166534", marginBottom: 24 }}>
-            <strong>{effectiveName}</strong>&apos;s admission form has been saved successfully.
+            {publicWing
+              ? <>Thank you! <strong>{effectiveName}</strong>&apos;s application has been received. Our team will contact you on <strong>{phone}</strong> to schedule the screening.</>
+              : <><strong>{effectiveName}</strong>&apos;s admission form has been saved successfully.</>}
           </div>
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-            <button onClick={reset} style={s.primaryBtn}>+ New Application</button>
+            <button onClick={reset} style={s.primaryBtn}>{publicWing ? "Submit another application" : "+ New Application"}</button>
             {onDone && (
               <button onClick={onDone} style={s.secondaryBtn}>← Back to Applications</button>
             )}
@@ -312,15 +356,15 @@ export function AdmissionFormContent({
             <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" as const }}>
               <div style={{ flex: 1, minWidth: 140 }}>
                 <label style={s.label}>First Name *</label>
-                <input value={firstName} onChange={e => setFirstName(e.target.value)} placeholder="First name" style={s.input} />
+                <input value={firstName} onChange={e => setFirstName(e.target.value)} placeholder="First name" style={inputStyle} />
               </div>
               <div style={{ flex: 1, minWidth: 140 }}>
                 <label style={s.label}>Second Name</label>
-                <input value={middleName} onChange={e => setMiddleName(e.target.value)} placeholder="Middle name" style={s.input} />
+                <input value={middleName} onChange={e => setMiddleName(e.target.value)} placeholder="Middle name" style={inputStyle} />
               </div>
               <div style={{ flex: 1, minWidth: 140 }}>
                 <label style={s.label}>Last Name *</label>
-                <input value={lastName} onChange={e => setLastName(e.target.value)} placeholder="Last name" style={s.input} />
+                <input value={lastName} onChange={e => setLastName(e.target.value)} placeholder="Last name" style={inputStyle} />
               </div>
             </div>
           </>
@@ -328,11 +372,11 @@ export function AdmissionFormContent({
           <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
             <div style={{ flex: 3 }}>
               <label style={s.label}>Full Name *</label>
-              <input value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Enter full name" style={s.input} />
+              <input value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Enter full name" style={inputStyle} />
             </div>
             <div style={{ flex: 1 }}>
               <label style={s.label}>Age</label>
-              <input value={age} onChange={e => setAge(e.target.value)} placeholder="—" style={s.input} type="number" min={0} />
+              <input value={age} onChange={e => setAge(e.target.value)} placeholder="—" style={inputStyle} type="number" min={0} />
             </div>
           </div>
         )}
@@ -342,26 +386,26 @@ export function AdmissionFormContent({
             <label style={s.label}>Date of Birth {minimal && <span style={{ color: "#9ca3af" }}>*</span>}</label>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <input value={dobDD} onChange={e => setDobDD(e.target.value.replace(/\D/g, ""))} placeholder="DD"
-                style={{ ...s.input, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={2} inputMode="numeric" />
+                style={{ ...inputStyle, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={2} inputMode="numeric" />
               <span style={{ color: "#9ca3af", fontWeight: 700 }}>/</span>
               <input value={dobMM} onChange={e => setDobMM(e.target.value.replace(/\D/g, ""))} placeholder="MM"
-                style={{ ...s.input, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={2} inputMode="numeric" />
+                style={{ ...inputStyle, width: 48, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={2} inputMode="numeric" />
               <span style={{ color: "#9ca3af", fontWeight: 700 }}>/</span>
               <input value={dobYYYY} onChange={e => setDobYYYY(e.target.value.replace(/\D/g, ""))} placeholder="YYYY"
-                style={{ ...s.input, width: 68, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={4} inputMode="numeric" />
+                style={{ ...inputStyle, width: 68, textAlign: "center" as const, boxSizing: "border-box" as const }} maxLength={4} inputMode="numeric" />
             </div>
           </div>
           {minimal && (
             <div style={{ flex: "0 0 auto" }}>
               <label style={s.label}>Age</label>
-              <div style={{ ...s.input, minWidth: 90, background: "#f3f4f6", color: computedAge ? "#111" : "#9ca3af", display: "flex", alignItems: "center" }}>
+              <div style={{ ...inputStyle, minWidth: 90, background: "#f3f4f6", color: computedAge ? "#111" : "#9ca3af", display: "flex", alignItems: "center" }}>
                 {computedAge ? `${computedAge} yrs` : "—"}
               </div>
             </div>
           )}
           <div style={{ flex: 1.5, minWidth: 200 }}>
             <label style={s.label}>Name of Parent / Guardian</label>
-            <input value={parentName} onChange={e => setParentName(e.target.value)} placeholder="Parent or guardian name" style={s.input} />
+            <input value={parentName} onChange={e => setParentName(e.target.value)} placeholder="Parent or guardian name" style={inputStyle} />
           </div>
         </div>
 
@@ -378,7 +422,7 @@ export function AdmissionFormContent({
 
             <div>
               <label style={s.label}>Name of School / Company</label>
-              <input value={schoolCompany} onChange={e => setSchoolCompany(e.target.value)} placeholder="School or company name" style={s.input} />
+              <input value={schoolCompany} onChange={e => setSchoolCompany(e.target.value)} placeholder="School or company name" style={inputStyle} />
             </div>
           </>
         )}
@@ -388,49 +432,49 @@ export function AdmissionFormContent({
       <div style={{ ...s.card, marginTop: 16 }}>
         <div style={s.sectionTitle}>Contact Information</div>
 
-        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-          <div style={{ flex: 1 }}>
+        <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" as const }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
             <label style={s.label}>Phone Number *</label>
-            <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+91 00000 00000" style={s.input} type="tel" />
+            <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+91 00000 00000" style={inputStyle} type="tel" />
           </div>
-          <div style={{ flex: 1 }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
             <label style={s.label}>Email ID</label>
-            <input value={email} onChange={e => setEmail(e.target.value)} placeholder="email@example.com" style={s.input} type="email" />
+            <input value={email} onChange={e => setEmail(e.target.value)} placeholder="email@example.com" style={inputStyle} type="email" />
           </div>
         </div>
 
         <div style={{ marginBottom: minimal ? 0 : 16 }}>
           <label style={s.label}>{minimal ? "Address" : "Address Line 1"}</label>
-          <input value={address1} onChange={e => setAddress1(e.target.value)} placeholder="House / Flat no., Street name" style={s.input} />
+          <input value={address1} onChange={e => setAddress1(e.target.value)} placeholder="House / Flat no., Street name" style={inputStyle} />
         </div>
 
         {minimal ? (
           <div style={{ marginTop: 16 }}>
             <label style={s.label}>Centre</label>
             {centres.length > 0 ? (
-              <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...s.input, cursor: "pointer" }}>
+              <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...inputStyle, cursor: "pointer" }}>
                 <option value="">— Select —</option>
                 {centres.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
               </select>
             ) : (
-              <input value={centre} onChange={e => setCentre(e.target.value)} placeholder="Centre" style={s.input} />
+              <input value={centre} onChange={e => setCentre(e.target.value)} placeholder="Centre" style={inputStyle} />
             )}
           </div>
         ) : (
           <div style={{ display: "flex", gap: 12 }}>
             <div style={{ flex: 2 }}>
               <label style={s.label}>Address Line 2</label>
-              <input value={address2} onChange={e => setAddress2(e.target.value)} placeholder="Area, Landmark" style={s.input} />
+              <input value={address2} onChange={e => setAddress2(e.target.value)} placeholder="Area, Landmark" style={inputStyle} />
             </div>
             <div style={{ flex: 1 }}>
               <label style={s.label}>Centre</label>
               {centres.length > 0 ? (
-                <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...s.input, cursor: "pointer" }}>
+                <select value={centre} onChange={e => setCentre(e.target.value)} style={{ ...inputStyle, cursor: "pointer" }}>
                   <option value="">— Select —</option>
                   {centres.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
                 </select>
               ) : (
-                <input value={centre} onChange={e => setCentre(e.target.value)} placeholder="Centre" style={s.input} />
+                <input value={centre} onChange={e => setCentre(e.target.value)} placeholder="Centre" style={inputStyle} />
               )}
             </div>
           </div>
@@ -499,7 +543,7 @@ export function AdmissionFormContent({
             <div style={{ marginBottom: 20 }}>
               <label style={s.label}>How Do You Know About ROL&apos;s School Of Music?</label>
               <input value={howHeardAboutUs} onChange={e => setHowHeardAboutUs(e.target.value)}
-                placeholder="e.g. Social media, friend referral, walk-in…" style={s.input} />
+                placeholder="e.g. Social media, friend referral, walk-in…" style={inputStyle} />
             </div>
 
             <div style={{ marginBottom: 20 }}>
@@ -627,6 +671,11 @@ export function AdmissionFormContent({
           </div>
         </div>
       </div>
+
+      {publicWing && (
+        <input value={website} onChange={e => setWebsite(e.target.value)} name="website" tabIndex={-1}
+          autoComplete="off" aria-hidden="true" style={{ position: "absolute", left: -9999, width: 1, height: 1, opacity: 0 }} />
+      )}
 
       {saveErr && (
         <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#dc2626", marginTop: 16 }}>

@@ -9,11 +9,19 @@ import { useEffect } from "react";
  */
 export default function ServiceWorkerRegister() {
   useEffect(() => {
-    if (
-      typeof window === "undefined" ||
-      !("serviceWorker" in navigator) ||
-      process.env.NODE_ENV !== "production"
-    ) {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+
+    // In dev, /_next/static chunk URLs aren't content-hashed, so a SW left over
+    // from a production run on this origin serves stale chunks cache-first and
+    // Fast Refresh falls into a full-reload loop. Remove it and its caches.
+    if (process.env.NODE_ENV !== "production") {
+      navigator.serviceWorker.getRegistrations().then((regs) => {
+        if (regs.length === 0) return;
+        Promise.all([
+          ...regs.map((r) => r.unregister()),
+          caches.keys().then((keys) => Promise.all(keys.filter((k) => k.startsWith("rol-")).map((k) => caches.delete(k)))),
+        ]).then(() => console.log("[SW] dev: unregistered stale service worker"));
+      });
       return;
     }
 

@@ -2,14 +2,14 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getDocs, collection, query, where, doc, writeBatch, serverTimestamp } from "firebase/firestore";
+import { getDocs, collection, query, where, doc, writeBatch, serverTimestamp, arrayUnion, arrayRemove } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { getCenters, createCenter, updateCenter } from "@/services/center/center.service";
 import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import type { Center, CenterBatch, Wing } from "@/types";
-import { DEFAULT_BATCH_NAME, effectiveBatches } from "@/lib/batches";
+import { DEFAULT_BATCH_NAME, effectiveBatches, explicitBatches } from "@/lib/batches";
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherUser } from "@/types";
@@ -36,6 +36,8 @@ const EMPTY_FORM = {
   startTime:   "",
   endTime:     "",
   batches:     [] as CenterBatch[],
+  demoClassDate:  "",
+  firstClassDate: "",
 };
 
 function newBatchId(): string {
@@ -64,6 +66,12 @@ function FormField({ label, required, children, fullWidth }: {
       {children}
     </div>
   );
+}
+
+// Teacher, days and times are optional — build the display slot from whatever is set.
+function buildTimeSlot(days: Day[], start: string, end: string): string {
+  const time = start && end ? `${start}–${end}` : start || end;
+  return [days.join("/"), time].filter(Boolean).join(" ");
 }
 
 function DayChips({ selected, onChange }: { selected: Day[]; onChange: (d: Day[]) => void }) {
@@ -152,6 +160,15 @@ function fmtDateShort(iso: string): string {
   if (!y || !m || !d) return iso;
   return `${parseInt(d, 10)} ${MONTH_SHORT[parseInt(m, 10) - 1] ?? m} ${y}`;
 }
+/** Firestore Timestamp / ISO string / Date → local "YYYY-MM-DD", or "" if unparseable. */
+function toLocalYMD(v: unknown): string {
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const d = v && typeof v === "object" && "toDate" in v
+    ? (v as { toDate(): Date }).toDate()
+    : typeof v === "string" || typeof v === "number" || v instanceof Date ? new Date(v) : null;
+  if (!d || isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 function toISODateLocal(v: unknown): string {
   if (v && typeof v === "object" && "toDate" in v) return (v as { toDate(): Date }).toDate().toISOString();
   if (typeof v === "string") return v;
@@ -218,6 +235,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
       startTime:  raw.startTime  ?? "",
       endTime:    raw.endTime    ?? "",
       batches:    center.batches ?? [],
+      demoClassDate:  center.demoClassDate  ?? "",
+      firstClassDate: center.firstClassDate ?? "",
     });
     setEditDayError("");
     setEditErr("");
@@ -236,12 +255,19 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
     setEditForm(prev => ({ ...prev, batches }));
   }
 
+  const [confirmDeactivate, setConfirmDeactivate] = useState(false);
+
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
-    if (editForm.daysOfWeek.length === 0) { setEditDayError("Select at least 1 day."); return; }
+    // Active → Inactive goes through the transfer/cancel step first.
+    if (center.status === "active" && editForm.status === "inactive") { setConfirmDeactivate(true); return; }
+    await saveEdit();
+  }
+
+  async function saveEdit() {
     setSavingEdit(true);
     setEditErr("");
-    const timeSlot = `${editForm.daysOfWeek.join("/")} ${editForm.startTime}–${editForm.endTime}`;
+    const timeSlot = buildTimeSlot(editForm.daysOfWeek, editForm.startTime, editForm.endTime);
     try {
       await updateCenter(center.id, {
         name:       editForm.name.trim(),
@@ -249,6 +275,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
         status:     editForm.status,
         timeSlot,
         batches:    editForm.batches,
+        demoClassDate:  editForm.demoClassDate,
+        firstClassDate: editForm.firstClassDate,
       });
       // Extra scheduling fields aren't in updateCenter's canonical whitelist —
       // patched directly, same as the page-level edit form does.
@@ -268,6 +296,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
         wing:       editForm.wing,
         timeSlot,
         batches:    editForm.batches,
+        demoClassDate:  editForm.demoClassDate,
+        firstClassDate: editForm.firstClassDate,
         daysOfWeek: editForm.daysOfWeek,
         startTime:  editForm.startTime,
         endTime:    editForm.endTime,
@@ -383,6 +413,22 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
 
   return (
     <div style={modalStyles.overlay} onClick={onClose}>
+      {confirmDeactivate && (
+        <div onClick={e => e.stopPropagation()}>
+          <DeactivateCenterModal
+            center={center}
+            onClose={() => setConfirmDeactivate(false)}
+            onConfirm={async ({ movedUids }) => {
+              const moved = new Set(movedUids);
+              setStudents(prev => prev
+                .filter(s => !moved.has(s.uid))
+                .map(s => s.status === "active" ? { ...s, status: "inactive" } : s));
+              setConfirmDeactivate(false);
+              await saveEdit();
+            }}
+          />
+        </div>
+      )}
       <div style={{ ...modalStyles.box, maxWidth: 880, maxHeight: "88vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
         <div style={modalStyles.header}>
           <div>
@@ -407,9 +453,9 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
                 <input name="name" value={editForm.name} onChange={handleEditChange} required
                   placeholder="e.g. Koramangala Center" style={formStyles.input} />
               </FormField>
-              <FormField label="Assigned Teacher" required>
-                <select name="teacherUid" value={editForm.teacherUid} onChange={handleEditChange} required style={formStyles.input}>
-                  <option value="">— Select a teacher —</option>
+              <FormField label="Assigned Teacher">
+                <select name="teacherUid" value={editForm.teacherUid} onChange={handleEditChange} style={formStyles.input}>
+                  <option value="">— Unassigned —</option>
                   {teachers.map(t => (
                     <option key={t.uid} value={t.uid}>{getTeacherDisplayName(t)}</option>
                   ))}
@@ -421,8 +467,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
                   <option value="inactive">Inactive</option>
                 </select>
               </FormField>
-              <FormField label="Assign Wing" required>
-                <select name="wing" value={editForm.wing} onChange={handleEditChange} required style={formStyles.input}>
+              <FormField label="Assign Wing">
+                <select name="wing" value={editForm.wing} onChange={handleEditChange} style={formStyles.input}>
                   <option value={WINGS.ROL_PLUS}>{WING_LABELS[WINGS.ROL_PLUS]}</option>
                   <option value={WINGS.SCHOOL_OF_MUSIC}>{WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}</option>
                 </select>
@@ -432,15 +478,23 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
                   </span>
                 )}
               </FormField>
-              <FormField label="Start Time" required>
+              <FormField label="Start Time">
                 <input name="startTime" type="time" value={editForm.startTime} onChange={handleEditChange}
-                  required style={formStyles.input} />
+                  style={formStyles.input} />
               </FormField>
-              <FormField label="End Time" required>
+              <FormField label="End Time">
                 <input name="endTime" type="time" value={editForm.endTime} onChange={handleEditChange}
-                  required style={formStyles.input} />
+                  style={formStyles.input} />
               </FormField>
-              <FormField label="Days of Week" required fullWidth>
+              <FormField label="Demo Class Date">
+                <input name="demoClassDate" type="date" value={editForm.demoClassDate} onChange={handleEditChange}
+                  style={formStyles.input} />
+              </FormField>
+              <FormField label="Date of First Class">
+                <input name="firstClassDate" type="date" value={editForm.firstClassDate} onChange={handleEditChange}
+                  style={formStyles.input} />
+              </FormField>
+              <FormField label="Days of Week" fullWidth>
                 <DayChips selected={editForm.daysOfWeek} onChange={handleEditDaysChange} />
                 {editDayError && <span style={formStyles.errorText}>{editDayError}</span>}
               </FormField>
@@ -1124,6 +1178,10 @@ function CentersContent() {
   const [activeCounts, setActiveCounts] = useState<Map<string, number>>(
     () => getCached(`centers:${wing}:activeCounts`) ?? new Map(),
   );
+  // centreId → earliest student admission date ("YYYY-MM-DD").
+  const [earliestAdmissions, setEarliestAdmissions] = useState<Map<string, string>>(
+    () => getCached(`centers:${wing}:earliestAdmissions`) ?? new Map(),
+  );
   const [loading, setLoading]       = useState(() => !getCached<Center[]>(`centers:${wing}:centers`));
   const [showForm, setShowForm]     = useState(false);
   const [editTarget, setEditTarget] = useState<Center | null>(null);
@@ -1146,8 +1204,18 @@ function CentersContent() {
     () => new Set(centers.map(c => c.name.trim().toLowerCase())),
     [centers],
   );
-  const activeCentersList   = useMemo(() => centers.filter(c => c.status === "active"), [centers]);
-  const inactiveCentersList = useMemo(() => centers.filter(c => c.status !== "active"), [centers]);
+  // Oldest centre first, by effective demo date (manual override, else the
+  // earliest student admission). Undated centres go last, by creation time.
+  const sortedCenters = useMemo(() => [...centers].sort((a, b) => {
+    const da = effectiveDemoDate(a, earliestAdmissions);
+    const db = effectiveDemoDate(b, earliestAdmissions);
+    if (da !== db) return !da ? 1 : !db ? -1 : da.localeCompare(db);
+    return (a.createdAt ?? "").localeCompare(b.createdAt ?? "");
+  }), [centers, earliestAdmissions]);
+  const activeCentersList   = useMemo(() => sortedCenters.filter(c => c.status === "active"), [sortedCenters]);
+  const inactiveCentersList = useMemo(() => sortedCenters.filter(c => c.status !== "active"), [sortedCenters]);
+  const pendingFirstClass   = useMemo(() => activeCentersList.filter(needsFirstClassDate), [activeCentersList]);
+  const firstClassInputRef  = useRef<HTMLInputElement>(null);
   const newImportNames = useMemo(
     () => importNames.filter(n => !existingNamesLC.has(n.toLowerCase())),
     [importNames, existingNamesLC],
@@ -1217,6 +1285,7 @@ function CentersContent() {
       setCenters(cachedCenters);
       setTeachers(getCached(`centers:${wing}:teachers`) ?? []);
       setActiveCounts(getCached(`centers:${wing}:activeCounts`) ?? new Map());
+      setEarliestAdmissions(getCached(`centers:${wing}:earliestAdmissions`) ?? new Map());
     }
     try {
       const [data, teacherList, studentSnap] = await Promise.all([
@@ -1231,15 +1300,22 @@ function CentersContent() {
       setCached(`centers:${wing}:teachers`, sortedTeachers);
 
       const counts = new Map<string, number>();
+      const earliest = new Map<string, string>();
       studentSnap.docs.forEach(d => {
         const st = d.data();
-        if (!isActiveStudentStatus((st.status ?? st.studentStatus ?? "active") as string)) return;
         const cid = (st.centerId ?? "") as string;
         if (!cid) return;
+        // Earliest admission counts every student ever at the centre, not just
+        // active ones — same precedence as the registry's "Admitted on".
+        const admitted = toLocalYMD(st.dateOfAdmission ?? st.admissionDate ?? st.createdAt);
+        if (admitted && (!earliest.has(cid) || admitted < earliest.get(cid)!)) earliest.set(cid, admitted);
+        if (!isActiveStudentStatus((st.status ?? st.studentStatus ?? "active") as string)) return;
         counts.set(cid, (counts.get(cid) ?? 0) + 1);
       });
       setActiveCounts(counts);
       setCached(`centers:${wing}:activeCounts`, counts);
+      setEarliestAdmissions(earliest);
+      setCached(`centers:${wing}:earliestAdmissions`, earliest);
     } catch (err) {
       console.error("Failed to fetch centers:", err);
     } finally {
@@ -1284,9 +1360,22 @@ function CentersContent() {
       startTime:  raw.startTime  ?? "",
       endTime:    raw.endTime    ?? "",
       batches:    center.batches ?? [],
+      demoClassDate:  center.demoClassDate  ?? "",
+      firstClassDate: center.firstClassDate ?? "",
     });
     setDayError("");
     setShowForm(true);
+  }
+
+  /** Opens the edit panel for `center` and focuses its first-class date picker. */
+  function setFirstClassFor(center: Center) {
+    openEdit(center);
+    setTimeout(() => {
+      const el = firstClassInputRef.current;
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.focus();
+    }, 280); // after the drawer slide-in
   }
 
   function closeForm() {
@@ -1296,11 +1385,18 @@ function CentersContent() {
     setDayError("");
   }
 
+  const [deactivateTarget, setDeactivateTarget] = useState<Center | null>(null);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (form.daysOfWeek.length === 0) { setDayError("Select at least 1 day."); return; }
+    // Active → Inactive goes through the transfer/cancel step first.
+    if (editTarget && editTarget.status === "active" && form.status === "inactive") { setDeactivateTarget(editTarget); return; }
+    await saveForm();
+  }
+
+  async function saveForm() {
     setSaving(true);
-    const timeSlot = `${form.daysOfWeek.join("/")} ${form.startTime}–${form.endTime}`;
+    const timeSlot = buildTimeSlot(form.daysOfWeek, form.startTime, form.endTime);
     try {
       if (editTarget) {
         await updateCenter(editTarget.id, {
@@ -1309,6 +1405,8 @@ function CentersContent() {
           status:     form.status,
           timeSlot,
           batches:    form.batches,
+          demoClassDate:  form.demoClassDate,
+          firstClassDate: form.firstClassDate,
         });
         // patch extra fields directly since updateCenter whitelists known Center fields
         const { doc: fsDoc, updateDoc, serverTimestamp } = await import("firebase/firestore");
@@ -1335,6 +1433,8 @@ function CentersContent() {
           status:      form.status,
           wing:        form.wing,
           batches:     form.batches,
+          demoClassDate:  form.demoClassDate,
+          firstClassDate: form.firstClassDate,
           ...(({ daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime }) as object),
         } as Parameters<typeof createCenter>[0]);
         toast(
@@ -1375,6 +1475,19 @@ function CentersContent() {
       {showMatrix && (
         <ScheduleMatrixModal centers={centers} teachers={teachers} onClose={() => setShowMatrix(false)} />
       )}
+      {deactivateTarget && (
+        <DeactivateCenterModal
+          center={deactivateTarget}
+          onClose={() => setDeactivateTarget(null)}
+          onConfirm={async ({ movedUids, cancelled }) => {
+            setDeactivateTarget(null);
+            await saveForm();
+            if (movedUids.length || cancelled) {
+              toast(`${movedUids.length} student${movedUids.length !== 1 ? "s" : ""} transferred, ${cancelled} admission${cancelled !== 1 ? "s" : ""} cancelled.`, "success");
+            }
+          }}
+        />
+      )}
       {deleteTarget && (
         <DeleteCenterModal
           center={deleteTarget}
@@ -1402,7 +1515,7 @@ function CentersContent() {
             {showImport ? "Cancel" : "⬆ Import names"}
           </button>
           <button onClick={showForm ? closeForm : openCreate} style={styles.addBtn}>
-            {showForm ? "Cancel" : "Add Center"}
+            + Add Center
           </button>
         </div>
       </div>
@@ -1466,76 +1579,138 @@ function CentersContent() {
         </div>
       )}
 
-      {/* Form */}
-      {showForm && (
-        <form onSubmit={handleSubmit} style={formStyles.wrapper}>
-          <div style={formStyles.sectionTitle}>
-            {isEditing ? `Editing: ${editTarget!.name}` : "New Center"}
+      {/* Add / Edit Center — slide-over drawer */}
+      <div onClick={closeForm} style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1000,
+        opacity: showForm ? 1 : 0, pointerEvents: showForm ? "auto" : "none", transition: "opacity 0.2s",
+      }} />
+      <form
+        onSubmit={handleSubmit}
+        className="center-drawer"
+        aria-hidden={!showForm}
+        style={{
+          ...drawerStyles.panel,
+          transform: showForm ? "translateX(0)" : "translateX(100%)",
+          pointerEvents: showForm ? "auto" : "none",
+        }}
+      >
+        <style>{`.center-drawer input:focus, .center-drawer select:focus { outline: none; border-color: #f59e0b; box-shadow: 0 0 0 2px rgba(245,158,11,0.45); }`}</style>
+        <div style={drawerStyles.header}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>
+              {isEditing ? "Edit Center" : "New Center"}
+            </div>
+            {isEditing && <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{editTarget!.name}</div>}
           </div>
-          <div style={formStyles.grid}>
-            <FormField label="Name" required>
-              <input name="name" value={form.name} onChange={handleChange} required
-                placeholder="e.g. Koramangala Center" style={formStyles.input} />
-            </FormField>
-            <FormField label="Assigned Teacher" required>
-              <select
-                name="teacherUid"
-                value={form.teacherUid}
-                onChange={handleChange}
-                required
-                style={formStyles.input}
-              >
-                <option value="">— Select a teacher —</option>
-                {teachers.map(t => (
-                  <option key={t.uid} value={t.uid}>{getTeacherDisplayName(t)}</option>
-                ))}
-              </select>
-            </FormField>
-            <FormField label="Status">
-              <select name="status" value={form.status} onChange={handleChange} style={formStyles.input}>
-                <option value="active">Active</option>
-                <option value="inactive">Inactive</option>
-              </select>
-            </FormField>
-            <FormField label="Assign Wing" required>
-              <select name="wing" value={form.wing} onChange={handleChange} required style={formStyles.input}>
-                <option value={WINGS.ROL_PLUS}>{WING_LABELS[WINGS.ROL_PLUS]}</option>
-                <option value={WINGS.SCHOOL_OF_MUSIC}>{WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}</option>
-              </select>
-              {isEditing && form.wing !== wing && (
-                <span style={formStyles.helperText}>
-                  Moving this centre out of the {WING_LABELS[wing]} view.
-                </span>
-              )}
-            </FormField>
-            <FormField label="Start Time" required>
-              <input name="startTime" type="time" value={form.startTime} onChange={handleChange}
-                required style={formStyles.input} />
-            </FormField>
-            <FormField label="End Time" required>
-              <input name="endTime" type="time" value={form.endTime} onChange={handleChange}
-                required style={formStyles.input} />
-            </FormField>
-            <FormField label="Days of Week" required fullWidth>
-              <DayChips selected={form.daysOfWeek} onChange={handleDaysChange} />
-              {dayError && <span style={formStyles.errorText}>{dayError}</span>}
-              {form.daysOfWeek.length > 0 && (
-                <span style={formStyles.helperText}>
-                  {form.daysOfWeek.join(", ")} · {form.daysOfWeek.length}/6 selected
-                </span>
-              )}
-            </FormField>
-            <FormField label="Batches" fullWidth>
-              <BatchesEditor batches={form.batches} onChange={handleBatchesChange} />
-            </FormField>
-          </div>
-          <div style={formStyles.actions}>
-            <button type="submit" disabled={saving}
-              style={{ ...formStyles.submitBtn, opacity: saving ? 0.6 : 1 }}>
-              {saving ? "Saving…" : isEditing ? "Update Center" : "Create Center"}
-            </button>
-          </div>
-        </form>
+          <button type="button" onClick={closeForm} aria-label="Close" style={drawerStyles.closeBtn}>✕</button>
+        </div>
+
+        <div style={drawerStyles.body}>
+          <section style={drawerStyles.section}>
+            <div style={drawerStyles.sectionTitle}>Basic Information</div>
+            <div style={drawerStyles.grid}>
+              <FormField label="Center Name" required fullWidth>
+                <input name="name" value={form.name} onChange={handleChange} required
+                  placeholder="e.g. Koramangala Center" style={formStyles.input} />
+              </FormField>
+              <FormField label="Status">
+                <select name="status" value={form.status} onChange={handleChange} style={formStyles.input}>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </FormField>
+              <FormField label="Assign Wing">
+                <select name="wing" value={form.wing} onChange={handleChange} style={formStyles.input}>
+                  <option value={WINGS.ROL_PLUS}>{WING_LABELS[WINGS.ROL_PLUS]}</option>
+                  <option value={WINGS.SCHOOL_OF_MUSIC}>{WING_LABELS[WINGS.SCHOOL_OF_MUSIC]}</option>
+                </select>
+                {isEditing && form.wing !== wing && (
+                  <span style={formStyles.helperText}>
+                    Moving this centre out of the {WING_LABELS[wing]} view.
+                  </span>
+                )}
+              </FormField>
+            </div>
+          </section>
+
+          <section style={drawerStyles.section}>
+            <div style={drawerStyles.sectionTitle}>Personnel &amp; Dates</div>
+            <div style={drawerStyles.grid}>
+              <FormField label="Assigned Teacher" fullWidth>
+                <select name="teacherUid" value={form.teacherUid} onChange={handleChange} style={formStyles.input}>
+                  <option value="">— Unassigned —</option>
+                  {teachers.map(t => (
+                    <option key={t.uid} value={t.uid}>{getTeacherDisplayName(t)}</option>
+                  ))}
+                </select>
+              </FormField>
+              <FormField label="Demo Class Date">
+                <input name="demoClassDate" type="date" value={form.demoClassDate} onChange={handleChange}
+                  style={formStyles.input} />
+              </FormField>
+              <FormField label="Date of First Class">
+                <input ref={firstClassInputRef} name="firstClassDate" type="date" value={form.firstClassDate} onChange={handleChange}
+                  style={formStyles.input} />
+                {form.demoClassDate && !form.firstClassDate && (
+                  <span style={formStyles.helperText}>Optional — a reminder shows on the dashboard until it&apos;s set.</span>
+                )}
+              </FormField>
+            </div>
+          </section>
+
+          <section style={drawerStyles.section}>
+            <div style={drawerStyles.sectionTitle}>Schedule &amp; Timings</div>
+            <div style={drawerStyles.grid}>
+              <FormField label="Days of Week" fullWidth>
+                <DayChips selected={form.daysOfWeek} onChange={handleDaysChange} />
+                {dayError && <span style={formStyles.errorText}>{dayError}</span>}
+                {form.daysOfWeek.length > 0 && (
+                  <span style={formStyles.helperText}>
+                    {form.daysOfWeek.join(", ")} · {form.daysOfWeek.length} day{form.daysOfWeek.length !== 1 ? "s" : ""} selected
+                  </span>
+                )}
+              </FormField>
+              <FormField label="Start Time">
+                <input name="startTime" type="time" value={form.startTime} onChange={handleChange}
+                  style={formStyles.input} />
+              </FormField>
+              <FormField label="End Time">
+                <input name="endTime" type="time" value={form.endTime} onChange={handleChange}
+                  style={formStyles.input} />
+              </FormField>
+            </div>
+          </section>
+
+          <section style={{ ...drawerStyles.section, borderBottom: "none", marginBottom: 0 }}>
+            <div style={drawerStyles.sectionTitle}>Batches Setup</div>
+            <BatchesEditor batches={form.batches} onChange={handleBatchesChange} />
+          </section>
+        </div>
+
+        <div style={drawerStyles.footer}>
+          <button type="button" onClick={closeForm} style={drawerStyles.cancelBtn}>Cancel</button>
+          <button type="submit" disabled={saving}
+            style={{ ...drawerStyles.primaryBtn, opacity: saving ? 0.6 : 1, cursor: saving ? "not-allowed" : "pointer" }}>
+            {saving ? "Saving…" : isEditing ? "Update Center" : "Create Center"}
+          </button>
+        </div>
+      </form>
+
+      {/* Reminders — centres with a demo date but no first-class date yet */}
+      {!loading && pendingFirstClass.length > 0 && (
+        <div style={reminderStyles.wrapper} role="alert">
+          {pendingFirstClass.map(c => (
+            <div key={c.id} style={reminderStyles.row}>
+              <span style={{ flex: 1, minWidth: 200 }}>
+                <b>Action Required:</b> Please set the Date of First Class for <b>{c.name}</b>.
+                <span style={{ opacity: 0.75 }}> (Demo: {fmtDMY(c.demoClassDate ?? "")})</span>
+              </span>
+              <button type="button" onClick={() => setFirstClassFor(c)} style={reminderStyles.btn}>
+                Set First Class Date
+              </button>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* Grid — active centres are the primary view; inactive ones live in
@@ -1554,6 +1729,7 @@ function CentersContent() {
                 <CenterCard key={center.id} center={center}
                   teachers={teachers}
                   activeCount={activeCounts.get(center.id) ?? 0}
+                  autoDemoDate={earliestAdmissions.get(center.id) ?? ""}
                   onView={() => setViewTarget(center)}
                   onEdit={() => openEdit(center)}
                   onDelete={() => setDeleteTarget(center)} />
@@ -1571,6 +1747,7 @@ function CentersContent() {
                   <CenterCard key={center.id} center={center}
                     teachers={teachers}
                     activeCount={activeCounts.get(center.id) ?? 0}
+                    autoDemoDate={earliestAdmissions.get(center.id) ?? ""}
                     onView={() => setViewTarget(center)}
                     onEdit={() => openEdit(center)}
                     onDelete={() => setDeleteTarget(center)} />
@@ -1586,6 +1763,28 @@ function CentersContent() {
 
 // ─── Card ──────────────────────────────────────────────────────────────────────
 
+/** An active centre whose demo class is scheduled but whose first class date isn't set yet. */
+/** Manually entered demo date wins; otherwise the centre's earliest student admission. */
+function effectiveDemoDate(center: Center, earliestAdmissions: Map<string, string>): string {
+  return center.demoClassDate || earliestAdmissions.get(center.id) || "";
+}
+
+function needsFirstClassDate(center: Center): boolean {
+  return center.status === "active" && !!center.demoClassDate && !center.firstClassDate;
+}
+
+/** "2026-09-24" → "24/09/2026". */
+function fmtDMY(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : iso;
+}
+
+const reminderStyles: Record<string, React.CSSProperties> = {
+  wrapper: { background: "#fffbeb", border: "1px solid #fcd34d", borderLeft: "4px solid #f59e0b", borderRadius: 10, padding: "10px 14px", marginBottom: 18, display: "flex", flexDirection: "column", gap: 8 },
+  row:     { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontSize: 13.5, color: "#78350f" },
+  btn:     { background: "#f59e0b", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
+};
+
 /** Card schedule as two lines: days ("Mon/Wed") and time ("5:00 PM – 6:00 PM"). */
 function splitSchedule(center: Center): { days: string; time: string } {
   const raw = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
@@ -1600,8 +1799,8 @@ function splitSchedule(center: Center): { days: string; time: string } {
   return m ? { days: m[1].trim(), time: formatTimesIn12h(m[2].trim()) } : { days: center.timeSlot ?? "", time: "" };
 }
 
-function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }: {
-  center: Center; teachers: TeacherUser[]; activeCount: number;
+function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdit, onDelete }: {
+  center: Center; teachers: TeacherUser[]; activeCount: number; autoDemoDate: string;
   onView: () => void; onEdit: () => void; onDelete: () => void;
 }) {
   const router = useRouter();
@@ -1610,6 +1809,7 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
   const menuRef = useRef<HTMLDivElement>(null);
   const teacher = teachers.find(t => t.uid === center.teacherUid);
   const schedule = splitSchedule(center);
+  const pendingFirst = needsFirstClassDate(center);
 
   function goToActiveStudents(e: React.MouseEvent) {
     e.stopPropagation();
@@ -1661,10 +1861,28 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
           ? <span>{getTeacherDisplayName(teacher)}</span>
           : <span style={{ color: "#9ca3af", fontSize: 12 }}>Unassigned</span>}
       </div>
+      {pendingFirst && (
+        <span style={styles.pendingBadge}>⏳ Pending First Class Date</span>
+      )}
       <div style={styles.cardMeta}>
         <span>{schedule.days || "-"}</span>
         {schedule.time && <span style={{ fontSize: 12, fontWeight: 500, color: "#4f46e5" }}>{schedule.time}</span>}
       </div>
+      {(center.demoClassDate || autoDemoDate || center.firstClassDate) && (
+        <div style={{ fontSize: 11.5, color: "#6b7280" }}>
+          Demo:{" "}
+          {center.demoClassDate
+            ? fmtDMY(center.demoClassDate)
+            : autoDemoDate
+              ? <span title="Earliest student admission at this centre — set a Demo Class Date to override">{fmtDMY(autoDemoDate)} (auto)</span>
+              : "—"}
+          {" | "}
+          First Class:{" "}
+          {center.firstClassDate
+            ? fmtDMY(center.firstClassDate)
+            : <span style={{ color: "#b45309", fontWeight: 600 }}>Pending</span>}
+        </div>
+      )}
       <button
         onClick={goToActiveStudents}
         style={styles.activeStudentsBadge}
@@ -1858,6 +2076,270 @@ const matrixStyles: Record<string, React.CSSProperties> = {
   swatch:   { display: "inline-block", width: 10, height: 10, borderRadius: 3, marginRight: 5, verticalAlign: "middle" },
 };
 
+// ─── Deactivate Center Modal ───────────────────────────────────────────────────
+
+interface DeactivateStudent { uid: string; name: string; admissionNo: string }
+interface DeactivateDest { id: string; name: string; wing: Wing; batches: CenterBatch[] }
+
+/**
+ * Shown when a centre is switched Active → Inactive. Lists the centre's active
+ * students so each can be moved to another active centre (optionally into one
+ * of its batches); everyone left unmoved has their admission cancelled
+ * (status "inactive" — the Registry shows it as "Cancelled"). `onConfirm`
+ * runs after the student writes and is what actually saves the centre.
+ */
+function DeactivateCenterModal({ center, onClose, onConfirm }: {
+  center:    Center;
+  onClose:   () => void;
+  onConfirm: (summary: { movedUids: string[]; cancelled: number }) => Promise<void>;
+}) {
+  const { wing: viewingWing } = useWing();
+  const [students, setStudents] = useState<DeactivateStudent[]>([]);
+  const [dests, setDests]       = useState<DeactivateDest[]>([]);
+  const [loading, setLoading]   = useState(true);
+  const [moveTo, setMoveTo]     = useState<Record<string, string>>({});   // uid → centreId
+  const [moveBatch, setMoveBatch] = useState<Record<string, string>>({}); // uid → batchId
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkDest, setBulkDest] = useState("");
+  const [busy, setBusy]         = useState(false);
+  const [error, setError]       = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [stuSnap, cenSnap] = await Promise.all([
+          getDocs(query(collection(db, "users"), where("role", "==", "student"), where("centerId", "==", center.id))),
+          getDocs(query(collection(db, "centers"), where("status", "==", "active"))),
+        ]);
+        if (cancelled) return;
+        setStudents(stuSnap.docs
+          .filter(d => (d.data().status ?? "active") === "active")
+          .map(d => ({
+            uid: d.id,
+            name: (d.data().displayName ?? d.data().name ?? "-") as string,
+            admissionNo: (d.data().admissionNo ?? d.data().admissionNumber ?? "") as string,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name)));
+        // Same-wing centres first — a transfer normally stays within the wing.
+        setDests(cenSnap.docs
+          .filter(d => d.id !== center.id)
+          .map(d => ({ id: d.id, name: (d.data().name ?? d.id) as string, wing: wingOf(d.data()), batches: explicitBatches(d.data()) }))
+          .sort((a, b) => Number(b.wing === viewingWing) - Number(a.wing === viewingWing) || a.name.localeCompare(b.name)));
+      } catch (err) {
+        console.error("[DeactivateCenterModal] load error:", err);
+        if (!cancelled) setError("Failed to load students.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [center.id, viewingWing]);
+
+  const destById = useMemo(() => new Map(dests.map(d => [d.id, d])), [dests]);
+  const toMove   = students.filter(s => selected.has(s.uid) && moveTo[s.uid]);
+  const toCancel = students.length - toMove.length;
+
+  function pickDest(uid: string, centreId: string) {
+    setMoveTo(prev => ({ ...prev, [uid]: centreId }));
+    setMoveBatch(prev => ({ ...prev, [uid]: "" }));
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (centreId) next.add(uid); else next.delete(uid);
+      return next;
+    });
+  }
+  function toggle(uid: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid); else next.add(uid);
+      return next;
+    });
+  }
+  function applyBulkDest() {
+    if (!bulkDest) return;
+    const targets = selected.size > 0 ? students.filter(s => selected.has(s.uid)) : students;
+    targets.forEach(s => pickDest(s.uid, bulkDest));
+  }
+
+  async function run(cancelAll: boolean) {
+    setBusy(true);
+    setError("");
+    const movers = cancelAll ? [] : toMove;
+    const moverIds = new Set(movers.map(s => s.uid));
+    try {
+      // Firestore batches cap at 500 writes — each mover needs up to 3.
+      const writes: ((b: ReturnType<typeof writeBatch>) => void)[] = [];
+      for (const s of movers) {
+        const dest  = destById.get(moveTo[s.uid])!;
+        const batch = dest.batches.find(b => b.id === moveBatch[s.uid]);
+        writes.push(b => b.update(doc(db, "users", s.uid), {
+          centerId:  dest.id,
+          batchId:   batch?.id ?? null,
+          batch:     batch?.name ?? null,
+          updatedAt: serverTimestamp(),
+        }));
+        writes.push(b => b.update(doc(db, "centers", dest.id), { studentUids: arrayUnion(s.uid), updatedAt: serverTimestamp() }));
+      }
+      if (movers.length > 0) {
+        writes.push(b => b.update(doc(db, "centers", center.id), { studentUids: arrayRemove(...movers.map(s => s.uid)) }));
+      }
+      for (const s of students) {
+        if (moverIds.has(s.uid)) continue;
+        writes.push(b => b.update(doc(db, "users", s.uid), {
+          status:        "inactive",
+          studentStatus: "inactive",
+          updatedAt:     serverTimestamp(),
+        }));
+      }
+      for (let i = 0; i < writes.length; i += 450) {
+        const b = writeBatch(db);
+        writes.slice(i, i + 450).forEach(w => w(b));
+        await b.commit();
+      }
+      await onConfirm({ movedUids: movers.map(s => s.uid), cancelled: students.length - movers.length });
+    } catch (err) {
+      console.error("[DeactivateCenterModal] error:", err);
+      setError(err instanceof Error ? err.message : "Failed to deactivate center.");
+      setBusy(false);
+    }
+  }
+
+  const btn = (bg: string, fg: string, enabled: boolean): React.CSSProperties => ({
+    background: enabled ? bg : "#f3f4f6", color: enabled ? fg : "#9ca3af", border: "none",
+    padding: "8px 16px", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: enabled ? "pointer" : "not-allowed",
+  });
+
+  return (
+    <div style={{ ...modalStyles.overlay, zIndex: 1100 }} onClick={busy ? undefined : onClose}>
+      <div style={{ ...modalStyles.box, maxWidth: 720, maxHeight: "90vh", display: "flex", flexDirection: "column", margin: "0 16px" }}
+        onClick={e => e.stopPropagation()}>
+        <div style={modalStyles.header}>
+          <span style={{ ...modalStyles.title, color: "#9a3412" }}>Deactivate {center.name}</span>
+          <button onClick={onClose} disabled={busy} style={modalStyles.closeBtn}>×</button>
+        </div>
+        <div style={{ ...modalStyles.body, overflowY: "auto" as const }}>
+          {loading ? (
+            <div style={{ fontSize: 13, color: "#6b7280" }}>Loading students…</div>
+          ) : students.length === 0 ? (
+            <div style={{ fontSize: 13, color: "#374151" }}>
+              This centre has no active students. It will simply be marked Inactive.
+            </div>
+          ) : (
+            <>
+              <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#9a3412" }}>
+                <strong>Do you want to keep any active students confirmed by transferring them to another center?</strong>
+                <div style={{ marginTop: 4, fontSize: 12 }}>
+                  Students you don&rsquo;t transfer will have their admission <strong>Cancelled</strong> (Enrollments and Registry).
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" as const }}>
+                <span style={{ fontSize: 12, color: "#374151" }}>
+                  {selected.size > 0 ? `Move ${selected.size} selected to` : "Move all to"}
+                </span>
+                <select value={bulkDest} onChange={e => setBulkDest(e.target.value)} style={{ ...formStyles.input, minWidth: 180 }}>
+                  <option value="">— Select center —</option>
+                  {dests.map(d => (
+                    <option key={d.id} value={d.id}>{d.name}{d.wing !== viewingWing ? ` (${WING_LABELS[d.wing]})` : ""}</option>
+                  ))}
+                </select>
+                <button type="button" onClick={applyBulkDest} disabled={!bulkDest}
+                  style={{ ...btn("#e0e7ff", "#3730a3", !!bulkDest), padding: "7px 12px", fontWeight: 600 }}>
+                  Apply
+                </button>
+              </div>
+
+              <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflowX: "auto" as const }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: "#f9fafb", textAlign: "left" as const, color: "#6b7280", fontSize: 11, textTransform: "uppercase" as const }}>
+                      <th style={{ padding: "8px 10px", width: 28 }}>
+                        <input type="checkbox"
+                          checked={selected.size === students.length}
+                          onChange={e => setSelected(e.target.checked ? new Set(students.map(s => s.uid)) : new Set())} />
+                      </th>
+                      <th style={{ padding: "8px 10px" }}>Student</th>
+                      <th style={{ padding: "8px 10px" }}>Move to</th>
+                      <th style={{ padding: "8px 10px" }}>Batch</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {students.map(s => {
+                      const dest = destById.get(moveTo[s.uid] ?? "");
+                      const willMove = selected.has(s.uid) && !!dest;
+                      return (
+                        <tr key={s.uid} style={{ borderTop: "1px solid #f3f4f6" }}>
+                          <td style={{ padding: "8px 10px" }}>
+                            <input type="checkbox" checked={selected.has(s.uid)} onChange={() => toggle(s.uid)} />
+                          </td>
+                          <td style={{ padding: "8px 10px" }}>
+                            <div style={{ fontWeight: 600, color: "#111827" }}>{s.name}</div>
+                            <div style={{ fontSize: 11, color: willMove ? "#16a34a" : "#dc2626" }}>
+                              {s.admissionNo ? `${s.admissionNo} · ` : ""}{willMove ? "Will transfer" : "Will be cancelled"}
+                            </div>
+                          </td>
+                          <td style={{ padding: "8px 10px" }}>
+                            <select value={moveTo[s.uid] ?? ""} onChange={e => pickDest(s.uid, e.target.value)}
+                              style={{ ...formStyles.input, width: "100%", minWidth: 150 }}>
+                              <option value="">— Select center —</option>
+                              {dests.map(d => (
+                                <option key={d.id} value={d.id}>{d.name}{d.wing !== viewingWing ? ` (${WING_LABELS[d.wing]})` : ""}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ padding: "8px 10px" }}>
+                            <select value={moveBatch[s.uid] ?? ""} disabled={!dest}
+                              onChange={e => setMoveBatch(prev => ({ ...prev, [s.uid]: e.target.value }))}
+                              style={{ ...formStyles.input, width: "100%", minWidth: 120 }}>
+                              <option value="">{DEFAULT_BATCH_NAME}</option>
+                              {dest?.batches.map(b => <option key={b.id} value={b.id}>{b.name || "Unnamed batch"}</option>)}
+                            </select>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {dests.length === 0 && (
+                <div style={{ fontSize: 12, color: "#6b7280" }}>No other active centres to transfer to.</div>
+              )}
+            </>
+          )}
+
+          {error && (
+            <div style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, padding: "7px 10px" }}>
+              ✕ {error}
+            </div>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" as const, marginTop: 4 }}>
+            <button onClick={onClose} disabled={busy}
+              style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", padding: "8px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+              Keep Active
+            </button>
+            {students.length === 0 ? (
+              <button onClick={() => run(true)} disabled={busy || loading} style={btn("#ea580c", "#fff", !busy && !loading)}>
+                {busy ? "Saving…" : "Mark Inactive"}
+              </button>
+            ) : (
+              <>
+                <button onClick={() => run(true)} disabled={busy} style={btn("#dc2626", "#fff", !busy)}>
+                  {busy ? "Saving…" : `Cancel All Admissions (${students.length})`}
+                </button>
+                <button onClick={() => run(false)} disabled={busy || toMove.length === 0} style={btn("#4f46e5", "#fff", !busy && toMove.length > 0)}>
+                  {busy ? "Saving…" : `Transfer Selected (${toMove.length})${toCancel > 0 ? ` · cancel ${toCancel}` : ""}`}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Delete Center Modal ───────────────────────────────────────────────────────
 
 function DeleteCenterModal({ center, onClose, onDeleted, currentUserUid, currentUserRole }: {
@@ -1944,6 +2426,7 @@ const styles: Record<string, React.CSSProperties> = {
   cardHover:   { boxShadow: "0 4px 14px rgba(0,0,0,0.08)" },
   cardHeader:  { display: "flex", alignItems: "center", justifyContent: "space-between" },
   cardName:    { fontSize: 15, fontWeight: 600, color: "var(--color-text-primary)" },
+  pendingBadge: { alignSelf: "flex-start", fontSize: 11, fontWeight: 600, color: "#b45309", background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 99, padding: "2px 8px" },
   cardMeta:    { display: "flex", flexDirection: "column", gap: 2, fontSize: 13, color: "var(--color-text-primary)" },
   cardMetaLabel:{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.04em" },
   codeChip:    { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4, fontWeight: 600 },
@@ -2040,4 +2523,21 @@ const viewStyles: Record<string, React.CSSProperties> = {
     background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", borderRadius: 6,
     padding: "8px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer",
   },
+};
+
+const drawerStyles: Record<string, React.CSSProperties> = {
+  panel:        {
+    position: "fixed", top: 0, right: 0, height: "100dvh", width: "min(560px, 100vw)",
+    background: "#fff", zIndex: 1001, display: "flex", flexDirection: "column",
+    boxShadow: "-8px 0 32px rgba(0,0,0,0.18)", transition: "transform 0.25s cubic-bezier(0.4,0,0.2,1)",
+  },
+  header:       { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #e5e7eb", flexShrink: 0 },
+  closeBtn:     { background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1 },
+  body:         { padding: 20, overflowY: "auto", flex: 1 },
+  section:      { paddingBottom: 20, marginBottom: 20, borderBottom: "1px solid #f3f4f6" },
+  sectionTitle: { fontSize: 13, fontWeight: 700, color: "#92400e", marginBottom: 14 },
+  grid:         { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 },
+  footer:       { display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 20px", borderTop: "1px solid #e5e7eb", background: "#f9fafb", flexShrink: 0 },
+  cancelBtn:    { background: "#fff", color: "#374151", border: "1px solid #d1d5db", padding: "9px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  primaryBtn:   { background: "#4f46e5", color: "#fff", border: "none", padding: "9px 22px", borderRadius: 8, fontSize: 13, fontWeight: 700 },
 };

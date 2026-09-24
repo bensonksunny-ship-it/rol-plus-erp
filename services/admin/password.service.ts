@@ -7,7 +7,8 @@ export interface ChangePasswordResult {
 
 /**
  * Directly sets a new password for another account's Firebase Auth login
- * (any role — the account must already have one, i.e. hasLogin === true).
+ * (any role — the account must already have a Firebase Auth user at this uid;
+ * the server checks Auth directly and backfills `hasLogin`).
  * Requires the caller to be signed in as the Founder — enforced server-side
  * in /api/admin/change-password (Admin SDK; client SDK can't set another
  * user's password). Used by the Founder Users page — the only place in the

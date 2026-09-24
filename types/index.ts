@@ -316,6 +316,13 @@ export interface Center {
    * references one of these by id; Registry's Batch column resolves it.
    */
   batches?: CenterBatch[];
+  /**
+   * demoClassDate / firstClassDate — ISO "YYYY-MM-DD" (or "" when unset).
+   * A centre with a demo date but no first-class date shows a "set first
+   * class date" reminder on the Centers dashboard.
+   */
+  demoClassDate?: string;
+  firstClassDate?: string;
   createdAt: string;
   updatedAt: string;
 }

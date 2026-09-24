@@ -50,9 +50,16 @@ export default function ProtectedRoute({ children, allowedRoles, requiredCapabil
       return;
     }
 
-    // Logged in, active, but wrong role or missing capability → login
+    // Logged in, active, but wrong role (e.g. switched hub/wing) or missing
+    // capability → back to the dashboard home. Sending them to /login instead
+    // looped: login full-reloads /dashboard, whose "resume last page" restore
+    // (rol_nav) navigates straight back here. Drop that saved path too.
     if (!isRoleAllowed(user, stableRoles) || !capOk) {
-      if (!redirectedRef.current) { redirectedRef.current = true; router.replace("/login"); }
+      if (!redirectedRef.current) {
+        redirectedRef.current = true;
+        try { localStorage.removeItem("rol_nav"); } catch { /* ignore */ }
+        router.replace("/dashboard");
+      }
     }
   }, [user, loading, stableRoles, router, capOk]);
 

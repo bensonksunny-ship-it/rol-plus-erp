@@ -16,6 +16,7 @@ import {
 } from "@/services/member/member.service";
 import { setParentChildren } from "@/services/staff/staff.service";
 import { resetUserPassword } from "@/services/admin/password.service";
+import { isElevatedAccount } from "@/lib/elevatedAccount";
 import type { Role, User, Wing } from "@/types";
 
 const ASSIGNABLE_ROLES: Role[] = [
@@ -122,7 +123,7 @@ const STAFF_ROLE_ORDER = [
 export default function UsersPage() {
   return (
     <ProtectedRoute
-      allowedRoles={[ROLES.FOUNDER]}
+      allowedRoles={[ROLES.FOUNDER, ROLES.CHIEF_TEACHER]}
       requiredCapability={CAPABILITIES.USERS_MANAGE}
     >
       <UsersContent />
@@ -132,6 +133,10 @@ export default function UsersPage() {
 
 function UsersContent() {
   const { user } = useAuth();
+  // Chief Teachers get a login-management view of lower-level accounts only:
+  // Founder/Admin/Director/Chief Teacher accounts are dropped before any
+  // counting, wing filtering or listing, and role/user management is hidden.
+  const isChief = user?.role === ROLES.CHIEF_TEACHER;
 
   const [section, setSection] = useState<Section>("staff");
   const [rows, setRows] = useState<User[]>([]);
@@ -210,20 +215,25 @@ function UsersContent() {
   const inWingFilter = (r: User) =>
     wingFilter === "all" || getUserWings(r).includes(wingFilter as Wing);
 
+  const scopedRows = useMemo(
+    () => (isChief ? rows.filter(r => !isElevatedAccount(r)) : rows),
+    [rows, isChief],
+  );
+
   const counts = useMemo(() => {
     const c: Record<Group, number> = { teacher: 0, student: 0, admin: 0 };
-    for (const r of rows) {
+    for (const r of scopedRows) {
       if (isDeleted(r) || isImported(r) || !inWingFilter(r)) continue;
       for (const g of groupsFor(r)) c[g]++;
     }
     return c;
-  }, [rows, wingFilter]);
+  }, [scopedRows, wingFilter]);
 
   // The view currently on screen — Staff shows teachers and admins together.
   const currentGroup: ViewGroup = section === "students" ? "student" : "staff";
 
   const visible = useMemo(() => {
-    const list = rows.filter(r => {
+    const list = scopedRows.filter(r => {
       if (isDeleted(r) || isImported(r) || !inWingFilter(r)) return false;
       const groups = groupsFor(r);
       return currentGroup === "student" ? groups.includes("student") : groups.some(g => g !== "student");
@@ -236,12 +246,12 @@ function UsersContent() {
       }
       return (a.displayName ?? "").localeCompare(b.displayName ?? "");
     });
-  }, [rows, currentGroup, wingFilter]);
+  }, [scopedRows, currentGroup, wingFilter]);
 
   const activeRows = useMemo(() => visible.filter(isActiveUser), [visible]);
   const inactiveRows = useMemo(() => visible.filter(r => !isActiveUser(r)), [visible]);
 
-  const showAddButton = section === "staff"; // Teachers and Admins sub-tabs both support the login-id form below
+  const showAddButton = section === "staff" && !isChief; // Teachers and Admins sub-tabs both support the login-id form below
 
   function reset() {
     setName(""); setEmail(""); setLoginId(""); setAuthMethod("loginId"); setPassword("");
@@ -518,6 +528,7 @@ function UsersContent() {
               onCreateLogin={setLoginTarget}
               onResetPassword={setResetPwTarget}
               onManageChildren={setChildrenTarget}
+              limited={isChief}
             />
             <SectionTable
               title={`Inactive ${title}`}
@@ -530,6 +541,7 @@ function UsersContent() {
               onCreateLogin={setLoginTarget}
               onResetPassword={setResetPwTarget}
               onManageChildren={setChildrenTarget}
+              limited={isChief}
             />
           </>
         )}
@@ -543,7 +555,7 @@ function UsersContent() {
   );
 }
 
-function SectionTable({ title, group, wingFilter, rows, emptyText, onToggle, onManage, onCreateLogin, onResetPassword, onManageChildren }: {
+function SectionTable({ title, group, wingFilter, rows, emptyText, onToggle, onManage, onCreateLogin, onResetPassword, onManageChildren, limited }: {
   title: string;
   group: ViewGroup;
   wingFilter: string;
@@ -554,6 +566,8 @@ function SectionTable({ title, group, wingFilter, rows, emptyText, onToggle, onM
   onCreateLogin: (u: User) => void;
   onResetPassword: (u: User) => void;
   onManageChildren: (u: User) => void;
+  /** Chief Teacher view — login actions only (no role, children or status changes). */
+  limited: boolean;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   function toggleExpand(uid: string) {
@@ -588,7 +602,7 @@ function SectionTable({ title, group, wingFilter, rows, emptyText, onToggle, onM
                   expanded={expanded.has(m.uid)} onToggleExpand={() => toggleExpand(m.uid)}
                   onToggle={() => onToggle(m)} onManage={() => onManage(m)}
                   onCreateLogin={() => onCreateLogin(m)} onResetPassword={() => onResetPassword(m)}
-                  onManageChildren={() => onManageChildren(m)} />
+                  onManageChildren={() => onManageChildren(m)} limited={limited} />
               ))}
             </tbody>
           </table>
@@ -605,11 +619,12 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v : null;
 }
 
-function Row({ sl, u, group, wingFilter, expanded, onToggleExpand, onToggle, onManage, onCreateLogin, onResetPassword, onManageChildren }: {
+function Row({ sl, u, group, wingFilter, expanded, onToggleExpand, onToggle, onManage, onCreateLogin, onResetPassword, onManageChildren, limited }: {
   sl: number; u: User; group: ViewGroup; wingFilter: string;
   expanded: boolean; onToggleExpand: () => void;
   onToggle: () => void; onManage: () => void; onCreateLogin: () => void; onResetPassword: () => void;
   onManageChildren: () => void;
+  limited: boolean;
 }) {
   const rec = u as unknown as Record<string, unknown>;
   const loginId = str(rec.loginId);
@@ -694,12 +709,12 @@ function Row({ sl, u, group, wingFilter, expanded, onToggleExpand, onToggle, onM
               </div>
             </div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const, marginTop: 12 }}>
-              {group !== "student" && <button style={s.linkBtn} onClick={onManage}>Manage roles</button>}
-              {isParent && <button style={s.linkBtn} onClick={onManageChildren}>Linked children</button>}
+              {group !== "student" && !limited && <button style={s.linkBtn} onClick={onManage}>Manage roles</button>}
+              {isParent && !limited && <button style={s.linkBtn} onClick={onManageChildren}>Linked children</button>}
               {loggedIn
                 ? <button style={s.linkBtn} onClick={onResetPassword}>Reset password</button>
                 : <button style={s.linkBtn} onClick={onCreateLogin}>Create login</button>}
-              {u.role === ROLES.MEMBER && (
+              {u.role === ROLES.MEMBER && !limited && (
                 <button style={s.linkBtn} onClick={onToggle}>
                   {u.status === "active" ? "Deactivate" : "Reactivate"}
                 </button>

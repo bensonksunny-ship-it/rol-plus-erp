@@ -27,6 +27,7 @@ import { deleteApp } from "firebase/app";
 import { db } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
 import { ROLES, WINGS, loginIdToAuthEmail } from "@/config/constants";
+import { isElevatedAccount } from "@/lib/elevatedAccount";
 import { wingOf } from "@/lib/wing";
 import type { MemberUser, Role, User, Wing } from "@/types";
 
@@ -229,6 +230,8 @@ export async function createLoginForUser(
   if (!oldSnap.exists()) throw new Error("USER_NOT_FOUND");
   const data = oldSnap.data();
   if (data.hasLogin) throw new Error("ALREADY_HAS_LOGIN");
+  // Chief Teachers manage lower-level accounts only (see /dashboard/users).
+  if (initiatorRole !== ROLES.FOUNDER && isElevatedAccount(data)) throw new Error("USER_NOT_FOUND");
   if (input.password.length < 6) throw new Error("WEAK_PASSWORD: at least 6 characters");
 
   let authEmail: string;

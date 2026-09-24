@@ -4,7 +4,7 @@
 // Music Admissions page can render the applications list.
 
 import { useState, useEffect, useRef } from "react";
-import { collection, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
+import { collection, getDocs, addDoc, serverTimestamp, onSnapshot } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import Link from "next/link";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
@@ -386,9 +386,27 @@ export function AdmissionsList({
   // showing the wing that was active when it first mounted (and applications
   // just moved to the other wing would never appear).
   useEffect(() => {
-    reload();
+    // Teachers only see their own applications — a one-off fetch is enough.
+    if (user?.role === ROLES.TEACHER) {
+      reload();
+      return;
+    }
+    // Everyone else watches the collection live, so forms parents submit from
+    // the QR code (/apply) pop into the list without a manual refresh.
+    setLoading(true);
+    return onSnapshot(
+      collection(db, "admissions"),
+      snap => {
+        setAdmissions(snap.docs
+          .map(d => d.data() as Record<string, unknown>)
+          .filter(a => (typeof a.wing === "string" ? a.wing : "rol_plus") === wing)
+          .sort((a, b) => String(b.submittedAt ?? "").localeCompare(String(a.submittedAt ?? ""))));
+        setLoading(false);
+      },
+      err => { console.error("[AdmissionsList] live admissions error:", err); reload(); },
+    );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wing]);
+  }, [wing, user?.role]);
 
   useEffect(() => {
     getDocs(collection(db, "centers"))
@@ -1003,6 +1021,12 @@ export function AdmissionsList({
                   </div>
                   <div style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.04em", color: admNo ? "#4f46e5" : "#9ca3af" }}>
                     {admNo || "no adm. no."}
+                    {str(rec.source) === "public_qr" && (
+                      <span title="Submitted by a parent via the QR code form"
+                        style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: 0, background: "#fef3c7", color: "#b45309", padding: "1px 6px", borderRadius: 99 }}>
+                        📱 Online
+                      </span>
+                    )}
                   </div>
                 </div>
                 <button
