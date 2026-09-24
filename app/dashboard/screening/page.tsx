@@ -10,6 +10,7 @@ import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { saveScreening, getAllScreenings } from "@/services/screening/screening.service";
 import { AdmissionsList } from "./admissions-list";
+import { ScreeningQuestionsPanel } from "@/components/screening/ScreeningQuestionsPanel";
 import type { ScreeningConfig, ScreeningTrack, ScreeningResult, ScreeningType } from "@/types";
 import { DiagnosticCard, TRACK_STYLE } from "@/components/DiagnosticCard";
 import { GuitarScreeningContent } from "./guitar/GuitarScreeningContent";
@@ -256,7 +257,7 @@ function scoreColor(n: number): string {
 
 function ScreeningHub() {
   const { wing } = useWing();
-  const [view,          setView]          = useState<"screening" | "applications">("screening");
+  const [view,          setView]          = useState<"screening" | "applications" | "questions">("screening");
   const [selectedTrack, setSelectedTrack] = useState<"guitar" | "keyboard" | "drums">("guitar");
   const [formKey,       setFormKey]       = useState(0);
 
@@ -302,6 +303,7 @@ function ScreeningHub() {
         {([
           { key: "screening"    as const, label: "🎹 Screening",    desc: "Evaluate & assign track"        },
           { key: "applications" as const, label: "📁 Applications", desc: "View & manage admission forms"  },
+          { key: "questions"    as const, label: "🧩 Screening Questions", desc: "Fast Track tests & rubrics" },
         ]).map(tab => (
           <button
             key={tab.key}
@@ -362,6 +364,7 @@ function ScreeningHub() {
         </>
       )}
       {view === "applications" && <AdmissionsList onStartScreening={handleStartScreening} />}
+      {view === "questions" && <ScreeningQuestionsPanel wing={wing} />}
     </>
   );
 }

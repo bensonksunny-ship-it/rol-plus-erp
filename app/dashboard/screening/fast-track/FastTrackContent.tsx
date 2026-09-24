@@ -8,6 +8,8 @@ import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { saveScreening } from "@/services/screening/screening.service";
 import type { ScreeningConfig, ScreeningResult } from "@/types";
+import { DEFAULT_FAST_TRACK_TESTS, type FastTrackTest } from "@/lib/screeningQuestions";
+import { getFastTrackTests } from "@/services/screening/screeningQuestions.service";
 
 /** The saved fast-track screening, handed back to an embedding wizard. */
 export type FastTrackScreeningResult = Omit<ScreeningResult, "id"> & { id: string };
@@ -42,55 +44,9 @@ const SIGHT_OPTIONS = [
   { id: "regular", label: "Regular", desc: "Reads from sheet music regularly"        },
 ] as const;
 
-const TESTS = [
-  {
-    code: "T-01", title: "Metronome Rhythm Sync",
-    sub: "80 BPM · Quarter note → eighth-note shift across 4 bars",
-    steps: [
-      { tag: "Setup",    text: "Set metronome to 80 BPM. Student claps in time with the click." },
-      { tag: "Bars 1–4", text: "Quarter notes — one clap per beat, four beats per bar" },
-      { tag: "→ Shift",  text: "Switch immediately — no warning given to the student" },
-      { tag: "Bars 5–8", text: "Eighth notes — two claps per beat, double subdivision" },
-    ],
-    tip: "Run 2 trials. Score the better attempt. Key focus: whether the subdivision shift is instantaneous or delayed.",
-    rubric: [
-      { grade: "High"   as Grade, desc: "Locks in from bar 1 at 80 BPM. Switch to double-time is immediate — zero hesitation." },
-      { grade: "Medium" as Grade, desc: "Mostly on-beat. Hesitates 1–2 beats at the shift but self-corrects within the bar." },
-      { grade: "Low"    as Grade, desc: "Struggles at 80 BPM, or loses beat entirely at the subdivision shift." },
-    ],
-  },
-  {
-    code: "T-02", title: "5-Finger Dexterity Run",
-    sub: "Independent isolation · Ascending 1→5 and descending 5→1",
-    steps: [
-      { tag: "Setup",      text: "Student places one hand flat on a table." },
-      { tag: "Ascending",  text: "Fingers 1 → 2 → 3 → 4 → 5 — each taps individually and rapidly." },
-      { tag: "Descending", text: "Fingers 5 → 4 → 3 → 2 → 1 — same individual tap sequence." },
-      { tag: "Repeat",     text: "3× each direction · Both hands. Watch for mirroring in the idle hand." },
-    ],
-    tip: "Watch for mirroring in the idle hand, grouping of fingers 4–5, stiffness at the 3→4 transition, or wrist involvement.",
-    rubric: [
-      { grade: "High"   as Grade, desc: "Clean, rapid, fully independent isolation in all 5 fingers. No mirroring or stiffness." },
-      { grade: "Medium" as Grade, desc: "Minor hesitation at finger 4 or 5. Slight idle-hand mirroring that self-corrects." },
-      { grade: "Low"    as Grade, desc: "Visible stiffness, persistent mirroring, or fingers 4–5 moving as a pair." },
-    ],
-  },
-  {
-    code: "T-03", title: "Pitch & Interval Echo",
-    sub: "3-note melodic phrase · Hum-back from memory · No replays",
-    steps: [
-      { tag: "Round 1", text: "Play C–E–G ascending (major triad). Simple, bright interval." },
-      { tag: "Round 2", text: "Play C–E–C (step up, return). Tests interval memory & direction." },
-      { tag: "Round 3", text: "Evaluator's choice — any 3-note phrase of moderate range." },
-    ],
-    tip: "Accept humming or singing. Score on pitch accuracy and contour — not voice quality. No replays between rounds.",
-    rubric: [
-      { grade: "High"   as Grade, desc: "Reproduces all 3 rounds accurately within 2 seconds. Correct pitch, contour, and interval direction." },
-      { grade: "Medium" as Grade, desc: "Accurate on Rounds 1–2 but drifts in Round 3. Contour correct but one or two pitches off." },
-      { grade: "Low"    as Grade, desc: "Cannot accurately reproduce even the first phrase. Hums in approximate range only." },
-    ],
-  },
-] as const;
+// The three tests (procedure + rubric) are configurable per wing by leadership
+// on the "Screening Questions" tab — see lib/screeningQuestions.ts. Teachers
+// only see them here, read-only, with the grade selectors.
 
 // ─── Slab logic ───────────────────────────────────────────────────────────────
 function computeSlabConfig(r: Grade, d: Grade, p: Grade): ScreeningConfig {
@@ -273,6 +229,14 @@ export function FastTrackContent({
   const { user } = useAuthContext();
   const { wing } = useWing();
   const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [tests, setTests] = useState<FastTrackTest[]>(DEFAULT_FAST_TRACK_TESTS);
+  useEffect(() => {
+    let live = true;
+    getFastTrackTests(wing)
+      .then(r => { if (live) setTests(r.tests); })
+      .catch(err => console.error("[FastTrack] could not load screening questions, using defaults:", err));
+    return () => { live = false; };
+  }, [wing]);
 
   const [studentName,   setStudentName]   = useState(lockedStudentName ?? "");
   const [studentQuery,  setStudentQuery]  = useState("");
@@ -523,7 +487,7 @@ export function FastTrackContent({
       {/* ── Step 2: Tests ──────────────────────────────────────────────────── */}
       {step === 2 && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 14 }}>
-          {TESTS.map((test, ti) => {
+          {tests.map((test, ti) => {
             const value = gradeValues[ti];
             const setter = gradeSetters[ti];
             return (

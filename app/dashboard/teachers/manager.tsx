@@ -18,6 +18,7 @@ import {
 import type { TeacherUser, UserStatus } from "@/types";
 import type { Center } from "@/types";
 import { deleteUser as deleteUserRecord } from "@/services/admin/delete.service";
+import { safeCompare } from "@/lib/sortKey";
 
 type Tab = "teachers" | "performance";
 
@@ -83,7 +84,7 @@ export function TeachersContent() {
         getDocs(query(collection(db, "attendance"), where("date", ">=", monthStart))),
       ]);
 
-      const sortedTeachers = teacherList.sort((a, b) => getTeacherDisplayName(a).localeCompare(getTeacherDisplayName(b)));
+      const sortedTeachers = teacherList.sort((a, b) => safeCompare(getTeacherDisplayName(a), getTeacherDisplayName(b)));
       setTeachers(sortedTeachers);
       setCached(`teachers:${wing}:teachers`, sortedTeachers);
       const allCenters = centerSnap.docs.map(d => ({ id: d.id, ...d.data() } as Center));

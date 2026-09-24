@@ -392,3 +392,25 @@ tbody tr.row-admin {
   background: var(--color-accent);
   box-shadow: 0 0 8px var(--color-accent-glow);
 }
+
+/* ── Centre name accents (Centers grid) ─────────────────────────────────────
+   8 hues; a centre's hue comes from hashing its name (getCenterHue in
+   app/dashboard/centers/_shared.tsx). 400 shades on dark, 600 on light. */
+.center-hue-0 { --center-hue: #818cf8; } /* indigo  */
+.center-hue-1 { --center-hue: #fbbf24; } /* amber   */
+.center-hue-2 { --center-hue: #34d399; } /* emerald */
+.center-hue-3 { --center-hue: #c084fc; } /* purple  */
+.center-hue-4 { --center-hue: #fb7185; } /* rose    */
+.center-hue-5 { --center-hue: #38bdf8; } /* sky     */
+.center-hue-6 { --center-hue: #2dd4bf; } /* teal    */
+.center-hue-7 { --center-hue: #a78bfa; } /* violet  */
+@media (prefers-color-scheme: light) {
+  .center-hue-0 { --center-hue: #4f46e5; }
+  .center-hue-1 { --center-hue: #d97706; }
+  .center-hue-2 { --center-hue: #059669; }
+  .center-hue-3 { --center-hue: #9333ea; }
+  .center-hue-4 { --center-hue: #e11d48; }
+  .center-hue-5 { --center-hue: #0284c7; }
+  .center-hue-6 { --center-hue: #0d9488; }
+  .center-hue-7 { --center-hue: #7c3aed; }
+}

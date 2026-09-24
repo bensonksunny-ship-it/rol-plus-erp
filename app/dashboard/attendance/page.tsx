@@ -977,7 +977,10 @@ function AttendanceContent() {
   });
 
   return (
-    <div style={{ fontFamily: "inherit" }}>
+    // Centred, width-capped like Admissions (1100) so names and P/A controls stay
+    // close on wide screens; the History month grid gets more room for its 31
+    // date columns. Below the cap it's full width, as before.
+    <div style={{ fontFamily: "inherit", width: "100%", maxWidth: tab === "today" ? 1100 : 1400, margin: "0 auto" }}>
       {/* Header */}
       <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>

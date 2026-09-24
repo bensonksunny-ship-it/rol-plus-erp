@@ -21,6 +21,7 @@ import { isSchoolOfMusic, inWing, wingOf } from "@/lib/wing";
 import { getCached, setCached } from "@/lib/dataCache";
 import { deleteCenter } from "@/services/admin/delete.service";
 import { parseFile } from "@/lib/xlsx-parser";
+import { safeCompare, sortKey } from "@/lib/sortKey";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -628,7 +629,7 @@ function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
         const total   = recs.length;
         return { date, recs, total, present, absent, pct: total > 0 ? (present / total) * 100 : 0 };
       })
-      .sort((a, b) => b.date.localeCompare(a.date));
+      .sort((a, b) => safeCompare(b.date, a.date));
   }, [monthRecs]);
 
   if (records.length === 0) {
@@ -749,7 +750,7 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing, ce
     const q = search.trim().toLowerCase();
     return activeStudents
       .filter(s => !q || s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) => safeCompare(a.name, b.name));
   }, [activeStudents, search]);
 
   // Only already-active students are hidden from the picker — inactive ones
@@ -910,7 +911,7 @@ function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, on
             };
           })
           .filter(s => !excludeUids.has(s.uid))
-          .sort((a, b) => a.name.localeCompare(b.name));
+          .sort((a, b) => safeCompare(a.name, b.name));
         setCandidates(list);
       } catch (err) {
         console.error("[AddStudentsModal] load error:", err);
@@ -1201,7 +1202,7 @@ function CentersContent() {
   const importFileRef                 = useRef<HTMLInputElement>(null);
 
   const existingNamesLC = useMemo(
-    () => new Set(centers.map(c => c.name.trim().toLowerCase())),
+    () => new Set(centers.map(c => sortKey(c.name).trim().toLowerCase())),
     [centers],
   );
   // Oldest centre first, by effective demo date (manual override, else the
@@ -1209,8 +1210,9 @@ function CentersContent() {
   const sortedCenters = useMemo(() => [...centers].sort((a, b) => {
     const da = effectiveDemoDate(a, earliestAdmissions);
     const db = effectiveDemoDate(b, earliestAdmissions);
-    if (da !== db) return !da ? 1 : !db ? -1 : da.localeCompare(db);
-    return (a.createdAt ?? "").localeCompare(b.createdAt ?? "");
+    if (da !== db) return !da ? 1 : !db ? -1 : safeCompare(da, db);
+    // createdAt is a Firestore Timestamp on centres created in-app — never assume a string.
+    return safeCompare(a.createdAt, b.createdAt);
   }), [centers, earliestAdmissions]);
   const activeCentersList   = useMemo(() => sortedCenters.filter(c => c.status === "active"), [sortedCenters]);
   const inactiveCentersList = useMemo(() => sortedCenters.filter(c => c.status !== "active"), [sortedCenters]);
@@ -1295,7 +1297,7 @@ function CentersContent() {
       ]);
       setCenters(data);
       setCached(`centers:${wing}:centers`, data);
-      const sortedTeachers = teacherList.sort((a, b) => getTeacherDisplayName(a).localeCompare(getTeacherDisplayName(b)));
+      const sortedTeachers = teacherList.sort((a, b) => safeCompare(getTeacherDisplayName(a), getTeacherDisplayName(b)));
       setTeachers(sortedTeachers);
       setCached(`centers:${wing}:teachers`, sortedTeachers);
 
@@ -1766,7 +1768,7 @@ function CentersContent() {
 /** An active centre whose demo class is scheduled but whose first class date isn't set yet. */
 /** Manually entered demo date wins; otherwise the centre's earliest student admission. */
 function effectiveDemoDate(center: Center, earliestAdmissions: Map<string, string>): string {
-  return center.demoClassDate || earliestAdmissions.get(center.id) || "";
+  return toLocalYMD(center.demoClassDate) || earliestAdmissions.get(center.id) || "";
 }
 
 function needsFirstClassDate(center: Center): boolean {
@@ -1799,6 +1801,13 @@ function splitSchedule(center: Center): { days: string; time: string } {
   return m ? { days: m[1].trim(), time: formatTimesIn12h(m[2].trim()) } : { days: center.timeSlot ?? "", time: "" };
 }
 
+/** Deterministic 0–7 hue index from the centre name → .center-hue-N in globals.css. */
+function getCenterHue(name: string): number {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (name.charCodeAt(i) + ((hash << 5) - hash)) | 0;
+  return Math.abs(hash) % 8;
+}
+
 function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdit, onDelete }: {
   center: Center; teachers: TeacherUser[]; activeCount: number; autoDemoDate: string;
   onView: () => void; onEdit: () => void; onDelete: () => void;
@@ -1828,7 +1837,8 @@ function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdi
   return (
     <div
       onClick={onView}
-      style={{ ...styles.card, ...(hover ? styles.cardHover : {}), cursor: "pointer", position: "relative" }}
+      className={`center-hue-${getCenterHue(center.name.trim().toLowerCase())}`}
+      style={{ ...styles.card, ...(hover ? styles.cardHover : {}), cursor: "pointer", position: "relative", borderTop: "3px solid var(--center-hue)" }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
     >
       <div style={{ ...styles.cardHeader, justifyContent: "flex-end" as const }}>
@@ -1855,7 +1865,7 @@ function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdi
           </div>
         </div>
       </div>
-      <div style={styles.cardName}>{center.name}</div>
+      <div style={{ ...styles.cardName, color: "var(--center-hue)", fontWeight: 700 }}>{center.name}</div>
       <div style={styles.cardMeta}>
         {teacher
           ? <span>{getTeacherDisplayName(teacher)}</span>
@@ -1964,7 +1974,7 @@ function ScheduleMatrixModal({ centers, teachers, onClose }: {
       name:    getTeacherDisplayName(t) || t.uid,
       classes: blocks.filter(b => b.center.teacherUid === t.uid).reduce((n, b) => n + b.batch.daysOfWeek.length, 0),
     }))
-    .sort((a, b) => a.name.localeCompare(b.name)),
+    .sort((a, b) => safeCompare(a.name, b.name)),
   [teachers, blocks]);
 
   const isAll = teacherFilter === "all";
@@ -2120,12 +2130,12 @@ function DeactivateCenterModal({ center, onClose, onConfirm }: {
             name: (d.data().displayName ?? d.data().name ?? "-") as string,
             admissionNo: (d.data().admissionNo ?? d.data().admissionNumber ?? "") as string,
           }))
-          .sort((a, b) => a.name.localeCompare(b.name)));
+          .sort((a, b) => safeCompare(a.name, b.name)));
         // Same-wing centres first — a transfer normally stays within the wing.
         setDests(cenSnap.docs
           .filter(d => d.id !== center.id)
           .map(d => ({ id: d.id, name: (d.data().name ?? d.id) as string, wing: wingOf(d.data()), batches: explicitBatches(d.data()) }))
-          .sort((a, b) => Number(b.wing === viewingWing) - Number(a.wing === viewingWing) || a.name.localeCompare(b.name)));
+          .sort((a, b) => Number(b.wing === viewingWing) - Number(a.wing === viewingWing) || safeCompare(a.name, b.name)));
       } catch (err) {
         console.error("[DeactivateCenterModal] load error:", err);
         if (!cancelled) setError("Failed to load students.");

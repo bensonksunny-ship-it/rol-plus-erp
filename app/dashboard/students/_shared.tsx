@@ -34,6 +34,7 @@ import type { CenterBatch } from "@/types";
 import { batchIdToStore, batchSchedule, effectiveBatches, isDefaultBatchId } from "@/lib/batches";
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
+import { safeCompare } from "@/lib/sortKey";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -518,7 +519,7 @@ function StudentsContent() {
       if (!map.has(s.centerId)) map.set(s.centerId, { centerId: s.centerId, centerName: s.centerName, students: [] });
       map.get(s.centerId)!.students.push(s);
     });
-    return Array.from(map.values()).sort((a, b) => a.centerName.localeCompare(b.centerName));
+    return Array.from(map.values()).sort((a, b) => safeCompare(a.centerName, b.centerName));
   }
 
   const groupedByCenter = useMemo(() => {
@@ -2609,7 +2610,7 @@ function StudentTableView({
     arr.sort((a, b) => {
       let cmp = 0;
       if (sortKey === "balance") cmp = a.balance - b.balance;
-      else cmp = String(a[sortKey] ?? "").localeCompare(String(b[sortKey] ?? ""));
+      else cmp = safeCompare(a[sortKey], b[sortKey]);
       return cmp * sortDir;
     });
     return arr;
@@ -2725,7 +2726,7 @@ export function LedgerEditor({
 
   // Chronological (newest first) statement: fee dues, payments, deposits, auto-charges.
   const statement = useMemo(() => {
-    return [...transactions].sort((a, b) => (b.date ?? "").localeCompare(a.date ?? ""));
+    return [...transactions].sort((a, b) => safeCompare(b.date, a.date));
   }, [transactions]);
 
   function startTxEdit(tx: Transaction) {

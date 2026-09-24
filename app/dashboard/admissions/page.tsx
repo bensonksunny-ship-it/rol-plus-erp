@@ -15,7 +15,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import QRCode from "qrcode";
 import { collection, addDoc, doc, updateDoc, getDocs, serverTimestamp } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -29,9 +28,11 @@ import { getWingSyllabus } from "@/services/lesson/lesson.service";
 import { generateAdmissionCardPDF } from "@/lib/generateAdmissionCard";
 import { AdmissionFormContent } from "../screening/admission-form";
 import { AdmissionsList } from "../screening/admissions-list";
-import { EnquiriesPanel } from "./enquiries";
+import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
+import { EnquiriesDrawer } from "./enquiries";
+import { ScreeningQuestionsPanel } from "@/components/screening/ScreeningQuestionsPanel";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
-import { markEnquiryConverted, type Enquiry } from "@/services/enquiry/enquiry.service";
+import { markEnquiryConverted, subscribeEnquiries, type Enquiry } from "@/services/enquiry/enquiry.service";
 import { FastTrackContent, type FastTrackScreeningResult } from "../screening/fast-track/FastTrackContent";
 import {
   SYLLABUS_LEVELS,
@@ -123,6 +124,9 @@ function Stepper({ step }: { step: number }) {
   );
 }
 
+type AdmissionsTab = "applications" | "questions";
+const ADMISSIONS_TABS: AdmissionsTab[] = ["applications", "questions"];
+
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 function AdmissionsWizard() {
   const { wing } = useWing();
@@ -133,15 +137,33 @@ function AdmissionsWizard() {
   const [application, setApplication] = useState<Record<string, unknown> | null>(null);
   const [screening, setScreening]     = useState<FastTrackScreeningResult | null>(null);
   const [showQr, setShowQr]           = useState(false);
-  const [tab, setTab]                 = useState<"applications" | "enquiries">("applications");
-  // Deep link: /dashboard/admissions?tab=enquiries opens straight on Enquiries.
+  // Which code the QR modal opens on — "enquiry" when launched from the
+  // Enquiries drawer, otherwise the full admission form.
+  const [qrTarget, setQrTarget]       = useState<"apply" | "enquiry" | null>(null);
+  // Enquiries live in a slide-over opened from the "Enquiries +" header button.
+  const [showEnquiries, setShowEnquiries] = useState(false);
+  const [newEnquiries, setNewEnquiries]   = useState(0);
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("tab") === "enquiries") setTab("enquiries");
+    if (wing !== WING) return;
+    return subscribeEnquiries(
+      WING,
+      list => setNewEnquiries(list.filter(e => e.status === "new").length),
+      () => setNewEnquiries(0),
+    );
+  }, [wing]);
+  const [showNewChoice, setShowNewChoice] = useState(false);
+  const [tab, setTab]                 = useState<AdmissionsTab>("applications");
+  // Deep links: ?tab=questions opens that tab; ?tab=enquiries (the old
+  // Enquiries tab) now opens the Enquiries drawer.
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t === "enquiries") setShowEnquiries(true);
+    else if (t && (ADMISSIONS_TABS as string[]).includes(t)) setTab(t as AdmissionsTab);
   }, []);
-  function selectTab(t: "applications" | "enquiries") {
+  function selectTab(t: AdmissionsTab) {
     setTab(t);
     const url = new URL(window.location.href);
-    if (t === "enquiries") url.searchParams.set("tab", t); else url.searchParams.delete("tab");
+    if (t !== "applications") url.searchParams.set("tab", t); else url.searchParams.delete("tab");
     window.history.replaceState(null, "", url);
   }
   // Step 1 toggle: full application vs. a quick enquiry (lead only).
@@ -155,6 +177,7 @@ function AdmissionsWizard() {
   }
 
   function convertEnquiry(e: Enquiry) {
+    setShowEnquiries(false);
     resetWizard();
     setFromEnquiry(e);
     setMode("wizard");
@@ -182,21 +205,52 @@ function AdmissionsWizard() {
   if (mode === "list") {
     return (
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: "0 0 60px" }}>
-        {showQr && <ParentQrModal wing={WING} initialTarget={tab === "enquiries" ? "enquiry" : "apply"} onClose={() => setShowQr(false)} />}
-        <div style={{ marginBottom: 18, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        {showQr && (
+          <ParentQrModal wing={WING}
+            initialTarget={qrTarget ?? "apply"}
+            onClose={() => { setShowQr(false); setQrTarget(null); }} />
+        )}
+        {showNewChoice && (
+          <NewAdmissionChoiceModal
+            onClose={() => setShowNewChoice(false)}
+            onDevice={() => { setShowNewChoice(false); resetWizard(); setMode("wizard"); }}
+            onParentQr={() => { setShowNewChoice(false); setQrTarget("apply"); setShowQr(true); }}
+          />
+        )}
+        <div style={{ marginBottom: 18, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 19, fontWeight: 900, color: "#78350f" }}>Admissions — {WING_LABELS[WING]}</div>
             <div style={{ fontSize: 12, color: "#92400e", opacity: 0.8, marginTop: 2 }}>
               One application · Fast Track screening · Syllabus by level &amp; instrument
             </div>
           </div>
-          <button onClick={() => setShowQr(true)}
-            style={{ ...btn, background: "#fff", color: "#b45309", border: "1.5px solid #fcd34d", padding: "9px 16px" }}>
-            <span aria-hidden style={{ fontSize: 16 }}>📱</span> QR Code for Parents
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setShowEnquiries(true)} title="Open enquiries — add a lead, follow up, convert"
+              style={{ ...btn, background: ACCENT, color: "#fff", padding: "9px 16px", position: "relative" }}>
+              <span aria-hidden style={{ fontSize: 15 }}>📇</span> Enquiries
+              <span aria-hidden style={{ background: "rgba(255,255,255,0.25)", borderRadius: 6, width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 15, lineHeight: 1 }}>+</span>
+              {newEnquiries > 0 && (
+                <span aria-label={`${newEnquiries} new`} style={{
+                  position: "absolute", top: -7, right: -7, minWidth: 20, height: 20, padding: "0 6px", boxSizing: "border-box",
+                  borderRadius: 999, background: "#dc2626", color: "#fff", fontSize: 11, fontWeight: 800,
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", border: "2px solid #fff",
+                }}>
+                  {newEnquiries > 99 ? "99+" : newEnquiries}
+                </span>
+              )}
+            </button>
+          </div>
         </div>
+        {showEnquiries && (
+          <EnquiriesDrawer
+            wing={WING}
+            onClose={() => setShowEnquiries(false)}
+            onConvert={convertEnquiry}
+            onShowQr={() => { setQrTarget("enquiry"); setShowQr(true); }}
+          />
+        )}
         <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "1px solid #f0f0f0" }}>
-          {([["applications", "Applications"], ["enquiries", "Enquiries"]] as const).map(([k, l]) => (
+          {([["applications", "Applications"], ["questions", "Screening Questions"]] as const).map(([k, l]) => (
             <button key={k} onClick={() => selectTab(k)} style={{
               padding: "9px 16px", border: "none", background: "none", cursor: "pointer", fontFamily: "inherit",
               fontSize: 13.5, fontWeight: tab === k ? 800 : 500, color: tab === k ? "#92400e" : "#6b7280",
@@ -206,11 +260,11 @@ function AdmissionsWizard() {
             </button>
           ))}
         </div>
-        {tab === "enquiries" ? (
-          <EnquiriesPanel wing={WING} onConvert={convertEnquiry} onShowQr={() => setShowQr(true)} />
+        {tab === "questions" ? (
+          <ScreeningQuestionsPanel wing={WING} />
         ) : (
         <AdmissionsList
-          onNewAdmission={() => { resetWizard(); setMode("wizard"); }}
+          onNewAdmission={() => setShowNewChoice(true)}
           onResume={(rec) => {
             setApplication(rec);
             setAdmissionId(typeof rec.id === "string" ? rec.id : null);
@@ -276,8 +330,8 @@ function AdmissionsWizard() {
         <div style={card}>
           <EnquiryForm wing={WING} source="staff" onCreated={() => {
             resetWizard();
-            selectTab("enquiries");
             setMode("list");
+            setShowEnquiries(true);
           }} />
         </div>
       )}
@@ -705,89 +759,6 @@ function ReviewEnrol({
         }}>
           {enrolling ? "Enrolling…" : "Enrol student & download card"}
         </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── QR code for parents ──────────────────────────────────────────────────────
-// Parents scan this to open the public /apply form (lands in this wing's
-// application list) or the /enquiry quick form (lands under Enquiries → Open
-// as an "Online Lead") on their own phone.
-function ParentQrModal({ wing, initialTarget = "apply", onClose }: {
-  wing: string; initialTarget?: "apply" | "enquiry"; onClose: () => void;
-}) {
-  const [target, setTarget] = useState<"apply" | "enquiry">(initialTarget);
-  const url = `${window.location.origin}/${target}?wing=${encodeURIComponent(wing)}`;
-  const [qr, setQr]         = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    QRCode.toDataURL(url, { width: 640, margin: 2, errorCorrectionLevel: "M", color: { dark: "#000000", light: "#ffffff" } })
-      .then(setQr)
-      .catch(err => console.error("[ParentQrModal] QR error:", err));
-  }, [url]);
-
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(url);
-    } catch {
-      const el = document.getElementById("parent-apply-link") as HTMLInputElement | null;
-      el?.select();
-      document.execCommand("copy");
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} role="dialog" aria-label="QR code for parents"
-        style={{ ...card, width: "100%", maxWidth: 420, padding: 0, overflow: "hidden", maxHeight: "92vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #f3f4f6" }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>📱 {target === "apply" ? "Mobile Admission Form" : "Mobile Enquiry Form"}</div>
-          <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#6b7280", lineHeight: 1 }}>✕</button>
-        </div>
-        <div style={{ padding: 20, textAlign: "center" }}>
-          <div style={{ display: "inline-flex", background: "#f3f4f6", borderRadius: 10, padding: 3, gap: 3, marginBottom: 14 }}>
-            {([["apply", "Full admission"], ["enquiry", "Quick enquiry"]] as const).map(([k, l]) => (
-              <button key={k} onClick={() => setTarget(k)} style={{
-                padding: "6px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: "inherit",
-                fontSize: 12, fontWeight: 700,
-                background: target === k ? "#fff" : "transparent", color: target === k ? "#92400e" : "#6b7280",
-                boxShadow: target === k ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
-              }}>{l}</button>
-            ))}
-          </div>
-          <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 14, padding: 12, width: "min(280px, 100%)", aspectRatio: "1", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box" }}>
-            {qr
-              ? <img src={qr} alt="QR code linking to the online admission form" style={{ width: "100%", height: "100%", imageRendering: "pixelated" }} />
-              : <span style={{ fontSize: 12, color: "#9ca3af" }}>Generating…</span>}
-          </div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "#78350f", margin: "16px 0 4px", lineHeight: 1.45 }}>
-            {target === "apply"
-              ? <>Scan with phone camera to open the ROL&apos;s School of Music Online Admission Form.</>
-              : <>Scan with phone camera to send a quick enquiry — just name, phone and place.</>}
-          </div>
-          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 16 }}>
-            {target === "apply"
-              ? "Submitted forms appear in the application list below, ready for Fast Track screening."
-              : "Enquiries appear instantly under Enquiries → Open, tagged “Online Lead”."}
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input id="parent-apply-link" readOnly value={url} onFocus={e => e.currentTarget.select()}
-              style={{ flex: 1, minWidth: 0, border: "1.5px solid #f0f0f0", borderRadius: 10, padding: "10px 12px", fontSize: 12, color: "#374151", background: "#fafafa", fontFamily: "inherit" }} />
-            <button onClick={copyLink} style={{ ...btn, background: copied ? "#16a34a" : ACCENT, color: "#fff", padding: "10px 16px", flexShrink: 0 }}>
-              {copied ? "✓ Copied" : "Copy Link"}
-            </button>
-          </div>
-          {qr && (
-            <a href={qr} download={target === "apply" ? "admission-form-qr.png" : "enquiry-form-qr.png"}
-              style={{ display: "inline-block", marginTop: 14, fontSize: 12, fontWeight: 600, color: "#b45309" }}>
-              Download QR image (for printing)
-            </a>
-          )}
-        </div>
       </div>
     </div>
   );

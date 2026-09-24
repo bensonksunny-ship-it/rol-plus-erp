@@ -20,6 +20,7 @@ import {
 import { AdmissionFormContent, OptionGroup, MultiOptionGroup } from "./admission-form";
 import { generateAdmissionCardPDF } from "@/lib/generateAdmissionCard";
 import { PhotoCaptureModal } from "./photo-capture-modal";
+import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
 
 const s: Record<string, React.CSSProperties> = {
   card: {
@@ -352,6 +353,9 @@ export function AdmissionsList({
   const otherWingLabel = WING_LABELS[otherWing] ?? otherWing;
   const [centresList,  setCentresList]  = useState<{ id: string; name: string }[]>([]);
   const [showForm,     setShowForm]     = useState(false);
+  // "+ New Admission" first asks: fill here, or show the parent QR code?
+  const [showChoice,   setShowChoice]   = useState(false);
+  const [showQr,       setShowQr]       = useState(false);
   const [pdfLoading,   setPdfLoading]   = useState<string | null>(null);
 
   // Screening lookup map: keyed by studentId and by lowercased studentName
@@ -564,10 +568,24 @@ export function AdmissionsList({
     </div>
   ) : null;
 
+  const newAdmissionModals = (
+    <>
+      {showChoice && (
+        <NewAdmissionChoiceModal
+          onClose={() => setShowChoice(false)}
+          onDevice={() => { setShowChoice(false); setShowForm(true); }}
+          onParentQr={() => { setShowChoice(false); setShowQr(true); }}
+        />
+      )}
+      {showQr && <ParentQrModal wing={wing} allowEnquiry={false} onClose={() => setShowQr(false)} />}
+    </>
+  );
+
   if (admissions.length === 0) {
     return (
       <>
         {formModal}
+        {newAdmissionModals}
         <div style={{ textAlign: "center", padding: "60px 24px", color: "#9ca3af" }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
           <div style={{ fontSize: 15, fontWeight: 700, color: "#374151", marginBottom: 6 }}>No applications yet</div>
@@ -581,7 +599,7 @@ export function AdmissionsList({
               + New Admission
             </Link>
           ) : (
-            <button onClick={() => setShowForm(true)} style={s.primaryBtn}>
+            <button onClick={() => setShowChoice(true)} style={s.primaryBtn}>
               + New Admission
             </button>
           )}
@@ -593,6 +611,7 @@ export function AdmissionsList({
   return (
     <div>
       {formModal}
+      {newAdmissionModals}
       {/* Edit overlay */}
       {editing && (
         <EditAdmissionOverlay
@@ -1000,7 +1019,7 @@ export function AdmissionsList({
             + New Admission
           </Link>
         ) : (
-          <button onClick={() => setShowForm(true)}
+          <button onClick={() => setShowChoice(true)}
             style={{ ...s.primaryBtn, padding: "8px 16px", fontSize: 12 }}>
             + New Admission
           </button>

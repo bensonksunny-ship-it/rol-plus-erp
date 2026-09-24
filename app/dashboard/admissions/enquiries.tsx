@@ -183,3 +183,45 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
     </div>
   );
 }
+
+/**
+ * Right-hand slide-over holding the whole enquiry workflow (form, filters,
+ * Mark contacted / Convert, enquiry QR). Opened from the "Enquiries +" header
+ * button on /dashboard/admissions so the main page stays focused on
+ * applications and screening.
+ */
+export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr }: {
+  wing: string;
+  onClose: () => void;
+  onConvert: (enquiry: Enquiry) => void;
+  onShowQr?: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <>
+      <style>{`@keyframes enqFade{from{opacity:0}to{opacity:1}}@keyframes enqSlide{from{transform:translateX(100%)}to{transform:translateX(0)}}`}</style>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 900, animation: "enqFade 0.2s ease" }} />
+      <aside role="dialog" aria-label="Enquiries" style={{
+        position: "fixed", top: 0, right: 0, height: "100dvh", width: "min(600px, 100vw)", zIndex: 901,
+        background: "#faf9f7", display: "flex", flexDirection: "column", boxShadow: "-8px 0 32px rgba(0,0,0,0.18)",
+        animation: "enqSlide 0.25s cubic-bezier(0.4,0,0.2,1)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #eee", background: "#fff", flexShrink: 0 }}>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 900, color: "#78350f" }}>Enquiries</div>
+            <div style={{ fontSize: 12, color: "#92400e", opacity: 0.8, marginTop: 2 }}>Leads from staff and the parent QR code</div>
+          </div>
+          <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1 }}>✕</button>
+        </div>
+        <div style={{ padding: 16, overflowY: "auto", flex: 1 }}>
+          <EnquiriesPanel wing={wing} onConvert={onConvert} onShowQr={onShowQr} />
+        </div>
+      </aside>
+    </>
+  );
+}

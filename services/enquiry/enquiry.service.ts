@@ -9,6 +9,7 @@
 import { collection, addDoc, doc, updateDoc, getDocs, onSnapshot, query, where, type Unsubscribe } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { normalizePhone } from "@/lib/enquiry";
+import { safeCompare } from "@/lib/sortKey";
 
 export type EnquiryStatus = "new" | "contacted" | "converted";
 export type EnquirySource = "staff" | "qr";
@@ -52,7 +53,7 @@ export async function getEnquiries(wing: string): Promise<Enquiry[]> {
   const snap = await getDocs(query(collection(db, "enquiries"), where("wing", "==", wing)));
   return snap.docs
     .map(d => ({ id: d.id, ...d.data() }) as Enquiry)
-    .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+    .sort((a, b) => safeCompare(b.createdAt, a.createdAt));
 }
 
 /**
@@ -69,7 +70,7 @@ export function subscribeEnquiries(
     snap => onData(
       snap.docs
         .map(d => ({ id: d.id, ...d.data() }) as Enquiry)
-        .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "")),
+        .sort((a, b) => safeCompare(b.createdAt, a.createdAt)),
     ),
     onError,
   );
