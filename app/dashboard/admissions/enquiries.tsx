@@ -2,11 +2,13 @@
 
 // Enquiries tab on /dashboard/admissions — quick prospect leads (from staff or
 // the parent QR code) with Mark contacted / Convert to admission actions.
+// The list is a live Firestore subscription, so "Online Lead" submissions from
+// the public /enquiry page show up under Open as soon as a parent sends one.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
 import {
-  getEnquiries, markEnquiryContacted,
+  subscribeEnquiries, markEnquiryContacted,
   type Enquiry, type EnquiryStatus,
 } from "@/services/enquiry/enquiry.service";
 import { formatPhone } from "@/lib/enquiry";
@@ -35,10 +37,12 @@ const actionBtn: React.CSSProperties = {
   fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 5,
 };
 
-export function EnquiriesPanel({ wing, onConvert, showFormInitially = false }: {
+export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = false }: {
   wing: string;
   /** Hand the lead to the full admission form. */
   onConvert: (enquiry: Enquiry) => void;
+  /** Opens the parent QR modal on the Quick Enquiry code. */
+  onShowQr?: () => void;
   showFormInitially?: boolean;
 }) {
   const [items, setItems]       = useState<Enquiry[]>([]);
@@ -49,18 +53,15 @@ export function EnquiriesPanel({ wing, onConvert, showFormInitially = false }: {
   const [busyId, setBusyId]     = useState<string | null>(null);
   const [flash, setFlash]       = useState("");
 
-  const reload = useCallback(async () => {
+  useEffect(() => {
+    setLoading(true);
     setErr("");
-    try {
-      setItems(await getEnquiries(wing));
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Could not load enquiries.");
-    } finally {
-      setLoading(false);
-    }
+    return subscribeEnquiries(
+      wing,
+      list => { setItems(list); setLoading(false); },
+      e => { setErr(e.message || "Could not load enquiries."); setLoading(false); },
+    );
   }, [wing]);
-
-  useEffect(() => { reload(); }, [reload]);
 
   const counts = useMemo(() => ({
     new:       items.filter(e => e.status === "new").length,
@@ -93,16 +94,22 @@ export function EnquiriesPanel({ wing, onConvert, showFormInitially = false }: {
             <div style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>Quick enquiry</div>
             <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>Capture a lead in seconds — convert it to a full admission later.</div>
           </div>
-          <button onClick={() => setShowForm(v => !v)} style={{ ...actionBtn, background: showForm ? "#f3f4f6" : ACCENT, color: showForm ? "#374151" : "#fff", border: "none", padding: "9px 16px" }}>
-            {showForm ? "Hide form" : "+ New enquiry"}
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {onShowQr && (
+              <button onClick={onShowQr} style={{ ...actionBtn, background: "#fff", color: "#b45309", border: "1.5px solid #fcd34d", padding: "9px 14px" }}>
+                <span aria-hidden>📱</span> Enquiry QR code
+              </button>
+            )}
+            <button onClick={() => setShowForm(v => !v)} style={{ ...actionBtn, background: showForm ? "#f3f4f6" : ACCENT, color: showForm ? "#374151" : "#fff", border: "none", padding: "9px 16px" }}>
+              {showForm ? "Hide form" : "+ New enquiry"}
+            </button>
+          </div>
         </div>
         {showForm && (
           <div style={{ marginTop: 18 }}>
             <EnquiryForm wing={wing} source="staff" onCreated={() => {
               setFlash("Enquiry saved.");
               setTimeout(() => setFlash(""), 2500);
-              reload();
             }} />
           </div>
         )}
@@ -140,7 +147,7 @@ export function EnquiriesPanel({ wing, onConvert, showFormInitially = false }: {
                     <span style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>{e.studentName}</span>
                     <span style={{ fontSize: 11, fontWeight: 700, color: st.color, background: st.bg, borderRadius: 999, padding: "2px 9px" }}>{st.label}</span>
                     {e.source === "qr" && (
-                      <span title="Submitted by a parent via the QR code" style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", background: "#f3f4f6", borderRadius: 999, padding: "2px 9px" }}>📱 QR</span>
+                      <span title="Submitted by a parent from their phone (QR code / enquiry link)" style={{ fontSize: 11, fontWeight: 700, color: "#6d28d9", background: "#ede9fe", borderRadius: 999, padding: "2px 9px" }}>📱 Online Lead</span>
                     )}
                   </div>
                   <div style={{ fontSize: 12.5, color: "#4b5563", marginTop: 4 }}>

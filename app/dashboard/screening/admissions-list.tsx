@@ -19,6 +19,7 @@ import {
 } from "@/services/screening/screening.service";
 import { AdmissionFormContent, OptionGroup, MultiOptionGroup } from "./admission-form";
 import { generateAdmissionCardPDF } from "@/lib/generateAdmissionCard";
+import { PhotoCaptureModal } from "./photo-capture-modal";
 
 const s: Record<string, React.CSSProperties> = {
   card: {
@@ -343,6 +344,8 @@ export function AdmissionsList({
   const [deleteId,     setDeleteId]     = useState<string | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [movingId,     setMovingId]     = useState<string | null>(null);
+  // Application whose candidate photo is being captured (QR submissions arrive without one).
+  const [photoFor,     setPhotoFor]     = useState<Record<string, unknown> | null>(null);
   const [menu,         setMenu]         = useState<{ id: string; rec: Record<string, unknown>; x: number; y: number } | null>(null);
 
   const otherWing      = wing === WINGS.SCHOOL_OF_MUSIC ? WINGS.ROL_PLUS : WINGS.SCHOOL_OF_MUSIC;
@@ -367,6 +370,10 @@ export function AdmissionsList({
   }
 
   function str(v: unknown): string   { return typeof v === "string" ? v : ""; }
+  /** Parent (QR) submission still waiting for staff to take the candidate photo. */
+  function photoPending(rec: Record<string, unknown>): boolean {
+    return str(rec.photoStatus) === "pending" && !str(rec.photo);
+  }
   function arr(v: unknown): string[] { return Array.isArray(v) ? v.map(String) : []; }
   function num(v: unknown): number | null { return typeof v === "number" ? v : null; }
 
@@ -788,7 +795,19 @@ export function AdmissionsList({
         }}>
           {/* Action row */}
           <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" as const }}>
-            {onResume ? (
+            {photoPending(selected) ? (
+              <button
+                onClick={() => setPhotoFor(selected)}
+                style={{
+                  padding: "9px 16px", borderRadius: 8, border: "none",
+                  background: "#d97706", color: "#fff",
+                  fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  display: "flex", alignItems: "center", gap: 6,
+                }}
+              >
+                📷 Take Photo to complete
+              </button>
+            ) : onResume ? (
               <button
                 onClick={() => onResume(selected)}
                 style={{
@@ -1027,6 +1046,17 @@ export function AdmissionsList({
                         📱 Online
                       </span>
                     )}
+                    {photoPending(rec) ? (
+                      <span title="Take the candidate photo to complete this application"
+                        style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 0, background: "#fee2e2", color: "#b91c1c", padding: "1px 7px", borderRadius: 99 }}>
+                        📷 Photo Pending
+                      </span>
+                    ) : str(rec.photoStatus) === "completed" && (
+                      <span title="Photo captured — ready for screening & enrolment"
+                        style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: 0, background: "#dcfce7", color: "#15803d", padding: "1px 7px", borderRadius: 99 }}>
+                        ✓ Completed
+                      </span>
+                    )}
                   </div>
                 </div>
                 <button
@@ -1063,7 +1093,14 @@ export function AdmissionsList({
                 <div style={{ fontSize: 11, color: "#9ca3af", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
                   {[centreName, date].filter(Boolean).join(" · ") || "—"}
                 </div>
-                {onResume ? (
+                {photoPending(rec) ? (
+                  <button
+                    onClick={() => setPhotoFor(rec)}
+                    style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "#d97706", cursor: "pointer", fontSize: 12, color: "#fff", fontWeight: 700, flexShrink: 0 }}
+                  >
+                    📷 Take Photo
+                  </button>
+                ) : onResume ? (
                   <button
                     onClick={() => onResume(rec)}
                     style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "#4f46e5", cursor: "pointer", fontSize: 12, color: "#fff", fontWeight: 700, flexShrink: 0 }}
@@ -1098,6 +1135,20 @@ export function AdmissionsList({
         })}
       </div>
 
+      {photoFor && (
+        <PhotoCaptureModal
+          admissionId={str(photoFor.id)}
+          name={str(photoFor.fullName)}
+          onClose={() => setPhotoFor(null)}
+          onSaved={photo => {
+            const id = str(photoFor.id);
+            const patch = { photo, photoStatus: "completed" };
+            setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, ...patch } : a));
+            setSelected(sel => sel && str(sel.id) === id ? { ...sel, ...patch } : sel);
+          }}
+        />
+      )}
+
       {/* Row overflow menu */}
       {menu && (() => {
         const rec = menu.rec;
@@ -1105,6 +1156,7 @@ export function AdmissionsList({
         const screened = !!getScreening(rec);
         const items: { label: string; onClick: () => void; danger?: boolean; disabled?: boolean }[] = [
           { label: "✏️  Edit details", onClick: () => { setSelected(rec); setEditing(rec); } },
+          { label: str(rec.photo) ? "📷  Retake / upload photo" : "📷  Take / upload photo", onClick: () => setPhotoFor(rec) },
         ];
         if (hasAdmNo)       items.push({ label: pdfLoading === str(rec.id) ? "…  Generating PDF" : "📄  Admission card PDF", onClick: () => handleRedownload(rec), disabled: pdfLoading === str(rec.id) });
         else if (screened) items.push({ label: pdfLoading === str(rec.id) ? "…  Generating PDF" : "📄  Request form PDF",   onClick: () => handleRedownload(rec), disabled: pdfLoading === str(rec.id) });

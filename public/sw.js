@@ -3,9 +3,11 @@
 //   /_next/static/**  → cache-first  (content-hashed, immutable)
 //   navigation        → network-first → offline.html fallback
 //   Firebase/auth     → network-only  (NEVER cached)
+//   /api/**, RSC data → network-only  (never cached — a stale payload from an
+//                       older build breaks client navigation on flaky mobile data)
 //   everything else   → network-first → cache fallback
 
-const CACHE_VER   = "v2";
+const CACHE_VER   = "v3";   // v3: purge RSC/API responses cached by v2
 const STATIC_CACHE = `rol-static-${CACHE_VER}`;
 const SHELL_CACHE  = `rol-shell-${CACHE_VER}`;
 const ALL_CACHES   = [STATIC_CACHE, SHELL_CACHE];
@@ -74,6 +76,14 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // API calls and Next.js RSC (client-navigation) payloads — network only.
+  if (
+    url.pathname.startsWith("/api/") ||
+    url.searchParams.has("_rsc") ||
+    request.headers.get("RSC") === "1" ||
+    request.headers.get("Next-Router-Prefetch") === "1"
+  ) return;
+
   // HTML navigation — network-first, fallback to offline page
   if (request.mode === "navigate") {
     event.respondWith(networkFirstNavigate(request));
@@ -135,10 +145,8 @@ async function networkFirstNavigate(request) {
     const cached = await caches.match(request);
     if (cached) return cached;
 
-    // Fall back to root (SPA shell)
-    const root = await caches.match("/");
-    if (root) return root;
-
+    // (No fallback to the cached "/" page: its HTML belongs to a different
+    // route and possibly an older build, which fails to hydrate.)
     // Last resort: offline page
     const offline = await caches.match("/offline.html");
     return (

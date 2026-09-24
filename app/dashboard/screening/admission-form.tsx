@@ -587,6 +587,8 @@ export function AdmissionFormContent({
       </div>
 
       {/* ── Candidate Photo ──────────────────────────────────────────────────── */}
+      {/* Not on the public /apply form: staff take the photo when the application arrives. */}
+      {!publicWing && (
       <div style={{ ...s.card, marginTop: 16 }}>
         <div style={s.sectionTitle}>Candidate Photo</div>
 
@@ -671,6 +673,7 @@ export function AdmissionFormContent({
           </div>
         </div>
       </div>
+      )}
 
       {publicWing && (
         <input value={website} onChange={e => setWebsite(e.target.value)} name="website" tabIndex={-1}

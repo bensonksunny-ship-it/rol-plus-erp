@@ -134,6 +134,16 @@ function AdmissionsWizard() {
   const [screening, setScreening]     = useState<FastTrackScreeningResult | null>(null);
   const [showQr, setShowQr]           = useState(false);
   const [tab, setTab]                 = useState<"applications" | "enquiries">("applications");
+  // Deep link: /dashboard/admissions?tab=enquiries opens straight on Enquiries.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "enquiries") setTab("enquiries");
+  }, []);
+  function selectTab(t: "applications" | "enquiries") {
+    setTab(t);
+    const url = new URL(window.location.href);
+    if (t === "enquiries") url.searchParams.set("tab", t); else url.searchParams.delete("tab");
+    window.history.replaceState(null, "", url);
+  }
   // Step 1 toggle: full application vs. a quick enquiry (lead only).
   const [formKind, setFormKind]       = useState<"full" | "quick">("full");
   // Set by "Convert to admission" — pre-fills the full form, marked converted on submit.
@@ -172,7 +182,7 @@ function AdmissionsWizard() {
   if (mode === "list") {
     return (
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: "0 0 60px" }}>
-        {showQr && <ParentQrModal wing={WING} onClose={() => setShowQr(false)} />}
+        {showQr && <ParentQrModal wing={WING} initialTarget={tab === "enquiries" ? "enquiry" : "apply"} onClose={() => setShowQr(false)} />}
         <div style={{ marginBottom: 18, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 19, fontWeight: 900, color: "#78350f" }}>Admissions — {WING_LABELS[WING]}</div>
@@ -187,7 +197,7 @@ function AdmissionsWizard() {
         </div>
         <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "1px solid #f0f0f0" }}>
           {([["applications", "Applications"], ["enquiries", "Enquiries"]] as const).map(([k, l]) => (
-            <button key={k} onClick={() => setTab(k)} style={{
+            <button key={k} onClick={() => selectTab(k)} style={{
               padding: "9px 16px", border: "none", background: "none", cursor: "pointer", fontFamily: "inherit",
               fontSize: 13.5, fontWeight: tab === k ? 800 : 500, color: tab === k ? "#92400e" : "#6b7280",
               borderBottom: tab === k ? `2.5px solid ${ACCENT}` : "2.5px solid transparent", marginBottom: -1,
@@ -197,7 +207,7 @@ function AdmissionsWizard() {
           ))}
         </div>
         {tab === "enquiries" ? (
-          <EnquiriesPanel wing={WING} onConvert={convertEnquiry} />
+          <EnquiriesPanel wing={WING} onConvert={convertEnquiry} onShowQr={() => setShowQr(true)} />
         ) : (
         <AdmissionsList
           onNewAdmission={() => { resetWizard(); setMode("wizard"); }}
@@ -266,7 +276,7 @@ function AdmissionsWizard() {
         <div style={card}>
           <EnquiryForm wing={WING} source="staff" onCreated={() => {
             resetWizard();
-            setTab("enquiries");
+            selectTab("enquiries");
             setMode("list");
           }} />
         </div>
@@ -701,10 +711,13 @@ function ReviewEnrol({
 }
 
 // ─── QR code for parents ──────────────────────────────────────────────────────
-// Parents scan this to open the public /apply form on their own phone. Their
-// submission lands in this wing's application list, ready for screening.
-function ParentQrModal({ wing, onClose }: { wing: string; onClose: () => void }) {
-  const [target, setTarget] = useState<"apply" | "enquiry">("apply");
+// Parents scan this to open the public /apply form (lands in this wing's
+// application list) or the /enquiry quick form (lands under Enquiries → Open
+// as an "Online Lead") on their own phone.
+function ParentQrModal({ wing, initialTarget = "apply", onClose }: {
+  wing: string; initialTarget?: "apply" | "enquiry"; onClose: () => void;
+}) {
+  const [target, setTarget] = useState<"apply" | "enquiry">(initialTarget);
   const url = `${window.location.origin}/${target}?wing=${encodeURIComponent(wing)}`;
   const [qr, setQr]         = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -759,7 +772,7 @@ function ParentQrModal({ wing, onClose }: { wing: string; onClose: () => void })
           <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 16 }}>
             {target === "apply"
               ? "Submitted forms appear in the application list below, ready for Fast Track screening."
-              : "Enquiries appear in the Enquiries tab for follow-up."}
+              : "Enquiries appear instantly under Enquiries → Open, tagged “Online Lead”."}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <input id="parent-apply-link" readOnly value={url} onFocus={e => e.currentTarget.select()}

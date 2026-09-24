@@ -1,56 +1,37 @@
 "use client";
 
 /**
- * ChunkErrorBoundary
+ * ChunkErrorBoundary — the app-wide (root layout) error boundary.
  *
- * Catches ChunkLoadError — the "Loading chunk N failed" error that occurs when
- * Vercel deploys a new build while a user has the old version open in their browser.
+ * 1. ChunkLoadError — the "Loading chunk N failed" error that occurs when
+ *    Vercel deploys a new build while a user has the old version open:
+ *      - New build is deployed → chunk filenames change (content hash in filename)
+ *      - Browser still has the old HTML/JS which references old chunk URLs
+ *      - Old chunk URLs return 404 → webpack throws ChunkLoadError
+ *      - We do ONE hard reload to get the new build; a localStorage timestamp
+ *        prevents an infinite reload loop if the new build also errors.
+ *    Without this, the browser retries the failed chunk endlessly, causing the
+ *    "page refreshing 2 times per second" loop seen in production on Vercel.
  *
- * What happens:
- *   1. New build is deployed → chunk filenames change (content hash in filename)
- *   2. Browser still has the old HTML/JS which references old chunk URLs
- *   3. Old chunk URLs return 404 → webpack throws ChunkLoadError
- *   4. React catches it here → we do ONE hard reload to get the new build
- *   5. A localStorage flag prevents infinite reload if the new build also errors
- *
- * Without this, the browser retries the failed chunk endlessly, causing the
- * "page refreshing 2 times per second" loop visible in production on Vercel.
+ * 2. Any other render error — logged with its stack (see lib/errorReporting)
+ *    and shown in a soft ErrorPanel with Try again / Go to Dashboard / Copy
+ *    error details. The boundary resets when the route changes. Errors inside
+ *    /dashboard pages are normally caught earlier by app/dashboard/error.tsx,
+ *    which keeps the sidebar usable; this one is the last line of defence.
  */
 
-import React from "react";
+import React, { useEffect } from "react";
+import { usePathname } from "next/navigation";
+import ErrorPanel from "@/components/ErrorPanel";
+import {
+  captureError, installGlobalErrorLogging, isChunkLoadError, reloadOnceForChunkError, type CapturedError,
+} from "@/lib/errorReporting";
 
 interface State {
   hasError: boolean;
   isChunkError: boolean;
   reloading: boolean;
-  error: Error | null;
-}
-
-function isChunkLoadError(error: Error): boolean {
-  return (
-    error.name === "ChunkLoadError" ||
-    /Loading chunk \d+ failed/i.test(error.message) ||
-    /loading css chunk/i.test(error.message) ||
-    /Failed to fetch dynamically imported module/i.test(error.message) ||
-    /Importing a module script failed/i.test(error.message)
-  );
-}
-
-function getReloadTimestamp(key: string): number {
-  try {
-    return parseInt(localStorage.getItem(key) ?? "0", 10);
-  } catch {
-    return 0;
-  }
-}
-
-function setReloadTimestamp(key: string, value: string): boolean {
-  try {
-    localStorage.setItem(key, value);
-    return true;
-  } catch {
-    return false;
-  }
+  captured: CapturedError | null;
 }
 
 function clearReloadTimestamp(key: string): void {
@@ -61,50 +42,42 @@ function clearReloadTimestamp(key: string): void {
   }
 }
 
-export default class ChunkErrorBoundary extends React.Component<
-  { children: React.ReactNode },
+/** Resets the boundary on route change and installs window-level error logging. */
+export default function ChunkErrorBoundary({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  useEffect(() => { installGlobalErrorLogging(); }, []);
+  return <Boundary resetKey={pathname ?? ""}>{children}</Boundary>;
+}
+
+class Boundary extends React.Component<
+  { children: React.ReactNode; resetKey: string },
   State
 > {
-  constructor(props: { children: React.ReactNode }) {
+  constructor(props: { children: React.ReactNode; resetKey: string }) {
     super(props);
-    this.state = { hasError: false, isChunkError: false, reloading: false, error: null };
+    this.state = { hasError: false, isChunkError: false, reloading: false, captured: null };
   }
 
   static getDerivedStateFromError(error: Error): Partial<State> {
-    return { hasError: true, isChunkError: isChunkLoadError(error), error };
+    return { hasError: true, isChunkError: isChunkLoadError(error) };
+  }
+
+  componentDidUpdate(prev: { resetKey: string }) {
+    if (this.state.hasError && !this.state.isChunkError && prev.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, captured: null });
+    }
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     if (!isChunkLoadError(error)) {
-      // A real bug, not a stale-build chunk 404 — log it so it's visible in
-      // the console instead of silently showing a generic fallback.
-      console.error("[ChunkErrorBoundary] Caught render error:", error, info.componentStack);
+      this.setState({ captured: captureError(error, "RootErrorBoundary", info.componentStack ?? undefined) });
       return;
     }
-
-    // Guard: only auto-reload ONCE per 30 seconds to avoid an infinite hard-reload loop
-    // if the new deploy itself is broken.
-    const RELOAD_KEY = "__chunk_reload_at__";
-    const lastReload = getReloadTimestamp(RELOAD_KEY);
-    const now = Date.now();
-
-    if (now - lastReload < 30_000) {
-      // Already reloaded recently — don't loop. Show the error fallback instead.
+    if (reloadOnceForChunkError()) {
+      this.setState({ reloading: true });
+    } else {
       console.error("[ChunkErrorBoundary] ChunkLoadError but reload guard active.", error);
-      return;
     }
-
-    const persisted = setReloadTimestamp(RELOAD_KEY, String(now));
-    if (!persisted) {
-      // If storage is blocked we cannot enforce the one-reload guard safely.
-      // In that case do not auto-reload; show fallback UI instead.
-      console.error("[ChunkErrorBoundary] Storage unavailable; skipping auto-reload to avoid loops.", error);
-      return;
-    }
-    this.setState({ reloading: true });
-
-    // Hard reload — bypasses the browser cache so the new chunk manifest is fetched.
-    window.location.reload();
   }
 
   render() {
@@ -185,52 +158,12 @@ export default class ChunkErrorBoundary extends React.Component<
     }
 
     if (this.state.hasError) {
-      // A genuine render error — don't claim it's a stale-build issue.
       return (
-        <div style={{
-          height: "100dvh",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "#0a0a0a",
-          color: "#f3f4f6",
-          fontFamily: "system-ui, sans-serif",
-          gap: 16,
-          padding: "0 24px",
-          textAlign: "center",
-        }}>
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" stroke="#ef4444" strokeWidth="1.5"/>
-            <path d="M12 8v4m0 4h.01" stroke="#ef4444" strokeWidth="1.8"
-              strokeLinecap="round"/>
-          </svg>
-          <div>
-            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>
-              Something went wrong
-            </div>
-            <div style={{ fontSize: 14, color: "#9ca3af", marginBottom: 20, maxWidth: 480 }}>
-              {process.env.NODE_ENV === "development" && this.state.error
-                ? this.state.error.message
-                : "An unexpected error occurred. Try reloading the page."}
-            </div>
-            <button
-              onClick={() => window.location.reload()}
-              style={{
-                padding: "10px 28px",
-                background: "#ef4444",
-                color: "#0a0a0a",
-                border: "none",
-                borderRadius: 8,
-                fontSize: 14,
-                fontWeight: 700,
-                cursor: "pointer",
-              }}
-            >
-              Reload
-            </button>
-          </div>
-        </div>
+        <ErrorPanel
+          fullScreen
+          error={this.state.captured}
+          onRetry={() => this.setState({ hasError: false, captured: null })}
+        />
       );
     }
 

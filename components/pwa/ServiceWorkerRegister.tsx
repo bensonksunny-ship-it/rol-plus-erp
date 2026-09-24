@@ -26,10 +26,14 @@ export default function ServiceWorkerRegister() {
     }
 
     let refreshing = false;
+    // A first-ever install also fires controllerchange (clients.claim) — that
+    // is not an update, and reloading then interrupts whatever the user is
+    // doing (seen as a double page load on every fresh visit).
+    const hadController = !!navigator.serviceWorker.controller;
 
-    // When a new SW takes control, do ONE hard reload to pick up fresh assets.
+    // When a NEW SW replaces an old one, do ONE hard reload to pick up fresh assets.
     navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (refreshing) return;
+      if (!hadController || refreshing) return;
       refreshing = true;
       window.location.reload();
     });

@@ -118,6 +118,9 @@ export async function POST(req: NextRequest) {
       initialExperience:    null,
       parentPartnerProgram: "",
       photo,
+      // Parents no longer attach a photo; staff capture it on the Admissions
+      // list ("Photo Pending" → Take Photo → "completed").
+      photoStatus:          photo ? "completed" : "pending",
       submittedBy:          "",
       source:               "public_qr",
       submittedAt:          new Date().toISOString(),

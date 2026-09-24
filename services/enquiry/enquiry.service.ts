@@ -6,7 +6,7 @@
 // lead to the full admission form; the enquiry is then marked converted.
 // =============================================================================
 
-import { collection, addDoc, doc, updateDoc, getDocs, query, where } from "firebase/firestore";
+import { collection, addDoc, doc, updateDoc, getDocs, onSnapshot, query, where, type Unsubscribe } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { normalizePhone } from "@/lib/enquiry";
 
@@ -53,6 +53,26 @@ export async function getEnquiries(wing: string): Promise<Enquiry[]> {
   return snap.docs
     .map(d => ({ id: d.id, ...d.data() }) as Enquiry)
     .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+}
+
+/**
+ * Live enquiry list for a wing, newest first — parent submissions from the
+ * public /enquiry page appear without a reload. Returns the unsubscribe fn.
+ */
+export function subscribeEnquiries(
+  wing: string,
+  onData: (items: Enquiry[]) => void,
+  onError: (err: Error) => void,
+): Unsubscribe {
+  return onSnapshot(
+    query(collection(db, "enquiries"), where("wing", "==", wing)),
+    snap => onData(
+      snap.docs
+        .map(d => ({ id: d.id, ...d.data() }) as Enquiry)
+        .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "")),
+    ),
+    onError,
+  );
 }
 
 export async function markEnquiryContacted(id: string): Promise<void> {
