@@ -24,6 +24,7 @@ import { db } from "@/services/firebase/firebase";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { saveAdmission } from "@/services/screening/screening.service";
+import { canEnterAdmissionNo, cleanAdmissionNo, isAdmissionNoTaken } from "@/lib/admissionNumber";
 import type { Wing } from "@/types";
 
 const s: Record<string, React.CSSProperties> = {
@@ -143,11 +144,17 @@ export function AdmissionFormContent({
   const inputStyle: React.CSSProperties = publicWing ? { ...s.input, fontSize: 16 } : s.input;
   const [website, setWebsite] = useState(""); // honeypot (public mode only)
 
+  // Admission number — typed in by a Founder / Director / Chief Teacher on the
+  // School of Music staff form (never generated, never asked of parents).
+  // Teachers don't see it; leadership adds it at the Enrol step instead.
+  const showAdmNo = minimal && !publicWing && canEnterAdmissionNo(user?.role);
+  const [admNo, setAdmNo] = useState("");
+
   // Personal information
   // ROL+ (non-minimal) keeps a single Full Name field. Wing 2 (minimal) splits
   // it into first / middle / last; `effectiveName` is the combined value used
   // everywhere downstream so the saved record keeps one shape.
-  const nameParts = (initial?.studentName ?? "").trim().split(/s+/).filter(Boolean);
+  const nameParts = (initial?.studentName ?? "").trim().split(/\s+/).filter(Boolean);
   const [fullName,      setFullName]      = useState(initial?.studentName?.trim() ?? "");
   const [firstName,     setFirstName]     = useState(nameParts[0] ?? "");
   const [middleName,    setMiddleName]    = useState("");
@@ -216,7 +223,8 @@ export function AdmissionFormContent({
 
   const dobOk = !minimal || computedAge !== "";
 
-  const canSubmit = nameOk && dobOk && phone.trim().length > 0;
+  const admNoOk   = !showAdmNo || admNo.trim().length >= 4;
+  const canSubmit = nameOk && dobOk && phone.trim().length > 0 && admNoOk;
 
   function compressImage(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -250,6 +258,9 @@ export function AdmissionFormContent({
     if (!canSubmit || saving) return;
     setSaving(true); setSaveErr("");
     try {
+      if (showAdmNo && await isAdmissionNoTaken(admNo)) {
+        throw new Error(`Admission number ${admNo.trim()} is already in use. Please check and enter a different one.`);
+      }
       const payload = {
         wing,
         fullName:            effectiveName,
@@ -276,6 +287,11 @@ export function AdmissionFormContent({
         parentPartnerProgram,
         photo:               photoDataUrl ?? null,
         submittedBy:         user?.uid ?? "",
+        ...(showAdmNo ? {
+          admissionNumber:      admNo.trim(),
+          admissionNoEnteredBy: user?.uid ?? "",
+          admissionNoEnteredAt: new Date().toISOString(),
+        } : {}),
       };
       let admissionId: string;
       if (publicWing) {
@@ -311,6 +327,7 @@ export function AdmissionFormContent({
     setInstrumentsPlayed([]); setMusicalSkill(""); setHowHeardAboutUs("");
     setInitialExperience(null); setParentPartnerProgram("");
     setPhotoDataUrl(null);
+    setAdmNo("");
     setSaved(false); setSaveErr("");
   }
 
@@ -350,6 +367,22 @@ export function AdmissionFormContent({
       {/* ── Personal Information ─────────────────────────────────────────────── */}
       <div style={s.card}>
         <div style={s.sectionTitle}>Personal Information</div>
+
+        {showAdmNo && (
+          <div style={{ marginBottom: 18, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 12, padding: "12px 14px" }}>
+            <label style={s.label}>Admission Number *</label>
+            <input
+              value={admNo}
+              onChange={e => setAdmNo(cleanAdmissionNo(e.target.value))}
+              placeholder="Enter the admission number"
+              autoComplete="off"
+              style={{ ...inputStyle, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.06em", background: "#fff" }}
+            />
+            <div style={{ fontSize: 11, color: admNo && !admNoOk ? "#dc2626" : "#92400e", marginTop: 6 }}>
+              {admNo && !admNoOk ? "At least 4 characters." : "Entered by the Chief Teacher / Director — checked for duplicates on save."}
+            </div>
+          </div>
+        )}
 
         {minimal ? (
           <>

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/services/firebase/firebase-admin";
 import { isElevatedAccount } from "@/lib/elevatedAccount";
 import { isWing } from "@/lib/wing";
-import { sanitizeFastTrackTests, screeningQuestionsDocId } from "@/lib/screeningQuestions";
+import { SCREENING_QUESTIONS_VERSION, sanitizeFastTrackTests, screeningQuestionsDocId } from "@/lib/screeningQuestions";
 
 // =============================================================================
 // Save / reset a wing's Fast Track screening questions.
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     }
 
     const tests = sanitizeFastTrackTests(body.tests);
-    await ref.set({ tests, updatedAt: new Date().toISOString(), updatedBy: decoded.uid });
+    await ref.set({ tests, version: SCREENING_QUESTIONS_VERSION, updatedAt: new Date().toISOString(), updatedBy: decoded.uid });
     return NextResponse.json({ success: true, tests });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to save screening questions.";

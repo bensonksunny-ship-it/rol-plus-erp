@@ -1,8 +1,42 @@
 import jsPDF from "jspdf";
+import { screeningSectionLines } from "@/lib/screeningQuestions";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function s(v: unknown): string { return typeof v === "string" ? v : ""; }
 function arr(v: unknown): string[] { return Array.isArray(v) ? v.map(String) : []; }
+
+/** Card instrument from an application's chosen instruments (default keyboard). */
+export function cardInstrument(instruments: unknown): "keyboard" | "guitar" | "drums" {
+  const set = arr(instruments).map(i => i.toLowerCase());
+  if (set.some(i => i === "keyboard" || i === "piano")) return "keyboard";
+  if (set.includes("guitar")) return "guitar";
+  if (set.includes("drums")) return "drums";
+  return "keyboard";
+}
+
+/**
+ * A saved Fast Track screening (School of Music, `screenings` collection) in
+ * the shape generateAdmissionCardPDF prints: section marks (5 × /3, or 3 × /5
+ * for an older screening) + total, or the v1 H/M/L grades.
+ */
+export function fastTrackCardScreening(sc: Record<string, unknown>, instrument: string): Record<string, unknown> {
+  const ss = sc.screeningScores as Record<string, unknown> | undefined;
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  return {
+    instrument,
+    stream:       "fast-track",
+    assessmentId: s(sc.id),
+    config:       sc.config,
+    ...(ss
+      ? { ft_sections: screeningSectionLines(sc), ft_totalScore: num(ss.total) }
+      : {
+          ft_rhythmGrade:    sc.rhythmSyncGrade,
+          ft_dexterityGrade: sc.dexterityGrade,
+          ft_pitchGrade:     sc.pitchEchoGrade,
+          ft_totalScore:     num(sc.rhythmScore) + num(sc.pitchScore) + num(sc.motorScore),
+        }),
+  };
+}
 
 export function toAdmissionNumber(id: string): string {
   let n = 0;
@@ -30,33 +64,120 @@ function fill(doc: jsPDF, [r, g, b]: [number, number, number]) { doc.setFillColo
 function stroke(doc: jsPDF, [r, g, b]: [number, number, number]) { doc.setDrawColor(r, g, b); }
 function color(doc: jsPDF, [r, g, b]: [number, number, number]) { doc.setTextColor(r, g, b); }
 
-// Section header — 8 mm band, returns y + 9
-function sh(doc: jsPDF, label: string, y: number, W: number, M: number): number {
+// ─── Layout grid (mm) ────────────────────────────────────────────────────────
+// Every key/value block on the card uses the same grid so labels and values
+// line up in straight columns across all sections:
+//   | label (LABEL_W) | value (wraps) |  COL_GAP  | label (LABEL_W) | value (wraps) |
+// Rows are laid out in pairs (left + right cell share one row), and a row is as
+// tall as its tallest wrapped cell, so the two columns never drift apart.
+const PAGE_W   = 210;
+const MARGIN   = 14;
+const CONTENT_W = PAGE_W - MARGIN * 2;          // 182
+const COL_GAP  = 8;
+const COL_W    = (CONTENT_W - COL_GAP) / 2;     // 87
+const COL2_X   = MARGIN + COL_W + COL_GAP;
+const LABEL_W  = 33;
+const FONT_SZ  = 7.5;
+const LINE_H   = 3.6;   // wrapped-line spacing
+const ROW_PAD  = 1.9;   // extra space under each row
+const SECTION_GAP = 4;  // space above each section header
+const FOOTER_Y = 282;
+const BOTTOM_LIMIT = FOOTER_Y - 6;
+
+type KV = [label: string, value: string];
+
+/** Empty / whitespace-only → "—", so every row keeps its full height. */
+function dash(v: string): string { return v && v.trim() ? v.trim() : "—"; }
+
+// Section header — full content-width band, returns the y to start the rows at.
+function sh(doc: jsPDF, label: string, y: number): number {
+  y += SECTION_GAP;
   fill(doc, CLR.primarySoft);
-  doc.rect(M, y, W - M * 2, 8, "F");
+  doc.rect(MARGIN, y, CONTENT_W, 7, "F");
+  fill(doc, CLR.primary);
+  doc.rect(MARGIN, y, 1.2, 7, "F");               // accent strip
   color(doc, CLR.primary);
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(7.5);
-  doc.text(label.toUpperCase(), M + 3, y + 5.5);
-  return y + 9;
+  doc.setFontSize(FONT_SZ);
+  doc.text(label.toUpperCase(), MARGIN + 3.5, y + 4.8);
+  return y + 7 + 4.5;                              // first row baseline
 }
 
-// Label + value row — 5.5 mm line height
-function lv(doc: jsPDF, label: string, value: string, x: number, y: number, lw = 38): number {
+/** Lines for one label/value cell inside a column of width `w`. */
+function cellLines(doc: jsPDF, [label, value]: KV, w: number): { l: string[]; v: string[] } {
+  doc.setFontSize(FONT_SZ);
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(7.5);
+  const l = doc.splitTextToSize(label, LABEL_W - 2) as string[];
+  doc.setFont("helvetica", "normal");
+  const v = doc.splitTextToSize(dash(value), w - LABEL_W) as string[];
+  return { l, v };
+}
+
+function drawCell(doc: jsPDF, cell: { l: string[]; v: string[] }, x: number, y: number) {
+  doc.setFontSize(FONT_SZ);
+  doc.setFont("helvetica", "bold");
   color(doc, CLR.gray500);
-  doc.text(label, x, y);
+  doc.text(cell.l, x, y, { lineHeightFactor: LINE_H / (FONT_SZ * 0.3528) });
   doc.setFont("helvetica", "normal");
   color(doc, CLR.gray900);
-  doc.text(value || "—", x + lw, y);
-  return y + 5.5;
+  doc.text(cell.v, x + LABEL_W, y, { lineHeightFactor: LINE_H / (FONT_SZ * 0.3528) });
 }
 
-function hr(doc: jsPDF, y: number, M: number, W: number) {
+const rowHeight = (lines: number) => Math.max(1, lines) * LINE_H + ROW_PAD;
+
+/**
+ * Two-column key/value grid. Cells fill left column then right column row by
+ * row (left[i] beside right[i]); returns the y after the last row.
+ */
+function grid2(doc: jsPDF, left: KV[], right: KV[], y: number): number {
+  const rows = Math.max(left.length, right.length);
+  for (let i = 0; i < rows; i++) {
+    const a = left[i]  ? cellLines(doc, left[i],  COL_W) : null;
+    const b = right[i] ? cellLines(doc, right[i], COL_W) : null;
+    const lines = Math.max(a ? Math.max(a.l.length, a.v.length) : 0, b ? Math.max(b.l.length, b.v.length) : 0);
+    y = ensureSpace(doc, y, rowHeight(lines));
+    if (a) drawCell(doc, a, MARGIN, y);
+    if (b) drawCell(doc, b, COL2_X, y);
+    y += rowHeight(lines);
+  }
+  return y;
+}
+
+/** Single key/value rows spanning width `w` from `x` (used beside the photo and for long values). */
+function grid1(doc: jsPDF, rows: KV[], x: number, y: number, w: number): number {
+  for (const kv of rows) {
+    const c = cellLines(doc, kv, w);
+    const lines = Math.max(c.l.length, c.v.length);
+    y = ensureSpace(doc, y, rowHeight(lines));
+    drawCell(doc, c, x, y);
+    y += rowHeight(lines);
+  }
+  return y;
+}
+
+/** Start a new page when the next `h` mm would run into the footer. */
+function ensureSpace(doc: jsPDF, y: number, h: number): number {
+  if (y + h <= BOTTOM_LIMIT) return y;
+  doc.addPage();
+  return MARGIN + 6;
+}
+
+/** Rounded chip sized to its text; returns the x after it (+ gap). */
+function chip(doc: jsPDF, text: string, x: number, y: number, bg: [number, number, number], fg: [number, number, number]): number {
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(FONT_SZ);
+  const w = doc.getTextWidth(text) + 5;
+  fill(doc, bg);
+  doc.roundedRect(x, y, w, 7, 1.5, 1.5, "F");
+  color(doc, fg);
+  doc.text(text, x + 2.5, y + 4.8);
+  return x + w + 3;
+}
+
+function hr(doc: jsPDF, y: number) {
   stroke(doc, CLR.gray300);
   doc.setLineWidth(0.2);
-  doc.line(M, y, W - M, y);
+  doc.line(MARGIN, y, PAGE_W - MARGIN, y);
 }
 
 // ─── Main generator ───────────────────────────────────────────────────────────
@@ -65,10 +186,8 @@ export async function generateAdmissionCardPDF(
   screening: Record<string, unknown> | null
 ) {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-  const W = 210;
-  const M = 14;
-  const GAP = 5;          // standard gap after hr
-  const COL2 = M + (W - M * 2) / 2 + 2;
+  const W = PAGE_W;
+  const M = MARGIN;
 
   const admNo  = s(admission.admissionNumber) || "";
   const isCard = admNo.length > 0;
@@ -134,64 +253,57 @@ export async function generateAdmissionCardPDF(
   color(doc, CLR.gray900);
   doc.text(s(admission.fullName) || "—", IX, y + 7);
 
-  let ry = y + 14;
-  ry = lv(doc, "Date of Birth:",     s(admission.dob)         || "—", IX, ry, 32);
-  ry = lv(doc, "Age:",               s(admission.age) ? `${s(admission.age)} yrs` : "—", IX, ry, 32);
-  ry = lv(doc, "Parent / Guardian:", s(admission.parentName)  || "—", IX, ry, 32);
-  ry = lv(doc, "Working Status:",    s(admission.workingStatus)|| "—", IX, ry, 32);
+  const ageStr = s(admission.age) ? `${s(admission.age)} yrs` : "";
+  const ry = grid1(doc, [
+    ["Date of Birth:",     s(admission.dob)],
+    ["Age:",               ageStr],
+    ["Parent / Guardian:", s(admission.parentName)],
+    ["Working Status:",    s(admission.workingStatus)],
+  ], IX, y + 14, PAGE_W - MARGIN - IX);
 
-  y = Math.max(y + PHOTO_H, ry) + GAP;
-  hr(doc, y, M, W);
-  y += GAP;
+  y = Math.max(y + PHOTO_H, ry - ROW_PAD) + 1;
 
-  // ── CONTACT & LOCATION (2-col) ────────────────────────────────────────────
-  y = sh(doc, "Contact & Location", y, W, M);
-  const addr = [s(admission.address1), s(admission.address2)].filter(Boolean).join(", ") || "—";
-  let c1y = y;
-  c1y = lv(doc, "Phone:",   s(admission.phone)  || "—", M,    c1y, 22);
-  c1y = lv(doc, "Email:",   s(admission.email)  || "—", M,    c1y, 22);
-  c1y = lv(doc, "Centre:",  s(admission.centre) || "—", M,    c1y, 22);
-  let c2y = y;
-  c2y = lv(doc, "School / Company:", s(admission.schoolCompany) || "—", COL2, c2y, 34);
-  c2y = lv(doc, "Address:",          addr,                               COL2, c2y, 34);
+  // ── CONTACT & LOCATION ────────────────────────────────────────────────────
+  y = sh(doc, "Contact & Location", y);
+  const addr = [s(admission.address1), s(admission.address2)].filter(Boolean).join(", ");
+  y = grid2(doc,
+    [["Phone:", s(admission.phone)], ["Email:", s(admission.email)], ["Centre:", s(admission.centre)]],
+    [["School / Company:", s(admission.schoolCompany)], ["Address:", addr]],
+    y);
 
-  y = Math.max(c1y, c2y) + GAP;
-  hr(doc, y, M, W);
-  y += GAP;
-
-  // ── MUSICAL PROFILE (2-col) ───────────────────────────────────────────────
-  y = sh(doc, "Musical Profile", y, W, M);
-  let m1y = y;
-  m1y = lv(doc, "Instruments to Learn:", arr(admission.instrumentsToLearn).join(", ") || "—", M, m1y, 40);
-  m1y = lv(doc, "Purpose of Learning:",  s(admission.purposeOfLearning)  || "—",              M, m1y, 40);
-  m1y = lv(doc, "Previous Experience:",  s(admission.previousExperience) || "—",              M, m1y, 40);
-  let m2y = y;
-  m2y = lv(doc, "Instruments Played:",  arr(admission.instrumentsPlayed).join(", ") || "—", COL2, m2y, 34);
-  m2y = lv(doc, "Musical Skill Level:", s(admission.musicalSkill)   || "—",                 COL2, m2y, 34);
-  m2y = lv(doc, "How Heard About Us:",  s(admission.howHeardAboutUs)|| "—",                 COL2, m2y, 34);
-
-  y = Math.max(m1y, m2y) + GAP;
-  hr(doc, y, M, W);
-  y += GAP;
+  // ── MUSICAL PROFILE ───────────────────────────────────────────────────────
+  y = sh(doc, "Musical Profile", ensureSpace(doc, y, 30));
+  y = grid2(doc,
+    [
+      ["Instruments to Learn:", arr(admission.instrumentsToLearn).join(", ")],
+      ["Purpose of Learning:",  s(admission.purposeOfLearning)],
+      ["Previous Experience:",  s(admission.previousExperience)],
+    ],
+    [
+      ["Instruments Played:",  arr(admission.instrumentsPlayed).join(", ")],
+      ["Musical Skill Level:", s(admission.musicalSkill)],
+      ["How Heard About Us:",  s(admission.howHeardAboutUs)],
+    ],
+    y);
 
   // ── SCREENING RESULTS ─────────────────────────────────────────────────────
-  y = sh(doc, "Screening Results", y, W, M);
+  y = sh(doc, "Screening Results", ensureSpace(doc, y, 30));
 
   if (!screening) {
     fill(doc, [254, 249, 195]);
-    doc.roundedRect(M, y, W - M * 2, 10, 2, 2, "F");
+    doc.roundedRect(M, y - 3.5, CONTENT_W, 9, 2, 2, "F");
     doc.setFont("helvetica", "bold");
     doc.setFontSize(8);
     color(doc, [146, 64, 14]);
-    doc.text("Screening Pending — not yet conducted", M + 4, y + 7);
-    y += 15;
+    doc.text("Screening Pending — not yet conducted", M + 4, y + 2);
+    y += 9;
   } else {
     const instrument = s(screening.instrument);
     const stream     = s(screening.stream);
     const assessId   = s(screening.assessmentId);
     const config     = screening.config as Record<string, unknown> | undefined;
-    const trackName  = config ? s(config.track) : "—";
-    const strategy   = config ? s(config.syllabusStrategy) : "—";
+    const trackName  = config ? s(config.track) : "";
+    const strategy   = config ? s(config.syllabusStrategy) : "";
     const metronome  = config?.metronome ? `Yes @ ${config.metronomeBpm} BPM` : "No";
 
     const instrLabel  = instrument.charAt(0).toUpperCase() + instrument.slice(1);
@@ -199,61 +311,48 @@ export async function generateAdmissionCardPDF(
     const trackColor: [number, number, number] =
       trackName.includes("Zeta") ? CLR.green : trackName.includes("Epsilon") ? CLR.amber : CLR.red;
 
-    // Chips row
-    fill(doc, CLR.primarySoft);
-    doc.roundedRect(M, y, 30, 7, 1.5, 1.5, "F");
-    doc.setFont("helvetica", "bold"); doc.setFontSize(7.5);
-    color(doc, CLR.primary);
-    doc.text(instrLabel, M + 2, y + 5);
+    // Chips row — each chip sized to its text
+    const chipY = y - 4;
+    let cx = M;
+    if (instrLabel)  cx = chip(doc, instrLabel,  cx, chipY, CLR.primarySoft, CLR.primary);
+    if (streamLabel) cx = chip(doc, streamLabel, cx, chipY, CLR.gray100, CLR.gray700);
+    if (trackName)   chip(doc, trackName, cx, chipY,
+      trackColor.map(c => Math.min(255, c + 210)) as [number, number, number], trackColor);
+    y = chipY + 7 + 5;
 
-    fill(doc, CLR.gray100);
-    doc.roundedRect(M + 33, y, 40, 7, 1.5, 1.5, "F");
-    color(doc, CLR.gray700);
-    doc.text(streamLabel, M + 35, y + 5);
+    const left: KV[] = [
+      ["Assessment ID:", assessId],
+      ["Slab Assigned:", trackName],
+    ];
+    const right: KV[] = [["Metronome:", metronome]];
+    if (config) {
+      if (instrument === "guitar") {
+        right.push(["Strum Technique:",  s(config.strumTechnique)], ["Chord Complexity:", s(config.chordComplexity)]);
+      }
+      if (instrument === "keyboard") {
+        right.push(["Hand Integration:", s(config.handIntegration)], ["Chords:", s(config.chords as string) || "None"]);
+      }
+      if (instrument === "drums") {
+        right.push(["Stick Type:", s(config.stickType)], ["Groove Complexity:", s(config.grooveComplexity)]);
+      }
+    }
+    y = grid2(doc, left, right, y);
 
-    fill(doc, [...trackColor.map(c => Math.min(255, c + 210))] as [number, number, number]);
-    doc.roundedRect(M + 76, y, 50, 7, 1.5, 1.5, "F");
-    color(doc, trackColor);
-    doc.text(trackName, M + 78, y + 5);
-    y += 11;
-
-    // 2-col data
-    let s1y = y;
-    s1y = lv(doc, "Assessment ID:", assessId,  M, s1y, 32);
-    s1y = lv(doc, "Slab Assigned:", trackName, M, s1y, 32);
-    s1y = lv(doc, "Strategy:",      strategy,  M, s1y, 32);
-
+    // Long values get the full content width so they wrap cleanly.
     const grades: string[] = [];
-    if (screening.ft_rhythmGrade)    grades.push(`Rhythm: ${screening.ft_rhythmGrade}`);
+    // Fast Track 15-mark rubric: pre-formatted section marks ("Rhythm Sync: 4/5").
+    const sections = Array.isArray(screening.ft_sections) ? (screening.ft_sections as unknown[]).map(String) : [];
+    if (sections.length) grades.push(...sections);
+    else if (screening.ft_rhythmGrade) grades.push(`Rhythm: ${screening.ft_rhythmGrade}`);
     if (screening.ft_dexterityGrade) grades.push(`Dexterity: ${screening.ft_dexterityGrade}`);
     if (instrument === "guitar"   && screening.ft_pitchGrade)    grades.push(`Pitch: ${screening.ft_pitchGrade}`);
     if (instrument === "keyboard" && screening.ft_pitchGrade)    grades.push(`Pitch Echo: ${screening.ft_pitchGrade}`);
     if (instrument === "drums"    && screening.ft_rudimentGrade) grades.push(`Rudiments: ${screening.ft_rudimentGrade}`);
-    if (typeof screening.ft_totalScore === "number") grades.push(`Score: ${screening.ft_totalScore}/15`);
-    if (grades.length > 0) s1y = lv(doc, "Clinical Scores:", grades.join("  |  "), M, s1y, 32);
-
-    let s2y = y;
-    s2y = lv(doc, "Metronome:", metronome, COL2, s2y, 34);
-    if (config) {
-      if (instrument === "guitar") {
-        s2y = lv(doc, "Strum Technique:",  s(config.strumTechnique),  COL2, s2y, 34);
-        s2y = lv(doc, "Chord Complexity:", s(config.chordComplexity), COL2, s2y, 34);
-      }
-      if (instrument === "keyboard") {
-        s2y = lv(doc, "Hand Integration:", s(config.handIntegration),            COL2, s2y, 34);
-        s2y = lv(doc, "Chords:",           s(config.chords as string) || "None", COL2, s2y, 34);
-      }
-      if (instrument === "drums") {
-        s2y = lv(doc, "Stick Type:",        s(config.stickType),        COL2, s2y, 34);
-        s2y = lv(doc, "Groove Complexity:", s(config.grooveComplexity), COL2, s2y, 34);
-      }
-    }
-
-    y = Math.max(s1y, s2y) + GAP;
+    if (typeof screening.ft_totalScore === "number") grades.push(`Total: ${screening.ft_totalScore}/15`);
+    const wide: KV[] = [["Strategy:", strategy]];
+    if (grades.length > 0) wide.push(["Clinical Scores:", grades.join("   |   ")]);
+    y = grid1(doc, wide, M, y, CONTENT_W);
   }
-
-  hr(doc, y, M, W);
-  y += GAP;
 
   // ── REQUEST FORM EXTRAS ───────────────────────────────────────────────────
   if (!isCard) {
@@ -272,17 +371,21 @@ export async function generateAdmissionCardPDF(
           "All fee, attendance, and academic policies of ROL's School of Music are duly acknowledged.",
         ];
 
-    y = sh(doc, "Acknowledgement", y, W, M);
+    y = sh(doc, "Acknowledgement", ensureSpace(doc, y, 20));
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    color(doc, CLR.gray700);
+    doc.setFontSize(FONT_SZ);
     for (const line of ackLines) {
-      doc.text(`•  ${line}`, M + 2, y, { maxWidth: W - M * 2 - 4 });
-      y += 5.5;
+      const wrapped = doc.splitTextToSize(line, CONTENT_W - 8) as string[];
+      y = ensureSpace(doc, y, rowHeight(wrapped.length));
+      color(doc, CLR.gray700);
+      doc.text("•", M + 2, y);
+      doc.text(wrapped, M + 6, y, { lineHeightFactor: LINE_H / (FONT_SZ * 0.3528) });
+      y += rowHeight(wrapped.length);
     }
-    y += GAP;
-    hr(doc, y, M, W);
-    y += GAP;
+    y += 2;
+    hr(doc, y);
+    y += 4;
+    y = ensureSpace(doc, y, 40);
 
     // ── SEAL + ADMISSION NUMBER + DIRECTOR (36 mm tall) ───────────────────
     const ROW_H   = 36;
@@ -336,22 +439,26 @@ export async function generateAdmissionCardPDF(
     doc.text("ROL's School of Music", MX, SIG_Y + 9.5, { align: "center" });
 
     y += ROW_H;
-    hr(doc, y, M, W);
-    y += GAP;
   }
 
   // ── FOOTER BAND ──────────────────────────────────────────────────────────
-  const FOOT_Y = 282;
-  fill(doc, CLR.primary);
-  doc.rect(0, FOOT_Y, W, 15, "F");
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(7);
-  color(doc, [200, 200, 255]);
-  doc.text(
-    `ROL+ Music Academy  •  ${isCard ? "Admission Card" : "Admission Request Form"}  •  Computer-generated document.`,
-    W / 2, FOOT_Y + 6, { align: "center" }
-  );
-  doc.text(`Issued: ${new Date().toLocaleDateString("en-IN")}`, W / 2, FOOT_Y + 11, { align: "center" });
+  const pages = doc.getNumberOfPages();
+  for (let pg = 1; pg <= pages; pg++) {
+    doc.setPage(pg);
+    fill(doc, CLR.primary);
+    doc.rect(0, FOOTER_Y, W, 15, "F");
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    color(doc, [200, 200, 255]);
+    doc.text(
+      `ROL+ Music Academy  •  ${isCard ? "Admission Card" : "Admission Request Form"}  •  Computer-generated document.`,
+      W / 2, FOOTER_Y + 6, { align: "center" }
+    );
+    doc.text(
+      `Issued: ${new Date().toLocaleDateString("en-IN")}${pages > 1 ? `  •  Page ${pg} of ${pages}` : ""}`,
+      W / 2, FOOTER_Y + 11, { align: "center" }
+    );
+  }
 
   // ── SAVE ─────────────────────────────────────────────────────────────────
   const name      = s(admission.fullName).replace(/\s+/g, "-") || "Student";

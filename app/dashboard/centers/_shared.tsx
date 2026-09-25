@@ -189,9 +189,24 @@ const ATT_STATUS_COLOR: Record<string, { bg: string; fg: string }> = {
 // ─── Center Detail data types ────────────────────────────────────────────────
 
 interface CenterAttRec { id: string; studentUid: string; date: string; status: string; }
-interface CenterStudentRec { uid: string; name: string; admissionNo: string; status: string; createdAt: string; }
+interface CenterStudentRec {
+  uid: string; name: string; admissionNo: string; status: string; createdAt: string;
+  /** Profile photo (admission `photo` data URL, or an uploaded photoURL) — "" when none. */
+  photo?: string;
+  instrument?: string;
+  batchId?: string | null;
+}
+
+/** First non-empty photo field on a user doc. */
+function studentPhoto(st: Record<string, unknown>): string {
+  for (const k of ["photo", "photoURL", "photoUrl", "avatarUrl"]) {
+    const v = st[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
 interface CenterTxRec { amount: number; date: string; status: string; type?: string; method?: string; }
-interface PickedStudent { uid: string; name: string; admissionNo: string; createdAt: string; }
+interface PickedStudent { uid: string; name: string; admissionNo: string; createdAt: string; photo?: string; instrument?: string; batchId?: string | null; }
 
 /** A student counts as "active" whether their `status` field carries the
  *  Students page's own vocabulary ("active") or the Registry's ("confirm" /
@@ -343,6 +358,9 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
             admissionNo: (st.admissionNo ?? st.admissionNumber ?? "") as string,
             status: (st.status ?? st.studentStatus ?? "active") as string,
             createdAt: toISODateLocal(st.createdAt),
+            photo: studentPhoto(st),
+            instrument: (st.instrument ?? "") as string,
+            batchId: (st.batchId ?? null) as string | null,
           };
         }));
         setTxs(txSnap.docs.map(d => {
@@ -407,7 +425,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
       const existing = new Set(prev.map(s => s.uid));
       const additions = picked
         .filter(p => !existing.has(p.uid))
-        .map(p => ({ uid: p.uid, name: p.name, admissionNo: p.admissionNo, status: "active", createdAt: p.createdAt }));
+        .map(p => ({ uid: p.uid, name: p.name, admissionNo: p.admissionNo, status: "active", createdAt: p.createdAt, photo: p.photo, instrument: p.instrument, batchId: p.batchId }));
       return [...prev, ...additions];
     });
   }
@@ -557,6 +575,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
               ) : tab === "students" ? (
                 <CenterStudentsTab
                   students={students}
+                  batches={explicitBatches(center as unknown as Record<string, unknown>)}
                   onUpdateStatuses={updateActiveRoster}
                   onAddStudents={addStudentsToCenter}
                   wing={center.wing}
@@ -728,8 +747,10 @@ function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
 
 // ─── Students Tab (roster + active/inactive management) ────────────────────
 
-function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing, centerId, centerName }: {
+function CenterStudentsTab({ students, batches, onUpdateStatuses, onAddStudents, wing, centerId, centerName }: {
   students: CenterStudentRec[];
+  /** This centre's named batches — resolves each student's batchId to a name. */
+  batches: CenterBatch[];
   onUpdateStatuses: (activeUids: Set<string>) => Promise<void>;
   onAddStudents: (picked: PickedStudent[]) => Promise<void>;
   wing: Wing | undefined;
@@ -756,6 +777,12 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing, ce
   // Only already-active students are hidden from the picker — inactive ones
   // registered here are exactly who "+ Add Active Students" should offer.
   const activeUids = useMemo(() => new Set(activeStudents.map(s => s.uid)), [activeStudents]);
+
+  // No named batches → everyone is in the implicit General Batch (see lib/batches).
+  function batchLabel(id: string | null | undefined): string {
+    if (batches.length === 0) return DEFAULT_BATCH_NAME;
+    return batches.find(b => b.id === id)?.name ?? "—";
+  }
 
   async function handleAssign(picked: PickedStudent[]) {
     setMsg(null);
@@ -827,21 +854,26 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing, ce
           <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
             <thead>
               <tr>
+                <th style={{ ...viewStyles.histTh, width: 52 }}><span className="sr-only">Photo</span></th>
                 <th style={viewStyles.histTh}>Student</th>
-                <th style={viewStyles.histTh}>Admission Number</th>
-                <th style={viewStyles.histTh}>Status</th>
+                <th style={viewStyles.histTh}>Instrument</th>
+                <th style={viewStyles.histTh}>Batch</th>
                 <th style={{ ...viewStyles.histTh, width: 90 }} />
               </tr>
             </thead>
             <tbody>
               {filtered.map((s, i) => (
                 <tr key={s.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-                  <td style={viewStyles.histTd}>{s.name}</td>
-                  <td style={viewStyles.histTd}>{s.admissionNo || "—"}</td>
-                  <td style={viewStyles.histTd}>
-                    <StatusBadge status="active" />
+                  <td style={{ ...viewStyles.histTd, paddingRight: 0, verticalAlign: "middle" as const }}>
+                    <StudentAvatar name={s.name} photo={s.photo} />
                   </td>
-                  <td style={viewStyles.histTd}>
+                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>
+                    <div style={{ fontWeight: 600, color: "#111827" }}>{s.name}</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", fontFamily: "monospace", marginTop: 1 }}>{s.admissionNo || "No admission no."}</div>
+                  </td>
+                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>{s.instrument && s.instrument !== "-" ? s.instrument : "—"}</td>
+                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>{batchLabel(s.batchId)}</td>
+                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>
                     <button
                       onClick={() => handleDeactivate(s.uid)}
                       disabled={removingUid === s.uid}
@@ -860,6 +892,39 @@ function CenterStudentsTab({ students, onUpdateStatuses, onAddStudents, wing, ce
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Student avatar — photo, or initials when there is none ────────────────────
+
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(p => p && p !== "-");
+  if (parts.length === 0) return "?";
+  const first = parts[0][0] ?? "";
+  const last  = parts.length > 1 ? parts[parts.length - 1][0] ?? "" : "";
+  return (first + last).toUpperCase();
+}
+
+function StudentAvatar({ name, photo, size = 36 }: { name: string; photo?: string; size?: number }) {
+  const [broken, setBroken] = useState(false);
+  const box: React.CSSProperties = {
+    width: size, height: size, borderRadius: "50%", flexShrink: 0, display: "block",
+    border: "1px solid #e5e7eb",
+  };
+  if (photo && !broken) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element -- data URLs / arbitrary storage URLs
+      <img src={photo} alt={name} loading="lazy" onError={() => setBroken(true)}
+        style={{ ...box, objectFit: "cover" as const, background: "#f3f4f6" }} />
+    );
+  }
+  return (
+    <div aria-hidden title={name} style={{
+      ...box, background: "#e0e7ff", color: "#4338ca", fontWeight: 600,
+      fontSize: Math.round(size * 0.36), display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      {initialsOf(name)}
     </div>
   );
 }
@@ -908,6 +973,9 @@ function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, on
               admissionNo: (st.admissionNo ?? st.admissionNumber ?? "") as string,
               createdAt:   toISODateLocal(st.createdAt),
               status:      (st.status ?? st.studentStatus ?? "active") as string,
+              photo:       studentPhoto(st),
+              instrument:  (st.instrument ?? "") as string,
+              batchId:     (st.batchId ?? null) as string | null,
             };
           })
           .filter(s => !excludeUids.has(s.uid))
@@ -944,7 +1012,7 @@ function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, on
     setSaving(true);
     setError("");
     try {
-      await onAssign(picked.map(({ uid, name, admissionNo, createdAt }) => ({ uid, name, admissionNo, createdAt })));
+      await onAssign(picked.map(({ uid, name, admissionNo, createdAt, photo, instrument, batchId }) => ({ uid, name, admissionNo, createdAt, photo, instrument, batchId })));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to assign students.");
       setSaving(false);

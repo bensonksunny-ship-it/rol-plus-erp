@@ -37,6 +37,35 @@ export async function saveScreening(
   return ref.id;
 }
 
+/**
+ * Overwrite an existing screening in place (Edit Assessment) — same doc id, so
+ * the application / student keep pointing at it. Mirrors the copy on the
+ * linked student's profile, like saveScreening.
+ */
+export async function updateScreening(id: string, data: Omit<ScreeningResult, "id">): Promise<void> {
+  const full = stripUndefined({ ...data, id }) as ScreeningResult;
+  await setDoc(doc(db, "screenings", id), full);
+  if (data.studentId) {
+    await updateDoc(doc(db, "users", data.studentId), {
+      screening: full,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+}
+
+/** Latest fast-track screening saved under this child's name (for applications
+ *  screened before `screeningId` was recorded on the application). */
+export async function findFastTrackScreeningByName(childName: string, wing: string): Promise<ScreeningResult | null> {
+  const name = childName.trim();
+  if (!name) return null;
+  const snap = await getDocs(query(collection(db, "screenings"), where("childName", "==", name)));
+  const list = snap.docs
+    .map(d => ({ ...(d.data() as ScreeningResult), id: d.id }))
+    .filter(s => s.screeningType === "fast-track" && (s.wing ?? wing) === wing)
+    .sort((a, b) => String(b.screenedAt ?? "").localeCompare(String(a.screenedAt ?? "")));
+  return list[0] ?? null;
+}
+
 export async function getScreeningByStudent(
   studentId: string,
 ): Promise<ScreeningResult | null> {

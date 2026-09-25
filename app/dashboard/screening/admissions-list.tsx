@@ -4,7 +4,7 @@
 // Music Admissions page can render the applications list.
 
 import { useState, useEffect, useRef } from "react";
-import { collection, getDocs, addDoc, serverTimestamp, onSnapshot } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, addDoc, serverTimestamp, onSnapshot } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import Link from "next/link";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
@@ -18,7 +18,9 @@ import {
   moveAdmissionToWing,
 } from "@/services/screening/screening.service";
 import { AdmissionFormContent, OptionGroup, MultiOptionGroup } from "./admission-form";
-import { generateAdmissionCardPDF } from "@/lib/generateAdmissionCard";
+import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening } from "@/lib/generateAdmissionCard";
+import { MAX_TOTAL_MARKS, gradeForMarks, readScreeningMarks } from "@/lib/screeningQuestions";
+import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { PhotoCaptureModal } from "./photo-capture-modal";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
 
@@ -324,6 +326,207 @@ function EditAdmissionOverlay({
 
 // ─── Admission applications list ─────────────────────────────────────────────
 
+// ─── School of Music application stages ───────────────────────────────────────
+// Derived from what the application record actually holds: `photo`,
+// `screeningId` (set when the wizard's Fast Track screening is saved) and
+// `enrolledStudentId` (set on enrolment).
+type StageAction = "photo" | "screen" | "enroll" | null;
+interface ApplicationStage { key: string; label: string; color: string; bg: string; action: StageAction; actionLabel: string }
+
+/**
+ * The admission number to show on an application — only one a person typed in
+ * (School of Music form: admissionNoEnteredBy; ROL+ "Complete admission":
+ * admissionNoManual). Generated / legacy numbers stay hidden; the card shows
+ * the application date in their place.
+ */
+export function manualAdmissionNo(rec: Record<string, unknown>): string {
+  const no = typeof rec.admissionNumber === "string" ? rec.admissionNumber.trim() : "";
+  const manual = (typeof rec.admissionNoEnteredBy === "string" && rec.admissionNoEnteredBy !== "") || rec.admissionNoManual === true;
+  return no && manual ? no : "";
+}
+
+export function getApplicationStage(rec: Record<string, unknown>): ApplicationStage {
+  const has = (k: string) => typeof rec[k] === "string" && (rec[k] as string).length > 0;
+  // Admission numbers are now typed in on the application form, so a number
+  // alone doesn't mean enrolled. Legacy applications (before manual entry)
+  // only got a number at enrolment — those have no admissionNoEnteredBy.
+  if (has("enrolledStudentId") || (has("admissionNumber") && !has("admissionNoEnteredBy")))
+    return { key: "enrolled", label: "Enrolled", color: "#374151", bg: "#f3f4f6", action: null, actionLabel: "" };
+  const screened = has("screeningId");
+  const photo    = has("photo");
+  if (screened && photo)
+    return { key: "ready", label: "Ready to Enroll", color: "#065f46", bg: "#d1fae5", action: "enroll", actionLabel: "🎓 Enroll Student" };
+  if (screened)
+    return { key: "screened", label: "Screening Complete (Photo Pending)", color: "#6b21a8", bg: "#f3e8ff", action: "photo", actionLabel: "📷 Take / Upload Photo" };
+  if (photo)
+    return { key: "photo", label: "Photo Captured", color: "#1e40af", bg: "#dbeafe", action: "screen", actionLabel: "🎹 Conduct Screening" };
+  return { key: "submitted", label: "Application Submitted (Pending Photo)", color: "#92400e", bg: "#fef3c7", action: "photo", actionLabel: "📷 Take / Upload Photo" };
+}
+
+const STAGE_ORDER = ["submitted", "photo", "screened", "ready", "enrolled"];
+
+function StageBadge({ stage }: { stage: ApplicationStage }) {
+  return (
+    <span style={{ display: "inline-block", fontSize: 10.5, fontWeight: 800, color: stage.color, background: stage.bg, padding: "3px 9px", borderRadius: 99, lineHeight: 1.3 }}>
+      {stage.label}
+    </span>
+  );
+}
+
+// ─── Screening section of the applicant detail panel (School of Music) ───────
+// Loads the Fast Track screening linked to the application (`screeningId`),
+// falling back to the latest one saved under the child's name for
+// applications screened before that link was recorded.
+const GRADE_COLORS: Record<string, { fg: string; bg: string }> = {
+  High:   { fg: "#15803d", bg: "#dcfce7" },
+  Medium: { fg: "#92400e", bg: "#fef3c7" },
+  Low:    { fg: "#991b1b", bg: "#fee2e2" },
+};
+
+function ApplicantScreening({ rec, wing, onOpen }: {
+  rec: Record<string, unknown>;
+  wing: string;
+  /** Opens the screening in the wizard (summary + Edit Assessment, or a new one). */
+  onOpen: () => void;
+}) {
+  const [sc, setSc]           = useState<Record<string, unknown> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const screeningId = typeof rec.screeningId === "string" ? rec.screeningId : "";
+  const fullName    = typeof rec.fullName === "string" ? rec.fullName : "";
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    (async () => {
+      try {
+        let data: Record<string, unknown> | null = null;
+        if (screeningId) {
+          const snap = await getDoc(doc(db, "screenings", screeningId));
+          data = snap.exists() ? (snap.data() as Record<string, unknown>) : null;
+        } else if (fullName) {
+          data = (await findFastTrackScreeningByName(fullName, wing)) as unknown as Record<string, unknown> | null;
+        }
+        if (live) setSc(data);
+      } catch (err) {
+        console.error("[ApplicantScreening] load error:", err);
+        if (live) setSc(null);
+      } finally {
+        if (live) setLoading(false);
+      }
+    })();
+    return () => { live = false; };
+  }, [screeningId, fullName, wing]);
+
+  const heading = (
+    <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 10 }}>
+      Screening
+    </div>
+  );
+  const box: React.CSSProperties = { marginTop: 20, paddingTop: 18, borderTop: "1px solid #f3f4f6" };
+
+  if (loading) return <div style={box}>{heading}<div style={{ fontSize: 13, color: "#9ca3af" }}>Loading screening…</div></div>;
+
+  if (!sc) {
+    return (
+      <div style={box}>
+        {heading}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const, background: "#f9fafb", border: "1px dashed #e5e7eb", borderRadius: 10, padding: "12px 14px" }}>
+          <span style={{ fontSize: 13, color: "#6b7280" }}>Not screened yet.</span>
+          <button onClick={onOpen} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1e40af", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            🎹 Conduct Screening
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Five sections out of 3, or three out of 5 for an older screening.
+  const r = readScreeningMarks(sc);
+  const total = r.total;
+  const when  = typeof sc.screenedAt === "string" ? new Date(sc.screenedAt) : null;
+  const track = (sc.config as { track?: string } | undefined)?.track;
+
+  return (
+    <div style={box}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const }}>
+        {heading}
+        <button onClick={onOpen} style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid #a5b4fc", background: "#fff", color: "#3730a3", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 10 }}>
+          Open / Edit Assessment →
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
+        {r.labels.map((label, i) => {
+          const m = r.marks[i];
+          const g = m !== null ? gradeForMarks(m, r.outOf) : null;
+          const c = g ? GRADE_COLORS[g] : null;
+          return (
+            <div key={label} style={{ flex: "1 1 120px", border: "1px solid #e5e7eb", borderRadius: 10, padding: "10px 12px", background: c?.bg ?? "#fff" }}>
+              <div style={{ fontSize: 11, color: "#6b7280", fontWeight: 600 }}>{label}</div>
+              <div style={{ fontSize: 20, fontWeight: 900, color: c?.fg ?? "#9ca3af" }}>
+                {m ?? "—"}<span style={{ fontSize: 12, fontWeight: 600 }}> / {r.outOf}</span>
+              </div>
+              {g && <div style={{ fontSize: 10, fontWeight: 700, color: c?.fg }}>{g.toUpperCase()}</div>}
+            </div>
+          );
+        })}
+        <div style={{ flex: "1 1 130px", border: "2px solid #c7d2fe", borderRadius: 10, padding: "10px 12px", background: "#eef2ff" }}>
+          <div style={{ fontSize: 11, color: "#3730a3", fontWeight: 700 }}>Total</div>
+          <div style={{ fontSize: 20, fontWeight: 900, color: "#1e1b4b" }}>
+            {total ?? "—"}<span style={{ fontSize: 12, fontWeight: 600 }}> / {MAX_TOTAL_MARKS}</span>
+          </div>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "#6b7280", marginTop: 8 }}>
+        {[
+          when && !isNaN(when.getTime()) ? `Screened ${when.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}` : "",
+          track ?? "",
+          r.legacy ? "older 3-section rubric" : "",
+          typeof sc.academicGoals === "string" && sc.academicGoals ? `Plays: ${sc.academicGoals}` : "",
+        ].filter(Boolean).join(" · ")}
+      </div>
+    </div>
+  );
+}
+
+// ─── Toolbar icons (lucide shapes, inline SVG — no icon library installed) ──
+/** Round icon-only toolbar button; the label is the tooltip and the accessible name. */
+function IconButton({ label, onClick, disabled, danger, children }: {
+  label: string; onClick: () => void; disabled?: boolean; danger?: boolean; children: React.ReactNode;
+}) {
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} aria-label={label} title={label}
+      className={`inline-flex items-center justify-center rounded-full p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        danger ? "text-indigo-500 hover:bg-white hover:text-red-600" : "text-indigo-600 hover:bg-white hover:text-indigo-800"
+      }`}
+      style={{ border: "none", background: "transparent", cursor: disabled ? "not-allowed" : "pointer", lineHeight: 0 }}>
+      {children}
+    </button>
+  );
+}
+const svgProps = {
+  width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+  strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true,
+};
+function IconPencil() {
+  return <svg {...svgProps}><path d="M21.17 6.81a1 1 0 0 0-3.99-3.98L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z" /><path d="m15 5 4 4" /></svg>;
+}
+function IconFileDown() {
+  return <svg {...svgProps}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M12 18v-6" /><path d="m9 15 3 3 3-3" /></svg>;
+}
+function IconArrowLeftRight() {
+  return <svg {...svgProps}><path d="M8 3 4 7l4 4" /><path d="M4 7h16" /><path d="m16 21 4-4-4-4" /><path d="M20 17H4" /></svg>;
+}
+function IconTrash() {
+  return <svg {...svgProps}><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /><line x1="10" x2="10" y1="11" y2="17" /><line x1="14" x2="14" y1="11" y2="17" /></svg>;
+}
+function IconX() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+    </svg>
+  );
+}
+
 export function AdmissionsList({
   onStartScreening,
   onNewAdmission,
@@ -334,7 +537,7 @@ export function AdmissionsList({
   onNewAdmission?: () => void;
   /** When set (School of Music, inside the Admissions page), each card gets a
    *  "Continue →" button that hands the application back to the wizard. */
-  onResume?: (rec: Record<string, unknown>) => void;
+  onResume?: (rec: Record<string, unknown>, intent?: "screen" | "enroll") => void;
 } = {}) {
   const { user }       = useAuthContext();
   const { wing }       = useWing();
@@ -347,7 +550,14 @@ export function AdmissionsList({
   const [movingId,     setMovingId]     = useState<string | null>(null);
   // Application whose candidate photo is being captured (QR submissions arrive without one).
   const [photoFor,     setPhotoFor]     = useState<Record<string, unknown> | null>(null);
-  const [menu,         setMenu]         = useState<{ id: string; rec: Record<string, unknown>; x: number; y: number } | null>(null);
+  // School of Music: enrolled applications stay on record (status Enrolled)
+  // but are hidden from the working list unless asked for.
+  const [showEnrolled, setShowEnrolled] = useState(false);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const selectedId = selected ? String(selected.id ?? "") : "";
+  useEffect(() => {
+    if (selectedId) detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [selectedId]);
 
   const otherWing      = wing === WINGS.SCHOOL_OF_MUSIC ? WINGS.ROL_PLUS : WINGS.SCHOOL_OF_MUSIC;
   const otherWingLabel = WING_LABELS[otherWing] ?? otherWing;
@@ -369,12 +579,53 @@ export function AdmissionsList({
   const [enrollCentre,     setEnrollCentre]     = useState("");
   const [enrolling,        setEnrolling]        = useState(false);
 
+  // Click / tap outside the expanded applicant detail card — or Escape — closes
+  // it. Never while another layer is open on top of it (edit form, delete
+  // confirm, photo capture, completion flow, new-admission pop-ups):
+  // those own the click / Escape, and dismissing them must not also drop the
+  // applicant underneath. Clicks on the applicant cards are left to their own
+  // onClick (select / toggle), and clicks inside any dialog are ignored.
+  const overlayOpen = !!(editing || deleteId || photoFor || completing || showForm || showChoice || showQr);
+  useEffect(() => {
+    if (!selectedId || overlayOpen) return;
+    function onPointer(e: MouseEvent | TouchEvent) {
+      const target = e.target as Element | null;
+      if (!target || !target.isConnected) return;
+      if (target === document.documentElement) return;                 // scrollbar drag
+      if (detailRef.current?.contains(target)) return;
+      if (target.closest("[data-applicant-card], [role='dialog'], [data-keep-detail-open]")) return;
+      setSelected(null);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setSelected(null);
+    }
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("touchstart", onPointer, { passive: true });
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("touchstart", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [selectedId, overlayOpen]);
+
   function closeCompleting() {
     setCompleting(null); setCompletingAdmNo(""); setCompletingPhase("number"); setEnrollCentre("");
   }
 
   function str(v: unknown): string   { return typeof v === "string" ? v : ""; }
   /** Parent (QR) submission still waiting for staff to take the candidate photo. */
+  /** Runs the School of Music stage action for an application. */
+  function runStageAction(rec: Record<string, unknown>, action: StageAction) {
+    if (action === "photo") setPhotoFor(rec);
+    else if (action === "screen" || action === "enroll") onResume?.(rec, action);
+  }
+
+  const enrolledCount = onResume ? admissions.filter(a => getApplicationStage(a).key === "enrolled").length : 0;
+  const visibleAdmissions = onResume && !showEnrolled
+    ? admissions.filter(a => getApplicationStage(a).key !== "enrolled")
+    : admissions;
+
   function photoPending(rec: Record<string, unknown>): boolean {
     return str(rec.photoStatus) === "pending" && !str(rec.photo);
   }
@@ -483,11 +734,31 @@ export function AdmissionsList({
         || null;
   }
 
+  /**
+   * Screening for the admission card: the ROL+ instrument screening if there is
+   * one, else the School of Music Fast Track screening — linked by
+   * `screeningId`, or (screened before that link existed) the latest one
+   * saved under the child's name.
+   */
+  async function cardScreening(admission: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    const rolPlus = getScreening(admission);
+    if (rolPlus) return rolPlus;
+    let ft: Record<string, unknown> | null = null;
+    const sid = str(admission.screeningId);
+    if (sid) {
+      const snap = await getDoc(doc(db, "screenings", sid));
+      if (snap.exists()) ft = { ...(snap.data() as Record<string, unknown>), id: snap.id };
+    } else if (str(admission.fullName)) {
+      ft = (await findFastTrackScreeningByName(str(admission.fullName), wing)) as unknown as Record<string, unknown> | null;
+    }
+    return ft ? fastTrackCardScreening(ft, cardInstrument(admission.instrumentsToLearn)) : null;
+  }
+
   async function handleRedownload(admission: Record<string, unknown>) {
     const id = str(admission.id);
     setPdfLoading(id);
     try {
-      await generateAdmissionCardPDF(admission, getScreening(admission));
+      await generateAdmissionCardPDF(admission, await cardScreening(admission));
     } catch (err) {
       console.error("PDF generation failed:", err);
     } finally {
@@ -500,8 +771,8 @@ export function AdmissionsList({
     setCompletingSaving("saving");
     try {
       const id      = str(completing.admission.id);
-      const updated = { ...completing.admission, admissionNumber: completingAdmNo };
-      await updateAdmission(id, { admissionNumber: completingAdmNo });
+      const updated = { ...completing.admission, admissionNumber: completingAdmNo, admissionNoManual: true };
+      await updateAdmission(id, { admissionNumber: completingAdmNo, admissionNoManual: true });
       setAdmissions(prev => prev.map(a => str(a.id) === id ? updated : a));
       setCompletingSaving("downloading");
       await generateAdmissionCardPDF(updated, completing.screening);
@@ -807,14 +1078,27 @@ export function AdmissionsList({
 
       {/* ── Detail panel ── */}
       {selected && (
-        <div style={{
+        <div ref={detailRef} style={{ scrollMarginTop: 16,
           background: "#fff", border: "1px solid #e5e7eb", borderRadius: 14,
           padding: "24px", marginBottom: 20, position: "relative" as const,
           boxShadow: "0 4px 24px rgba(0,0,0,0.07)",
         }}>
           {/* Action row */}
-          <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" as const }}>
-            {photoPending(selected) ? (
+          <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" as const, alignItems: "center" }}>
+            {onResume ? (() => {
+              const stage = getApplicationStage(selected);
+              return (
+                <>
+                  <StageBadge stage={stage} />
+                  {stage.action && (
+                    <button onClick={() => runStageAction(selected, stage.action)}
+                      style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: stage.color, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                      {stage.actionLabel}
+                    </button>
+                  )}
+                </>
+              );
+            })() : photoPending(selected) ? (
               <button
                 onClick={() => setPhotoFor(selected)}
                 style={{
@@ -825,18 +1109,6 @@ export function AdmissionsList({
                 }}
               >
                 📷 Take Photo to complete
-              </button>
-            ) : onResume ? (
-              <button
-                onClick={() => onResume(selected)}
-                style={{
-                  padding: "9px 16px", borderRadius: 8, border: "none",
-                  background: "#4f46e5", color: "#fff",
-                  fontSize: 13, fontWeight: 700, cursor: "pointer",
-                  display: "flex", alignItems: "center", gap: 6,
-                }}
-              >
-                Continue in wizard →
               </button>
             ) : wing === WINGS.SCHOOL_OF_MUSIC ? (
               <Link
@@ -863,49 +1135,49 @@ export function AdmissionsList({
                 🎹 Start Screening
               </button>
             )}
-            <button
-              onClick={() => setEditing(selected)}
-              style={{
-                padding: "9px 16px", borderRadius: 8,
-                border: "1px solid #d1d5db", background: "#f9fafb",
-                color: "#374151", fontSize: 13, fontWeight: 600, cursor: "pointer",
-              }}
-            >
-              ✏️ Edit
-            </button>
-            <button
-              onClick={() => handleMove(str(selected.id))}
-              disabled={movingId === str(selected.id)}
-              style={{
-                padding: "9px 16px", borderRadius: 8,
-                border: "1px solid #c7d2fe", background: "#eef2ff",
-                color: "#4338ca", fontSize: 13, fontWeight: 600,
-                cursor: movingId === str(selected.id) ? "not-allowed" : "pointer",
-                opacity: movingId === str(selected.id) ? 0.6 : 1,
-              }}
-            >
-              {movingId === str(selected.id) ? "Moving…" : `↦ Move to ${otherWingLabel}`}
-            </button>
-            <button
-              onClick={() => setDeleteId(str(selected.id))}
-              style={{
-                padding: "9px 16px", borderRadius: 8,
-                border: "1px solid #fecaca", background: "#fef2f2",
-                color: "#dc2626", fontSize: 13, fontWeight: 600, cursor: "pointer",
-              }}
-            >
-              🗑️ Delete
-            </button>
-            <button
-              onClick={() => setSelected(null)}
-              style={{
-                marginLeft: "auto", padding: "9px 14px", borderRadius: 8,
-                border: "none", background: "#f3f4f6",
-                color: "#374151", fontSize: 13, cursor: "pointer",
-              }}
-            >
-              ✕ Close
-            </button>
+            {/* Right-hand toolbar: icon-only actions (photo lives inside Edit), then close. */}
+            {(() => {
+              const id       = str(selected.id);
+              const hasAdmNo = !!str(selected.admissionNumber);
+              const screened = !!getScreening(selected) || !!str(selected.screeningId) || !!onResume;
+              const pdfBusy  = pdfLoading === id;
+              const moving   = movingId === id;
+              return (
+            <div role="toolbar" aria-label="Application actions" style={{
+              marginLeft: "auto", display: "flex", alignItems: "center", gap: 2,
+              background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 999,
+              padding: "3px 5px", boxShadow: "0 1px 2px rgba(79,70,229,0.08)",
+            }}>
+              <IconButton label="Edit application" onClick={() => setEditing(selected)}>
+                <IconPencil />
+              </IconButton>
+              {(hasAdmNo || screened) && (
+                <IconButton
+                  label={pdfBusy ? "Generating PDF…" : hasAdmNo ? "Download admission card PDF" : "Download request form PDF"}
+                  onClick={() => handleRedownload(selected)} disabled={pdfBusy}>
+                  <IconFileDown />
+                </IconButton>
+              )}
+              <IconButton label={moving ? "Moving…" : `Move to ${otherWingLabel}`} onClick={() => handleMove(id)} disabled={moving}>
+                <IconArrowLeftRight />
+              </IconButton>
+              <IconButton label="Delete application" onClick={() => setDeleteId(id)} danger>
+                <IconTrash />
+              </IconButton>
+              <span aria-hidden style={{ width: 1, height: 20, background: "#c7d2fe", margin: "0 3px" }} />
+              <button
+                type="button"
+                onClick={() => setSelected(null)}
+                aria-label="Close applicant details"
+                title="Close (Esc)"
+                className="inline-flex items-center justify-center rounded-full p-1.5 text-indigo-400 transition-colors hover:bg-white hover:text-indigo-700"
+                style={{ border: "none", background: "transparent", cursor: "pointer", lineHeight: 0 }}
+              >
+                <IconX />
+              </button>
+            </div>
+              );
+            })()}
           </div>
 
           <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" as const }}>
@@ -925,7 +1197,10 @@ export function AdmissionsList({
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 18, fontWeight: 800, color: "#111", marginBottom: 2 }}>{str(selected.fullName)}</div>
               <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>
-                {str(selected.submittedAt) ? new Date(str(selected.submittedAt)).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : ""}
+                {manualAdmissionNo(selected) && (
+                  <span style={{ fontFamily: "monospace", fontWeight: 700, color: "#4f46e5", marginRight: 10 }}>{manualAdmissionNo(selected)}</span>
+                )}
+                {str(selected.submittedAt) ? "Applied " : ""}{str(selected.submittedAt) ? new Date(str(selected.submittedAt)).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }) : ""}
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 20px" }}>
@@ -999,6 +1274,16 @@ export function AdmissionsList({
               </div>
             )}
           </div>
+
+          {/* Screening (School of Music) */}
+          {onResume && (
+            <ApplicantScreening
+              key={str(selected.id)}
+              rec={selected}
+              wing={wing}
+              onOpen={() => onResume(selected, "screen")}
+            />
+          )}
         </div>
       )}
 
@@ -1006,7 +1291,13 @@ export function AdmissionsList({
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>
           Applications
-          <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 400, marginLeft: 8 }}>({admissions.length})</span>
+          <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 400, marginLeft: 8 }}>({visibleAdmissions.length})</span>
+          {enrolledCount > 0 && (
+            <button onClick={() => setShowEnrolled(v => !v)}
+              style={{ marginLeft: 10, padding: "3px 10px", borderRadius: 99, border: "1px solid #e5e7eb", background: showEnrolled ? "#f3f4f6" : "#fff", color: "#6b7280", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+              {showEnrolled ? "Hide" : "Show"} enrolled ({enrolledCount})
+            </button>
+          )}
         </div>
         {onNewAdmission ? (
           <button onClick={onNewAdmission}
@@ -1027,15 +1318,17 @@ export function AdmissionsList({
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
-        {admissions.map((rec, i) => {
+        {visibleAdmissions.map((rec, i) => {
           const isSelected  = selected?.id === rec.id;
           const instruments = arr(rec.instrumentsToLearn);
           const admNo       = str(rec.admissionNumber);
+          const shownAdmNo  = manualAdmissionNo(rec);
           const date        = str(rec.submittedAt) ? new Date(str(rec.submittedAt)).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "";
           const centreName  = centresList.find(c => c.id === str(rec.centre))?.name ?? str(rec.centre);
           return (
             <div
               key={str(rec.id) || i}
+              data-applicant-card
               onClick={() => setSelected(isSelected ? null : rec)}
               style={{
                 border: isSelected ? "2px solid #4f46e5" : "1px solid #e5e7eb",
@@ -1057,15 +1350,17 @@ export function AdmissionsList({
                   <div style={{ fontSize: 14, fontWeight: 700, color: "#111", whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis" }}>
                     {str(rec.fullName) || "—"}
                   </div>
-                  <div style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.04em", color: admNo ? "#4f46e5" : "#9ca3af" }}>
-                    {admNo || "no adm. no."}
+                  <div style={{ fontSize: 11, fontFamily: shownAdmNo ? "monospace" : "inherit", fontWeight: shownAdmNo ? 700 : 500, letterSpacing: shownAdmNo ? "0.04em" : 0, color: shownAdmNo ? "#4f46e5" : "#6b7280" }}>
+                    {shownAdmNo
+                      ? <span title="Admission number">{shownAdmNo}</span>
+                      : <span title="Date of application">{date ? `Applied ${date}` : ""}</span>}
                     {str(rec.source) === "public_qr" && (
                       <span title="Submitted by a parent via the QR code form"
                         style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: 0, background: "#fef3c7", color: "#b45309", padding: "1px 6px", borderRadius: 99 }}>
                         📱 Online
                       </span>
                     )}
-                    {photoPending(rec) ? (
+                    {onResume ? null : photoPending(rec) ? (
                       <span title="Take the candidate photo to complete this application"
                         style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 0, background: "#fee2e2", color: "#b91c1c", padding: "1px 7px", borderRadius: 99 }}>
                         📷 Photo Pending
@@ -1078,18 +1373,23 @@ export function AdmissionsList({
                     )}
                   </div>
                 </div>
-                <button
-                  onClick={e => {
-                    e.stopPropagation();
-                    const r = e.currentTarget.getBoundingClientRect();
-                    setMenu(m => m?.id === str(rec.id) ? null : { id: str(rec.id), rec, x: r.right, y: r.bottom });
-                  }}
-                  title="More"
-                  style={{ padding: "4px 9px", borderRadius: 6, border: "1px solid #e5e7eb", background: menu?.id === str(rec.id) ? "#ede9fe" : "#f9fafb", cursor: "pointer", fontSize: 14, color: "#374151", lineHeight: 1, flexShrink: 0 }}
-                >
-                  ⋯
-                </button>
               </div>
+
+              {/* Stage (School of Music) */}
+              {onResume && (() => {
+                const stage = getApplicationStage(rec);
+                const idx = STAGE_ORDER.indexOf(stage.key);
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div><StageBadge stage={stage} /></div>
+                    <div style={{ display: "flex", gap: 3 }} aria-hidden>
+                      {STAGE_ORDER.slice(0, 4).map((k, i) => (
+                        <div key={k} style={{ flex: 1, height: 4, borderRadius: 99, background: i <= idx ? stage.color : "#e5e7eb", opacity: i <= idx ? 0.75 : 1 }} />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Meta */}
               <div style={{ fontSize: 12, color: "#6b7280", display: "flex", gap: 12, flexWrap: "wrap" as const }}>
@@ -1112,19 +1412,29 @@ export function AdmissionsList({
                 <div style={{ fontSize: 11, color: "#9ca3af", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
                   {[centreName, date].filter(Boolean).join(" · ") || "—"}
                 </div>
-                {photoPending(rec) ? (
+                {onResume ? (() => {
+                  const stage = getApplicationStage(rec);
+                  if (!stage.action) return <span style={{ fontSize: 12, color: "#15803d", fontWeight: 700, flexShrink: 0 }}>✓ Enrolled</span>;
+                  return (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                      {stage.key === "submitted" && (
+                        <button onClick={() => runStageAction(rec, "screen")} title="Screen now, add the photo later"
+                          style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #e5e7eb", background: "#fff", cursor: "pointer", fontSize: 11, color: "#6b7280", fontWeight: 600 }}>
+                          Screen
+                        </button>
+                      )}
+                      <button onClick={() => runStageAction(rec, stage.action)}
+                        style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: stage.color, cursor: "pointer", fontSize: 12, color: "#fff", fontWeight: 700 }}>
+                        {stage.actionLabel}
+                      </button>
+                    </div>
+                  );
+                })() : photoPending(rec) ? (
                   <button
                     onClick={() => setPhotoFor(rec)}
                     style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "#d97706", cursor: "pointer", fontSize: 12, color: "#fff", fontWeight: 700, flexShrink: 0 }}
                   >
                     📷 Take Photo
-                  </button>
-                ) : onResume ? (
-                  <button
-                    onClick={() => onResume(rec)}
-                    style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "#4f46e5", cursor: "pointer", fontSize: 12, color: "#fff", fontWeight: 700, flexShrink: 0 }}
-                  >
-                    Continue →
                   </button>
                 ) : admNo ? (
                   <button
@@ -1168,49 +1478,6 @@ export function AdmissionsList({
         />
       )}
 
-      {/* Row overflow menu */}
-      {menu && (() => {
-        const rec = menu.rec;
-        const hasAdmNo = !!str(rec.admissionNumber);
-        const screened = !!getScreening(rec);
-        const items: { label: string; onClick: () => void; danger?: boolean; disabled?: boolean }[] = [
-          { label: "✏️  Edit details", onClick: () => { setSelected(rec); setEditing(rec); } },
-          { label: str(rec.photo) ? "📷  Retake / upload photo" : "📷  Take / upload photo", onClick: () => setPhotoFor(rec) },
-        ];
-        if (hasAdmNo)       items.push({ label: pdfLoading === str(rec.id) ? "…  Generating PDF" : "📄  Admission card PDF", onClick: () => handleRedownload(rec), disabled: pdfLoading === str(rec.id) });
-        else if (screened) items.push({ label: pdfLoading === str(rec.id) ? "…  Generating PDF" : "📄  Request form PDF",   onClick: () => handleRedownload(rec), disabled: pdfLoading === str(rec.id) });
-        items.push({ label: movingId === str(rec.id) ? "…  Moving" : `↦  Move to ${otherWingLabel}`, onClick: () => handleMove(str(rec.id)), disabled: movingId === str(rec.id) });
-        items.push({ label: "🗑️  Delete", onClick: () => setDeleteId(str(rec.id)), danger: true });
-        return (
-          <>
-            <div onClick={() => setMenu(null)} style={{ position: "fixed", inset: 0, zIndex: 200 }} />
-            <div style={{
-              position: "fixed", top: menu.y + 6, left: Math.max(8, menu.x - 210), zIndex: 201,
-              background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10,
-              boxShadow: "0 12px 32px rgba(0,0,0,0.16)", minWidth: 210, overflow: "hidden", padding: "4px 0",
-            }}>
-              {items.map((it, idx) => (
-                <button
-                  key={idx}
-                  disabled={it.disabled}
-                  onClick={() => { setMenu(null); it.onClick(); }}
-                  style={{
-                    display: "block", width: "100%", textAlign: "left", padding: "9px 16px",
-                    border: "none", background: "#fff", fontSize: 13,
-                    color: it.danger ? "#dc2626" : "#374151",
-                    cursor: it.disabled ? "not-allowed" : "pointer",
-                    opacity: it.disabled ? 0.5 : 1,
-                  }}
-                  onMouseEnter={e => { if (!it.disabled) e.currentTarget.style.background = it.danger ? "#fef2f2" : "#f9fafb"; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = "#fff"; }}
-                >
-                  {it.label}
-                </button>
-              ))}
-            </div>
-          </>
-        );
-      })()}
     </div>
   );
 }

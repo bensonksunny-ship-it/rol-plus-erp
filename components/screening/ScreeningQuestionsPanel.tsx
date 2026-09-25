@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { isElevatedAccount } from "@/lib/elevatedAccount";
 import {
-  FAST_TRACK_TEST_MEASURES, MAX_STEPS,
+  FAST_TRACK_TEST_MEASURES, GRADE_MARK_RANGE, MAX_SECTION_MARKS, MAX_STEPS, MAX_TOTAL_MARKS, SECTION_COUNT,
   type FastTrackTest, type ScreeningGrade,
 } from "@/lib/screeningQuestions";
 import {
@@ -100,7 +100,7 @@ export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
   }
 
   async function reset() {
-    if (!window.confirm("Reset all three tests to the original wording? Your edits will be lost.")) return;
+    if (!window.confirm("Reset all five sections to the original wording? Your edits will be lost.")) return;
     setBusy(true); setErr("");
     try {
       await resetFastTrackTests(wing);
@@ -122,7 +122,12 @@ export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
       {/* Header */}
       <div style={{ ...card, padding: "16px 20px", marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div style={{ minWidth: 220, flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>Fast Track screening questions</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>
+            Fast Track screening questions
+            <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color: "#92400e", background: "#fef3c7", borderRadius: 999, padding: "3px 9px", verticalAlign: "middle" }}>
+              {SECTION_COUNT} × {MAX_SECTION_MARKS} = {MAX_TOTAL_MARKS} marks
+            </span>
+          </div>
           <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
             {canEdit
               ? "Teachers see these exact tests when they screen a student. Edits apply to every new screening in this wing."
@@ -188,7 +193,7 @@ export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
                 </div>
                 <span style={{ fontSize: 10.5, fontWeight: 700, color: "#6b7280", background: "#f3f4f6", borderRadius: 999, padding: "3px 9px", flexShrink: 0 }}
                   title="What this test scores — fixed, because the slab result depends on it">
-                  Scores {FAST_TRACK_TEST_MEASURES[ti]}
+                  {FAST_TRACK_TEST_MEASURES[ti]} · /{MAX_SECTION_MARKS}
                 </span>
               </div>
 
@@ -253,7 +258,7 @@ export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
                       return (
                         <div key={r.grade} style={{ border: `1.5px solid ${g.border}`, background: g.bg, borderRadius: 12, padding: "10px 12px" }}>
                           <div style={{ fontSize: 11, fontWeight: 800, color: g.color, marginBottom: 4 }}>
-                            {r.grade.toUpperCase()} · {r.grade === "High" ? 5 : r.grade === "Medium" ? 3 : 1}/5
+                            {r.grade.toUpperCase()} · {GRADE_MARK_RANGE[r.grade].label}
                           </div>
                           {editing ? (
                             <textarea value={r.desc} maxLength={300} rows={2} aria-label={`${t.code} ${r.grade} description`}
@@ -272,7 +277,7 @@ export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
           ))}
           {editing && (
             <div style={{ fontSize: 11.5, color: "#9ca3af" }}>
-              The three tests and their High / Medium / Low scores are fixed — the Delta / Epsilon / Zeta slab result depends on them.
+              The five sections, their 3-mark scale and the High (3) / Medium (2) / Low (1) bands are fixed — the total /15 depends on them, and S-1 to S-3 set the Delta / Epsilon / Zeta slab.
               Blank fields fall back to the original wording when saved.
             </div>
           )}

@@ -1,7 +1,7 @@
 import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "@/services/firebase/firebase";
 import {
-  DEFAULT_FAST_TRACK_TESTS, sanitizeFastTrackTests, screeningQuestionsDocId,
+  DEFAULT_FAST_TRACK_TESTS, SCREENING_QUESTIONS_VERSION, sanitizeFastTrackTests, screeningQuestionsDocId,
   type FastTrackTest,
 } from "@/lib/screeningQuestions";
 
@@ -15,8 +15,9 @@ export interface FastTrackTestsDoc {
 /** A wing's Fast Track questions — the saved set, or the defaults. */
 export async function getFastTrackTests(wing: string): Promise<FastTrackTestsDoc> {
   const snap = await getDoc(doc(db, "config", screeningQuestionsDocId(wing)));
-  if (!snap.exists()) return { tests: DEFAULT_FAST_TRACK_TESTS, customised: false };
-  const data = snap.data();
+  const data = snap.exists() ? snap.data() : null;
+  // Missing, or saved for an older set of sections → current defaults.
+  if (!data || data.version !== SCREENING_QUESTIONS_VERSION) return { tests: DEFAULT_FAST_TRACK_TESTS, customised: false };
   return {
     tests: sanitizeFastTrackTests(data.tests),
     customised: true,

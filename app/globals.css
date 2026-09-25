@@ -74,8 +74,8 @@
 }
 
 /* ── Light mode ────────────────────────────────────────────────────────────── */
-@media (prefers-color-scheme: light) {
-  :root {
+/* theme: light (set by the day/night toggle or the OS — see app/layout.tsx) */
+  :root[data-theme="light"]{
     --color-bg:              #f4f4f8;
     --color-surface:         #ffffff;
     --color-surface-2:       #f8f8fc;
@@ -112,57 +112,57 @@
     --shadow-glow:           0 0 24px rgba(217,119,6,0.14);
   }
 
-  input, textarea, select { color-scheme: light; }
-  tbody tr:nth-child(even) { background: #f6f6fc !important; }
-  tbody tr:nth-child(odd)  { background: #ffffff  !important; }
+  :root[data-theme="light"] input, :root[data-theme="light"] textarea, :root[data-theme="light"] select{ color-scheme: light; }
+  :root[data-theme="light"] tbody tr:nth-child(even){ background: #f6f6fc !important; }
+  :root[data-theme="light"] tbody tr:nth-child(odd){ background: #ffffff  !important; }
 
   /* Status chips — light overrides */
-  [style*="background: #dcfce7"] { background: #ecfdf5 !important; color: #059669 !important; }
-  [style*="background: #fee2e2"] { background: #fef2f2 !important; color: #dc2626 !important; }
-  [style*="background: #fef9c3"],
-  [style*="background: #fef3c7"] { background: #fffbeb !important; color: #d97706 !important; }
-  [style*="background: #e0e7ff"],
-  [style*="background: #ede9fe"] { background: #f5f3ff !important; color: #7c3aed !important; }
-  [style*="background: #dbeafe"] { background: #eff6ff !important; color: #2563eb !important; }
-}
+  :root[data-theme="light"] [style*="background: #dcfce7"]{ background: #ecfdf5 !important; color: #059669 !important; }
+  :root[data-theme="light"] [style*="background: #fee2e2"]{ background: #fef2f2 !important; color: #dc2626 !important; }
+  :root[data-theme="light"] [style*="background: #fef9c3"],
+  :root[data-theme="light"] [style*="background: #fef3c7"]{ background: #fffbeb !important; color: #d97706 !important; }
+  :root[data-theme="light"] [style*="background: #e0e7ff"],
+  :root[data-theme="light"] [style*="background: #ede9fe"]{ background: #f5f3ff !important; color: #7c3aed !important; }
+  :root[data-theme="light"] [style*="background: #dbeafe"]{ background: #eff6ff !important; color: #2563eb !important; }
+
 
 /* ── Dark overrides for hard-coded inline colours ────────────────────────── */
-@media (prefers-color-scheme: dark) {
-  input, textarea, select {
+/* theme: dark (set by the day/night toggle or the OS — see app/layout.tsx) */
+  :root[data-theme="dark"] input, :root[data-theme="dark"] textarea, :root[data-theme="dark"] select{
     background:   var(--color-surface-2) !important;
     color:        var(--color-text-primary) !important;
     border-color: var(--color-border) !important;
     color-scheme: dark;
   }
 
-  tbody tr:nth-child(even) { background: var(--color-surface-3) !important; }
-  tbody tr:nth-child(odd)  { background: var(--color-surface)   !important; }
+  :root[data-theme="dark"] tbody tr:nth-child(even){ background: var(--color-surface-3) !important; }
+  :root[data-theme="dark"] tbody tr:nth-child(odd){ background: var(--color-surface)   !important; }
 
-  [style*="background: #fff"],
-  [style*="background: white"],
-  [style*="background:#fff"],
-  [style*="background: #ffffff"] { background: var(--color-surface) !important; }
+  :root[data-theme="dark"] [style*="background: #fff"],
+  :root[data-theme="dark"] [style*="background: white"],
+  :root[data-theme="dark"] [style*="background:#fff"],
+  :root[data-theme="dark"] [style*="background: #ffffff"]{ background: var(--color-surface) !important; }
 
-  [style*="background: #f9fafb"],
-  [style*="background: #fafafa"],
-  [style*="background: #f3f4f6"],
-  [style*="background: #f9f9f9"],
-  [style*="background: #f4f5f9"],
-  [style*="background: #f3f4f9"] { background: var(--color-surface-2) !important; }
+  :root[data-theme="dark"] [style*="background: #f9fafb"],
+  :root[data-theme="dark"] [style*="background: #fafafa"],
+  :root[data-theme="dark"] [style*="background: #f3f4f6"],
+  :root[data-theme="dark"] [style*="background: #f9f9f9"],
+  :root[data-theme="dark"] [style*="background: #f4f5f9"],
+  :root[data-theme="dark"] [style*="background: #f3f4f9"]{ background: var(--color-surface-2) !important; }
 
-  a[style*="background: #ede9fe"],
-  a[style*="background:#ede9fe"] { background: var(--color-violet-dim) !important; }
+  :root[data-theme="dark"] a[style*="background: #ede9fe"],
+  :root[data-theme="dark"] a[style*="background:#ede9fe"]{ background: var(--color-violet-dim) !important; }
 
   /* Semantic status chips */
-  [style*="background: #dcfce7"] { background: var(--color-success-dim) !important; color: var(--color-success) !important; }
-  [style*="background: #fee2e2"] { background: var(--color-danger-dim)  !important; color: var(--color-danger)  !important; }
-  [style*="background: #fef9c3"],
-  [style*="background: #fef3c7"] { background: var(--color-warning-dim) !important; color: var(--color-warning) !important; }
-  [style*="background: #e0e7ff"],
-  [style*="background: #ede9fe"] { background: var(--color-violet-dim)  !important; color: var(--color-violet)  !important; }
-  [style*="background: #dbeafe"] { background: var(--color-info-dim)    !important; color: var(--color-info)    !important; }
-  [style*="background: #fef2f2"] { background: var(--color-danger-dim)  !important; border-color: rgba(248,113,113,0.2) !important; }
-}
+  :root[data-theme="dark"] [style*="background: #dcfce7"]{ background: var(--color-success-dim) !important; color: var(--color-success) !important; }
+  :root[data-theme="dark"] [style*="background: #fee2e2"]{ background: var(--color-danger-dim)  !important; color: var(--color-danger)  !important; }
+  :root[data-theme="dark"] [style*="background: #fef9c3"],
+  :root[data-theme="dark"] [style*="background: #fef3c7"]{ background: var(--color-warning-dim) !important; color: var(--color-warning) !important; }
+  :root[data-theme="dark"] [style*="background: #e0e7ff"],
+  :root[data-theme="dark"] [style*="background: #ede9fe"]{ background: var(--color-violet-dim)  !important; color: var(--color-violet)  !important; }
+  :root[data-theme="dark"] [style*="background: #dbeafe"]{ background: var(--color-info-dim)    !important; color: var(--color-info)    !important; }
+  :root[data-theme="dark"] [style*="background: #fef2f2"]{ background: var(--color-danger-dim)  !important; border-color: rgba(248,113,113,0.2) !important; }
+
 
 /* ── Base ─────────────────────────────────────────────────────────────────── */
 html, body {
@@ -404,13 +404,13 @@ tbody tr.row-admin {
 .center-hue-5 { --center-hue: #38bdf8; } /* sky     */
 .center-hue-6 { --center-hue: #2dd4bf; } /* teal    */
 .center-hue-7 { --center-hue: #a78bfa; } /* violet  */
-@media (prefers-color-scheme: light) {
-  .center-hue-0 { --center-hue: #4f46e5; }
-  .center-hue-1 { --center-hue: #d97706; }
-  .center-hue-2 { --center-hue: #059669; }
-  .center-hue-3 { --center-hue: #9333ea; }
-  .center-hue-4 { --center-hue: #e11d48; }
-  .center-hue-5 { --center-hue: #0284c7; }
-  .center-hue-6 { --center-hue: #0d9488; }
-  .center-hue-7 { --center-hue: #7c3aed; }
-}
+/* theme: light (set by the day/night toggle or the OS — see app/layout.tsx) */
+  :root[data-theme="light"] .center-hue-0{ --center-hue: #4f46e5; }
+  :root[data-theme="light"] .center-hue-1{ --center-hue: #d97706; }
+  :root[data-theme="light"] .center-hue-2{ --center-hue: #059669; }
+  :root[data-theme="light"] .center-hue-3{ --center-hue: #9333ea; }
+  :root[data-theme="light"] .center-hue-4{ --center-hue: #e11d48; }
+  :root[data-theme="light"] .center-hue-5{ --center-hue: #0284c7; }
+  :root[data-theme="light"] .center-hue-6{ --center-hue: #0d9488; }
+  :root[data-theme="light"] .center-hue-7{ --center-hue: #7c3aed; }
+

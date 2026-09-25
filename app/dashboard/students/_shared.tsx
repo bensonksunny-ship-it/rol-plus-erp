@@ -7,11 +7,7 @@ import {
   query, where, serverTimestamp, addDoc, increment,
 } from "firebase/firestore";
 import { db } from "@/config/firebase";
-import {
-  createUserWithEmailAndPassword, getAuth, signOut as fbSignOut,
-  updateEmail,
-} from "firebase/auth";
-import { deleteApp } from "firebase/app";
+import { updateEmail } from "firebase/auth";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { ToastContainer } from "@/components/ui/Toast";
@@ -107,35 +103,7 @@ interface EditForm {
 
 const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-const EMPTY_CREATE = {
-  name: "", email: "", admissionNo: "", phone: "",
-  centerId: "", batchId: "", instrument: "", course: "",
-  classType: "group",
-  billingMode: "postpay",
-  assignedTeacherUid: "",
-  classDays: [] as string[],
-  classTime: "",
-  feeCycle: "monthly", feePerClass: "", monthlyFee: "", status: "active",
-  // Most students are records only, not app users — a login is opt-in per student.
-  createLogin: false,
-};
-
-type CreateForm = typeof EMPTY_CREATE;
-
 // ─── Helpers ───────────────────────────────────────────────────────────────────
-
-async function getNextStudentSeq(): Promise<number> {
-  const ref  = doc(db, "counters", "student_global");
-  const snap = await getDoc(ref);
-  const next = snap.exists() ? (snap.data().seq as number) + 1 : 1;
-  const { setDoc: sd } = await import("firebase/firestore");
-  await sd(ref, { seq: next }, { merge: true });
-  return next;
-}
-
-function buildStudentID(seq: number): string {
-  return `ROL${new Date().getFullYear()}${String(seq).padStart(4, "0")}`;
-}
 
 export function fmtINR(n: number): string {
   return n === 0 ? "₹0" : `₹${n.toLocaleString("en-IN")}`;
@@ -265,14 +233,10 @@ function StudentsContent() {
   const [tab, setTab]                   = useState<StudentTab>("active");
   const [requestsOpen, setRequestsOpen] = useState(false);
   const [breakRequestsOpen, setBreakRequestsOpen] = useState(false);
-  const [showForm, setShowForm]         = useState(false);
-  const [form, setForm]                 = useState({ ...EMPTY_CREATE });
-  const [saving, setSaving]             = useState(false);
   const [editTarget, setEditTarget]         = useState<StudentRow | null>(null);
   const [clearHistoryTarget, setClearHistoryTarget] = useState<StudentRow | null>(null);
   const [deleteTarget, setDeleteTarget]     = useState<StudentRow | null>(null);
   const [breakTarget, setBreakTarget]       = useState<StudentRow | null>(null);
-  const [formErrors, setFormErrors]         = useState<Record<string, string>>({});
   const debounceRef                         = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { toasts, toast, remove }           = useToast();
 
@@ -531,121 +495,6 @@ function StudentsContent() {
     };
   }, [filteredRest]);
 
-  // ── Create student ─────────────────────────────────────────────────────────
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    const errs: Record<string, string> = {};
-    if (!form.name.trim())        errs.name = "Required";
-    if (form.createLogin) {
-      if (!form.email.trim())     errs.email = "Required for a login";
-      else if (!/\S+@\S+\.\S+/.test(form.email)) errs.email = "Enter a valid email";
-    } else if (form.email.trim() && !/\S+@\S+\.\S+/.test(form.email)) {
-      errs.email = "Enter a valid email";
-    }
-    if (!form.admissionNo.trim()) errs.admissionNo = "Required";
-    if (!form.centerId.trim())    errs.centerId = "Pick a centre";
-    if (!form.instrument.trim())  errs.instrument = "Required";
-    if (!form.course.trim())      errs.course = "Required";
-    if (isSom && Number(form.monthlyFee) <= 0) errs.monthlyFee = "Enter the monthly fee";
-    if (!isSom && form.feeCycle === "per_class" && Number(form.feePerClass) <= 0) errs.feePerClass = "Enter the per-class fee";
-    setFormErrors(errs);
-    if (Object.keys(errs).length > 0) { toast("Please fix the highlighted fields.", "error"); return; }
-
-    setSaving(true);
-    try {
-      const trimmedEmail = form.email.trim().toLowerCase();
-      if (trimmedEmail) {
-        const dupEmail = await getDocs(query(collection(db, "users"), where("email", "==", trimmedEmail)));
-        if (!dupEmail.empty) { toast("Email already in use.", "error"); return; }
-      }
-
-      let uid: string;
-      if (form.createLogin) {
-        const { initializeApp } = await import("firebase/app");
-        const { default: primaryApp } = await import("@/services/firebase/firebase");
-        const secondaryApp  = initializeApp(primaryApp.options, `student-create-${Date.now()}`);
-        const secondaryAuth = getAuth(secondaryApp);
-
-        try {
-          const cred = await createUserWithEmailAndPassword(
-            secondaryAuth, trimmedEmail, form.admissionNo.trim()
-          );
-          uid = cred.user.uid;
-        } finally {
-          await fbSignOut(secondaryAuth).catch(() => {});
-          await deleteApp(secondaryApp).catch(() => {});
-        }
-      } else {
-        // No login — just a Firestore record, no Firebase Auth account.
-        uid = doc(collection(db, "users")).id;
-      }
-
-      const seq       = await getNextStudentSeq();
-      const studentID = buildStudentID(seq);
-
-      await setDoc(doc(db, "users", uid), {
-        uid, name: form.name.trim(), displayName: form.name.trim(),
-        email:       trimmedEmail,
-        studentID,
-        admissionNo: form.admissionNo.trim(),
-        phone:       form.phone.trim(),
-        centerId:    form.centerId.trim(),
-        batchId:     batchIdToStore(centerOptions.find(c => c.id === form.centerId)?.batches, form.batchId),
-        instrument:  form.instrument.trim(),
-        course:      form.course.trim(),
-        // School of Music (wing 2): every student is a group batch, prepaid,
-        // billed monthly — the form hides the ROL+ options and forces these.
-        classType:          isSom ? "group"   : (form.classType || "group"),
-        billingMode:        isSom ? "prepay"  : (form.billingMode || "postpay"),
-        assignedTeacherUid: !isSom && form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
-        classDays:          !isSom && form.classType === "personal" ? form.classDays : [],
-        classTime:          !isSom && form.classType === "personal" ? (form.classTime || null) : null,
-        feeCycle:    isSom ? "monthly" : form.feeCycle,
-        feePerClass: !isSom && form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
-        ...(isSom ? { monthlyFee: Number(form.monthlyFee) } : {}),
-        status:        form.status,
-        studentStatus: form.status,   // mirror for type-system compatibility
-        role:        "student",
-        wing:        wing,
-        createdVia:  "manual",
-        hasLogin:          form.createLogin,
-        mustResetPassword: form.createLogin,
-        currentBalance: 0,
-        deactivationRequestedBy: null,
-        deactivationRequestedAt: null,
-        deactivationApprovalStatus: null,
-        breakRequestedBy:    null,
-        breakRequestedAt:    null,
-        breakStartDate:      null,
-        breakReason:         null,
-        breakApprovalStatus: null,
-        createdBy:   user?.uid ?? "unknown",
-        createdAt:   serverTimestamp(),
-        updatedAt:   serverTimestamp(),
-      });
-
-      logAction({ action: "STUDENT_CREATED", initiatorId: user?.uid ?? "", initiatorRole: role ?? "admin",
-        approverId: null, approverRole: null, reason: null,
-        metadata: { uid, studentID, name: form.name.trim(), email: trimmedEmail, hasLogin: form.createLogin } });
-
-      setForm({ ...EMPTY_CREATE });
-      setFormErrors({});
-      setShowForm(false);
-      setLoading(true);
-      await fetchData();
-      toast(
-        form.createLogin
-          ? `Student created. ID: ${studentID}`
-          : `Student added. ID: ${studentID} (no login created — record only).`,
-        "success"
-      );
-    } catch (err) {
-      toast(`Failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   // ── Deactivation actions ───────────────────────────────────────────────────
   async function requestDeactivation(student: StudentRow) {
     if (!user) return;
@@ -786,7 +635,7 @@ function StudentsContent() {
             </>}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
           {requestStudents.length > 0 && (
             <div style={p.deactivationBadge} onClick={() => setRequestsOpen(true)}>
               ⚠ Deactivation Requests ({requestStudents.length})
@@ -799,9 +648,13 @@ function StudentsContent() {
             </div>
           )}
           {(isAdmin || isTeacher) && (
-            <button onClick={() => { setFormErrors({}); setEditTarget(null); setShowForm(true); }} style={p.addBtn}>
-              + Add Student
-            </button>
+            // Students are only created through the admissions pipeline
+            // (application → screening → centre assignment → enrol).
+            <Link href={isSom ? "/dashboard/admissions" : "/dashboard/screening"}
+              title="New students are enrolled through Admissions & Screening"
+              style={{ fontSize: 12.5, fontWeight: 600, color: "var(--color-accent-text)", whiteSpace: "nowrap", alignSelf: "center" }}>
+              🎓 New admission →
+            </Link>
           )}
         </div>
       </div>
@@ -980,20 +833,6 @@ function StudentsContent() {
           )}
         </div>
       )}
-
-      {/* ── Add Student drawer ── */}
-      <AddStudentDrawer
-        open={showForm}
-        form={form}
-        setForm={setForm}
-        errors={formErrors}
-        isSom={isSom}
-        saving={saving}
-        centerOptions={centerOptions}
-        teacherOptions={teacherOptions}
-        onClose={() => { setShowForm(false); setFormErrors({}); }}
-        onSubmit={handleCreate}
-      />
 
       {/* ── Edit Modal ── */}
       {editTarget && (
@@ -2381,210 +2220,6 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
   );
 }
 
-// ─── Add Student drawer ───────────────────────────────────────────────────────
-
-function DrawerErr({ msg }: { msg?: string }) {
-  if (!msg) return null;
-  return <span style={{ fontSize: 11, fontWeight: 600, color: "#dc2626" }}>{msg}</span>;
-}
-
-function AddStudentDrawer({
-  open, form, setForm, errors, isSom, saving, centerOptions, teacherOptions, onClose, onSubmit,
-}: {
-  open: boolean;
-  form: CreateForm;
-  setForm: React.Dispatch<React.SetStateAction<CreateForm>>;
-  errors: Record<string, string>;
-  isSom: boolean;
-  saving: boolean;
-  centerOptions: CenterOption[];
-  teacherOptions: { id: string; name: string }[];
-  onClose: () => void;
-  onSubmit: (e: React.FormEvent) => void;
-}) {
-  const errInput = (k: string): React.CSSProperties =>
-    errors[k] ? { ...p.input, borderColor: "#fca5a5", background: "#fef2f2" } : p.input;
-
-  return (
-    <>
-      <div onClick={onClose} style={{
-        position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1000,
-        opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none", transition: "opacity 0.2s",
-      }} />
-      <form
-        onSubmit={onSubmit}
-        style={{
-          position: "fixed", top: 0, right: 0, height: "100dvh", width: "min(460px, 100vw)",
-          background: "#fff", zIndex: 1001, display: "flex", flexDirection: "column" as const,
-          boxShadow: "-8px 0 32px rgba(0,0,0,0.18)",
-          transform: open ? "translateX(0)" : "translateX(100%)",
-          transition: "transform 0.25s cubic-bezier(0.4,0,0.2,1)",
-          pointerEvents: open ? "auto" : "none",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #e5e7eb", flexShrink: 0 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>New Student</div>
-          <button type="button" onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1 }}>✕</button>
-        </div>
-
-        <div style={{ padding: "16px 20px", overflowY: "auto" as const, flex: 1 }}>
-          <div style={p.hint}>
-            {form.createLogin
-              ? <>🔐 Login: <strong>email</strong> as username · <strong>admission no.</strong> as password · Student ID is assigned automatically</>
-              : <>Most students don't need to sign in — this student is added as a record only. Student ID is assigned automatically.</>}
-          </div>
-
-          <div style={modal.sectionLabel}>Identity</div>
-          <div style={{ display: "flex", flexDirection: "column" as const, gap: 12, marginBottom: 18 }}>
-            <Field label="Full Name *">
-              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Arjun Sharma" style={errInput("name")} />
-              <DrawerErr msg={errors.name} />
-            </Field>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#374151", cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                checked={form.createLogin}
-                onChange={e => setForm(f => ({ ...f, createLogin: e.target.checked }))}
-              />
-              Create a login for this student (email + password sign-in)
-            </label>
-            <Field label={form.createLogin ? "Email (login username) *" : "Email (optional)"}>
-              <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="e.g. arjun@gmail.com" style={errInput("email")} />
-              <DrawerErr msg={errors.email} />
-            </Field>
-            <Field label={form.createLogin ? "Admission No. (initial password) *" : "Admission No."}>
-              <input value={form.admissionNo} onChange={e => setForm(f => ({ ...f, admissionNo: e.target.value }))} placeholder="e.g. ADM-2026-001" style={errInput("admissionNo")} />
-              <DrawerErr msg={errors.admissionNo} />
-            </Field>
-            <Field label="Phone">
-              <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} placeholder="e.g. +91 98765 43210" style={p.input} />
-            </Field>
-          </div>
-
-          <div style={modal.sectionLabel}>Placement</div>
-          <div style={{ display: "flex", flexDirection: "column" as const, gap: 12, marginBottom: 18 }}>
-            <Field label="Centre *">
-              <select
-                value={form.centerId}
-                onChange={e => {
-                  const cid = e.target.value;
-                  const centerFee = centerOptions.find(c => c.id === cid)?.monthlyFee;
-                  setForm(f => ({
-                    ...f,
-                    centerId: cid,
-                    batchId: cid === f.centerId ? f.batchId : "",
-                    monthlyFee: isSom && !f.monthlyFee && centerFee ? String(centerFee) : f.monthlyFee,
-                  }));
-                }}
-                style={errInput("centerId")}>
-                <option value="">— Select centre —</option>
-                {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-              <DrawerErr msg={errors.centerId} />
-            </Field>
-            {form.centerId && (
-              <Field label="Batch">
-                <BatchSelect
-                  batches={centerOptions.find(c => c.id === form.centerId)?.batches ?? []}
-                  value={form.batchId}
-                  onChange={v => setForm(f => ({ ...f, batchId: v }))}
-                />
-              </Field>
-            )}
-            {!isSom && (
-              <Field label="Class Type *">
-                <select value={form.classType} onChange={e => setForm(f => ({ ...f, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))} style={p.input}>
-                  <option value="group">Group Class (batch at centre)</option>
-                  <option value="personal">Personal Class (one-on-one / private)</option>
-                </select>
-              </Field>
-            )}
-            {!isSom && form.classType === "personal" && (
-              <Field label="Assign Teacher">
-                <select value={form.assignedTeacherUid} onChange={e => setForm(f => ({ ...f, assignedTeacherUid: e.target.value }))} style={p.input}>
-                  <option value="">— Unassigned —</option>
-                  {teacherOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
-              </Field>
-            )}
-            {!isSom && form.classType === "personal" && (
-              <Field label="Class Days">
-                <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8, paddingTop: 2 }}>
-                  {DAYS_OF_WEEK.map(day => (
-                    <label key={day} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, cursor: "pointer" }}>
-                      <input type="checkbox" checked={form.classDays.includes(day)}
-                        onChange={e => setForm(f => ({
-                          ...f,
-                          classDays: e.target.checked ? [...f.classDays, day] : f.classDays.filter(d => d !== day),
-                        }))} />
-                      {day}
-                    </label>
-                  ))}
-                </div>
-              </Field>
-            )}
-            {!isSom && form.classType === "personal" && (
-              <Field label="Class Time">
-                <input type="time" value={form.classTime} onChange={e => setForm(f => ({ ...f, classTime: e.target.value }))} style={p.input} />
-              </Field>
-            )}
-            <Field label="Instrument *">
-              <input value={form.instrument} onChange={e => setForm(f => ({ ...f, instrument: e.target.value }))} placeholder="e.g. Guitar" style={errInput("instrument")} />
-              <DrawerErr msg={errors.instrument} />
-            </Field>
-            <Field label="Course *">
-              <input value={form.course} onChange={e => setForm(f => ({ ...f, course: e.target.value }))} placeholder="e.g. Beginner Guitar" style={errInput("course")} />
-              <DrawerErr msg={errors.course} />
-            </Field>
-          </div>
-
-          <div style={modal.sectionLabel}>Fees</div>
-          <div style={{ display: "flex", flexDirection: "column" as const, gap: 12 }}>
-            {isSom ? (
-              <Field label="Monthly Fee (₹) *">
-                <input type="number" min="0" step="1" value={form.monthlyFee}
-                  onChange={e => setForm(f => ({ ...f, monthlyFee: e.target.value }))} placeholder="e.g. 2000" style={errInput("monthlyFee")} />
-                <DrawerErr msg={errors.monthlyFee} />
-              </Field>
-            ) : (
-              <>
-                <Field label="Billing Mode *">
-                  <select value={form.billingMode} onChange={e => setForm(f => ({ ...f, billingMode: e.target.value }))} style={p.input}>
-                    <option value="postpay">Postpay — billed first, pays after</option>
-                    <option value="prepay">Prepay — payments advance, fee deducted</option>
-                  </select>
-                </Field>
-                <Field label="Fee Cycle">
-                  <select value={form.feeCycle} onChange={e => setForm(f => ({ ...f, feeCycle: e.target.value }))} style={p.input}>
-                    <option value="monthly">Monthly</option>
-                    <option value="per_class">Per Class</option>
-                  </select>
-                </Field>
-                {form.feeCycle === "per_class" && (
-                  <Field label="Fee Per Class (₹)">
-                    <input type="number" min="0" step="1" value={form.feePerClass}
-                      onChange={e => setForm(f => ({ ...f, feePerClass: e.target.value }))} placeholder="500" style={errInput("feePerClass")} />
-                    <DrawerErr msg={errors.feePerClass} />
-                  </Field>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-
-        <div style={{ padding: "14px 20px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 10, flexShrink: 0, background: "#f9fafb" }}>
-          <button type="button" onClick={onClose} style={modal.cancelBtn}>Cancel</button>
-          <button type="submit" disabled={saving} style={{ ...p.primaryBtn, opacity: saving ? 0.6 : 1 }}>
-            {saving ? "Creating…" : "Create Student"}
-          </button>
-        </div>
-      </form>
-    </>
-  );
-}
-
-// ─── Student table view ───────────────────────────────────────────────────────
-
 function StudentTableView({
   students, sortKey, sortDir, onSort, showStatus, isAdmin, isTeacher,
   onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete,
@@ -3070,7 +2705,6 @@ export const p: Record<string, React.CSSProperties> = {
   header:  { display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 12, marginBottom: 20 },
   heading: { fontSize: 22, fontWeight: 700, color: "#111827", margin: 0 },
   subheading: { fontSize: 12, color: "#6b7280", marginTop: 3 },
-  addBtn:  { background: "#4f46e5", color: "#fff", border: "none", padding: "9px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" },
   primaryBtn: { background: "#4f46e5", color: "#fff", border: "none", padding: "9px 22px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" },
 
   card:      { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "20px 24px", marginBottom: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.05)" },

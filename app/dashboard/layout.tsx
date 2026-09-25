@@ -10,6 +10,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useWing } from "@/hooks/useWing";
 import { useRoleHub } from "@/hooks/useRoleHub";
 import { clearPersistedSession, signOut } from "@/services/firebase/auth.service";
+import ThemeToggle from "@/components/layout/ThemeToggle";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES, type Capability } from "@/config/permissions";
 import type { Role } from "@/types";
@@ -540,6 +541,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 <div style={s.userEmail}>{user.email}</div>
               </div>
             </div>
+            <ThemeToggle />
             <button onClick={handleSignOut} style={s.signOutBtn}>
               <svg width="13" height="13" viewBox="0 0 20 20" fill="none">
                 <path d="M7 3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -616,6 +618,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <div style={s.userEmail}>{user.email}</div>
             </div>
           </div>
+          <ThemeToggle />
           <button onClick={handleSignOut} style={s.signOutBtn}>
             <svg width="13" height="13" viewBox="0 0 20 20" fill="none">
               <path d="M7 3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>

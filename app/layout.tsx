@@ -4,6 +4,7 @@ import { AuthProvider } from "@/features/auth/AuthContext";
 import ChunkErrorBoundary from "@/components/ChunkErrorBoundary";
 import ServiceWorkerRegister from "@/components/pwa/ServiceWorkerRegister";
 import InstallPrompt from "@/components/pwa/InstallPrompt";
+import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
 export const metadata: Metadata = {
   title:       "ROL's Plus",
@@ -42,8 +43,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    // data-theme is set by the inline script before hydration → suppress the attribute mismatch.
+    <html lang="en" suppressHydrationWarning>
       <head>
+        {/* Day/night theme — applied before first paint (see lib/theme.ts) */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         {/* PWA splash / status bar */}
         <meta name="apple-mobile-web-app-capable"          content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />

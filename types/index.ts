@@ -451,6 +451,28 @@ export interface ScreeningResult {
   rhythmSyncGrade?: string;
   dexterityGrade?:  string;
   pitchEchoGrade?:  string;
+  // Fast Track v2 (15-mark rubric): Rhythm Sync / Pitch Consciousness / Sheet
+  // Tapping. rhythmSyncGrade is shared with v1; dexterity/pitchEcho are v1-only.
+  pitchConsciousnessGrade?: string;
+  sheetTappingGrade?:       string;
+  // Fast Track v3 adds S-4 / S-5.
+  attentionSpanGrade?:      string;
+  musicalAwarenessGrade?:   string;
+  /**
+   * Fast Track section marks, total always out of 15.
+   *   v3 (sectionMax = 3): five sections × 3 marks.
+   *   v2 (no sectionMax):  three sections × 5 marks — attentionSpan /
+   *                        musicalAwareness absent. Read via readScreeningMarks().
+   */
+  screeningScores?: {
+    rhythmSync:         number;
+    pitchConsciousness: number;
+    sheetTapping:       number;
+    attentionSpan?:     number;
+    musicalAwareness?:  number;
+    total:              number;
+    sectionMax?:        number;
+  };
   // Practical scores
   rhythmScore:     number;
   pitchScore:      number;

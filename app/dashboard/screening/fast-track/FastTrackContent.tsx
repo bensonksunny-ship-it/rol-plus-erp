@@ -6,9 +6,13 @@ import { db } from "@/services/firebase/firebase";
 import Link from "next/link";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
-import { saveScreening } from "@/services/screening/screening.service";
+import { saveScreening, updateScreening } from "@/services/screening/screening.service";
 import type { ScreeningConfig, ScreeningResult } from "@/types";
-import { DEFAULT_FAST_TRACK_TESTS, type FastTrackTest } from "@/lib/screeningQuestions";
+import {
+  DEFAULT_FAST_TRACK_TESTS, FAST_TRACK_TEST_CODES, FAST_TRACK_TEST_MEASURES, GRADE_MARK_RANGE, GRADE_TO_MARK,
+  MAX_SECTION_MARKS, MAX_TOTAL_MARKS, SECTION_COUNT, gradeForMarks, readScreeningMarks,
+  type FastTrackTest, type ScreeningRubric,
+} from "@/lib/screeningQuestions";
 import { getFastTrackTests } from "@/services/screening/screeningQuestions.service";
 
 /** The saved fast-track screening, handed back to an embedding wizard. */
@@ -44,7 +48,7 @@ const SIGHT_OPTIONS = [
   { id: "regular", label: "Regular", desc: "Reads from sheet music regularly"        },
 ] as const;
 
-// The three tests (procedure + rubric) are configurable per wing by leadership
+// The five sections (procedure + rubric) are configurable per wing by leadership
 // on the "Screening Questions" tab — see lib/screeningQuestions.ts. Teachers
 // only see them here, read-only, with the grade selectors.
 
@@ -130,32 +134,49 @@ function Stepper({ step }: { step: number }) {
   );
 }
 
-// ─── Grade selector card ──────────────────────────────────────────────────────
-function GradeCard({ grade, desc, selected, onSelect }: { grade: Grade; desc: string; selected: boolean; onSelect: () => void }) {
-  const cfg = GRADE_CFG[grade];
+// ─── Mark entry (1–3) ─────────────────────────────────────────────────────────
+// Teachers pick a mark out of 3 (High 3 · Medium 2 · Low 1); the rubric bands
+// are shown read-only and light up for the chosen mark. Clicking a band picks
+// its mark as a shortcut.
+function MarkEntry({ rubric, marks, onSelect }: {
+  rubric: ScreeningRubric[]; marks: number | null; onSelect: (m: number) => void;
+}) {
+  const band = marks !== null ? gradeForMarks(marks) : null;
   return (
-    <div onClick={onSelect} style={{
-      border: selected ? `2px solid ${cfg.border}` : "1.5px solid #f0f0f0",
-      borderRadius: 12, background: selected ? cfg.bg : "#fafafa",
-      padding: "12px 14px", cursor: "pointer", marginBottom: 8,
-      display: "flex", alignItems: "flex-start", gap: 12,
-      transition: "all 0.15s",
-    }}>
-      <div style={{
-        width: 18, height: 18, borderRadius: "50%", flexShrink: 0, marginTop: 2,
-        border: `2px solid ${selected ? cfg.border : "#d1d5db"}`,
-        background: selected ? cfg.border : "transparent",
-        transition: "all 0.15s",
-      }} />
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: selected ? cfg.color : "#374151", letterSpacing: "0.06em", textTransform: "uppercase" as const, marginBottom: 3 }}>
-          {grade}
-          {selected && (
-            <span style={{ marginLeft: 8, fontSize: 9, background: cfg.badgeBg, color: cfg.color, borderRadius: 99, padding: "1px 7px" }}>SELECTED · {GRADE_SCORE[grade]}/5</span>
-          )}
-        </div>
-        <div style={{ fontSize: 12, color: selected ? "#374151" : "#9ca3af", lineHeight: 1.55 }}>{desc}</div>
+    <div>
+      <div role="radiogroup" aria-label={`Marks out of ${MAX_SECTION_MARKS}`} style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {Array.from({ length: MAX_SECTION_MARKS }, (_, i) => i + 1).map(m => {
+          const cfg = GRADE_CFG[gradeForMarks(m)];
+          const on = marks === m;
+          return (
+            <button key={m} type="button" role="radio" aria-checked={on} onClick={() => onSelect(m)}
+              style={{
+                flex: 1, padding: "10px 0", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
+                fontSize: 16, fontWeight: 900, transition: "all 0.15s",
+                border: on ? `2px solid ${cfg.border}` : "1.5px solid #e5e7eb",
+                background: on ? cfg.border : "#fff", color: on ? "#fff" : cfg.color,
+              }}>
+              {m}
+            </button>
+          );
+        })}
       </div>
+      {rubric.map(r => {
+        const cfg = GRADE_CFG[r.grade];
+        const selected = band === r.grade;
+        return (
+          <div key={r.grade} onClick={() => onSelect(GRADE_MARK_RANGE[r.grade].max)} style={{
+            border: selected ? `2px solid ${cfg.border}` : "1.5px solid #f0f0f0",
+            borderRadius: 12, background: selected ? cfg.bg : "#fafafa",
+            padding: "10px 14px", cursor: "pointer", marginBottom: 8, transition: "all 0.15s",
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: selected ? cfg.color : "#374151", letterSpacing: "0.06em", textTransform: "uppercase" as const, marginBottom: 3 }}>
+              {r.grade} <span style={{ fontWeight: 600, textTransform: "none" as const, letterSpacing: 0, color: selected ? cfg.color : "#9ca3af" }}>· {GRADE_MARK_RANGE[r.grade].label}</span>
+            </div>
+            <div style={{ fontSize: 12, color: selected ? "#374151" : "#9ca3af", lineHeight: 1.55 }}>{r.desc}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -209,10 +230,28 @@ function StudentSearch({ studentName, setStudentName, studentQuery, setStudentQu
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
+const EMPTY_MARKS = (): (number | null)[] => Array(SECTION_COUNT).fill(null);
+
+/**
+ * Saved marks as five values on the current 1–3 scale (for the edit form).
+ * An older 3-section screening (marks out of 5) carries its bands over —
+ * High → 3, Medium → 2, Low → 1 — and S-4 / S-5 start blank.
+ */
+function savedMarks(sc: FastTrackScreeningResult | null | undefined): (number | null)[] {
+  if (!sc) return EMPTY_MARKS();
+  const r = readScreeningMarks(sc as unknown as Record<string, unknown>);
+  const marks = r.legacy
+    ? r.marks.map(m => (m === null ? null : GRADE_TO_MARK[gradeForMarks(m, r.outOf)]))
+    : r.marks.map(m => (m !== null && m >= 1 && m <= MAX_SECTION_MARKS ? m : null));
+  return [...marks, ...EMPTY_MARKS()].slice(0, SECTION_COUNT);
+}
+
 export function FastTrackContent({
   onBack,
   onSaved,
   lockedStudentName,
+  initial,
+  onUpdated,
 }: {
   onBack?:  () => void;
   /**
@@ -225,6 +264,15 @@ export function FastTrackContent({
    * and the "link to enrolled student" search is hidden.
    */
   lockedStudentName?: string;
+  /**
+   * An already-completed screening. The component opens on a read-only
+   * summary of it; "Edit Assessment" unlocks the form, and saving overwrites
+   * this same screening (same id) instead of creating a new one.
+   * Parents should remount on change (key={initial?.id}).
+   */
+  initial?: FastTrackScreeningResult | null;
+  /** Called after an edited screening is saved (summary view shows it again). */
+  onUpdated?: (screening: FastTrackScreeningResult) => void;
 } = {}) {
   const { user } = useAuthContext();
   const { wing } = useWing();
@@ -238,20 +286,25 @@ export function FastTrackContent({
     return () => { live = false; };
   }, [wing]);
 
-  const [studentName,   setStudentName]   = useState(lockedStudentName ?? "");
+  // The saved screening being viewed/edited (null = a brand-new assessment).
+  const [current, setCurrent] = useState<FastTrackScreeningResult | null>(initial ?? null);
+  const [editing, setEditing] = useState(!initial);
+
+  const [studentName,   setStudentName]   = useState(lockedStudentName ?? initial?.childName ?? "");
   const [studentQuery,  setStudentQuery]  = useState("");
   const [allStudents,   setAllStudents]   = useState<StudentOption[]>([]);
   const [linkedStudent, setLinkedStudent] = useState<StudentOption | null>(null);
   const [studsLoading,  setStudsLoading]  = useState(false);
   const [showDropdown,  setShowDropdown]  = useState(false);
 
-  const [priorInstruments, setPriorInstruments] = useState<string[]>([]);
-  const [performanceGoal,  setPerformanceGoal]  = useState("");
-  const [sightReading,     setSightReading]     = useState("");
+  const [priorInstruments, setPriorInstruments] = useState<string[]>(
+    () => (initial?.academicGoals ?? "").split(",").map(x => x.trim()).filter(Boolean),
+  );
+  const [performanceGoal,  setPerformanceGoal]  = useState(initial?.stageReadiness ?? "");
+  const [sightReading,     setSightReading]     = useState(initial?.practiceCommitment ?? "");
 
-  const [rhythmGrade, setRhythmGrade] = useState<Grade | null>(null);
-  const [dexGrade,    setDexGrade]    = useState<Grade | null>(null);
-  const [pitchGrade,  setPitchGrade]  = useState<Grade | null>(null);
+  // Marks out of 3 for S-1 Rhythm Sync … S-5 Musical Awareness.
+  const [marks, setMarks] = useState<(number | null)[]>(() => savedMarks(initial));
 
   const [saving, setSaving] = useState(false);
   const [saved,  setSaved]  = useState(false);
@@ -290,10 +343,15 @@ export function FastTrackContent({
     }
   }
 
-  const testGrades = [rhythmGrade, dexGrade, pitchGrade] as const;
-  const allGraded  = testGrades.every(g => g !== null);
-  const slabConfig = allGraded ? computeSlabConfig(rhythmGrade!, dexGrade!, pitchGrade!) : null;
-  const avgScore   = allGraded ? parseFloat(((GRADE_SCORE[rhythmGrade!]+GRADE_SCORE[dexGrade!]+GRADE_SCORE[pitchGrade!])/3).toFixed(2)) : null;
+  const allGraded  = marks.every(m => m !== null);
+  const scored     = marks.filter((m): m is number => m !== null);
+  const totalMarks = scored.reduce((sum, m) => sum + m, 0);
+  const grades     = allGraded ? (marks as number[]).map(gradeForMarks) : null;
+  // Same slab rule as before, on each section's band: all High → Zeta, any Low → Delta.
+  const slabConfig = grades ? computeSlabConfig(grades[0], grades[1], grades[2]) : null;
+  // averageScore stays on the 0–5 scale older screens show ("x.xx / 5"):
+  // the total is always out of 15, so total ÷ 3.
+  const avgScore   = allGraded ? parseFloat((totalMarks / 3).toFixed(2)) : null;
   const canSave    = allGraded && studentName.trim().length > 0;
 
   async function handleSave() {
@@ -303,15 +361,35 @@ export function FastTrackContent({
       const payload: Omit<ScreeningResult, "id"> = {
         wing,
         screeningType: "fast-track", childName: studentName.trim(),
-        rhythmSyncGrade: rhythmGrade!, dexterityGrade: dexGrade!, pitchEchoGrade: pitchGrade!,
-        rhythmScore: GRADE_SCORE[rhythmGrade!], pitchScore: GRADE_SCORE[pitchGrade!], motorScore: GRADE_SCORE[dexGrade!],
+        rhythmSyncGrade: grades![0], pitchConsciousnessGrade: grades![1], sheetTappingGrade: grades![2],
+        attentionSpanGrade: grades![3], musicalAwarenessGrade: grades![4],
+        screeningScores: {
+          rhythmSync: marks[0]!, pitchConsciousness: marks[1]!, sheetTapping: marks[2]!,
+          attentionSpan: marks[3]!, musicalAwareness: marks[4]!,
+          total: totalMarks, sectionMax: MAX_SECTION_MARKS,
+        },
+        // Legacy per-skill fields (0–5 scale), still read by the screening
+        // list / diagnostic card — High 5 · Medium 3 · Low 1.
+        rhythmScore: GRADE_SCORE[grades![0]], pitchScore: GRADE_SCORE[grades![1]], motorScore: GRADE_SCORE[grades![2]],
         averageScore: avgScore, config: slabConfig,
-        screenedBy: user?.uid ?? "", screenedAt: new Date().toISOString(),
-        studentId: linkedStudent?.uid ?? null,
+        // An edit keeps the original evaluator + date and records who changed it.
+        screenedBy: current?.screenedBy || (user?.uid ?? ""),
+        screenedAt: current?.screenedAt || new Date().toISOString(),
+        ...(current ? { updatedBy: user?.uid ?? "", updatedAt: new Date().toISOString() } : {}),
+        studentId: linkedStudent?.uid ?? current?.studentId ?? null,
         ...(performanceGoal ? { stageReadiness: performanceGoal } : {}),
         ...(priorInstruments.length ? { academicGoals: priorInstruments.join(", ") } : {}),
         ...(sightReading ? { practiceCommitment: sightReading } : {}),
       };
+      if (current) {
+        await updateScreening(current.id, payload);
+        const updated = { ...payload, id: current.id } as FastTrackScreeningResult;
+        setCurrent(updated);
+        setEditing(false);
+        setStep(1);
+        onUpdated?.(updated);
+        return;
+      }
       const screeningId = await saveScreening(payload);
       if (onSaved) {
         onSaved({ ...payload, id: screeningId });
@@ -329,12 +407,86 @@ export function FastTrackContent({
     setStep(1);
     setStudentName(""); setStudentQuery(""); setLinkedStudent(null); setShowDropdown(false);
     setPriorInstruments([]); setPerformanceGoal(""); setSightReading("");
-    setRhythmGrade(null); setDexGrade(null); setPitchGrade(null);
+    setMarks(EMPTY_MARKS());
     setSaved(false); setSaveErr("");
   }
 
-  const gradeSetters = [setRhythmGrade, setDexGrade, setPitchGrade] as const;
-  const gradeValues  = [rhythmGrade, dexGrade, pitchGrade] as const;
+  const setMark = (i: number, m: number) => setMarks(prev => prev.map((v, j) => (j === i ? m : v)));
+
+  // ── Completed screening: read-only summary ─────────────────────────────────
+  if (current && !editing) {
+    const r = readScreeningMarks(current as unknown as Record<string, unknown>);
+    const total = r.total;
+    const when = current.screenedAt ? new Date(current.screenedAt) : null;
+    const goal = PERF_GOALS.find(g => g.id === current.stageReadiness)?.label ?? current.stageReadiness;
+    const sight = SIGHT_OPTIONS.find(o => o.id === current.practiceCommitment)?.label ?? current.practiceCommitment;
+    return (
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "0 0 60px" }}>
+        <div style={{ ...card, border: "1.5px solid #c7d2fe", marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" as const }}>
+            <div>
+              <span style={{ display: "inline-block", fontSize: 11, fontWeight: 800, color: "#3730a3", background: "#e0e7ff", padding: "3px 10px", borderRadius: 99 }}>
+                ✓ Screening Complete
+              </span>
+              <div style={{ fontSize: 20, fontWeight: 900, color: "#111", marginTop: 8 }}>{current.childName || studentName}</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
+                Fast Track assessment{when && !isNaN(when.getTime()) ? ` · ${when.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}` : ""}
+                {current.config?.track ? ` · ${current.config.track}` : ""}
+              </div>
+            </div>
+            <button onClick={() => { setEditing(true); setStep(1); }}
+              style={{ ...btnBase, background: "#fff", color: "#3730a3", border: "1.5px solid #a5b4fc" }}>
+              ✏️ Edit Assessment
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 12 }}>
+          {r.labels.map((label, i) => {
+            const v = r.marks[i];
+            const cfg = v !== null ? GRADE_CFG[gradeForMarks(v, r.outOf)] : null;
+            return (
+              <div key={label} style={{ ...card, textAlign: "center" as const, border: `1.5px solid ${cfg?.border ?? "#e5e7eb"}`, background: cfg?.bg ?? "#fff" }}>
+                <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: 6, letterSpacing: "0.04em" }}>{FAST_TRACK_TEST_CODES[i]} · {label}</div>
+                <div style={{ fontSize: 26, fontWeight: 900, color: cfg?.color ?? "#9ca3af" }}>
+                  {v ?? "—"}<span style={{ fontSize: 13, fontWeight: 600 }}> / {r.outOf}</span>
+                </div>
+                {v !== null && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>{gradeForMarks(v, r.outOf).toUpperCase()}</div>}
+              </div>
+            );
+          })}
+        </div>
+        {r.legacy && (
+          <div style={{ fontSize: 12, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "8px 12px", marginBottom: 12 }}>
+            Scored on the older 3-section rubric (out of 5 each). Use Edit Assessment to re-score it on the
+            5-section rubric — current bands carry over and Attention Span / Musical Awareness need scoring.
+          </div>
+        )}
+
+        <div style={{ ...card, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" as const, background: "#f8f9fb", marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 10, color: "#9ca3af", letterSpacing: "0.08em", marginBottom: 4, fontFamily: "monospace" }}>TOTAL SCREENING SCORE</div>
+            <div style={{ fontSize: 34, fontWeight: 900, color: "#111", lineHeight: 1 }}>
+              {total ?? "—"}<span style={{ fontSize: 14, fontWeight: 400, color: "#9ca3af" }}> / {MAX_TOTAL_MARKS} marks</span>
+            </div>
+          </div>
+          <div style={{ fontSize: 12.5, color: "#374151", lineHeight: 1.7 }}>
+            {priorInstruments.length > 0 && <div><b>Instruments played:</b> {priorInstruments.join(", ")}</div>}
+            {goal && <div><b>Performance goal:</b> {goal}</div>}
+            {sight && <div><b>Sight reading:</b> {sight}</div>}
+          </div>
+        </div>
+
+        {/* View-only: no enrol action here — enrolment starts from the
+            applicant card ("Enroll Student") once screening + photo are done. */}
+        {onBack && (
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={onBack} style={{ ...btnBase, background: "#f3f4f6", color: "#6b7280" }}>← Back</button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // ── Success ────────────────────────────────────────────────────────────────
   if (saved) {
@@ -345,9 +497,9 @@ export function FastTrackContent({
           <div style={{ fontSize: 10, color: "#9ca3af", letterSpacing: "0.1em", marginBottom: 8, fontFamily: "monospace" }}>{assessmentId}</div>
           <div style={{ fontSize: 22, fontWeight: 900, color: "#15803d", marginBottom: 6 }}>Assessment Saved</div>
           <div style={{ fontSize: 15, color: "#6b7280", marginBottom: 10 }}>{studentName}</div>
-          {avgScore !== null && (
+          {allGraded && (
             <div style={{ fontSize: 14, color: "#374151", marginBottom: 4 }}>
-              Composite score <strong>{avgScore.toFixed(2)}</strong> / 5
+              Total screening score <strong>{totalMarks}</strong> / {MAX_TOTAL_MARKS} marks
             </div>
           )}
           <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 32 }}>Fast Track — same syllabus for every student</div>
@@ -388,6 +540,23 @@ export function FastTrackContent({
           </div>
         </div>
       </div>
+
+      {current && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const, background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 12, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#3730a3" }}>
+          <span>✏️ Editing the saved assessment — saving updates it in place.</span>
+          <button onClick={() => {
+            // Discard edits: restore the saved values and go back to the summary.
+            setMarks(savedMarks(current));
+            setPriorInstruments((current.academicGoals ?? "").split(",").map(x => x.trim()).filter(Boolean));
+            setPerformanceGoal(current.stageReadiness ?? "");
+            setSightReading(current.practiceCommitment ?? "");
+            setSaveErr("");
+            setEditing(false);
+          }} style={{ background: "none", border: "none", color: "#3730a3", fontWeight: 700, cursor: "pointer", textDecoration: "underline", fontSize: 13 }}>
+            Cancel editing
+          </button>
+        </div>
+      )}
 
       {/* ── Stepper ────────────────────────────────────────────────────────── */}
       <Stepper step={step} />
@@ -488,8 +657,8 @@ export function FastTrackContent({
       {step === 2 && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 14 }}>
           {tests.map((test, ti) => {
-            const value = gradeValues[ti];
-            const setter = gradeSetters[ti];
+            const value = marks[ti];
+            const band  = value !== null ? gradeForMarks(value) : null;
             return (
               <div key={test.code} style={{ ...card, gridColumn: "span 12" }}>
                 <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 20 }}>
@@ -500,9 +669,9 @@ export function FastTrackContent({
                     <div style={{ fontSize: 14, fontWeight: 800, color: "#111" }}>{test.title}</div>
                     <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{test.sub}</div>
                   </div>
-                  {value && (
-                    <div style={{ fontSize: 11, fontWeight: 800, padding: "4px 12px", borderRadius: 99, background: GRADE_CFG[value].badgeBg, color: GRADE_CFG[value].color, flexShrink: 0 }}>
-                      {value.toUpperCase()} · {GRADE_SCORE[value]}/5
+                  {value !== null && band && (
+                    <div style={{ fontSize: 11, fontWeight: 800, padding: "4px 12px", borderRadius: 99, background: GRADE_CFG[band].badgeBg, color: GRADE_CFG[band].color, flexShrink: 0 }}>
+                      {value} / {MAX_SECTION_MARKS} · {band.toUpperCase()}
                     </div>
                   )}
                 </div>
@@ -520,15 +689,22 @@ export function FastTrackContent({
                     <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, borderTop: "1px solid #f0f0f0", paddingTop: 10 }}>{test.tip}</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", letterSpacing: "0.08em", textTransform: "uppercase" as const, marginBottom: 14 }}>Score Entry</div>
-                    {test.rubric.map(r => (
-                      <GradeCard key={r.grade} grade={r.grade} desc={r.desc} selected={value === r.grade} onSelect={() => setter(r.grade)} />
-                    ))}
+                    <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", letterSpacing: "0.08em", textTransform: "uppercase" as const, marginBottom: 14 }}>Score Entry · out of {MAX_SECTION_MARKS}</div>
+                    <MarkEntry rubric={test.rubric} marks={value} onSelect={m => setMark(ti, m)} />
                   </div>
                 </div>
               </div>
             );
           })}
+
+          <div style={{ gridColumn: "span 12", ...card, padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", border: "2px solid #fde68a", background: "#fffbeb" }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#78350f" }}>
+              Total Screening Score: <span style={{ fontSize: 22, fontWeight: 900 }}>{totalMarks}</span> / {MAX_TOTAL_MARKS} Marks
+            </div>
+            <div style={{ fontSize: 12, color: "#92400e" }}>
+              {marks.map((m, i) => `${FAST_TRACK_TEST_MEASURES[i]} ${m ?? "–"}/${MAX_SECTION_MARKS}`).join(" · ")}
+            </div>
+          </div>
 
           <div style={{ gridColumn: "span 12", display: "flex", justifyContent: "space-between" }}>
             <button onClick={() => setStep(1)} style={{ ...btnBase, background: "#f3f4f6", color: "#6b7280" }}>← Back</button>
@@ -537,7 +713,7 @@ export function FastTrackContent({
               color: allGraded ? "#fff" : "#9ca3af",
               cursor: allGraded ? "pointer" : "not-allowed",
             }}>
-              {allGraded ? "View Result →" : `Score all 3 tests (${gradeValues.filter(Boolean).length}/3)`}
+              {allGraded ? "View Result →" : `Score all ${SECTION_COUNT} sections (${scored.length}/${SECTION_COUNT})`}
             </button>
           </div>
         </div>
@@ -549,17 +725,14 @@ export function FastTrackContent({
           <div style={{ display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 14 }}>
 
             {/* Score bento tiles */}
-            {([
-              { code: "T-01", name: "Rhythm Sync", grade: rhythmGrade! },
-              { code: "T-02", name: "Dexterity",   grade: dexGrade!   },
-              { code: "T-03", name: "Pitch Echo",  grade: pitchGrade! },
-            ]).map(t => {
-              const cfg = GRADE_CFG[t.grade];
+            {tests.map((t, i) => {
+              const m = marks[i]!;
+              const cfg = GRADE_CFG[gradeForMarks(m)];
               return (
-                <div key={t.code} style={{ ...card, gridColumn: "span 4", textAlign: "center" as const, border: `1.5px solid ${cfg.border}`, background: cfg.bg }}>
-                  <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: 8, letterSpacing: "0.04em" }}>{t.code} · {t.name}</div>
-                  <div style={{ fontSize: 26, fontWeight: 900, color: cfg.color }}>{t.grade.toUpperCase()}</div>
-                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>{GRADE_SCORE[t.grade]} / 5 pts</div>
+                <div key={t.code} style={{ ...card, gridColumn: i < 3 ? "span 4" : "span 6", textAlign: "center" as const, border: `1.5px solid ${cfg.border}`, background: cfg.bg }}>
+                  <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: 8, letterSpacing: "0.04em" }}>{t.code} · {FAST_TRACK_TEST_MEASURES[i]}</div>
+                  <div style={{ fontSize: 26, fontWeight: 900, color: cfg.color }}>{m}<span style={{ fontSize: 13, fontWeight: 600 }}> / {MAX_SECTION_MARKS}</span></div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>{gradeForMarks(m).toUpperCase()}</div>
                 </div>
               );
             })}
@@ -568,9 +741,9 @@ export function FastTrackContent({
             <div style={{ ...card, gridColumn: "span 12", border: "2px solid #d1d5db", background: "#f8f9fb" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" as const, gap: 16 }}>
                 <div>
-                  <div style={{ fontSize: 10, color: "#9ca3af", letterSpacing: "0.08em", marginBottom: 6, fontFamily: "monospace" }}>COMPOSITE SCORE</div>
+                  <div style={{ fontSize: 10, color: "#9ca3af", letterSpacing: "0.08em", marginBottom: 6, fontFamily: "monospace" }}>TOTAL SCREENING SCORE</div>
                   <div style={{ fontSize: 40, fontWeight: 900, color: "#111", lineHeight: 1 }}>
-                    {avgScore.toFixed(2)}<span style={{ fontSize: 14, fontWeight: 400, color: "#9ca3af" }}>/5</span>
+                    {totalMarks}<span style={{ fontSize: 14, fontWeight: 400, color: "#9ca3af" }}> / {MAX_TOTAL_MARKS} marks</span>
                   </div>
                 </div>
                 <div style={{ fontSize: 12, color: "#6b7280", maxWidth: 260, textAlign: "right" as const, lineHeight: 1.5 }}>
@@ -602,7 +775,7 @@ export function FastTrackContent({
                   cursor: canSave && !saving ? "pointer" : "not-allowed",
                   padding: "13px 22px",
                 }}>
-                  {saving ? "Saving…" : !studentName.trim() ? "Enter student name in Step 1 ↑" : "💾 Save Assessment"}
+                  {saving ? "Saving…" : !studentName.trim() ? "Enter student name in Step 1 ↑" : current ? "💾 Save Changes" : "💾 Save Assessment"}
                 </button>
                 <button onClick={() => setStep(2)} style={{ ...btnBase, justifyContent: "center", background: "#f3f4f6", color: "#6b7280" }}>
                   ← Revise Tests
