@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/services/firebase/firebase-admin";
 import { isWing } from "@/lib/wing";
 import { ENQUIRY_INSTRUMENTS, isValidPhone, normalizePhone } from "@/lib/enquiry";
+import { checkDuplicatesServer } from "@/services/dedup/dedup.server";
 
 // =============================================================================
 // Public (unauthenticated) quick enquiry — backs the /enquiry page parents
@@ -55,6 +56,14 @@ export async function POST(req: NextRequest) {
   const instrument = ENQUIRY_INSTRUMENTS.includes(str(body.instrument)) ? str(body.instrument) : "";
 
   try {
+    // Duplicate guard — generic message only (public caller); sibling / parent
+    // matches on the same phone are accepted and flagged for staff.
+    const matches = await checkDuplicatesServer({ name: studentName, phone }, { enquiries: true });
+    if (matches.some(m => m.level === "same")) {
+      return NextResponse.json({
+        error: "We already have an enquiry for this student — our team will call you back soon.",
+      }, { status: 409 });
+    }
     const ref = adminDb().collection("enquiries").doc();
     await ref.set({
       parentName, studentName, place, instrument, wing,
@@ -62,6 +71,7 @@ export async function POST(req: NextRequest) {
       status:    "new",
       source:    "qr",
       createdAt: new Date().toISOString(),
+      ...(matches.length ? { possibleDuplicateOf: matches.map(m => m.candidate.id) } : {}),
     });
     return NextResponse.json({ id: ref.id });
   } catch (err) {

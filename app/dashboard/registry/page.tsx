@@ -20,6 +20,8 @@ import { DEFAULT_BATCH_NAME, explicitBatches } from "@/lib/batches";
 import { parseFile, normalizeHeader } from "@/lib/xlsx-parser";
 import { logAction } from "@/services/audit/audit.service";
 import { getCached, setCached } from "@/lib/dataCache";
+import { normName, normPhone } from "@/lib/dedup";
+import MergeDuplicatesModal from "@/components/dedup/MergeDuplicatesModal";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
 
 // The register shows the wing currently selected (ROL+ or School of Music) —
@@ -343,6 +345,8 @@ function RegistryContent() {
   // that already has every other capability in this app. Other status moves
   // (e.g. Confirm → Hold) stay open to anyone with canImport, as before.
   // ROL+ is run by its Admin (no Chief Teacher / Director there).
+  // Merging records rewrites fee / attendance history — leadership only.
+  const canMergeDuplicates = isFounder || role === ROLES.ADMIN || isDirector;
   const canReactivate = WING === WINGS.ROL_PLUS
     ? role === ROLES.ADMIN || isFounder
     : isChiefTeacher || isDirector || isFounder;
@@ -362,6 +366,7 @@ function RegistryContent() {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [showImport, setShowImport] = useState(false);
+  const [showMerge, setShowMerge] = useState(false);
   const [pastedText, setPastedText] = useState("");
 
   // ── Row expansion (accordion detail drawer) ─────────────────────────────
@@ -456,7 +461,7 @@ function RegistryContent() {
           studSnap => {
             const admNos = new Set<string>();
             const list: Entry[] = studSnap.docs
-              .filter(d => wingOf(d.data()) === WING)
+              .filter(d => wingOf(d.data()) === WING && d.data().status !== "merged")
               .map(d => {
                 // "estimate" so a just-written serverTimestamp() reads as ~now
                 // instead of null while the write is still pending.
@@ -551,6 +556,12 @@ function RegistryContent() {
     setExistingAdmNos(getCached<Set<string>>(`registry:${WING}:admNos`) ?? new Set());
     setLoading(!cached);
   }, [WING]);
+
+  // Centres that run more than one batch — their rows show which batch.
+  const multiBatchCentres = useMemo(
+    () => new Set(centres.filter(c => (c.batches?.length ?? 0) >= 2).map(c => c.id)),
+    [centres],
+  );
 
   const statuses = useMemo(() => {
     const found = new Set(entries.map(filterStatus));
@@ -684,6 +695,11 @@ function RegistryContent() {
           {canImport && (
             <button style={s.importBtn} onClick={() => setShowImport(true)}>⬆ Import Excel</button>
           )}
+          {canMergeDuplicates && (
+            <button style={{ ...s.printBtn, color: "#3730a3", borderColor: "#c7d2fe", background: "#eef2ff" }} onClick={() => setShowMerge(true)}>
+              🔍 Scan &amp; Merge Duplicates
+            </button>
+          )}
           {canImport && entries.length > 0 && (
             <button
               style={{ ...s.printBtn, color: "#b91c1c", borderColor: "#fecaca", background: "#fef2f2" }}
@@ -766,6 +782,11 @@ function RegistryContent() {
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{i + 1}</td>
                     <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>
                       {e.name}
+                      {multiBatchCentres.has(e.centerId) && e.batch && e.batch !== "—" && (
+                        <span title="Batch" style={{ marginLeft: 8, padding: "1px 7px", borderRadius: 999, fontSize: 10.5, fontWeight: 600, background: "#eef2ff", color: "#4338ca" }}>
+                          🗂 {e.batch}
+                        </span>
+                      )}
                       {e.admissionNo !== "—" ? (
                         <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 400, color: "var(--color-text-muted)", fontFamily: "ui-monospace, monospace" }}>
                           {e.admissionNo}
@@ -892,10 +913,17 @@ function RegistryContent() {
         )}
       </div>
 
+      {showMerge && (
+        <MergeDuplicatesModal
+          onClose={() => setShowMerge(false)}
+          centreName={id => centres.find(c => c.id === id)?.name ?? (id ? "Unknown centre" : "")}
+        />
+      )}
       {showImport && (
         <ImportModal
           centres={centres}
           existingAdmNos={existingAdmNos}
+          existingPeople={entries}
           initiatorId={user?.uid ?? "unknown"}
           initiatorRole={user?.role ?? ROLES.FOUNDER}
           wing={WING}
@@ -1208,9 +1236,11 @@ function DetailField({ label, value, emphasize }: { label: string; value: string
 }
 
 function ImportModal({
-  centres, existingAdmNos, initiatorId, initiatorRole, wing: WING, initialPaste, onClose, onDone, onImported,
+  centres, existingAdmNos, existingPeople, initiatorId, initiatorRole, wing: WING, initialPaste, onClose, onDone, onImported,
 }: {
   centres: RegistryCentre[];
+  /** Students already on the register — a row with the same name + phone is a duplicate. */
+  existingPeople: { name: string; phone: string }[];
   /** Wing the imported students are created in. */
   wing: string;
   existingAdmNos: Set<string>;
@@ -1258,6 +1288,13 @@ function ImportModal({
    *  name, or an admission number that's already on the register. */
   function buildPreview(rows: Record<string, string>[]): PreviewRow[] {
     const seen = new Set<string>();
+    // Same person = same name + same phone (siblings share a phone, so phone alone isn't enough).
+    const personKey = (name: string, phone: string) => {
+      const n = normName(name), ph = normPhone(phone);
+      return n && ph ? `${n}|${ph}` : "";
+    };
+    const existingPeopleKeys = new Set(existingPeople.map(e => personKey(e.name, e.phone)).filter(Boolean));
+    const seenPeople = new Set<string>();
     return rows.map((r, i) => {
       const name        = pick(r, "name", "studentname", "fullname");
       const admittedOn  = parseSheetDate(pick(r, "dateofadmission", "admissiondate", "doa", "date"));
@@ -1276,7 +1313,10 @@ function ImportModal({
       const key  = admissionNo.replace(/\s+/g, "").toUpperCase();
       const dupInFile = key && seen.has(key);
       if (key) seen.add(key);
-      const duplicate = !!key && (existingAdmNos.has(key) || !!dupInFile);
+      const pk = personKey(name, phone);
+      const personDup = !!pk && (existingPeopleKeys.has(pk) || seenPeople.has(pk));
+      if (pk) seenPeople.add(pk);
+      const duplicate = (!!key && (existingAdmNos.has(key) || !!dupInFile)) || personDup;
 
       return {
         sl: i + 1,
@@ -1503,7 +1543,7 @@ function ImportModal({
                 <code style={{ fontSize: 11 }}>Phone number</code> from the Phone column, and so on. A centre that isn&apos;t in the system is kept
                 as plain text.
                 <strong>Every row needs its admission number</strong> — numbers are entered manually and never generated.
-                Rows with no name or no admission number are blocked; rows whose admission number is already on the register are skipped.
+                Rows with no name or no admission number are blocked; rows whose admission number, or name + phone, is already on the register are skipped.
               </p>
 
               {preview.length === 0 && (<>

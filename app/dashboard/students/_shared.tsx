@@ -30,7 +30,7 @@ import {
 import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
 import type { CenterBatch } from "@/types";
-import { batchIdToStore, batchSchedule, effectiveBatches, isDefaultBatchId } from "@/lib/batches";
+import { batchIdToStore, batchSchedule, effectiveBatches, explicitBatches, isDefaultBatchId } from "@/lib/batches";
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import { safeCompare } from "@/lib/sortKey";
@@ -47,6 +47,8 @@ export interface StudentRow {
   centerId:    string;
   centerName:  string;
   batchId:     string | null;
+  /** Batch label — only set when the student's centre runs 2+ batches ("" otherwise). */
+  batchName?:  string;
   wing:        string;   // "rol_plus" | "school_of_music"
   instrument:  string;
   course:      string;
@@ -330,9 +332,12 @@ function StudentsContent() {
       const cMap = new Map<string, string>();
       const cMapAll = new Map<string, string>();
       const cOptsAll: CenterOption[] = [];
+      const cBatches = new Map<string, { id: string; name: string }[]>();   // centres with 2+ batches
       centerSnap.docs.forEach(d => {
         const nm = (d.data().name as string) ?? d.id;
         cMapAll.set(d.id, nm);
+        const ex = explicitBatches(d.data());
+        if (ex.length >= 2) cBatches.set(d.id, ex);
         if (!inWing(d.data(), wing)) return;
         cMap.set(d.id, nm);
         cOptsAll.push({
@@ -380,6 +385,9 @@ function StudentsContent() {
           centerName:  cMap.get(centerIdRaw) || cMapAll.get(centerIdRaw)
             || (centerIdRaw && !looksLikeCenterId(centerIdRaw) ? centerIdRaw : "Unassigned Center"),
           batchId:     (s.batchId ?? null) as string | null,
+          batchName:   cBatches.has(centerIdRaw)
+            ? (cBatches.get(centerIdRaw)!.find(b => b.id === s.batchId)?.name || "No batch")
+            : "",
           wing:        wingOf(s),
           instrument:  (s.instrument  ?? "-") as string,
           course:      (s.course      ?? "-") as string,
@@ -971,7 +979,10 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, showStatus, expande
       onClick={onToggleExpand}>
       <td style={{ ...p.td, textAlign: "center" as const }}><span style={p.expandChevron}>{expanded ? "▾" : "▸"}</span></td>
       <td style={{ ...p.td, ...ellipsis, fontWeight: 600, color: "#111827", maxWidth: 180 }} title={s.name}>{s.name}</td>
-      <td style={{ ...p.td, ...ellipsis, maxWidth: 150 }} title={s.centerName}>{s.centerName}</td>
+      <td style={{ ...p.td, ...ellipsis, maxWidth: 170 }} title={s.batchName ? `${s.centerName} · ${s.batchName}` : s.centerName}>
+        {s.centerName}
+        {s.batchName && <div style={{ fontSize: 11, color: "#4338ca", fontWeight: 600, ...ellipsis }}>🗂 {s.batchName}</div>}
+      </td>
       <td style={{ ...p.td, fontWeight: 700, color: s.balance > 0 ? "#d97706" : "#16a34a" }}>
         {fmtINR(s.balance)}
       </td>
@@ -1123,6 +1134,7 @@ function RequestsPanel({ requests, onApprove, onReject }: {
                 <span style={p.idChip}>{s.studentID}</span>
                 {" · "}
                 {s.centerName}
+                {s.batchName && <span style={{ color: "#4338ca", fontWeight: 600 }}>{" · 🗂 "}{s.batchName}</span>}
                 {" · "}
                 {s.course}
               </div>
@@ -1185,6 +1197,7 @@ function BreakRequestsPanel({ requests, onApprove, onReject }: {
                   <span style={p.idChip}>{s.studentID}</span>
                   {" · "}
                   {s.centerName}
+                  {s.batchName && <span style={{ color: "#4338ca", fontWeight: 600 }}>{" · 🗂 "}{s.batchName}</span>}
                   {" · "}
                   {s.course}
                 </div>
@@ -1254,6 +1267,7 @@ function OnBreakPanel({ students, onEndBreak, isAdmin }: {
                 <span style={p.idChip}>{s.studentID}</span>
                 {" · "}
                 {s.centerName}
+                {s.batchName && <span style={{ color: "#4338ca", fontWeight: 600 }}>{" · 🗂 "}{s.batchName}</span>}
                 {" · "}
                 {s.course}
               </div>

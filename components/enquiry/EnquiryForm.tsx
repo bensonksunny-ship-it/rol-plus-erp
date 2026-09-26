@@ -6,6 +6,9 @@
 import { useState, type FormEvent } from "react";
 import { createEnquiry, type EnquirySource } from "@/services/enquiry/enquiry.service";
 import { ENQUIRY_INSTRUMENTS, isValidPhone, normalizePhone } from "@/lib/enquiry";
+import { checkDuplicates } from "@/services/dedup/dedup.service";
+import DuplicateWarning, { isBlockingDuplicate, type DuplicateOverride } from "@/components/dedup/DuplicateWarning";
+import type { DedupMatch } from "@/lib/dedup";
 
 const ACCENT = "#d97706";
 
@@ -33,6 +36,8 @@ export default function EnquiryForm({ wing, source, onCreated, submitLabel = "Sa
   const [saving, setSaving]           = useState(false);
   const [err, setErr]                 = useState("");
   const [website, setWebsite]         = useState("");   // honeypot (QR / public only)
+  // Duplicate guard (staff; the public route checks server-side).
+  const [dupMatches, setDupMatches]   = useState<DedupMatch[]>([]);
 
   const phoneOk = isValidPhone(phone);
   const valid = parentName.trim() !== "" && studentName.trim() !== "" && phoneOk && place.trim() !== "";
@@ -43,14 +48,24 @@ export default function EnquiryForm({ wing, source, onCreated, submitLabel = "Sa
     setPhone(d.length > 5 ? `${d.slice(0, 5)} ${d.slice(5)}` : d);
   }
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
+  async function handleSubmit(e: FormEvent | null, override: DuplicateOverride | null = null) {
+    e?.preventDefault();
     setTouched(true);
     if (!valid || saving) return;
     setSaving(true);
     setErr("");
     try {
-      const data = { parentName, studentName, phone, place, instrument, wing, source };
+      let dup: Record<string, unknown> = {};
+      if (source !== "qr") {
+        const matches = await checkDuplicates({ name: studentName, phone }, { applications: true, enquiries: true });
+        if (isBlockingDuplicate(matches) || (matches.length > 0 && !override)) {
+          setDupMatches(matches);
+          return;
+        }
+        if (matches.length) dup = { possibleDuplicateOf: matches.map(m => m.candidate.id), duplicateOverride: override };
+      }
+      setDupMatches([]);
+      const data = { parentName, studentName, phone, place, instrument, wing, source, ...dup };
       let id: string;
       if (source === "qr") {
         // Public page: no login, so write through the server route.
@@ -119,6 +134,14 @@ export default function EnquiryForm({ wing, source, onCreated, submitLabel = "Sa
         <input value={website} onChange={e => setWebsite(e.target.value)} name="website" tabIndex={-1}
           autoComplete="off" aria-hidden="true" style={{ position: "absolute", left: -9999, width: 1, height: 1, opacity: 0 }} />
       )}
+
+      <div style={{ gridColumn: "1 / -1" }}>
+        <DuplicateWarning
+          matches={dupMatches}
+          onContinue={why => handleSubmit(null, why)}
+          onCancel={() => setDupMatches([])}
+        />
+      </div>
 
       {err && (
         <div style={{ gridColumn: "1 / -1", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "9px 13px", fontSize: 13, color: "#dc2626" }}>

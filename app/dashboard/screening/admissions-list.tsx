@@ -25,6 +25,8 @@ import { MAX_TOTAL_MARKS, gradeForMarks, readScreeningMarks } from "@/lib/screen
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { PhotoCaptureModal } from "./photo-capture-modal";
 import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
+import { checkDuplicates } from "@/services/dedup/dedup.service";
+import { duplicateMessage } from "@/lib/dedup";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
 
 const s: Record<string, React.CSSProperties> = {
@@ -635,6 +637,7 @@ export function AdmissionsList({
   const [completingPhase,  setCompletingPhase]  = useState<"number" | "success" | "enroll">("number");
   const [enrollCentre,     setEnrollCentre]     = useState("");
   const [enrolling,        setEnrolling]        = useState(false);
+  const [enrollErr,        setEnrollErr]        = useState("");
 
   // Click / tap outside the expanded applicant detail card — or Escape — closes
   // it. Never while another layer is open on top of it (edit form, delete
@@ -900,8 +903,15 @@ export function AdmissionsList({
     // Admission numbers are manual-only — never create a student without one.
     if (!str(completing.admission.admissionNumber).trim()) return;
     setEnrolling(true);
+    setEnrollErr("");
     try {
       const adm = completing.admission;
+      // Never create a second student for someone already in the Registry.
+      const same = (await checkDuplicates(
+        { name: str(adm.fullName), phone: str(adm.phone), email: str(adm.email), dob: str(adm.dob), admissionNo: str(adm.admissionNumber) },
+        { applications: false },
+      )).find(m => m.level === "same");
+      if (same) { setEnrollErr(duplicateMessage(same)); return; }
       await addDoc(collection(db, "users"), {
         name:            str(adm.fullName),
         role:            "student",
@@ -1180,6 +1190,11 @@ export function AdmissionsList({
                   </div>
                 )}
               </div>
+              {enrollErr && (
+                <div role="alert" style={{ margin: "0 24px 12px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#991b1b" }}>
+                  ⛔ {enrollErr} — not enrolled again.
+                </div>
+              )}
               <div style={{ padding: "0 24px 24px", display: "flex", gap: 10 }}>
                 <button onClick={() => setCompletingPhase("success")} disabled={enrolling} style={{ ...s.secondaryBtn, flex: 1 }}>← Back</button>
                 <button

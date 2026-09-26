@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/services/firebase/firebase-admin";
 import { isWing, wingOf } from "@/lib/wing";
+import { checkDuplicatesServer } from "@/services/dedup/dedup.server";
 
 // =============================================================================
 // Public (unauthenticated) admission intake — backs the /apply page that
@@ -90,6 +91,17 @@ export async function POST(req: NextRequest) {
 
   const middleName = str(body.middleName, 80);
   try {
+    // Duplicate guard. Never reveal another family's details to the public:
+    // an exact match is refused with a generic message; a shared phone/email
+    // (sibling / parent) or same-name match is accepted but flagged for staff.
+    const matches = await checkDuplicatesServer({
+      name: [firstName, middleName, lastName].filter(Boolean).join(" "), phone, email: str(body.email, 120), dob,
+    });
+    if (matches.some(m => m.level === "same")) {
+      return NextResponse.json({
+        error: "We already have this student's details on file — no need to submit again. Our team will contact you shortly.",
+      }, { status: 409 });
+    }
     const ref = adminDb().collection("admissions").doc();
     // Same shape the in-app AdmissionFormContent (minimal) saves.
     await ref.set({
@@ -123,6 +135,7 @@ export async function POST(req: NextRequest) {
       photoStatus:          photo ? "completed" : "pending",
       submittedBy:          "",
       source:               "public_qr",
+      ...(matches.length ? { possibleDuplicateOf: matches.map(m => m.candidate.id) } : {}),
       submittedAt:          new Date().toISOString(),
     });
     return NextResponse.json({ id: ref.id });

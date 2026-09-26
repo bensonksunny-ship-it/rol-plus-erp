@@ -34,7 +34,9 @@ export interface Enquiry {
 
 export type NewEnquiry = Pick<Enquiry, "parentName" | "studentName" | "phone" | "place" | "instrument" | "wing" | "source">;
 
-export async function createEnquiry(data: NewEnquiry): Promise<string> {
+export async function createEnquiry(
+  data: NewEnquiry & { possibleDuplicateOf?: string[]; duplicateOverride?: string | null },
+): Promise<string> {
   const ref = await addDoc(collection(db, "enquiries"), {
     parentName:  data.parentName.trim(),
     studentName: data.studentName.trim(),
@@ -45,6 +47,8 @@ export async function createEnquiry(data: NewEnquiry): Promise<string> {
     source:      data.source,
     status:      "new",
     createdAt:   new Date().toISOString(),
+    // Saved after staff confirmed a sibling / parent / different-person match.
+    ...(data.possibleDuplicateOf?.length ? { possibleDuplicateOf: data.possibleDuplicateOf, duplicateOverride: data.duplicateOverride ?? null } : {}),
   });
   return ref.id;
 }

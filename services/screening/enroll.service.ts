@@ -18,6 +18,8 @@ import { db } from "@/services/firebase/firebase";
 import { WINGS } from "@/config/constants";
 import { isAdmissionNoTaken } from "@/lib/admissionNumber";
 import { linkAdmissionFeeToStudent } from "@/services/finance/finance.service";
+import { checkDuplicates } from "@/services/dedup/dedup.service";
+import { duplicateMessage } from "@/lib/dedup";
 import type { CenterBatch } from "@/types";
 import type { SyllabusInstrument, SyllabusLevel } from "@/types/lesson";
 
@@ -59,6 +61,13 @@ export async function enrollApplicant(i: EnrollInput): Promise<string> {
   }
 
   const a = i.application;
+
+  // Never create a second student for someone already enrolled.
+  const same = (await checkDuplicates(
+    { name: str(a.fullName), phone: str(a.phone), email: str(a.email), dob: str(a.dob), admissionNo: admNo },
+    { applications: false },
+  )).find(m => m.level === "same");
+  if (same) throw new Error(`${duplicateMessage(same)}. Open that student instead of enrolling again.`);
   const admittedOn = i.startDate ? new Date(`${i.startDate}T00:00:00`).toISOString() : new Date().toISOString();
   const { id: screeningId, ...screeningData } = i.screening;
 

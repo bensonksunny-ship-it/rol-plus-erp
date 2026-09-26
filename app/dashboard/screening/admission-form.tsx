@@ -26,6 +26,9 @@ import { useWing } from "@/hooks/useWing";
 import { saveAdmission } from "@/services/screening/screening.service";
 import { canEnterAdmissionNo, cleanAdmissionNo, isAdmissionNoTaken } from "@/lib/admissionNumber";
 import type { Wing } from "@/types";
+import { checkDuplicates } from "@/services/dedup/dedup.service";
+import DuplicateWarning, { isBlockingDuplicate, type DuplicateOverride } from "@/components/dedup/DuplicateWarning";
+import type { DedupMatch } from "@/lib/dedup";
 
 const s: Record<string, React.CSSProperties> = {
   card: {
@@ -254,13 +257,31 @@ export function AdmissionFormContent({
     e.target.value = "";
   }
 
-  async function handleSubmit() {
+  // Duplicate guard (staff form; the public /apply route checks server-side).
+  const [dupMatches, setDupMatches] = useState<DedupMatch[]>([]);
+  const [dupOverride, setDupOverride] = useState<DuplicateOverride | null>(null);
+
+  async function handleSubmit(override: DuplicateOverride | null = dupOverride) {
     if (!canSubmit || saving) return;
     setSaving(true); setSaveErr("");
     try {
       if (showAdmNo && await isAdmissionNoTaken(admNo)) {
         throw new Error(`Admission number ${admNo.trim()} is already in use. Please check and enter a different one.`);
       }
+      let dupIds: string[] = [];
+      if (!publicWing) {
+        const matches = await checkDuplicates({
+          name: effectiveName, phone, email, dob: `${dobDD}/${dobMM}/${dobYYYY}`,
+          admissionNo: showAdmNo ? admNo : "",
+        }, { applications: true });
+        // Exact match → never save. Family / same-name → wait for staff to confirm.
+        if (isBlockingDuplicate(matches) || (matches.length > 0 && !override)) {
+          setDupMatches(matches);
+          return;
+        }
+        dupIds = matches.map(m => m.candidate.id);
+      }
+      setDupMatches([]);
       const payload = {
         wing,
         fullName:            effectiveName,
@@ -287,6 +308,7 @@ export function AdmissionFormContent({
         parentPartnerProgram,
         photo:               photoDataUrl ?? null,
         submittedBy:         user?.uid ?? "",
+        ...(dupIds.length ? { possibleDuplicateOf: dupIds, duplicateOverride: override } : {}),
         ...(showAdmNo ? {
           admissionNumber:      admNo.trim(),
           admissionNoEnteredBy: user?.uid ?? "",
@@ -713,6 +735,12 @@ export function AdmissionFormContent({
           autoComplete="off" aria-hidden="true" style={{ position: "absolute", left: -9999, width: 1, height: 1, opacity: 0 }} />
       )}
 
+      <DuplicateWarning
+        matches={dupMatches}
+        onContinue={why => { setDupOverride(why); handleSubmit(why); }}
+        onCancel={() => setDupMatches([])}
+      />
+
       {saveErr && (
         <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#dc2626", marginTop: 16 }}>
           {saveErr}
@@ -723,7 +751,7 @@ export function AdmissionFormContent({
         <button type="button" onClick={reset} style={s.secondaryBtn}>Reset</button>
         <button
           type="button"
-          onClick={handleSubmit}
+          onClick={() => handleSubmit()}
           disabled={!canSubmit || saving}
           style={{ ...s.primaryBtn, opacity: canSubmit && !saving ? 1 : 0.4, cursor: canSubmit && !saving ? "pointer" : "not-allowed" }}
         >
