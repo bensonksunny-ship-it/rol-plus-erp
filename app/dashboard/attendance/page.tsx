@@ -862,7 +862,9 @@ function AttendanceContent() {
         const students: StudentRow[] = stuResults[i].docs
           .filter(d => {
             const st = ((d.data().status ?? d.data().studentStatus ?? "active") as string);
-            return st !== "inactive" && st !== "deactivation_requested";
+            // A pending inactivation request keeps attending until a Chief
+            // Teacher / Director approves it (then status → "inactive").
+            return st !== "inactive";
           })
           .map(d => {
             const data = d.data() as Record<string, unknown>;

@@ -9,8 +9,9 @@
 //                            wing syllabus (automatic — see lesson.service),
 //                            downloads the admission card.
 //
-// This route only does anything for the school_of_music wing; ROL+ keeps its
-// existing /dashboard/screening hub.
+// Same system in both wings (ROL+ Music Academy and Rol's School of Music):
+// every list, screening, question set, centre and student is scoped to the
+// wing currently selected — nothing crosses between wings.
 // =============================================================================
 
 import { useEffect, useState } from "react";
@@ -29,13 +30,14 @@ import { AdmissionFormContent } from "../screening/admission-form";
 import { AdmissionsList } from "../screening/admissions-list";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
 import { EnquiriesDrawer } from "./enquiries";
-import { ScreeningQuestionsPanel } from "@/components/screening/ScreeningQuestionsPanel";
+import { ScreeningQuestionsModal } from "@/components/screening/ScreeningQuestionsModal";
+import { useAuth } from "@/hooks/useAuth";
+import { canLeadWing } from "@/lib/elevatedAccount";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
 import { markEnquiryConverted, subscribeEnquiries, type Enquiry } from "@/services/enquiry/enquiry.service";
 import { FastTrackContent, type FastTrackScreeningResult } from "../screening/fast-track/FastTrackContent";
 
 const ACCENT = "#d97706";
-const WING = WINGS.SCHOOL_OF_MUSIC;
 
 // ─── Shared primitives ────────────────────────────────────────────────────────
 const card: React.CSSProperties = {
@@ -96,12 +98,11 @@ function Stepper({ step }: { step: number }) {
   );
 }
 
-type AdmissionsTab = "applications" | "questions";
-const ADMISSIONS_TABS: AdmissionsTab[] = ["applications", "questions"];
 
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 function AdmissionsWizard() {
   const { wing } = useWing();
+  const WING = wing;   // the active wing — see header comment
 
   const [mode, setMode]             = useState<"list" | "wizard">("list");
   const [step, setStep]             = useState<1 | 2 | 3>(1);
@@ -122,7 +123,6 @@ function AdmissionsWizard() {
   }
   const [newEnquiries, setNewEnquiries]   = useState(0);
   useEffect(() => {
-    if (wing !== WING) return;
     return subscribeEnquiries(
       WING,
       list => setNewEnquiries(list.filter(e => e.status === "new").length),
@@ -130,20 +130,17 @@ function AdmissionsWizard() {
     );
   }, [wing]);
   const [showNewChoice, setShowNewChoice] = useState(false);
-  const [tab, setTab]                 = useState<AdmissionsTab>("applications");
-  // Deep links: ?tab=questions opens that tab; ?tab=enquiries (the old
-  // Enquiries tab) now opens the Enquiries drawer.
+  // Screening rubric editor — a pop-up from the ⚙ header icon (wing leaders only).
+  const { user: me } = useAuth();
+  const canEditQuestions = canLeadWing(me, WING);
+  const [showQuestions, setShowQuestions] = useState(false);
+  // Deep links: ?tab=enquiries opens the Enquiries drawer; ?tab=questions opens
+  // the rubric editor (both were tabs once).
   useEffect(() => {
     const t = new URLSearchParams(window.location.search).get("tab");
     if (t === "enquiries") setShowEnquiries(true);
-    else if (t && (ADMISSIONS_TABS as string[]).includes(t)) setTab(t as AdmissionsTab);
-  }, []);
-  function selectTab(t: AdmissionsTab) {
-    setTab(t);
-    const url = new URL(window.location.href);
-    if (t !== "applications") url.searchParams.set("tab", t); else url.searchParams.delete("tab");
-    window.history.replaceState(null, "", url);
-  }
+    else if (t === "questions" && canEditQuestions) setShowQuestions(true);
+  }, [canEditQuestions]);
   // Step 1 toggle: full application vs. a quick enquiry (lead only).
   const [formKind, setFormKind]       = useState<"full" | "quick">("full");
   // Set by "Convert to admission" — pre-fills the full form, marked converted on submit.
@@ -161,23 +158,6 @@ function AdmissionsWizard() {
     setMode("wizard");
   }
 
-  if (wing !== WING) {
-    return (
-      <div style={{ maxWidth: 520, margin: "48px auto", ...card, textAlign: "center" }}>
-        <div style={{ fontSize: 40, marginBottom: 12 }}>🎼</div>
-        <div style={{ fontSize: 17, fontWeight: 800, color: "#111", marginBottom: 6 }}>
-          Admissions is the {WING_LABELS[WING]} intake
-        </div>
-        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>
-          Switch the active wing to {WING_LABELS[WING]} to use this. The ROL+ Music Academy
-          intake lives on the Screening hub.
-        </div>
-        <Link href="/dashboard/screening" style={{ ...btn, background: "#f3f4f6", color: "#374151", textDecoration: "none" }}>
-          Go to Screening →
-        </Link>
-      </div>
-    );
-  }
 
   // ── List view (default) ──────────────────────────────────────────────────
   if (mode === "list") {
@@ -211,7 +191,20 @@ function AdmissionsWizard() {
               One application · Fast Track screening · Syllabus by level &amp; instrument
             </div>
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {canEditQuestions && (
+              <button type="button" onClick={() => setShowQuestions(true)}
+                title="Edit Screening Rubric & Questions" aria-label="Edit Screening Rubric & Questions"
+                className="transition-colors hover:bg-amber-50"
+                style={{ ...btn, background: "#fff", color: "#b45309", border: "1.5px solid #fcd34d", padding: 9, lineHeight: 0 }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <line x1="21" x2="14" y1="4" y2="4" /><line x1="10" x2="3" y1="4" y2="4" />
+                  <line x1="21" x2="12" y1="12" y2="12" /><line x1="8" x2="3" y1="12" y2="12" />
+                  <line x1="21" x2="16" y1="20" y2="20" /><line x1="12" x2="3" y1="20" y2="20" />
+                  <line x1="14" x2="14" y1="2" y2="6" /><line x1="8" x2="8" y1="10" y2="14" /><line x1="16" x2="16" y1="18" y2="22" />
+                </svg>
+              </button>
+            )}
             <button onClick={() => setShowEnquiries(true)} title="Open enquiries — add a lead, follow up, convert"
               style={{ ...btn, background: ACCENT, color: "#fff", padding: "9px 16px", position: "relative" }}>
               <span aria-hidden style={{ fontSize: 15 }}>📇</span> Enquiries
@@ -236,20 +229,13 @@ function AdmissionsWizard() {
             onShowQr={() => { setQrTarget("enquiry"); setShowQr(true); }}
           />
         )}
-        <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "1px solid #f0f0f0" }}>
-          {([["applications", "Applications"], ["questions", "Screening Questions"]] as const).map(([k, l]) => (
-            <button key={k} onClick={() => selectTab(k)} style={{
-              padding: "9px 16px", border: "none", background: "none", cursor: "pointer", fontFamily: "inherit",
-              fontSize: 13.5, fontWeight: tab === k ? 800 : 500, color: tab === k ? "#92400e" : "#6b7280",
-              borderBottom: tab === k ? `2.5px solid ${ACCENT}` : "2.5px solid transparent", marginBottom: -1,
-            }}>
-              {l}
-            </button>
-          ))}
-        </div>
-        {tab === "questions" ? (
-          <ScreeningQuestionsPanel wing={WING} />
-        ) : (
+        {showQuestions && (
+          <ScreeningQuestionsModal wing={WING} onClose={() => {
+            setShowQuestions(false);
+            const url = new URL(window.location.href);
+            if (url.searchParams.get("tab") === "questions") { url.searchParams.delete("tab"); window.history.replaceState(null, "", url); }
+          }} />
+        )}
         <AdmissionsList
           onNewAdmission={() => setShowNewChoice(true)}
           onResume={async (rec, intent) => {
@@ -287,7 +273,6 @@ function AdmissionsWizard() {
             setMode("wizard");
           }}
         />
-        )}
       </div>
     );
   }

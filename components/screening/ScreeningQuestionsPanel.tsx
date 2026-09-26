@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
-import { isElevatedAccount } from "@/lib/elevatedAccount";
+import { canLeadWing } from "@/lib/elevatedAccount";
 import {
   FAST_TRACK_TEST_MEASURES, GRADE_MARK_RANGE, MAX_SECTION_MARKS, MAX_STEPS, MAX_TOTAL_MARKS, SECTION_COUNT,
   type FastTrackTest, type ScreeningGrade,
@@ -47,9 +47,15 @@ const iconBtn: React.CSSProperties = {
 
 const clone = (t: FastTrackTest[]): FastTrackTest[] => JSON.parse(JSON.stringify(t));
 
-export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
+export function ScreeningQuestionsPanel({ wing, startEditing = false, onDirtyChange }: {
+  wing: string;
+  /** Open straight into the editor (the Admissions pop-up does this). */
+  startEditing?: boolean;
+  /** Tells a hosting pop-up whether there are unsaved edits. */
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const { user } = useAuth();
-  const canEdit = isElevatedAccount(user);
+  const canEdit = canLeadWing(user, wing);
 
   const [tests, setTests]           = useState<FastTrackTest[] | null>(null);
   const [customised, setCustomised] = useState(false);
@@ -58,17 +64,20 @@ export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
   const [err, setErr]               = useState("");
   const [flash, setFlash]           = useState("");
 
-  async function load() {
+  useEffect(() => { onDirtyChange?.(draft !== null); }, [draft]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function load(openEditor = false) {
     setErr("");
     try {
       const res = await getFastTrackTests(wing);
       setTests(res.tests);
       setCustomised(res.customised);
+      if (openEditor && canEdit) setDraft(clone(res.tests));
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not load screening questions.");
     }
   }
-  useEffect(() => { setTests(null); setDraft(null); load(); }, [wing]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setTests(null); setDraft(null); load(startEditing); }, [wing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function showFlash(text: string) {
     setFlash(text);
@@ -141,7 +150,7 @@ export function ScreeningQuestionsPanel({ wing }: { wing: string }) {
               <>
                 <button onClick={() => setDraft(null)} disabled={busy} style={{ ...btn, background: "#f3f4f6", color: "#374151" }}>Cancel</button>
                 <button onClick={save} disabled={busy} style={{ ...btn, background: ACCENT, color: "#fff", opacity: busy ? 0.6 : 1 }}>
-                  {busy ? "Saving…" : "Save questions"}
+                  {busy ? "Saving…" : "Save Changes"}
                 </button>
               </>
             ) : (

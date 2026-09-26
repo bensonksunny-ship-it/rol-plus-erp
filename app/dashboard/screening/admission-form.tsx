@@ -147,7 +147,7 @@ export function AdmissionFormContent({
   // Admission number — typed in by a Founder / Director / Chief Teacher on the
   // School of Music staff form (never generated, never asked of parents).
   // Teachers don't see it; leadership adds it at the Enrol step instead.
-  const showAdmNo = minimal && !publicWing && canEnterAdmissionNo(user?.role);
+  const showAdmNo = minimal && !publicWing && canEnterAdmissionNo(user?.role, wing);
   const [admNo, setAdmNo] = useState("");
 
   // Personal information

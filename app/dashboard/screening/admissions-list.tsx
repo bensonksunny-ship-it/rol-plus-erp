@@ -3,12 +3,14 @@
 // Extracted from ./page.tsx so both the ROL+ Screening hub and the School of
 // Music Admissions page can render the applications list.
 
-import { useState, useEffect, useRef } from "react";
-import { collection, doc, getDoc, getDocs, addDoc, serverTimestamp, onSnapshot } from "firebase/firestore";
+import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { collection, doc, getDoc, getDocs, addDoc, serverTimestamp, onSnapshot, updateDoc } from "firebase/firestore";
+import { invalidateCache } from "@/lib/dataCache";
 import { db } from "@/services/firebase/firebase";
 import Link from "next/link";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
+import { canEnterAdmissionNo, cleanAdmissionNo, isAdmissionNoTaken } from "@/lib/admissionNumber";
 import { useWing } from "@/hooks/useWing";
 import {
   getAllAdmissions,
@@ -22,6 +24,7 @@ import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening } from
 import { MAX_TOTAL_MARKS, gradeForMarks, readScreeningMarks } from "@/lib/screeningQuestions";
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { PhotoCaptureModal } from "./photo-capture-modal";
+import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
 
 const s: Record<string, React.CSSProperties> = {
@@ -57,6 +60,9 @@ function EditAdmissionOverlay({
   onSave:      (updated: Record<string, unknown>) => Promise<void>;
   onCancel:    () => void;
 }) {
+  const { user } = useAuthContext();
+  // Admission numbers are entered manually, and only by these roles.
+  const canEditAdmNo = canEnterAdmissionNo(user?.role, rs(record.wing) || "rol_plus");
   function rs(v: unknown): string    { return typeof v === "string" ? v : ""; }
   function ra(v: unknown): string[]  { return Array.isArray(v) ? v.map(String) : []; }
   function rn(v: unknown): number | null { return typeof v === "number" ? v : null; }
@@ -123,8 +129,18 @@ function EditAdmissionOverlay({
     if (!fullName.trim() || !phone.trim() || saving) return;
     setSaving(true); setSaveErr("");
     try {
+      const admNo   = admissionNumber.trim();
+      const changed = admNo !== rs(record.admissionNumber).trim();
+      if (canEditAdmNo && changed && admNo && await isAdmissionNoTaken(admNo, rs(record.id))) {
+        throw new Error(`Admission number ${admNo} is already in use. Please enter a different one.`);
+      }
       await onSave({
-        admissionNumber: admissionNumber.trim(),
+        // Only the permitted roles may set it; record who did so it counts as manual entry.
+        ...(canEditAdmNo && changed ? {
+          admissionNumber:      admNo,
+          admissionNoEnteredBy: admNo ? (user?.uid ?? "") : "",
+          admissionNoEnteredAt: admNo ? new Date().toISOString() : "",
+        } : {}),
         fullName: fullName.trim(), age: age.trim(),
         dob: `${dobDD}/${dobMM}/${dobYYYY}`,
         parentName: parentName.trim(), workingStatus, schoolCompany: schoolCompany.trim(),
@@ -155,14 +171,22 @@ function EditAdmissionOverlay({
         <div style={{ padding: "20px 24px", maxHeight: "72vh", overflowY: "auto", display: "flex", flexDirection: "column" as const, gap: 20 }}>
           {/* Admission Number */}
           <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "14px 16px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#4338ca", marginBottom: 8 }}>Admission Number <span style={{ fontSize: 11, fontWeight: 400, color: "#6366f1" }}>(11 digits)</span></div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#4338ca", marginBottom: 8 }}>Admission Number <span style={{ fontSize: 11, fontWeight: 400, color: "#6366f1" }}>(entered manually)</span></div>
             <input
               value={admissionNumber}
-              onChange={e => setAdmissionNumber(e.target.value.replace(/\D/g, "").slice(0, 11))}
-              placeholder="00000000000"
-              maxLength={11}
-              style={{ ...s.input, fontFamily: "monospace", fontSize: 15, fontWeight: 700, letterSpacing: "0.12em", color: "#4338ca", background: "#fff", maxWidth: 200 }}
+              readOnly={!canEditAdmNo}
+              autoComplete="off"
+              autoFocus={canEditAdmNo && !admissionNumber}
+              onChange={e => setAdmissionNumber(cleanAdmissionNo(e.target.value))}
+              placeholder={canEditAdmNo ? "Enter admission number" : "Not entered yet"}
+              style={{ ...s.input, fontFamily: "monospace", fontSize: 15, fontWeight: 700, letterSpacing: "0.08em", color: "#4338ca", background: canEditAdmNo ? "#fff" : "#f3f4f6", maxWidth: 280 }}
             />
+            {!admissionNumber.trim() && (
+              <div style={{ fontSize: 11.5, color: "#b91c1c", marginTop: 6, fontWeight: 600 }}>
+                ⚠ No Admission Number Given — Manual entry required before enrollment
+                {!canEditAdmNo && " (a Chief Teacher or Director must enter it)"}
+              </div>
+            )}
           </div>
 
           {/* Personal */}
@@ -330,7 +354,7 @@ function EditAdmissionOverlay({
 // Derived from what the application record actually holds: `photo`,
 // `screeningId` (set when the wizard's Fast Track screening is saved) and
 // `enrolledStudentId` (set on enrolment).
-type StageAction = "photo" | "screen" | "enroll" | null;
+type StageAction = "photo" | "screen" | "fee" | "enroll" | null;
 interface ApplicationStage { key: string; label: string; color: string; bg: string; action: StageAction; actionLabel: string }
 
 /**
@@ -354,6 +378,9 @@ export function getApplicationStage(rec: Record<string, unknown>): ApplicationSt
     return { key: "enrolled", label: "Enrolled", color: "#374151", bg: "#f3f4f6", action: null, actionLabel: "" };
   const screened = has("screeningId");
   const photo    = has("photo");
+  // The admission fee must be paid before enrolment is unlocked.
+  if (screened && photo && !isAdmissionFeePaid(rec))
+    return { key: "fee", label: "Admission Fee Pending", color: "#9a3412", bg: "#ffedd5", action: "fee", actionLabel: "💰 Record Admission Fee" };
   if (screened && photo)
     return { key: "ready", label: "Ready to Enroll", color: "#065f46", bg: "#d1fae5", action: "enroll", actionLabel: "🎓 Enroll Student" };
   if (screened)
@@ -363,7 +390,37 @@ export function getApplicationStage(rec: Record<string, unknown>): ApplicationSt
   return { key: "submitted", label: "Application Submitted (Pending Photo)", color: "#92400e", bg: "#fef3c7", action: "photo", actionLabel: "📷 Take / Upload Photo" };
 }
 
-const STAGE_ORDER = ["submitted", "photo", "screened", "ready", "enrolled"];
+const STAGE_ORDER = ["submitted", "photo", "screened", "fee", "ready", "enrolled"];
+
+/** Admission fee paid (a positive amount recorded) — required before enrolment. */
+export function isAdmissionFeePaid(rec: Record<string, unknown>): boolean {
+  return rec.admissionFeePaid === true && typeof rec.admissionFeeAmount === "number" && rec.admissionFeeAmount > 0;
+}
+
+/**
+ * Admission-lifecycle rank used to order the applications grid — how many of
+ * the four formalities are done: photo captured, screening evaluated,
+ * admission fee paid, admission number entered (manually).
+ *   4 → Ready to Enroll (top row) · 2–3 → part-way · 1 → one step done ·
+ *   0 → just submitted. Enrolled applications (shown only with "Show
+ *   enrolled") sit below everything at -1.
+ */
+export function getLifecycleRank(rec: Record<string, unknown>): number {
+  if (getApplicationStage(rec).key === "enrolled") return -1;
+  const has = (k: string) => typeof rec[k] === "string" && (rec[k] as string).length > 0;
+  return [has("photo"), has("screeningId"), isAdmissionFeePaid(rec), !!manualAdmissionNo(rec)].filter(Boolean).length;
+}
+
+function FeeChip({ rec }: { rec: Record<string, unknown> }) {
+  const paid = isAdmissionFeePaid(rec);
+  return (
+    <span title={paid ? "Admission fee paid" : "Admission fee not yet paid — required before enrolment"}
+      style={{ display: "inline-block", fontSize: 10.5, fontWeight: 700, padding: "3px 9px", borderRadius: 99, lineHeight: 1.3,
+        color: paid ? "#15803d" : "#9a3412", background: paid ? "#dcfce7" : "#fff7ed", border: `1px solid ${paid ? "#bbf7d0" : "#fed7aa"}` }}>
+      {paid ? `💰 Admission Fee Paid · ₹${(rec.admissionFeeAmount as number).toLocaleString("en-IN")}` : "Admission Fee Pending"}
+    </span>
+  );
+}
 
 function StageBadge({ stage }: { stage: ApplicationStage }) {
   return (
@@ -616,15 +673,53 @@ export function AdmissionsList({
   function str(v: unknown): string   { return typeof v === "string" ? v : ""; }
   /** Parent (QR) submission still waiting for staff to take the candidate photo. */
   /** Runs the School of Music stage action for an application. */
+  const [feeFor, setFeeFor] = useState<Record<string, unknown> | null>(null);
+
   function runStageAction(rec: Record<string, unknown>, action: StageAction) {
     if (action === "photo") setPhotoFor(rec);
+    else if (action === "fee") setFeeFor(rec);
     else if (action === "screen" || action === "enroll") onResume?.(rec, action);
   }
 
   const enrolledCount = onResume ? admissions.filter(a => getApplicationStage(a).key === "enrolled").length : 0;
-  const visibleAdmissions = onResume && !showEnrolled
-    ? admissions.filter(a => getApplicationStage(a).key !== "enrolled")
-    : admissions;
+  // Closest-to-enrolment first: lifecycle rank (see getLifecycleRank), then newest application.
+  const visibleAdmissions = useMemo(() => {
+    const list = onResume && !showEnrolled
+      ? admissions.filter(a => getApplicationStage(a).key !== "enrolled")
+      : admissions;
+    return list
+      .map(rec => ({ rec, rank: getLifecycleRank(rec) }))
+      .sort((a, b) => b.rank - a.rank || str(b.rec.submittedAt).localeCompare(str(a.rec.submittedAt)))
+      .map(x => x.rec);
+  }, [admissions, onResume, showEnrolled]);
+  const readyCount = useMemo(() => visibleAdmissions.filter(r => getLifecycleRank(r) === 4).length, [visibleAdmissions]);
+
+  // Cards glide to their new place when the order changes (FLIP), and a card
+  // that just moved up a tier flashes green. Skipped for reduced-motion users.
+  const cardEls   = useRef(new Map<string, HTMLDivElement>());
+  const lastRects = useRef(new Map<string, DOMRect>());
+  const lastRanks = useRef(new Map<string, number>());
+  const orderKey  = visibleAdmissions.map(r => `${str(r.id)}:${getLifecycleRank(r)}`).join("|");
+  useLayoutEffect(() => {
+    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const rects = new Map<string, DOMRect>();
+    cardEls.current.forEach((el, id) => {
+      const now = el.getBoundingClientRect();
+      rects.set(id, now);
+      const before = lastRects.current.get(id);
+      const rank = getLifecycleRank(visibleAdmissions.find(r => str(r.id) === id) ?? {});
+      const prevRank = lastRanks.current.get(id);
+      if (!reduce && before && typeof el.animate === "function") {
+        const dx = before.left - now.left, dy = before.top - now.top;
+        if (dx || dy) el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 420, easing: "cubic-bezier(.2,.7,.2,1)" });
+        if (prevRank !== undefined && rank > prevRank) {
+          el.animate([{ boxShadow: "0 0 0 3px rgba(22,163,74,0.55)" }, { boxShadow: "0 0 0 0 rgba(22,163,74,0)" }], { duration: 1400, easing: "ease-out" });
+        }
+      }
+      lastRanks.current.set(id, rank);
+    });
+    lastRects.current = rects;
+  }, [orderKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function photoPending(rec: Record<string, unknown>): boolean {
     return str(rec.photoStatus) === "pending" && !str(rec.photo);
@@ -695,6 +790,20 @@ export function AdmissionsList({
 
   async function handleSaveEdit(id: string, updated: Record<string, unknown>) {
     await updateAdmission(id, updated);
+    // Already enrolled → push a (re)entered admission number onto the student
+    // record too, so the centre roster / Registry pick it up and the student
+    // is no longer flagged "Missing admission number".
+    const rec = admissions.find(a => str(a.id) === id);
+    const studentUid = rec ? str(rec.enrolledStudentId) : "";
+    const admNo = typeof updated.admissionNumber === "string" ? updated.admissionNumber.trim() : "";
+    if (studentUid && admNo && admNo !== str(rec?.admissionNumber).trim()) {
+      await updateDoc(doc(db, "users", studentUid), {
+        admissionNumber: admNo, admissionNo: admNo, studentID: admNo,
+        admissionNoAutoGenerated: false, updatedAt: serverTimestamp(),
+      });
+      invalidateCache(`registry:${wing}:entries`);
+      invalidateCache(`students:${wing}:students`);
+    }
     setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, ...updated } : a));
     setSelected(prev => prev && str(prev.id) === id ? { ...prev, ...updated } : prev);
     setEditing(null);
@@ -788,6 +897,8 @@ export function AdmissionsList({
 
   async function handleEnrollStudent() {
     if (!completing || !enrollCentre || enrolling) return;
+    // Admission numbers are manual-only — never create a student without one.
+    if (!str(completing.admission.admissionNumber).trim()) return;
     setEnrolling(true);
     try {
       const adm = completing.admission;
@@ -1032,6 +1143,15 @@ export function AdmissionsList({
                 <div style={{ fontSize: 12, color: "#c7d2fe", marginTop: 3 }}>{str(completing.admission.fullName)}</div>
               </div>
               <div style={{ padding: "28px 24px" }}>
+                {!str(completing.admission.admissionNumber).trim() && (
+                  <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px", marginBottom: 16 }}>
+                    <span style={{ fontSize: 13, color: "#b91c1c", fontWeight: 600 }}>⚠ No Admission Number Given — Manual entry required before enrollment</span>
+                    <button onClick={() => setCompletingPhase("number")}
+                      style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                      Enter Admission Number
+                    </button>
+                  </div>
+                )}
                 <label style={{ fontSize: 13, fontWeight: 700, color: "#374151", display: "block", marginBottom: 10 }}>
                   Select Centre
                 </label>
@@ -1064,8 +1184,8 @@ export function AdmissionsList({
                 <button onClick={() => setCompletingPhase("success")} disabled={enrolling} style={{ ...s.secondaryBtn, flex: 1 }}>← Back</button>
                 <button
                   onClick={handleEnrollStudent}
-                  disabled={!enrollCentre || enrolling}
-                  style={{ ...s.primaryBtn, flex: 2, background: "#4f46e5", opacity: enrollCentre && !enrolling ? 1 : 0.45, cursor: enrollCentre && !enrolling ? "pointer" : "not-allowed" }}
+                  disabled={!enrollCentre || enrolling || !str(completing.admission.admissionNumber).trim()}
+                  style={{ ...s.primaryBtn, flex: 2, background: "#4f46e5", opacity: enrollCentre && !enrolling && str(completing.admission.admissionNumber).trim() ? 1 : 0.45, cursor: enrollCentre && !enrolling && str(completing.admission.admissionNumber).trim() ? "pointer" : "not-allowed" }}
                 >
                   {enrolling ? "Enrolling…" : "Confirm Enrollment"}
                 </button>
@@ -1083,6 +1203,15 @@ export function AdmissionsList({
           padding: "24px", marginBottom: 20, position: "relative" as const,
           boxShadow: "0 4px 24px rgba(0,0,0,0.07)",
         }}>
+          {!manualAdmissionNo(selected) && getApplicationStage(selected).key !== "enrolled" && (
+            <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
+              <span style={{ fontSize: 13, color: "#b91c1c", fontWeight: 600 }}>⚠ No Admission Number Given — Manual entry required before enrollment</span>
+              <button onClick={() => setEditing(selected)}
+                style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                Enter Admission Number
+              </button>
+            </div>
+          )}
           {/* Action row */}
           <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" as const, alignItems: "center" }}>
             {onResume ? (() => {
@@ -1275,6 +1404,38 @@ export function AdmissionsList({
             )}
           </div>
 
+          {/* Admission fee (School of Music) */}
+          {onResume && getApplicationStage(selected).key !== "enrolled" && (
+            <div style={{ marginTop: 20, paddingTop: 18, borderTop: "1px solid #f3f4f6" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 10 }}>
+                Admission Fee
+              </div>
+              {isAdmissionFeePaid(selected) ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const, fontSize: 13, color: "#374151" }}>
+                  <FeeChip rec={selected} />
+                  <button onClick={() => handleRedownload(selected)} disabled={pdfLoading === str(selected.id)}
+                    style={{ order: 3, marginLeft: "auto", padding: "7px 14px", borderRadius: 8, border: "1px solid #c7d2fe", background: "#eef2ff", color: "#3730a3", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    {pdfLoading === str(selected.id) ? "Preparing PDF…" : str(selected.admissionNumber) ? "📄 Download Admission Card" : "📄 Download Form & Receipt"}
+                  </button>
+                  <span>
+                    {[
+                      str(selected.admissionFeeMethod) === "Bank" ? "Bank Transfer" : str(selected.admissionFeeMethod),
+                      str(selected.admissionFeeReference) && `Ref ${str(selected.admissionFeeReference)}`,
+                      str(selected.admissionFeeDate) && new Date(`${str(selected.admissionFeeDate)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }),
+                    ].filter(Boolean).join(" · ")}
+                  </span>
+                </div>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const, background: "#fff7ed", border: "1px dashed #fed7aa", borderRadius: 10, padding: "12px 14px" }}>
+                  <span style={{ fontSize: 13, color: "#9a3412" }}>Not paid yet — required before enrolment.</span>
+                  <button onClick={() => setFeeFor(selected)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#9a3412", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    💰 Record Admission Fee
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Screening (School of Music) */}
           {onResume && (
             <ApplicantScreening
@@ -1319,6 +1480,14 @@ export function AdmissionsList({
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
         {visibleAdmissions.map((rec, i) => {
+          // Tier dividers — only when something is actually ready to enrol.
+          const rank     = getLifecycleRank(rec);
+          const prevRank = i > 0 ? getLifecycleRank(visibleAdmissions[i - 1]) : null;
+          const divider = readyCount > 0 && (
+            i === 0 && rank === 4 ? { label: `✓ Ready to Enroll · ${readyCount}`, color: "#065f46", line: "#a7f3d0" }
+            : prevRank === 4 && rank < 4 ? { label: "In progress", color: "#6b7280", line: "#e5e7eb" }
+            : null
+          );
           const isSelected  = selected?.id === rec.id;
           const instruments = arr(rec.instrumentsToLearn);
           const admNo       = str(rec.admissionNumber);
@@ -1326,8 +1495,15 @@ export function AdmissionsList({
           const date        = str(rec.submittedAt) ? new Date(str(rec.submittedAt)).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "";
           const centreName  = centresList.find(c => c.id === str(rec.centre))?.name ?? str(rec.centre);
           return (
+            <Fragment key={str(rec.id) || i}>
+            {divider && (
+              <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 10, marginTop: i === 0 ? 0 : 6 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 800, color: divider.color, letterSpacing: "0.04em", whiteSpace: "nowrap" as const }}>{divider.label}</span>
+                <span style={{ flex: 1, height: 1, background: divider.line }} />
+              </div>
+            )}
             <div
-              key={str(rec.id) || i}
+              ref={el => { const id = str(rec.id); if (!id) return; if (el) cardEls.current.set(id, el); else cardEls.current.delete(id); }}
               data-applicant-card
               onClick={() => setSelected(isSelected ? null : rec)}
               style={{
@@ -1360,6 +1536,12 @@ export function AdmissionsList({
                         📱 Online
                       </span>
                     )}
+                    {!shownAdmNo && getApplicationStage(rec).key !== "enrolled" && (
+                      <span title="No Admission Number Given — Manual entry required before enrollment (Edit details)"
+                        style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 0, background: "#fee2e2", color: "#b91c1c", padding: "1px 7px", borderRadius: 99 }}>
+                        ⚠ No Adm. No.
+                      </span>
+                    )}
                     {onResume ? null : photoPending(rec) ? (
                       <span title="Take the candidate photo to complete this application"
                         style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 0, background: "#fee2e2", color: "#b91c1c", padding: "1px 7px", borderRadius: 99 }}>
@@ -1381,9 +1563,12 @@ export function AdmissionsList({
                 const idx = STAGE_ORDER.indexOf(stage.key);
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <div><StageBadge stage={stage} /></div>
+                    <div style={{ display: "flex", gap: 5, flexWrap: "wrap" as const }}>
+                      <StageBadge stage={stage} />
+                      {stage.key !== "enrolled" && <FeeChip rec={rec} />}
+                    </div>
                     <div style={{ display: "flex", gap: 3 }} aria-hidden>
-                      {STAGE_ORDER.slice(0, 4).map((k, i) => (
+                      {STAGE_ORDER.slice(0, 5).map((k, i) => (
                         <div key={k} style={{ flex: 1, height: 4, borderRadius: 99, background: i <= idx ? stage.color : "#e5e7eb", opacity: i <= idx ? 0.75 : 1 }} />
                       ))}
                     </div>
@@ -1460,9 +1645,23 @@ export function AdmissionsList({
                 ) : null}
               </div>
             </div>
+            </Fragment>
           );
         })}
       </div>
+
+      {feeFor && (
+        <AdmissionFeeModal
+          application={feeFor}
+          onClose={() => setFeeFor(null)}
+          onPaid={fee => {
+            const id = str(feeFor.id);
+            setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, ...fee } : a));
+            setSelected(sel => sel && str(sel.id) === id ? { ...sel, ...fee } : sel);
+          }}
+          onDownloadCard={rec => handleRedownload(rec)}
+        />
+      )}
 
       {photoFor && (
         <PhotoCaptureModal

@@ -333,6 +333,7 @@ export interface CenterBatch {
   daysOfWeek: string[];          // e.g. ["Mon","Wed","Fri"]
   startTime: string;             // "HH:MM"
   endTime: string;               // "HH:MM"
+  teacherUid?: string;           // batch teacher; "" / absent = the centre's teacher
 }
 
 // ─── Attendance ───────────────────────────────────────────────────────────────

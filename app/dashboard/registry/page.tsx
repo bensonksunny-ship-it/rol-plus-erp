@@ -13,16 +13,17 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES } from "@/config/permissions";
 import { useAuth } from "@/hooks/useAuth";
+import { useWing } from "@/hooks/useWing";
 import { wingOf } from "@/lib/wing";
 import type { Wing } from "@/types";
 import { DEFAULT_BATCH_NAME, explicitBatches } from "@/lib/batches";
 import { parseFile, normalizeHeader } from "@/lib/xlsx-parser";
-import { formatAdmissionNo, reserveAdmissionSeq } from "@/lib/admissionNumber";
 import { logAction } from "@/services/audit/audit.service";
 import { getCached, setCached } from "@/lib/dataCache";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
 
-const WING = WINGS.SCHOOL_OF_MUSIC;
+// The register shows the wing currently selected (ROL+ or School of Music) —
+// same system for both, each wing's students kept separate.
 
 interface Entry {
   uid:         string;
@@ -75,6 +76,16 @@ function toRegistryStatus(status: string): string {
   if (v === "active") return "Confirm";
   if (v === "inactive") return "Cancelled";
   return status; // Hold, and any other free-text status, pass through as-is
+}
+/**
+ * An admission number is the prerequisite for being an active student: a
+ * "Confirm" (active) row without one is held under this label instead — it
+ * isn't counted in the Confirm filter until the number is entered.
+ */
+const NEEDS_ADM_NO = "Needs Adm. No.";
+function filterStatus(e: { status: string; admissionNo: string }): string {
+  const st = toRegistryStatus(e.status);
+  return st === "Confirm" && (!e.admissionNo || e.admissionNo === "—") ? NEEDS_ADM_NO : st;
 }
 function fromRegistryStatus(label: string): string {
   if (label === "Confirm") return "active";
@@ -219,7 +230,7 @@ const GUIDE_COLUMNS: { label: string; keys: string[]; example: string; note?: st
   { label: "Date Of Admission", keys: ["dateofadmission", "admissiondate", "doa", "date"], example: "24/09/2026", note: "DD/MM/YYYY" },
   { label: "Centre",            keys: ["centre", "center", "centrename", "centername", "branch", "location"], example: "Cinnamon", note: "exact name" },
   { label: "Phone number",      keys: ["phonenumber", "phoneno", "phone", "mobilenumber", "mobileno", "mobile", "contactnumber", "contactno", "contact"], example: "9876543210" },
-  { label: "Admission no.",     keys: ["admissionno", "admissionnumber", "admissionnumberno", "admno", "admissionid"], example: "", note: "blank = auto" },
+  { label: "Admission no.",     keys: ["admissionno", "admissionnumber", "admissionnumberno", "admno", "admissionid"], example: "", note: "required" },
   { label: "Course",            keys: ["course", "instrument"], example: "Keyboard" },
   { label: "Status",            keys: ["status"], example: "", note: "leave blank" },
   { label: "Screening Grade",   keys: ["screeninggrade", "screeningscore", "grade", "screening"], example: "" },
@@ -324,25 +335,30 @@ export default function RegistryPage() {
 }
 
 function RegistryContent() {
-  const { user, can, isChiefTeacher, isDirector, isFounder } = useAuth();
+  const { user, role, can, isChiefTeacher, isDirector, isFounder } = useAuth();
+  const { wing: WING } = useWing();
   const canImport = can(CAPABILITIES.STUDENTS_MANAGE);
   // Reactivating a student (Cancelled/Inactive/Hold → Confirm) is restricted
   // to Chief Teacher / Director — Founder included as the super-admin role
   // that already has every other capability in this app. Other status moves
   // (e.g. Confirm → Hold) stay open to anyone with canImport, as before.
-  const canReactivate = isChiefTeacher || isDirector || isFounder;
+  // ROL+ is run by its Admin (no Chief Teacher / Director there).
+  const canReactivate = WING === WINGS.ROL_PLUS
+    ? role === ROLES.ADMIN || isFounder
+    : isChiefTeacher || isDirector || isFounder;
 
   // Seed from the last visit's cache so revisiting this page via the sidebar
   // renders instantly instead of a blank loading state — the effect below
   // still always re-fetches/re-subscribes to stay fresh.
-  const [entries, setEntries] = useState<Entry[]>(() => getCached<Entry[]>("registry:entries") ?? []);
+  // Cache keys are per wing so switching wings never flashes the other wing's register.
+  const [entries, setEntries] = useState<Entry[]>(() => getCached<Entry[]>(`registry:${WING}:entries`) ?? []);
   const [centres, setCentres] = useState<RegistryCentre[]>(
-    () => getCached("registry:centres") ?? [],
+    () => getCached(`registry:${WING}:centres`) ?? [],
   );
   const [existingAdmNos, setExistingAdmNos] = useState<Set<string>>(
-    () => getCached<Set<string>>("registry:admNos") ?? new Set(),
+    () => getCached<Set<string>>(`registry:${WING}:admNos`) ?? new Set(),
   );
-  const [loading, setLoading] = useState(() => !getCached<Entry[]>("registry:entries"));
+  const [loading, setLoading] = useState(() => !getCached<Entry[]>(`registry:${WING}:entries`));
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [showImport, setShowImport] = useState(false);
@@ -433,7 +449,7 @@ function RegistryContent() {
         centreList.sort((a, b) =>
           Number(b.wing === WING) - Number(a.wing === WING) || a.name.localeCompare(b.name));
         setCentres(centreList);
-        setCached("registry:centres", centreList);
+        setCached(`registry:${WING}:centres`, centreList);
 
         unsubscribe = onSnapshot(
           query(collection(db, "users"), where("role", "==", "student")),
@@ -507,8 +523,8 @@ function RegistryContent() {
             setExistingAdmNos(admNos);
             setEntries(list);
             setLoading(false);
-            setCached("registry:admNos", admNos);
-            setCached("registry:entries", list);
+            setCached(`registry:${WING}:admNos`, admNos);
+            setCached(`registry:${WING}:entries`, list);
           },
           err => {
             console.error("Registry live update failed:", err);
@@ -522,10 +538,22 @@ function RegistryContent() {
     })();
 
     return () => { cancelled = true; if (unsubscribe) unsubscribe(); };
-  }, []);
+  }, [WING]);
+
+  // Wing switched → show that wing's cached register (or a loading state) at once.
+  const shownWing = useRef(WING);
+  useEffect(() => {
+    if (shownWing.current === WING) return;
+    shownWing.current = WING;
+    const cached = getCached<Entry[]>(`registry:${WING}:entries`);
+    setEntries(cached ?? []);
+    setCentres(getCached(`registry:${WING}:centres`) ?? []);
+    setExistingAdmNos(getCached<Set<string>>(`registry:${WING}:admNos`) ?? new Set());
+    setLoading(!cached);
+  }, [WING]);
 
   const statuses = useMemo(() => {
-    const found = new Set(entries.map(e => toRegistryStatus(e.status)));
+    const found = new Set(entries.map(filterStatus));
     const others = Array.from(found).filter(s => !STATUS_OPTIONS.includes(s as typeof STATUS_OPTIONS[number])).sort();
     return [...STATUS_OPTIONS, ...others];
   }, [entries]);
@@ -533,7 +561,7 @@ function RegistryContent() {
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return entries.filter(e => {
-      if (statusFilter !== "all" && toRegistryStatus(e.status) !== statusFilter) return false;
+      if (statusFilter !== "all" && filterStatus(e) !== statusFilter) return false;
       if (!needle) return true;
       return (
         e.name.toLowerCase().includes(needle) ||
@@ -738,9 +766,14 @@ function RegistryContent() {
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{i + 1}</td>
                     <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>
                       {e.name}
-                      {e.admissionNo !== "—" && (
+                      {e.admissionNo !== "—" ? (
                         <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 400, color: "var(--color-text-muted)", fontFamily: "ui-monospace, monospace" }}>
                           {e.admissionNo}
+                        </span>
+                      ) : filterStatus(e) === NEEDS_ADM_NO && (
+                        <span title="Missing Admission Number — not counted as active until one is entered (Edit this row)"
+                          style={{ marginLeft: 8, padding: "1px 7px", borderRadius: 999, fontSize: 10.5, fontWeight: 700, background: "#fee2e2", color: "#b91c1c" }}>
+                          ⚠ No adm. no.
                         </span>
                       )}
                       {newUids.has(e.uid) && (
@@ -865,6 +898,7 @@ function RegistryContent() {
           existingAdmNos={existingAdmNos}
           initiatorId={user?.uid ?? "unknown"}
           initiatorRole={user?.role ?? ROLES.FOUNDER}
+          wing={WING}
           initialPaste={pastedText}
           onClose={closeImport}
           onDone={closeImport}
@@ -1152,8 +1186,7 @@ interface PreviewRow {
   centreUnmatched: boolean;
   batchId:     string;    // picked after parsing from the matched centre's batches; "" = none / General Batch
   phone:       string;
-  admissionNo: string;    // explicit from the sheet; "" → auto-generate on import
-  auto:        boolean;
+  admissionNo: string;    // from the sheet — required; never auto-generated
   course:      string;
   status:      string;
   screening:   string;
@@ -1175,9 +1208,11 @@ function DetailField({ label, value, emphasize }: { label: string; value: string
 }
 
 function ImportModal({
-  centres, existingAdmNos, initiatorId, initiatorRole, initialPaste, onClose, onDone, onImported,
+  centres, existingAdmNos, initiatorId, initiatorRole, wing: WING, initialPaste, onClose, onDone, onImported,
 }: {
   centres: RegistryCentre[];
+  /** Wing the imported students are created in. */
+  wing: string;
   existingAdmNos: Set<string>;
   initiatorId: string;
   initiatorRole: string;
@@ -1194,7 +1229,7 @@ function ImportModal({
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [parseErr, setParseErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ imported: number; skipped: number; failed: number; generated: number; centres: string[] } | null>(null);
+  const [result, setResult] = useState<{ imported: number; skipped: number; failed: number; blocked: number; centres: string[] } | null>(null);
 
   const centreByName = useMemo(() => {
     const m = new Map<string, { id: string; code: string }>();
@@ -1238,7 +1273,6 @@ function ImportModal({
       const nameMatch = centreRaw ? centreByName.get(centreRaw.trim().toLowerCase()) : undefined;
       const centreId  = nameMatch?.id ?? null;
 
-      const auto = !admissionNo;
       const key  = admissionNo.replace(/\s+/g, "").toUpperCase();
       const dupInFile = key && seen.has(key);
       if (key) seen.add(key);
@@ -1255,11 +1289,11 @@ function ImportModal({
         batchId: "",
         phone,
         admissionNo,
-        auto,
         course,
         status: status || "active",
         screening,
-        error: name ? null : "Name is required",
+        // Admission numbers are manual-only: a row without one is blocked, not auto-numbered.
+        error: !name ? "Name is required" : !admissionNo ? "No Admission Number Given" : null,
         duplicate,
       };
     });
@@ -1360,20 +1394,12 @@ function ImportModal({
     let imported = 0, failed = 0;
     const newIds: string[] = [];
     try {
-      // Reserve one sequence per row that needs an auto-generated number.
-      const autoRows = importable.filter(r => r.auto);
-      let seq = autoRows.length ? await reserveAdmissionSeq(autoRows.length) : 0;
-      const generated = new Map<number, string>(); // preview row sl → generated number
-      for (const r of autoRows) {
-        generated.set(r.sl, formatAdmissionNo({ prefix: r.centreCode, dateISO: r.admittedOn, seq: seq++ }));
-      }
-
       for (let i = 0; i < importable.length; i += 400) {
         const chunk = importable.slice(i, i + 400);
         const batch = writeBatch(db);
         const chunkIds: string[] = [];
         for (const r of chunk) {
-          const admNo = r.admissionNo || generated.get(r.sl) || "";
+          const admNo = r.admissionNo;
           const pickedBatch = r.centreId ? centreById.get(r.centreId)?.batches?.find(b => b.id === r.batchId) : undefined;
           const [first, ...rest] = r.name.trim().split(/\s+/);
           const ref = doc(collection(db, "users"));
@@ -1388,7 +1414,7 @@ function ImportModal({
             lastName:       rest.join(" "),
             phone:          r.phone,
             admissionNumber: admNo,
-            admissionNoAutoGenerated: r.auto,
+            admissionNoAutoGenerated: false,
             studentID:      admNo,
             // Keep the human-readable name (exactly as typed) in `centre` and the
             // matched Firestore doc id separately in `centerId` — never collapse
@@ -1429,11 +1455,11 @@ function ImportModal({
         approverId: null,
         approverRole: null,
         reason: null,
-        metadata: { imported, skipped: skipCount, failed, generated: autoRows.length, source: mode === "file" ? (fileName || "file") : mode },
+        metadata: { imported, skipped: skipCount, failed, blocked: errorCount, source: mode === "file" ? (fileName || "file") : mode },
       }).catch(() => {});
       onImported(newIds);
       setResult({
-        imported, skipped: skipCount, failed, generated: autoRows.length,
+        imported, skipped: skipCount, failed, blocked: errorCount,
         centres: [...centreSummary.known, ...centreSummary.fresh],
       });
     } finally {
@@ -1455,7 +1481,7 @@ function ImportModal({
               <div style={{ fontSize: 40, marginBottom: 10 }}>✅</div>
               <div style={{ fontSize: 16, fontWeight: 800, color: "#15803d", marginBottom: 8 }}>Import complete</div>
               <div style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>
-                {result.imported} added · {result.generated} auto-numbered · {result.skipped} skipped (duplicates) · {result.failed} failed
+                {result.imported} added · {result.skipped} skipped (duplicates) · {result.blocked} blocked (no name / admission number) · {result.failed} failed
               </div>
               {result.centres.length > 0 && (
                 <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginTop: 8 }}>
@@ -1476,8 +1502,8 @@ function ImportModal({
                 between columns. Each field comes only from its own column: <code style={{ fontSize: 11 }}>Centre</code> from the Centre column,
                 <code style={{ fontSize: 11 }}>Phone number</code> from the Phone column, and so on. A centre that isn&apos;t in the system is kept
                 as plain text.
-                If a row has no admission number, one is generated as <code style={{ fontSize: 11 }}>ROLCC + DDMMYYYY + sequence</code>.
-                Only rows with no name, or an admission number already on the register, are skipped.
+                <strong>Every row needs its admission number</strong> — numbers are entered manually and never generated.
+                Rows with no name or no admission number are blocked; rows whose admission number is already on the register are skipped.
               </p>
 
               {preview.length === 0 && (<>
@@ -1600,7 +1626,6 @@ function ImportModal({
                 <>
                   <div style={{ display: "flex", gap: 14, margin: "14px 0 8px", fontSize: 12, fontWeight: 700, flexWrap: "wrap" as const }}>
                     <span style={{ color: "#16a34a" }}>{importable.length} to import</span>
-                    <span style={{ color: "#4f46e5" }}>{importable.filter(r => r.auto).length} auto-numbered</span>
                     <span style={{ color: "#d97706" }}>{skipCount} duplicate</span>
                     <span style={{ color: "#dc2626" }}>{errorCount} error</span>
                   </div>
@@ -1614,7 +1639,7 @@ function ImportModal({
                           <tr key={r.sl} style={s.tr}>
                             <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{r.sl}</td>
                             <td style={s.td}>{r.name || <em style={{ color: "#dc2626" }}>missing</em>}</td>
-                            <td style={s.td}>{r.admissionNo || <em style={{ color: "#4f46e5" }}>auto</em>}</td>
+                            <td style={s.td}>{r.admissionNo || <em style={{ color: "#dc2626" }}>missing</em>}</td>
                             <td style={s.td}>{r.centreRaw || "—"}</td>
                             <td style={s.td}>
                               {(() => {

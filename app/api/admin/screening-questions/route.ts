@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/services/firebase/firebase-admin";
-import { isElevatedAccount } from "@/lib/elevatedAccount";
+import { canLeadWing } from "@/lib/elevatedAccount";
 import { isWing } from "@/lib/wing";
 import { SCREENING_QUESTIONS_VERSION, sanitizeFastTrackTests, screeningQuestionsDocId } from "@/lib/screeningQuestions";
 
@@ -20,16 +20,19 @@ export async function POST(req: NextRequest) {
     if (!idToken) return NextResponse.json({ error: "Missing auth token." }, { status: 401 });
 
     const decoded = await adminAuth().verifyIdToken(idToken);
+    const body = await req.json().catch(() => null) as { wing?: unknown; tests?: unknown; reset?: unknown } | null;
+    if (!body || !isWing(body.wing)) return NextResponse.json({ error: "Unknown wing." }, { status: 400 });
+
+    // Per wing: ROL+ → Founder / Admin; School of Music → Founder / Admin / Director / Chief Teacher.
     const callerSnap = await adminDb().doc(`users/${decoded.uid}`).get();
-    if (!callerSnap.exists || !isElevatedAccount(callerSnap.data())) {
+    if (!callerSnap.exists || !canLeadWing(callerSnap.data(), body.wing)) {
       return NextResponse.json(
-        { error: "Only the Founder, an Admin, Director or Chief Teacher can edit screening questions." },
+        { error: body.wing === "rol_plus"
+            ? "Only the Founder or an Admin can edit ROL+ screening questions."
+            : "Only the Founder, an Admin, Director or Chief Teacher can edit screening questions." },
         { status: 403 },
       );
     }
-
-    const body = await req.json().catch(() => null) as { wing?: unknown; tests?: unknown; reset?: unknown } | null;
-    if (!body || !isWing(body.wing)) return NextResponse.json({ error: "Unknown wing." }, { status: 400 });
 
     const ref = adminDb().collection("config").doc(screeningQuestionsDocId(body.wing));
     if (body.reset === true) {

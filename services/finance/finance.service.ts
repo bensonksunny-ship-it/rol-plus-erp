@@ -225,6 +225,8 @@ export async function getFeeStructureByCenter(
  * payment — so it counts as a charge regardless of status.
  */
 export function transactionBalanceEffect(tx: Transaction): number {
+  // A one-off admission fee is separate from tuition — never part of the balance.
+  if (tx.type === "admission_fee") return 0;
   const isCharge =
     tx.method === "auto-monthly" ||
     tx.method === "auto" ||
@@ -276,6 +278,7 @@ export interface DueSettlement {
 /** True for a real money-in receipt (not a due, charge, or system auto-entry). */
 export function isSettlingPayment(tx: Transaction): boolean {
   if (tx.status !== "completed") return false;
+  if (tx.type === "admission_fee") return false;   // never settles a monthly due
   if (tx.type === "fee_due" || tx.type === "charge") return false;
   if (tx.method === "auto" || tx.method === "auto-monthly") return false;
   return true;
@@ -611,4 +614,72 @@ export async function deleteTransaction(
       reversedEffect: -oldEffect,
     },
   });
+}
+
+// ─── Admission fee (School of Music, before enrolment) ───────────────────────
+
+export function isAdmissionFee(tx: Transaction): boolean {
+  return tx.type === "admission_fee";
+}
+
+export interface RecordAdmissionFeeInput {
+  admissionId:     string;
+  payerName:       string;
+  admissionNumber: string;
+  centerId:        string;
+  amount:          number;
+  method:          "Cash" | "UPI" | "Card" | "Bank";
+  reference:       string;
+  date:            string;   // YYYY-MM-DD
+  receivedBy:      string;
+}
+
+/**
+ * Records a paid admission fee: a completed "admission_fee" transaction in the
+ * Finance ledger (collections totals pick it up by centre straight away) and
+ * the paid state on the application, which unlocks "Enroll Student".
+ * Returns the transaction id.
+ */
+export async function recordAdmissionFee(i: RecordAdmissionFeeInput): Promise<string> {
+  if (!(i.amount > 0)) throw new Error("Enter the admission fee amount.");
+  if (!i.centerId) throw new Error("Select the centre.");
+  const date = i.date || new Date().toISOString().slice(0, 10);
+  const ref = await addDoc(collection(db, TRANSACTIONS), {
+    studentUid:      "",               // set when the applicant is enrolled
+    centerId:        i.centerId,
+    amount:          i.amount,
+    method:          i.method,
+    receivedBy:      i.receivedBy,
+    date,
+    status:          "completed",
+    type:            "admission_fee",
+    note:            "Admission fee",
+    reference:       i.reference.trim() || null,
+    admissionId:     i.admissionId,
+    payerName:       i.payerName,
+    admissionNumber: i.admissionNumber,
+    createdAt:       serverTimestamp(),
+  });
+  await updateDoc(doc(db, "admissions", i.admissionId), {
+    admissionFeePaid:       true,
+    admissionFeeAmount:     i.amount,
+    admissionFeeMethod:     i.method,
+    admissionFeeReference:  i.reference.trim() || null,
+    admissionFeeDate:       date,
+    admissionFeeCentreId:   i.centerId,
+    admissionFeeTxId:       ref.id,
+    admissionFeeRecordedBy: i.receivedBy,
+    updatedAt:              new Date().toISOString(),
+  });
+  logAction({
+    action: "ADMISSION_FEE_RECORDED", initiatorId: i.receivedBy, initiatorRole: "admin",
+    approverId: null, approverRole: null, reason: null,
+    metadata: { transactionId: ref.id, admissionId: i.admissionId, amount: i.amount, method: i.method, centerId: i.centerId },
+  });
+  return ref.id;
+}
+
+/** On enrolment: attach the admission-fee receipt to the new student + final centre. */
+export async function linkAdmissionFeeToStudent(txId: string, studentUid: string, centerId: string, admissionNumber: string): Promise<void> {
+  await updateDoc(doc(db, TRANSACTIONS, txId), { studentUid, centerId, admissionNumber });
 }

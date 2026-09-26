@@ -17,6 +17,7 @@ import {
 import { db } from "@/services/firebase/firebase";
 import { WINGS } from "@/config/constants";
 import { isAdmissionNoTaken } from "@/lib/admissionNumber";
+import { linkAdmissionFeeToStudent } from "@/services/finance/finance.service";
 import type { CenterBatch } from "@/types";
 import type { SyllabusInstrument, SyllabusLevel } from "@/types/lesson";
 
@@ -35,6 +36,8 @@ export interface EnrollInput {
   /** YYYY-MM-DD — first class / start date; becomes the admission date. */
   startDate:     string;
   enrolledBy:    string;
+  /** Wing the applicant was admitted to — the student is created there (default School of Music). */
+  wing?:         string;
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
@@ -46,6 +49,11 @@ export async function enrollApplicant(i: EnrollInput): Promise<string> {
   if (admNo.length < 4) throw new Error("Enter the admission number (at least 4 characters).");
   if (!i.centreId) throw new Error("Select a centre.");
   if (!(i.monthlyFee > 0)) throw new Error("Enter the monthly fee.");
+  // Admission fee is a mandatory prerequisite.
+  const feeAmount = i.application.admissionFeeAmount;
+  if (i.application.admissionFeePaid !== true || typeof feeAmount !== "number" || !(feeAmount > 0)) {
+    throw new Error("Record the admission fee payment before enrolling.");
+  }
   if (await isAdmissionNoTaken(admNo, i.admissionId)) {
     throw new Error(`Admission number ${admNo} is already in use. Please enter a different one.`);
   }
@@ -62,7 +70,7 @@ export async function enrollApplicant(i: EnrollInput): Promise<string> {
     middleName:      str(a.middleName),
     lastName:        str(a.lastName),
     role:            "student",
-    wing:            WINGS.SCHOOL_OF_MUSIC,
+    wing:            i.wing || WINGS.SCHOOL_OF_MUSIC,
     phone:           str(a.phone),
     email:           str(a.email),
     age:             str(a.age),
@@ -105,6 +113,14 @@ export async function enrollApplicant(i: EnrollInput): Promise<string> {
     updatedAt:          serverTimestamp(),
   });
   const uid = userRef.id;
+
+  // The admission-fee receipt was saved before the student existed — attach
+  // it to them (and the final centre) so it shows on their Finance history.
+  const feeTxId = str(a.admissionFeeTxId);
+  if (feeTxId) {
+    await linkAdmissionFeeToStudent(feeTxId, uid, i.centreId, admNo).catch(err =>
+      console.warn("[enroll] link admission fee:", err));
+  }
 
   // 2. Links: student ↔ screening, centre roster mirror, application → enrolled.
   await updateDoc(userRef, { "screening.studentId": uid, updatedAt: serverTimestamp() });

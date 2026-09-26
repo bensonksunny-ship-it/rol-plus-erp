@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef, Fragment, Suspense } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, Fragment, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
@@ -55,6 +55,10 @@ interface StudentFeeRow {
 
 interface CenterOption { id: string; name: string; centerCode: string; }
 
+/** Finance is organised by centre; students without one are grouped under this key. */
+const UNASSIGNED = "__unassigned__";
+function centreKey(s: { centerId: string }): string { return s.centerId || UNASSIGNED; }
+
 type PayMethod      = "UPI" | "Cash" | "Bank";
 type DiscountType   = "fixed" | "percent";
 // Which inline panel is open for a student row
@@ -66,6 +70,7 @@ const METHOD_STYLES: Record<string, React.CSSProperties> = {
   UPI:            { background: "#ede9fe", color: "#4f46e5" },
   Cash:           { background: "#dcfce7", color: "#16a34a" },
   Bank:           { background: "#dbeafe", color: "#1d4ed8" },
+  Card:           { background: "#e0f2fe", color: "#0369a1" },
   auto:           { background: "#f3f4f6", color: "#374151" },
   "auto-monthly": { background: "#fef9c3", color: "#b45309" },
   deposit:        { background: "#fce7f3", color: "#9d174d" },
@@ -178,7 +183,15 @@ function FinanceContent() {
   const historyDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Filters
-  const [filterCenter, setFilterCenter]      = useState<string>("all");
+  // The whole page (cards, list, drill-downs) is scoped to this centre.
+  // "all" | a centre id | UNASSIGNED. Deep-linkable via ?center=.
+  const [filterCenter, setFilterCenterState] = useState<string>(() => searchParams.get("center") || "all");
+  function setFilterCenter(id: string) {
+    setFilterCenterState(id);
+    const url = new URL(window.location.href);
+    if (id === "all") url.searchParams.delete("center"); else url.searchParams.set("center", id);
+    window.history.replaceState(null, "", url);
+  }
   const [filterStatus, setFilterStatus]      = useState<string>("all");
   const [filterDate, setFilterDate]          = useState<string>("");
   const [studentSearch, setStudentSearch]    = useState<string>("");
@@ -363,13 +376,33 @@ function FinanceContent() {
       const type   = (raw.type   as string) ?? "";
       const method = (tx.method  as string) ?? "";
       if (type === "fee_due" || type === "charge" || method === "auto" || method === "auto-monthly") return;
+      if (type === "admission_fee") return;   // one-off, not tuition
       m.set(tx.studentUid, (m.get(tx.studentUid) ?? 0) + tx.amount);
     });
     return m;
   }, [transactions, selectedMonth]);
 
   // ── Summary ──────────────────────────────────────────────────────────────────
+  // Students + transactions in the selected centre — every summary card uses these.
+  const scopeStudents = useMemo(
+    () => filterCenter === "all" ? students : students.filter(s => centreKey(s) === filterCenter),
+    [students, filterCenter],
+  );
+  const scopeTransactions = useMemo(() => {
+    if (filterCenter === "all") return transactions;
+    const uids = new Set(scopeStudents.map(s => s.uid));
+    return transactions.filter(t => t.studentUid ? uids.has(t.studentUid) : t.centerId === filterCenter);
+  }, [transactions, scopeStudents, filterCenter]);
+
+  // Same scope for the drill-down ledgers: by student, so a transaction whose
+  // stored centerId is stale (student moved) still lands under the right centre.
+  const scopeUidSet = useMemo(() => new Set(scopeStudents.map(s => s.uid)), [scopeStudents]);
+  const inScope = useCallback((tx: Transaction) => filterCenter === "all"
+    || (tx.studentUid ? scopeUidSet.has(tx.studentUid) : tx.centerId === filterCenter), [filterCenter, scopeUidSet]);
+
   const summary = useMemo(() => {
+    const students     = scopeStudents;
+    const transactions = scopeTransactions;
     const today      = todayStr();
     const isManualPayment = (t: Transaction) => {
       const raw    = t as unknown as Record<string, unknown>;
@@ -406,7 +439,7 @@ function FinanceContent() {
     // Prepay students with fee generated but not yet paid
     const lowCreditCount   = prepayStudents.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid)).length;
     return { total, todayAmt, pendingBal, activeCount, paidActiveCount, collectionPct, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
-  }, [transactions, students, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap]);
+  }, [scopeTransactions, scopeStudents, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap]);
 
   // ── Last tx per student (scoped to selected month) ───────────────────────────
   const lastTxMap = useMemo(() => {
@@ -703,11 +736,11 @@ function FinanceContent() {
       } else {
         if (!(tx.date ?? "").startsWith(selectedMonth)) return false;
       }
-      if (filterCenter !== "all" && tx.centerId !== filterCenter) return false;
+      if (!inScope(tx)) return false;
       if (filterStatus !== "all" && tx.status  !== filterStatus)  return false;
       return true;
     });
-  }, [transactions, filterCenter, filterStatus, filterDate, selectedMonth]);
+  }, [transactions, inScope, filterStatus, filterDate, selectedMonth]);
 
   // Which slice of the ledger sits behind the summary tile the admin clicked.
   const drillDownTx = useMemo(() => {
@@ -717,7 +750,7 @@ function FinanceContent() {
       // status-only check silently dropped once any payment landed.
       return transactions.filter(tx => {
         if (tx.type !== "fee_due") return false;
-        if (filterCenter !== "all" && tx.centerId !== filterCenter) return false;
+        if (!inScope(tx)) return false;
         const bm = tx.billingMonth || (tx.date ?? "").slice(0, 7);
         if (bm !== selectedMonth) return false;
         const s = dueSettlements.get(`${tx.studentUid}|${bm}`);
@@ -727,12 +760,12 @@ function FinanceContent() {
     if (drillDown === "prepay") {
       return filteredTx.filter(tx => tx.type === "deposit");
     }
-    // "collected" — real money in.
-    return filteredTx.filter(tx => isSettlingPayment(tx));
-  }, [drillDown, transactions, filteredTx, dueSettlements, filterCenter, selectedMonth]);
+    // "collected" — real money in (tuition receipts + admission fees).
+    return filteredTx.filter(tx => isSettlingPayment(tx) || (tx.type === "admission_fee" && tx.status === "completed"));
+  }, [drillDown, transactions, filteredTx, dueSettlements, inScope, selectedMonth]);
 
   const filteredStudents = useMemo(() => {
-    let list = filterCenter === "all" ? students : students.filter(s => s.centerId === filterCenter);
+    let list = scopeStudents;
     if      (filterType === "group")    list = list.filter(s => s.classType   === "group");
     else if (filterType === "personal") list = list.filter(s => s.classType   === "personal");
     else if (filterType === "prepay")   list = list.filter(s => s.billingMode === "prepay");
@@ -752,7 +785,43 @@ function FinanceContent() {
       // Secondary: student name, always A→Z within a centre.
       return a.name.localeCompare(b.name);
     });
-  }, [students, filterCenter, studentSearch, filterType, feeStatusFilter, centerSortDir]);
+  }, [scopeStudents, studentSearch, filterType, feeStatusFilter, centerSortDir]);
+
+  // Centre tabs: every centre of the wing (plus any centre / "Unassigned"
+  // bucket that only exists on student records), with student + overdue counts.
+  const centreTabs = useMemo(() => {
+    const stats = new Map<string, { count: number; overdue: number; name: string }>();
+    students.forEach(st => {
+      const k = centreKey(st);
+      const e = stats.get(k) ?? { count: 0, overdue: 0, name: st.centerName };
+      e.count++;
+      if (feeDueMap.has(st.uid) && !paidMap.has(st.uid)) e.overdue++;
+      stats.set(k, e);
+    });
+    const known = new Set(centers.map(c => c.id));
+    const tabs = centers.map(c => ({ id: c.id, name: c.name, count: stats.get(c.id)?.count ?? 0, overdue: stats.get(c.id)?.overdue ?? 0 }));
+    stats.forEach((v, k) => {
+      if (!known.has(k)) tabs.push({ id: k, name: k === UNASSIGNED ? "Unassigned" : (v.name || "Other centre"), count: v.count, overdue: v.overdue });
+    });
+    return tabs.sort((a, b) =>
+      Number(a.id === UNASSIGNED) - Number(b.id === UNASSIGNED) || a.name.localeCompare(b.name));
+  }, [students, centers, feeDueMap, paidMap]);
+  const totalOverdue = useMemo(() => centreTabs.reduce((n, t) => n + t.overdue, 0), [centreTabs]);
+  const selectedCentreName = filterCenter === "all" ? "All Centers" : centreTabs.find(t => t.id === filterCenter)?.name ?? "Centre";
+
+  // Subtotals for the centre headings in the All Centers list.
+  const groupTotals = useMemo(() => {
+    const m = new Map<string, { count: number; due: number; paid: number }>();
+    filteredStudents.forEach(st => {
+      const k = centreKey(st);
+      const e = m.get(k) ?? { count: 0, due: 0, paid: 0 };
+      e.count++;
+      if (paidMap.has(st.uid)) e.paid += paidAmountMap.get(st.uid) ?? 0;
+      else if (feeDueMap.has(st.uid)) e.due += feeDueMap.get(st.uid)?.amount ?? 0;
+      m.set(k, e);
+    });
+    return m;
+  }, [filteredStudents, paidMap, paidAmountMap, feeDueMap]);
 
   function formatDate(value: unknown): string {
     if (!value || typeof value !== "string") return "-";
@@ -828,6 +897,24 @@ function FinanceContent() {
         </div>
       </div>
 
+      {/* ── Centre tabs — scope the whole page to one centre ─────────────────── */}
+      <div role="tablist" aria-label="Centre" style={st.centreTabBar}>
+        {[{ id: "all", name: "All Centers", count: students.length, overdue: totalOverdue }, ...centreTabs].map(t => {
+          const on = filterCenter === t.id;
+          return (
+            <button key={t.id} role="tab" aria-selected={on}
+              onClick={() => { setFilterCenter(t.id); setDrillDown(null); setActiveUid(null); }}
+              style={{ ...st.centreTab, ...(on ? st.centreTabActive : {}) }}>
+              <span>{t.name}</span>
+              <span style={{ ...st.centreTabCount, ...(on ? { background: "rgba(255,255,255,0.25)", color: "#fff" } : {}) }}>{t.count}</span>
+              {t.overdue > 0 && (
+                <span title={`${t.overdue} with dues`} style={st.centreTabDue}>{t.overdue}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
       {/* ── Summary Cards — click one to see the transactions behind it ──────── */}
       <div style={st.cardGrid}>
         <SummaryCard
@@ -872,17 +959,11 @@ function FinanceContent() {
 
       {/* ── Shared filters ───────────────────────────────────────────────────── */}
       <div style={st.filterRow}>
-        <select value={filterCenter} onChange={e => setFilterCenter(e.target.value)} style={st.filterSelect}>
-          <option value="all">All Centers</option>
-          {centers.map(c => (
-            <option key={c.id} value={c.id}>[{c.centerCode}] {c.name}</option>
-          ))}
-        </select>
         {drillDown === null ? (
           <>
             <input
               type="search"
-              placeholder="Search name or ID…"
+              placeholder={filterCenter === "all" ? "Search name or ID…" : `Search name or ID in ${selectedCentreName}…`}
               value={studentSearch}
               onChange={e => setStudentSearch(e.target.value)}
               style={{ ...st.searchInput, flex: 1 }}
@@ -1001,7 +1082,10 @@ function FinanceContent() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredStudents.map((s) => {
+                  {filteredStudents.map((s, idx) => {
+                    const groupKey    = centreKey(s);
+                    const startsGroup = filterCenter === "all" && (idx === 0 || centreKey(filteredStudents[idx - 1]) !== groupKey);
+                    const g           = groupTotals.get(groupKey);
                     const isPrepay   = s.billingMode === "prepay";
                     const overdue    = feeDueMap.has(s.uid) && !paidMap.has(s.uid);
                     const hasCredit  = isPrepay && s.balance < 0; // prepay credit remaining
@@ -1024,6 +1108,21 @@ function FinanceContent() {
 
                     return (
                       <>
+                        {/* ── Centre heading (All Centers view) ─────────── */}
+                        {startsGroup && (
+                          <tr key={`hdr-${groupKey}`}>
+                            <td colSpan={isMobile ? 2 : 5} style={st.groupHeader}>
+                              <button onClick={() => setFilterCenter(groupKey)} style={st.groupHeaderBtn} title="Show only this centre">
+                                {groupKey === UNASSIGNED ? "Unassigned" : s.centerName || "—"} →
+                              </button>
+                              <span style={st.groupHeaderMeta}>
+                                {g?.count ?? 0} student{g?.count === 1 ? "" : "s"}
+                                {g && g.paid > 0 && <> · <span style={{ color: "#16a34a" }}>Collected {fmtINR(g.paid)}</span></>}
+                                {g && g.due > 0 && <> · <span style={{ color: "#dc2626" }}>Due {fmtINR(g.due)}</span></>}
+                              </span>
+                            </td>
+                          </tr>
+                        )}
                         {/* ── Main data row ─────────────────────────────── */}
                         <tr
                           key={s.uid}
@@ -1554,7 +1653,8 @@ function FinanceContent() {
                                           const isPending  = tx.status === "pending";
                                           const isFailed   = tx.status === "failed";
 
-                                          const typeLabel = isFeedue ? "Fee Due" : isDeposit ? "Payment" : isCharge ? "Auto-charge" : "Payment";
+                                          const isAdmFee   = tx.type === "admission_fee";
+                                          const typeLabel = isFeedue ? "Fee Due" : isAdmFee ? "Admission Fee" : isDeposit ? "Payment" : isCharge ? "Auto-charge" : "Payment";
                                           const typeColor = isFeedue
                                             ? { bg: "#fffbeb", border: "#fde68a", text: "#b45309" }
                                             : isDeposit
@@ -1931,7 +2031,14 @@ function TxTable({
               <Fragment key={tx.id}>
                 <tr style={i % 2 === 0 ? st.rowEven : st.rowOdd}>
                   <td style={{ ...st.td, minWidth: 140 }}>
-                    <div style={{ fontWeight: 600 }}>{student?.name ?? tx.studentUid ?? "—"}</div>
+                    <div style={{ fontWeight: 600 }}>{student?.name ?? tx.payerName ?? (tx.studentUid || "—")}</div>
+                    {tx.type === "admission_fee" && (
+                      <div style={{ marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap" as const }}>
+                        <span style={{ ...st.badge, background: "#fff7ed", color: "#9a3412", border: "1px solid #fed7aa" }}>Admission Fee</span>
+                        {!student && tx.admissionNumber && <span style={st.studentIDChip}>{tx.admissionNumber}</span>}
+                        {tx.reference && <span style={{ fontSize: 11, color: "#9ca3af" }}>Ref {tx.reference}</span>}
+                      </div>
+                    )}
                     {student?.studentID && (
                       <div style={{ marginTop: 2 }}>
                         <span style={st.studentIDChip}>{student.studentID}</span>
@@ -2176,6 +2283,14 @@ const st: Record<string, React.CSSProperties> = {
   filterDate:    { padding: "7px 10px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)" },
   clearDate:     { background: "none", border: "none", fontSize: 12, color: "#6b7280", cursor: "pointer", padding: "4px 8px" },
   filterSummary: { fontSize: 12, color: "var(--color-text-secondary)", marginBottom: 10 },
+  centreTabBar:  { display: "flex", gap: 8, overflowX: "auto", padding: "2px 2px 10px", marginBottom: 14, scrollbarWidth: "thin" },
+  centreTab:     { display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0, padding: "8px 14px", borderRadius: 999, border: "1.5px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
+  centreTabActive: { background: "var(--color-accent)", borderColor: "var(--color-accent)", color: "#fff", boxShadow: "var(--shadow-sm)" },
+  centreTabCount:  { fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 999, background: "var(--color-surface-3)", color: "var(--color-text-secondary)" },
+  centreTabDue:    { fontSize: 10.5, fontWeight: 800, padding: "1px 6px", borderRadius: 999, background: "#dc2626", color: "#fff" },
+  groupHeader:     { padding: "10px 12px", background: "var(--color-surface-2)", borderTop: "2px solid var(--color-border)", borderBottom: "1px solid var(--color-border)" },
+  groupHeaderBtn:  { background: "none", border: "none", padding: 0, fontSize: 13.5, fontWeight: 800, color: "var(--color-text-primary)", cursor: "pointer", marginRight: 12 },
+  groupHeaderMeta: { fontSize: 12, color: "var(--color-text-secondary)" },
   searchInput:   { padding: "7px 12px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", minWidth: 140, flex: "1 1 140px" },
 
   overdueBanner: { display: "flex", alignItems: "flex-start", gap: 10, background: "#fff1f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", marginBottom: 12, fontSize: 13, color: "#be123c" },

@@ -10,10 +10,13 @@ import {
   arrayUnion,
   arrayRemove,
   serverTimestamp,
+  query,
+  where,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { DEFAULT_WING } from "@/config/constants";
-import { inWing } from "@/lib/wing";
+import { inWing, wingOf } from "@/lib/wing";
 import type { Wing } from "@/types";
 import type { Center, CreateCenterInput, UpdateCenterInput } from "@/types/center";
 
@@ -101,19 +104,87 @@ export async function getCenterById(id: string): Promise<Center> {
   return { id: snap.id, ...snap.data() } as Center;
 }
 
+export interface CenterRenameResult {
+  from: string;
+  to: string;
+  /** Student records whose stored centre name was updated (or linked by id). */
+  students: number;
+  /** Admission applications whose centre name was updated. */
+  applications: number;
+}
+
+/**
+ * Cascade a centre rename. Everything keyed by `centerId` (attendance,
+ * transactions, rosters, finance) resolves the name live and needs nothing;
+ * this rewrites the places that store the centre *name* as text:
+ *   users.centre       — registry imports / registry edits / centre assigns
+ *                        (free-text records matching the old name are also
+ *                        linked to the centre by id so they don't orphan)
+ *   admissions.centre  — the application form stores the chosen centre's name
+ */
+export async function cascadeCenterRename(
+  id: string, oldName: string, newName: string, wing: Wing,
+): Promise<CenterRenameResult> {
+  const oldKey = oldName.trim().toLowerCase();
+  const writes: { ref: ReturnType<typeof doc>; data: Record<string, unknown> }[] = [];
+  let students = 0, applications = 0;
+
+  const [userSnap, admSnap] = await Promise.all([
+    getDocs(query(collection(db, "users"), where("role", "==", "student"))),
+    getDocs(collection(db, "admissions")),
+  ]);
+
+  userSnap.docs.forEach(d => {
+    const st = d.data();
+    const centre = typeof st.centre === "string" ? st.centre : "";
+    const cid    = typeof st.centerId === "string" ? st.centerId : "";
+    if (cid === id) {
+      // Linked by id: only refresh a stored name (some records keep the id in `centre`).
+      if (centre && centre !== id && centre !== newName) {
+        writes.push({ ref: d.ref, data: { centre: newName, updatedAt: serverTimestamp() } });
+        students++;
+      }
+    } else if (!cid && centre.trim().toLowerCase() === oldKey && inWing(st, wing)) {
+      writes.push({ ref: d.ref, data: { centre: newName, centerId: id, updatedAt: serverTimestamp() } });
+      students++;
+    }
+  });
+
+  admSnap.docs.forEach(d => {
+    const a = d.data();
+    const centre = typeof a.centre === "string" ? a.centre : "";
+    if (centre.trim().toLowerCase() === oldKey && wingOf(a) === wing) {
+      writes.push({ ref: d.ref, data: { centre: newName } });
+      applications++;
+    }
+  });
+
+  for (let i = 0; i < writes.length; i += 450) {
+    const batch = writeBatch(db);
+    writes.slice(i, i + 450).forEach(w => batch.update(w.ref, w.data));
+    await batch.commit();
+  }
+  return { from: oldName, to: newName, students, applications };
+}
+
 /**
  * Update a center by ID. Only updates provided fields.
- * Side-effect: when teacherUid changes, removes centerId from old teacher's centerIds
- * and adds it to the new teacher's centerIds — keeps teacher ↔ student visibility consistent.
+ * Side-effects:
+ *  - when teacherUid changes, removes centerId from old teacher's centerIds
+ *    and adds it to the new teacher's centerIds — keeps teacher ↔ student visibility consistent.
+ *  - when the name changes, cascades it to records that store the name (see
+ *    cascadeCenterRename) and returns what was updated.
  */
-export async function updateCenter(id: string, data: UpdateCenterInput): Promise<void> {
+export async function updateCenter(id: string, data: UpdateCenterInput): Promise<CenterRenameResult | null> {
   const ref = doc(db, COLLECTION, id);
 
-  // Read current state before writing so we can diff the teacherUid change.
+  // Read current state before writing so we can diff the teacherUid / name change.
   const existing = await getDocFromServer(ref);
   const prevTeacherUid = existing.exists()
     ? ((existing.data().teacherUid as string) ?? "")
     : "";
+  const prevName = existing.exists() ? String(existing.data().name ?? "") : "";
+  const prevWing = (existing.exists() ? wingOf(existing.data()) : DEFAULT_WING) as Wing;
 
   // Only canonical fields are allowed — no spread, no unknown keys
   const payload: Record<string, unknown> = { updatedAt: serverTimestamp() };
@@ -151,4 +222,10 @@ export async function updateCenter(id: string, data: UpdateCenterInput): Promise
       );
     }
   }
+
+  const newName = data.name?.trim();
+  if (newName && prevName && newName !== prevName.trim()) {
+    return cascadeCenterRename(id, prevName, newName, prevWing);
+  }
+  return null;
 }

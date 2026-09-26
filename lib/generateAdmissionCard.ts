@@ -180,6 +180,34 @@ function hr(doc: jsPDF, y: number) {
   doc.line(MARGIN, y, PAGE_W - MARGIN, y);
 }
 
+// ─── Money (Helvetica has no ₹ glyph, so "Rs.") ────────────────────────────────
+function rupees(n: number): string {
+  return `Rs. ${Math.round(n).toLocaleString("en-IN")}/-`;
+}
+const ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+  "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+const TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+function under1000(n: number): string {
+  const h = Math.floor(n / 100), r = n % 100;
+  const rest = r < 20 ? ONES[r] : `${TENS[Math.floor(r / 10)]}${r % 10 ? " " + ONES[r % 10] : ""}`;
+  return [h ? `${ONES[h]} Hundred` : "", rest].filter(Boolean).join(" ");
+}
+/** 1500 → "Rupees One Thousand Five Hundred Only" (Indian lakh/crore grouping). */
+export function rupeesInWords(amount: number): string {
+  let n = Math.round(amount);
+  if (n <= 0) return "Rupees Zero Only";
+  const parts: string[] = [];
+  const crore = Math.floor(n / 10000000); n %= 10000000;
+  const lakh  = Math.floor(n / 100000);   n %= 100000;
+  const thou  = Math.floor(n / 1000);     n %= 1000;
+  if (crore) parts.push(`${under1000(crore)} Crore`);
+  if (lakh)  parts.push(`${under1000(lakh)} Lakh`);
+  if (thou)  parts.push(`${under1000(thou)} Thousand`);
+  if (n)     parts.push(under1000(n));
+  return `Rupees ${parts.join(" ")} Only`;
+}
+const PAY_MODE_LABEL: Record<string, string> = { Cash: "Cash", UPI: "UPI", Card: "Card", Bank: "Bank Transfer" };
+
 // ─── Main generator ───────────────────────────────────────────────────────────
 export async function generateAdmissionCardPDF(
   admission: Record<string, unknown>,
@@ -352,6 +380,96 @@ export async function generateAdmissionCardPDF(
     const wide: KV[] = [["Strategy:", strategy]];
     if (grades.length > 0) wide.push(["Clinical Scores:", grades.join("   |   ")]);
     y = grid1(doc, wide, M, y, CONTENT_W);
+  }
+
+  // ── ADMISSION FEE RECEIPT ─────────────────────────────────────────────────
+  const feeAmount = typeof admission.admissionFeeAmount === "number" ? admission.admissionFeeAmount : 0;
+  if (admission.admissionFeePaid === true && feeAmount > 0) {
+    const BOX_H = 38;
+    y = ensureSpace(doc, y + SECTION_GAP, BOX_H + 2);
+    const top = y;
+
+    // Dashed receipt border
+    stroke(doc, CLR.green);
+    doc.setLineWidth(0.4);
+    doc.setLineDashPattern([1.5, 1], 0);
+    doc.roundedRect(M, top, CONTENT_W, BOX_H, 2, 2, "S");
+    doc.setLineDashPattern([], 0);
+
+    // Title strip
+    fill(doc, [220, 252, 231]);
+    doc.rect(M + 0.4, top + 0.4, CONTENT_W - 0.8, 8, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    color(doc, [21, 128, 61]);
+    doc.text("ADMISSION FEE RECEIPT", M + 4, top + 5.7);
+    const txId = s(admission.admissionFeeTxId);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7);
+    color(doc, CLR.gray700);
+    doc.text(`Receipt No: ${txId ? "AF-" + txId.slice(0, 8).toUpperCase() : "—"}`, W - M - 4, top + 5.7, { align: "right" });
+
+    // Details (left) + amount (right)
+    const paidOn = s(admission.admissionFeeDate)
+      ? new Date(`${s(admission.admissionFeeDate)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })
+      : "—";
+    const rows: KV[] = [
+      ["Received from:", dash(s(admission.parentName)) !== "—" ? `${s(admission.parentName)} (for ${s(admission.fullName)})` : s(admission.fullName)],
+      ["Towards:",       "Admission Fee - ROL's School of Music"],
+      ["Payment mode:",  PAY_MODE_LABEL[s(admission.admissionFeeMethod)] ?? s(admission.admissionFeeMethod)],
+      ["Reference:",     s(admission.admissionFeeReference)],
+      ["Date paid:",     paidOn],
+    ];
+    let ry = top + 13;
+    for (const kv of rows) {
+      const c = cellLines(doc, kv, CONTENT_W * 0.58);
+      drawCell(doc, c, M + 4, ry);
+      ry += rowHeight(Math.max(c.l.length, c.v.length)) - 0.6;
+    }
+
+    // Amount block + PAID stamp
+    const AX = M + CONTENT_W * 0.62;
+    const AW = W - M - 4 - AX;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(7);
+    color(doc, CLR.gray500);
+    doc.text("AMOUNT PAID", AX, top + 14);
+    doc.setFontSize(16);
+    color(doc, CLR.gray900);
+    doc.text(rupees(feeAmount), AX, top + 21);
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(6.8);
+    color(doc, CLR.gray700);
+    doc.text(doc.splitTextToSize(rupeesInWords(feeAmount), AW) as string[], AX, top + 25.5);
+    // Stamp
+    stroke(doc, CLR.green);
+    doc.setLineWidth(0.6);
+    doc.roundedRect(W - M - 28, top + BOX_H - 11, 24, 8, 1.5, 1.5, "S");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    color(doc, CLR.green);
+    doc.text("PAID", W - M - 16, top + BOX_H - 5.3, { align: "center" });
+
+    y = top + BOX_H + 2;
+  }
+
+  // ── BEFORE THE FIRST CLASS (admission card only) ──────────────────────────
+  if (isCard) {
+    y = sh(doc, "Before your first class", ensureSpace(doc, y, 18));
+    const note = "You will be receiving your text book and note book when the teacher comes for the first class.";
+    fill(doc, [255, 251, 235]);
+    const lines = doc.splitTextToSize(note, CONTENT_W - 12) as string[];
+    const h = lines.length * LINE_H + 4;
+    y = ensureSpace(doc, y - 3.5, h + 2);
+    doc.roundedRect(M, y, CONTENT_W, h, 1.5, 1.5, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    color(doc, CLR.amber);
+    doc.text("i", M + 4, y + 4.6);
+    doc.setFont("helvetica", "normal");
+    color(doc, CLR.gray900);
+    doc.text(lines, M + 9, y + 4.6, { lineHeightFactor: LINE_H / (8 * 0.3528) });
+    y += h + 2;
   }
 
   // ── REQUEST FORM EXTRAS ───────────────────────────────────────────────────

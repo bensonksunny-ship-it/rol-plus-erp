@@ -15,6 +15,7 @@ import { inWing, isSchoolOfMusic } from "@/lib/wing";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center, Wing } from "@/types";
+import InactivationRequestsPanel from "@/components/dashboard/InactivationRequestsPanel";
 
 /** Keep only rows whose centre belongs to the active wing. */
 function scopeToWing<T extends { centerId?: string }>(rows: T[], centerIds: Set<string>): T[] {
@@ -216,8 +217,10 @@ function DashboardContent() {
 
   if (authLoading || !user) return null;
   if (user.role === ROLES.STUDENT || user.role === ROLES.PARENT || user.role === ROLES.MEMBER) return null;
-  if (user.role === ROLES.FOUNDER) return <CommandCenter />;
-  return <AdminDashboard />;
+  // Approvers see pending student-inactivation requests above their dashboard.
+  const requests = <InactivationRequestsPanel />;   // renders only for this wing's approvers, and only with requests
+  if (user.role === ROLES.FOUNDER) return <>{requests}<CommandCenter /></>;
+  return <>{requests}<AdminDashboard /></>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

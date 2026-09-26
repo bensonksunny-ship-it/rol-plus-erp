@@ -13,6 +13,9 @@ import { ROLES } from "@/config/constants";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import { logAction } from "@/services/audit/audit.service";
+import {
+  approveStudentDeactivation, rejectStudentDeactivation, requestStudentDeactivation,
+} from "@/services/student/deactivation.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import { useWing } from "@/hooks/useWing";
@@ -496,62 +499,42 @@ function StudentsContent() {
   }, [filteredRest]);
 
   // ── Deactivation actions ───────────────────────────────────────────────────
+  // Shared with the centre student preview and the dashboard approvals panel.
+  const actor = () => ({ uid: user!.uid, role, name: user?.displayName ?? undefined, wing });
+
   async function requestDeactivation(student: StudentRow) {
     if (!user) return;
     try {
-      await updateDoc(doc(db, "users", student.id), {
-        status:                     "deactivation_requested",
-        studentStatus:              "deactivation_requested",
-        deactivationApprovalStatus: "pending",
-        deactivationRequestedBy:    user.uid,
-        deactivationRequestedAt:    new Date().toISOString(),
-        updatedAt:                  serverTimestamp(),
-      });
-      logAction({ action: "DEACTIVATION_REQUESTED", initiatorId: user.uid, initiatorRole: role ?? "teacher",
-        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
+      await requestStudentDeactivation(student.id, actor());
       setStudents(prev => prev.map(s => s.id !== student.id ? s : {
         ...s, status: "deactivation_requested",
         deactivationRequestedBy: user.uid,
         deactivationRequestedAt: new Date().toISOString(),
       }));
-      toast("Deactivation request submitted.", "success");
+      toast("Your request has been sent for review.", "success");
     } catch { toast("Failed to submit request.", "error"); }
   }
 
   async function approveDeactivation(student: StudentRow) {
     if (!user) return;
     try {
-      await updateDoc(doc(db, "users", student.id), {
-        status:                     "inactive",
-        studentStatus:              "inactive",
-        deactivationApprovalStatus: "approved",
-        updatedAt:                  serverTimestamp(),
-      });
-      logAction({ action: "DEACTIVATION_APPROVED", initiatorId: user.uid, initiatorRole: role ?? "admin",
-        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
+      await approveStudentDeactivation(student.id, actor(), student.deactivationRequestedBy);
       setStudents(prev => prev.map(s => s.id !== student.id ? s : { ...s, status: "inactive" }));
-      toast("Student deactivated.", "success");
-    } catch { toast("Failed to deactivate.", "error"); }
+      toast(student.balance > 0
+        ? `Student deactivated. ${"₹" + Math.round(student.balance).toLocaleString("en-IN")} outstanding stays on Finance until paid.`
+        : "Student deactivated.", "success");
+    } catch (e) { toast(e instanceof Error ? e.message : "Failed to deactivate.", "error"); }
   }
 
   async function rejectDeactivation(student: StudentRow) {
     if (!user) return;
     try {
-      await updateDoc(doc(db, "users", student.id), {
-        status:                     "active",
-        studentStatus:              "active",
-        deactivationApprovalStatus: "rejected",
-        deactivationRequestedBy:    null,
-        deactivationRequestedAt:    null,
-        updatedAt:                  serverTimestamp(),
-      });
-      logAction({ action: "DEACTIVATION_REJECTED", initiatorId: user.uid, initiatorRole: role ?? "admin",
-        approverId: null, approverRole: null, reason: null, metadata: { studentId: student.id } });
+      await rejectStudentDeactivation(student.id, actor(), student.deactivationRequestedBy);
       setStudents(prev => prev.map(s => s.id !== student.id ? s : {
         ...s, status: "active", deactivationRequestedBy: null, deactivationRequestedAt: null,
       }));
       toast("Deactivation request rejected. Student is active.", "success");
-    } catch { toast("Failed to reject.", "error"); }
+    } catch (e) { toast(e instanceof Error ? e.message : "Failed to reject.", "error"); }
   }
 
   // ── Break actions ──────────────────────────────────────────────────────────

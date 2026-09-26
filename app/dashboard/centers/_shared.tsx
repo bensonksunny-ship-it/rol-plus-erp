@@ -2,9 +2,9 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getDocs, collection, query, where, doc, writeBatch, serverTimestamp, arrayUnion, arrayRemove } from "firebase/firestore";
+import { getDoc, getDocs, collection, query, where, doc, updateDoc, writeBatch, serverTimestamp, arrayUnion, arrayRemove } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
-import { getCenters, createCenter, updateCenter } from "@/services/center/center.service";
+import { getCenters, createCenter, updateCenter, type CenterRenameResult } from "@/services/center/center.service";
 import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
@@ -18,10 +18,17 @@ import { useToast } from "@/hooks/useToast";
 import { useAuth } from "@/hooks/useAuth";
 import { useWing } from "@/hooks/useWing";
 import { isSchoolOfMusic, inWing, wingOf } from "@/lib/wing";
-import { getCached, setCached } from "@/lib/dataCache";
+import { getCached, invalidateCache, setCached } from "@/lib/dataCache";
 import { deleteCenter } from "@/services/admin/delete.service";
-import { parseFile } from "@/lib/xlsx-parser";
-import { safeCompare, sortKey } from "@/lib/sortKey";
+import { safeCompare } from "@/lib/sortKey";
+import Link from "next/link";
+import { computeDueSettlements, computeStudentBalances, outstandingDuesForStudent } from "@/services/finance/finance.service";
+import type { Transaction } from "@/types/finance";
+import { canEnterAdmissionNo, cleanAdmissionNo, isAdmissionNoTaken } from "@/lib/admissionNumber";
+import {
+  DEACTIVATION_REQUESTED, approveStudentDeactivation, canApproveDeactivation,
+  rejectStudentDeactivation, requestStudentDeactivation,
+} from "@/services/student/deactivation.service";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -95,46 +102,233 @@ function DayChips({ selected, onChange }: { selected: Day[]; onChange: (d: Day[]
   );
 }
 
-function BatchesEditor({ batches, onChange }: { batches: CenterBatch[]; onChange: (b: CenterBatch[]) => void }) {
-  function addBatch() {
-    onChange([...batches, { id: newBatchId(), name: "", daysOfWeek: [], startTime: "", endTime: "" }]);
+type BatchDraft = { id: string | null; name: string; teacherUid: string; daysOfWeek: Day[]; startTime: string; endTime: string };
+const EMPTY_BATCH_DRAFT: BatchDraft = { id: null, name: "", teacherUid: "", daysOfWeek: [], startTime: "", endTime: "" };
+
+/** "Mon, Wed · 5:00 PM – 6:00 PM" */
+function batchSummary(b: CenterBatch): string {
+  const fmt = (t: string) => {
+    const [h, m] = t.split(":").map(Number);
+    if (Number.isNaN(h)) return t;
+    return `${((h + 11) % 12) + 1}:${String(m || 0).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+  };
+  const days = b.daysOfWeek.length ? b.daysOfWeek.join(", ") : "No days set";
+  const time = b.startTime && b.endTime ? `${fmt(b.startTime)} – ${fmt(b.endTime)}` : b.startTime ? fmt(b.startTime) : "No time set";
+  return `${days} · ${time}`;
+}
+
+/**
+ * Sub-batches of a centre. Saved batches show as summary cards (edit / remove);
+ * "+ Add New Batch to Current Center" opens an inline form. The list is only
+ * written when the surrounding centre form is saved. No batches → the centre
+ * runs as its single General Batch (see lib/batches).
+ */
+/** The centre's own schedule — what Batch 1 is made from when there are no batches yet. */
+interface CentreSchedule { daysOfWeek: string[]; startTime: string; endTime: string; teacherUid: string }
+
+const IMPLICIT_BATCH = "__batch1__";
+
+function BatchesEditor({ batches, onChange, teachers, base }: {
+  batches: CenterBatch[];
+  onChange: (b: CenterBatch[]) => void;
+  teachers: TeacherUser[];
+  /** Centre schedule + teacher — shown as Batch 1 until the centre has real batches. */
+  base: CentreSchedule;
+}) {
+  const [draft, setDraft] = useState<BatchDraft | null>(null);
+  const [draftErr, setDraftErr] = useState("");
+
+  const teacherName = (uid?: string) => {
+    if (!uid) return "";
+    const t = teachers.find(x => x.uid === uid);
+    return t ? getTeacherDisplayName(t) : "Unknown teacher";
+  };
+
+  /** Batch 1 as a real batch: the centre's days, times and teacher. */
+  function batchOneFromBase(name = DEFAULT_BATCH_NAME): CenterBatch {
+    return {
+      id: newBatchId(), name,
+      teacherUid: base.teacherUid || "",
+      daysOfWeek: DAYS.filter(d => base.daysOfWeek.includes(d)),
+      startTime: base.startTime || "", endTime: base.endTime || "",
+    };
   }
-  function updateBatch(id: string, patch: Partial<CenterBatch>) {
-    onChange(batches.map(b => b.id === id ? { ...b, ...patch } : b));
+
+  function openNew() {
+    setDraft({ ...EMPTY_BATCH_DRAFT, name: batches.length === 0 ? "Batch 2" : `Batch ${batches.length + 1}` });
+    setDraftErr("");
+  }
+  /** Rename / adjust Batch 1 while it's still the centre's implicit batch. */
+  function openImplicit() {
+    setDraft({ id: IMPLICIT_BATCH, name: DEFAULT_BATCH_NAME, teacherUid: base.teacherUid || "",
+      daysOfWeek: DAYS.filter(d => base.daysOfWeek.includes(d)) as Day[], startTime: base.startTime, endTime: base.endTime });
+    setDraftErr("");
+  }
+  function openEdit(b: CenterBatch) {
+    setDraft({ id: b.id, name: b.name, teacherUid: b.teacherUid ?? "", daysOfWeek: b.daysOfWeek as Day[], startTime: b.startTime, endTime: b.endTime });
+    setDraftErr("");
+  }
+  function commitDraft() {
+    if (!draft) return;
+    const name = draft.name.trim();
+    if (!name) { setDraftErr("Give the batch a name."); return; }
+    // Batch 1 (implicit) → becomes a real batch; its schedule may be left as the centre had it.
+    if (draft.id === IMPLICIT_BATCH) {
+      if (draft.startTime && draft.endTime && draft.endTime <= draft.startTime) { setDraftErr("End time must be after the start time."); return; }
+      onChange([{ id: newBatchId(), name, teacherUid: draft.teacherUid,
+        daysOfWeek: DAYS.filter(d => draft.daysOfWeek.includes(d)), startTime: draft.startTime, endTime: draft.endTime }]);
+      setDraft(null);
+      return;
+    }
+    if (draft.daysOfWeek.length === 0) { setDraftErr("Pick at least one class day."); return; }
+    if (!draft.startTime || !draft.endTime) { setDraftErr("Set both start and end time."); return; }
+    if (draft.endTime <= draft.startTime) { setDraftErr("End time must be after the start time."); return; }
+    // The first extra batch turns the centre's own schedule into Batch 1 (keeps every student there).
+    const current = batches.length === 0 && !draft.id ? [batchOneFromBase()] : batches;
+    if (current.some(b => b.id !== draft.id && b.name.trim().toLowerCase() === name.toLowerCase())) {
+      setDraftErr("Another batch already has this name."); return;
+    }
+    // Always a string teacherUid — Firestore rejects undefined values.
+    const saved: CenterBatch = {
+      id: draft.id && draft.id !== IMPLICIT_BATCH ? draft.id : newBatchId(), name, teacherUid: draft.teacherUid,
+      daysOfWeek: DAYS.filter(d => draft.daysOfWeek.includes(d)), startTime: draft.startTime, endTime: draft.endTime,
+    };
+    onChange(draft.id ? current.map(b => b.id === draft.id ? saved : b) : [...current, saved]);
+    setDraft(null);
   }
   function removeBatch(id: string) {
     onChange(batches.filter(b => b.id !== id));
+    if (draft?.id === id) setDraft(null);
   }
-  return (
-    <div style={{ display: "flex", flexDirection: "column" as const, gap: 10 }}>
-      {batches.length === 0 && (
-        <div style={{ fontSize: 12, color: "#9ca3af" }}>
-          No batches yet — the centre&apos;s days &amp; time above act as its single {DEFAULT_BATCH_NAME}, and every
-          student here is in it. Adding a batch replaces the {DEFAULT_BATCH_NAME}.
+
+  const draftForm = draft && (
+    <div style={batchStyles.draft}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#312e81" }}>
+        {draft.id === IMPLICIT_BATCH ? "Batch 1 — rename / adjust" : draft.id ? "Edit batch" : batches.length === 0 ? "New batch (Batch 2)" : "New batch"}
+      </div>
+      {!draft.id && batches.length === 0 && (
+        <div style={{ fontSize: 11.5, color: "#4338ca" }}>
+          Adding this turns the centre&apos;s current days, time and teacher into <b>Batch 1 ({DEFAULT_BATCH_NAME})</b> —
+          every student already here stays in Batch 1. You can rename it afterwards.
         </div>
       )}
-      {batches.map(b => (
-        <div key={b.id} style={batchStyles.row}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const, alignItems: "center" }}>
-            <input
-              value={b.name}
-              onChange={e => updateBatch(b.id, { name: e.target.value })}
-              placeholder="e.g. Batch A, Weekend Morning"
-              style={{ ...formStyles.input, flex: "1 1 180px" }}
-            />
-            <input type="time" value={b.startTime} onChange={e => updateBatch(b.id, { startTime: e.target.value })}
-              style={{ ...formStyles.input, width: 110 }} />
-            <span style={{ fontSize: 12, color: "#9ca3af" }}>to</span>
-            <input type="time" value={b.endTime} onChange={e => updateBatch(b.id, { endTime: e.target.value })}
-              style={{ ...formStyles.input, width: 110 }} />
-            <button type="button" onClick={() => removeBatch(b.id)} style={batchStyles.removeBtn} title="Remove batch">✕</button>
-          </div>
-          <DayChips selected={b.daysOfWeek as Day[]} onChange={days => updateBatch(b.id, { daysOfWeek: days })} />
-        </div>
-      ))}
-      <button type="button" onClick={addBatch} style={batchStyles.addBtn}>+ Add Batch</button>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
+        <label style={batchStyles.field}>
+          <span style={batchStyles.label}>Batch name *</span>
+          <input autoFocus value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })}
+            placeholder="e.g. Mon/Wed Evening Batch" style={formStyles.input} />
+        </label>
+        <label style={batchStyles.field}>
+          <span style={batchStyles.label}>Batch teacher</span>
+          <select value={draft.teacherUid} onChange={e => setDraft({ ...draft, teacherUid: e.target.value })} style={formStyles.input}>
+            <option value="">— Centre teacher / none —</option>
+            {teachers.map(t => <option key={t.uid} value={t.uid}>{getTeacherDisplayName(t)}</option>)}
+          </select>
+        </label>
+      </div>
+      <div style={batchStyles.field}>
+        <span style={batchStyles.label}>Class days *</span>
+        <DayChips selected={draft.daysOfWeek} onChange={days => setDraft({ ...draft, daysOfWeek: days })} />
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" as const }}>
+        <label style={batchStyles.field}>
+          <span style={batchStyles.label}>Start time *</span>
+          <input type="time" value={draft.startTime} onChange={e => setDraft({ ...draft, startTime: e.target.value })} style={{ ...formStyles.input, width: 130 }} />
+        </label>
+        <label style={batchStyles.field}>
+          <span style={batchStyles.label}>End time *</span>
+          <input type="time" value={draft.endTime} onChange={e => setDraft({ ...draft, endTime: e.target.value })} style={{ ...formStyles.input, width: 130 }} />
+        </label>
+      </div>
+      {draftErr && <div style={{ fontSize: 12, color: "#dc2626" }}>{draftErr}</div>}
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <button type="button" onClick={() => setDraft(null)} style={batchStyles.cancelBtn}>Cancel</button>
+        <button type="button" onClick={commitDraft} style={batchStyles.saveBtn}>{draft.id ? "Update batch" : "Add batch"}</button>
+      </div>
     </div>
   );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column" as const, gap: 10 }}>
+      {batches.length === 0 && draft?.id !== IMPLICIT_BATCH && (
+        <div style={batchStyles.card}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: "#111827" }}>
+              {DEFAULT_BATCH_NAME}
+              <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 700, color: "#4338ca", background: "#e0e7ff", borderRadius: 999, padding: "1px 7px" }}>Batch 1</span>
+            </div>
+            <div style={{ fontSize: 12, color: "#4b5563", marginTop: 2 }}>
+              {batchSummary({ id: "", name: "", daysOfWeek: base.daysOfWeek, startTime: base.startTime, endTime: base.endTime }) || "Uses the centre's days & time above"}
+            </div>
+            <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 2 }}>
+              👤 {teacherName(base.teacherUid) || "Centre teacher"} · all current students
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button type="button" onClick={openImplicit} style={batchStyles.iconBtn} title="Rename Batch 1" aria-label="Rename Batch 1">✎</button>
+          </div>
+        </div>
+      )}
+      {draft?.id === IMPLICIT_BATCH && draftForm}
+
+      {batches.map(b => draft?.id === b.id ? <div key={b.id}>{draftForm}</div> : (
+        <div key={b.id} style={batchStyles.card}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: "#111827" }}>
+              {b.name || <em style={{ color: "#9ca3af" }}>Unnamed batch</em>}
+              <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 700, color: "#6b7280", background: "#f3f4f6", borderRadius: 999, padding: "1px 7px" }}>Batch {batches.indexOf(b) + 1}</span>
+            </div>
+            <div style={{ fontSize: 12, color: "#4b5563", marginTop: 2 }}>{batchSummary(b)}</div>
+            <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 2 }}>
+              👤 {teacherName(b.teacherUid) || "Centre teacher"}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            <button type="button" onClick={() => openEdit(b)} style={batchStyles.iconBtn} title="Edit batch" aria-label={`Edit ${b.name}`}>✎</button>
+            <button type="button" onClick={() => removeBatch(b.id)} style={batchStyles.removeBtn} title="Remove batch" aria-label={`Remove ${b.name}`}>🗑</button>
+          </div>
+        </div>
+      ))}
+
+      {draft && !draft.id && draftForm}
+
+      {!draft && (
+        <button type="button" onClick={openNew} style={batchStyles.addBtn}>+ Add New Batch to Current Center</button>
+      )}
+      {draft && (
+        <div style={{ fontSize: 11, color: "#9ca3af" }}>Finish with “{draft.id ? "Update batch" : "Add batch"}” — batches are saved with the centre.</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Keep students in step with a centre's batches after it's saved:
+ *   • first real batches on a batch-less centre → every student with no batch
+ *     is put in Batch 1 (the first batch), so no one drops out of a roster;
+ *   • a renamed batch → its students' stored batch label follows.
+ * Rosters, Attendance and the Registry resolve batches by id, so they pick the
+ * new names up on their own; this also keeps the stored label tidy.
+ */
+async function syncStudentsToBatches(centerId: string, prev: CenterBatch[], next: CenterBatch[]): Promise<number> {
+  const becameBatched = prev.length === 0 && next.length > 0;
+  const renamed = next.filter(b => { const old = prev.find(p => p.id === b.id); return old && old.name !== b.name; });
+  if (!becameBatched && renamed.length === 0) return 0;
+  const snap = await getDocs(query(collection(db, "users"), where("role", "==", "student"), where("centerId", "==", centerId)));
+  const ids = new Set(next.map(b => b.id));
+  const wb = writeBatch(db);
+  let n = 0;
+  snap.docs.forEach(d => {
+    const st = d.data();
+    const cur = typeof st.batchId === "string" ? st.batchId : "";
+    if (becameBatched && (!cur || !ids.has(cur))) {
+      wb.update(d.ref, { batchId: next[0].id, batch: next[0].name, updatedAt: serverTimestamp() }); n++; return;
+    }
+    const r = renamed.find(b => b.id === cur);
+    if (r && st.batch !== r.name) { wb.update(d.ref, { batch: r.name, updatedAt: serverTimestamp() }); n++; }
+  });
+  if (n > 0) await wb.commit();
+  return n;
 }
 
 // ─── Date / format helpers (Center Detail view) ─────────────────────────────────
@@ -206,13 +400,45 @@ function studentPhoto(st: Record<string, unknown>): string {
   return "";
 }
 interface CenterTxRec { amount: number; date: string; status: string; type?: string; method?: string; }
-interface PickedStudent { uid: string; name: string; admissionNo: string; createdAt: string; photo?: string; instrument?: string; batchId?: string | null; }
+interface PickedStudent {
+  uid: string; name: string; admissionNo: string; createdAt: string; photo?: string; instrument?: string; batchId?: string | null;
+  /** Centre the student is moving from (registry-wide add), if any. */
+  fromCenterId?: string | null;
+}
 
 /** A student counts as "active" whether their `status` field carries the
  *  Students page's own vocabulary ("active") or the Registry's ("confirm" /
  *  "confirmed") — matches the definition used everywhere else in the app. */
 function isActiveStudentStatus(status: string): boolean {
-  return /^(active|confirm|confirmed)$/i.test((status || "").trim());
+  // Pending inactivation / break requests are still attending until approved
+  // (same rule as the Students page).
+  return /^(active|confirm|confirmed|deactivation_requested|break_requested)$/i.test((status || "").trim());
+}
+
+/**
+ * Admission number is the prerequisite for being an active student: without
+ * one a student is held in "Needs Adm. No." — not on the active roster, not in
+ * the centre's count — until someone enters it.
+ */
+function hasAdmissionNo(no: unknown): boolean {
+  return typeof no === "string" && no.trim() !== "" && no.trim() !== "—" && no.trim() !== "-";
+}
+function countsAsActive(s: { status: string; admissionNo: string }): boolean {
+  return isActiveStudentStatus(s.status) && hasAdmissionNo(s.admissionNo);
+}
+/** Who may type an admission number in — per wing (ROL+ → Founder / Admin). */
+function canAssignAdmissionNo(role: string | null | undefined, wing: string | null | undefined): boolean {
+  return canEnterAdmissionNo(role, wing) || (wing !== WINGS.ROL_PLUS && role === ROLES.ADMIN);
+}
+
+/** Toast text after a save; spells out the rename cascade when the name changed. */
+function renameMessage(r: CenterRenameResult): string {
+  const parts = [
+    r.students ? `${r.students} student record${r.students !== 1 ? "s" : ""}` : "",
+    r.applications ? `${r.applications} application${r.applications !== 1 ? "s" : ""}` : "",
+  ].filter(Boolean);
+  return `Center renamed to ${r.to}. All associated student records and ledgers updated successfully!`
+    + (parts.length ? ` (${parts.join(", ")} relabelled)` : "");
 }
 
 function isManualPayment(t: CenterTxRec): boolean {
@@ -223,8 +449,10 @@ function isManualPayment(t: CenterTxRec): boolean {
 
 type ViewTab = "attendance" | "students" | "insights";
 
-function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
-  center: Center; onClose: () => void; teachers: TeacherUser[]; onSaved?: (updated: Center) => void;
+function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCount }: {
+  center: Center; onClose: () => void; teachers: TeacherUser[]; onSaved?: (updated: Center, rename: CenterRenameResult | null) => void;
+  /** Live active-student count after roster changes (deactivate / undo / restore / add). */
+  onActiveCount?: (centerId: string, count: number) => void;
 }) {
   // Local copy so a saved edit reflects immediately without waiting on the
   // parent's list to refetch — onSaved still fires so the grid stays in sync.
@@ -285,7 +513,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
     setEditErr("");
     const timeSlot = buildTimeSlot(editForm.daysOfWeek, editForm.startTime, editForm.endTime);
     try {
-      await updateCenter(center.id, {
+      const rename = await updateCenter(center.id, {
         name:       editForm.name.trim(),
         teacherUid: editForm.teacherUid.trim(),
         status:     editForm.status,
@@ -304,6 +532,16 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
         endTime:    editForm.endTime,
         updatedAt:  serverTimestamp(),
       });
+      // First batches → current students go into Batch 1; renames follow onto students.
+      const prevBatches = explicitBatches(center as unknown as Record<string, unknown>);
+      await syncStudentsToBatches(center.id, prevBatches, editForm.batches)
+        .catch(err => console.error("[centre] batch sync:", err));
+      if (prevBatches.length === 0 && editForm.batches.length > 0) {
+        const first = editForm.batches[0].id, ids = new Set(editForm.batches.map(b => b.id));
+        setStudents(prev => prev.map(st => (!st.batchId || !ids.has(st.batchId) ? { ...st, batchId: first } : st)));
+      }
+      invalidateCache(`registry:${editForm.wing}:entries`);
+      invalidateCache(`students:${editForm.wing}:students`);
       const updated = {
         ...center,
         name:       editForm.name.trim(),
@@ -320,7 +558,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
       } as Center & { daysOfWeek: Day[]; startTime: string; endTime: string };
       setCenter(updated);
       setEditing(false);
-      onSaved?.(updated);
+      onSaved?.(updated, rename);
     } catch (err) {
       console.error("[ViewModal] update error:", err);
       setEditErr(err instanceof Error ? err.message : "Failed to update center.");
@@ -390,36 +628,72 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
 
   // Sets exactly `activeUids` active and every other student at this centre
   // inactive — the "active roster" for the centre.
-  async function updateActiveRoster(activeUids: Set<string>) {
+  /**
+   * Sets one student's status (Deactivate, Undo, Restore). Only status /
+   * studentStatus change — centerId and batchId are untouched, so a restored
+   * student drops straight back into their batch. Registry, Attendance and
+   * Finance all read this same user doc; the page caches that could show a
+   * stale status are dropped so their next visit refetches.
+   */
+  async function setStudentStatus(uid: string, status: string) {
     const batch = writeBatch(db);
-    let changed = 0;
-    students.forEach(s => {
-      const newStatus = activeUids.has(s.uid) ? "active" : "inactive";
-      if (s.status === newStatus) return;
-      changed++;
-      batch.update(doc(db, "users", s.uid), {
-        status:        newStatus,
-        studentStatus: newStatus,
-        updatedAt:     serverTimestamp(),
-      });
-    });
-    if (changed > 0) await batch.commit();
-    setStudents(prev => prev.map(s => ({ ...s, status: activeUids.has(s.uid) ? "active" : "inactive" })));
+    batch.update(doc(db, "users", uid), { status, studentStatus: status, updatedAt: serverTimestamp() });
+    await batch.commit();
+    patchStudentStatus(uid, status);
   }
+
+  /** An admission number was assigned from the preview — the student joins the active roster. */
+  function patchStudentAdmissionNo(uid: string, admissionNo: string) {
+    setStudents(prev => prev.map(s => (s.uid === uid ? { ...s, admissionNo } : s)));
+    const w = wingOf(center);
+    invalidateCache(`students:${w}:students`);
+    invalidateCache(`centers:${w}:activeCounts`);
+    invalidateCache(`registry:${w}:entries`);
+  }
+
+  /** Reflect a status already written elsewhere (inactivation request / approval). */
+  function patchStudentStatus(uid: string, status: string) {
+    setStudents(prev => prev.map(s => (s.uid === uid ? { ...s, status } : s)));
+    const w = wingOf(center);
+    invalidateCache(`students:${w}:students`);
+    invalidateCache(`centers:${w}:activeCounts`);
+    invalidateCache(`registry:${w}:entries`);
+  }
+
+  // Keep the centre card's "🎓 N" badge in step with this roster.
+  const activeCount = useMemo(() => students.filter(countsAsActive).length, [students]);
+  const loadedRef = useRef(false);
+  useEffect(() => {
+    if (loading) return;
+    if (!loadedRef.current) { loadedRef.current = true; return; }   // skip the initial load
+    onActiveCount?.(center.id, activeCount);
+  }, [activeCount, loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Assigns existing/new students to this centre and marks them Active —
   // updates their `centerId` (the source of truth for centre membership) and
   // folds them straight into local state so the roster/count reflect it immediately.
   async function addStudentsToCenter(picked: PickedStudent[]) {
     const batch = writeBatch(db);
+    const centreBatches = explicitBatches(center as unknown as Record<string, unknown>);
     picked.forEach(p => {
+      const b = centreBatches.find(x => x.id === p.batchId);
+      // Same centre/batch fields the Registry edit writes, so the student shows
+      // under this centre + batch there, in rosters, attendance and finance.
       batch.update(doc(db, "users", p.uid), {
         centerId:      center.id,
+        centre:        center.name,
+        batchId:       b ? b.id : null,
+        batch:         b ? b.name : null,
         status:        "active",
         studentStatus: "active",
         updatedAt:     serverTimestamp(),
       });
+      // Keep the centres' roster mirrors in step when moving between centres.
+      if (p.fromCenterId && p.fromCenterId !== center.id) {
+        batch.update(doc(db, "centers", p.fromCenterId), { studentUids: arrayRemove(p.uid) });
+      }
     });
+    batch.update(doc(db, "centers", center.id), { studentUids: arrayUnion(...picked.map(p => p.uid)), updatedAt: serverTimestamp() });
     await batch.commit();
     setStudents(prev => {
       const existing = new Set(prev.map(s => s.uid));
@@ -448,7 +722,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
           />
         </div>
       )}
-      <div style={{ ...modalStyles.box, maxWidth: 880, maxHeight: "88vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
+      <div style={{ ...modalStyles.box, maxWidth: "min(1120px, 96vw)", maxHeight: "88vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
         <div style={modalStyles.header}>
           <div>
             <div style={modalStyles.title}>{center.name}</div>
@@ -518,7 +792,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
                 {editDayError && <span style={formStyles.errorText}>{editDayError}</span>}
               </FormField>
               <FormField label="Batches" fullWidth>
-                <BatchesEditor batches={editForm.batches} onChange={handleEditBatchesChange} />
+                <BatchesEditor batches={editForm.batches} onChange={handleEditBatchesChange} teachers={teachers}
+                  base={{ daysOfWeek: editForm.daysOfWeek, startTime: editForm.startTime, endTime: editForm.endTime, teacherUid: editForm.teacherUid }} />
               </FormField>
             </div>
 
@@ -543,16 +818,46 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
             <div style={viewStyles.quickFacts}>
               <QuickFact label="Wing"     value={WING_LABELS[wingOf(center)] ?? "-"} />
               <QuickFact label="Teacher"  value={teacherLabel} />
-              <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || formatTimesIn12h(center.timeSlot) || "-"} />
-              <QuickFact label="Time"     value={formatTimeRange12(raw.startTime, raw.endTime) || "-"} />
+              {(center.batches ?? []).length === 0 && <>
+                <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || formatTimesIn12h(center.timeSlot) || "-"} />
+                <QuickFact label="Time"     value={formatTimeRange12(raw.startTime, raw.endTime) || "-"} />
+              </>}
               <QuickFact label="Students" value={String(students.length)} />
               {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
                 <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
               ) : null}
-              <QuickFact label="Batches" value={(center.batches ?? []).length > 0
-                ? (center.batches ?? []).map(b => b.name || "Unnamed").join(", ")
-                : `${DEFAULT_BATCH_NAME} (centre schedule)`} />
+              {(center.batches ?? []).length === 0 && <QuickFact label="Batches" value={`${DEFAULT_BATCH_NAME} (centre schedule)`} />}
             </div>
+
+            {/* One card per batch — name, schedule, teacher, active students */}
+            {(center.batches ?? []).length > 0 && (
+              <div style={{ margin: "0 0 14px" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", letterSpacing: "0.06em", textTransform: "uppercase" as const, marginBottom: 6 }}>
+                  Batches ({(center.batches ?? []).length})
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 8 }}>
+                  {(center.batches ?? []).map((b, bi) => {
+                    const tUid = b.teacherUid || center.teacherUid;
+                    const t = teachers.find(x => x.uid === tUid);
+                    const n = students.filter(st => st.batchId === b.id && countsAsActive(st)).length;
+                    return (
+                      <div key={b.id} style={{ border: "1px solid #e0e7ff", background: "#f8faff", borderRadius: 10, padding: "8px 10px", minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{b.name || "Unnamed"}</span>
+                          <span style={{ fontSize: 10.5, fontWeight: 700, color: "#6b7280", flexShrink: 0 }}>Batch {bi + 1}</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: "#4b5563", marginTop: 2 }}>
+                          {b.daysOfWeek.join(", ") || "—"}{(b.startTime || b.endTime) ? ` · ${formatTimeRange12(b.startTime, b.endTime)}` : ""}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 2 }}>
+                          👤 {t ? getTeacherDisplayName(t) : "Unassigned"} · 🎓 {n} active
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Sub-navigation tabs */}
             <div style={viewStyles.tabBar}>
@@ -575,8 +880,10 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved }: {
               ) : tab === "students" ? (
                 <CenterStudentsTab
                   students={students}
+                  onSetStatus={setStudentStatus}
+                  onStatusChanged={patchStudentStatus}
+                  onAdmissionNoAssigned={patchStudentAdmissionNo}
                   batches={explicitBatches(center as unknown as Record<string, unknown>)}
-                  onUpdateStatuses={updateActiveRoster}
                   onAddStudents={addStudentsToCenter}
                   wing={center.wing}
                   centerId={center.id}
@@ -747,36 +1054,65 @@ function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
 
 // ─── Students Tab (roster + active/inactive management) ────────────────────
 
-function CenterStudentsTab({ students, batches, onUpdateStatuses, onAddStudents, wing, centerId, centerName }: {
+function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, onAdmissionNoAssigned, onAddStudents, wing, centerId, centerName }: {
   students: CenterStudentRec[];
+  /** Persist one student's status (and update the roster). */
+  onSetStatus: (uid: string, status: string) => Promise<void>;
+  /** Status already persisted by the inactivation service — just update the roster. */
+  onStatusChanged: (uid: string, status: string) => void;
+  onAdmissionNoAssigned: (uid: string, admissionNo: string) => void;
   /** This centre's named batches — resolves each student's batchId to a name. */
   batches: CenterBatch[];
-  onUpdateStatuses: (activeUids: Set<string>) => Promise<void>;
   onAddStudents: (picked: PickedStudent[]) => Promise<void>;
   wing: Wing | undefined;
   centerId: string;
   centerName: string;
 }) {
   const [search, setSearch]     = useState("");
-  const [msg, setMsg]           = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [msg, setMsg]           = useState<{ type: "success" | "error"; text: string; undo?: { uid: string; prev: string } } | null>(null);
   const [showAdd, setShowAdd]   = useState(false);
-  const [removingUid, setRemovingUid] = useState<string | null>(null);
+  const [busyUid, setBusyUid]   = useState<string | null>(null);
+  const [view, setView]         = useState<"active" | "inactive" | "needsAdmNo">("active");
+  const [preview, setPreview]   = useState<CenterStudentRec | null>(null);
+  // Batch filter — only offered when the centre runs more than one batch.
+  const [batchFilter, setBatchFilter] = useState<string>("all");
+  // Teachers can only request an inactivation; leadership inactivates directly.
+  const { user: me, role: myRole } = useAuth();
+  const canApprove = canApproveDeactivation(myRole, wing);
 
-  // Primary view is a strict Active-only roster — Inactive/Cancelled rows
-  // never load here at all. Attaching/activating a student happens exclusively
-  // through "+ Add Active Students" below.
-  const activeStudents = useMemo(() => students.filter(s => s.status === "active"), [students]);
+  // Banners auto-dismiss; an Undo banner stays 6 s — long enough to react.
+  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function flash(next: NonNullable<typeof msg>) {
+    if (msgTimer.current) clearTimeout(msgTimer.current);
+    setMsg(next);
+    msgTimer.current = setTimeout(() => setMsg(null), next.undo ? 6000 : 4000);
+  }
+  useEffect(() => () => { if (msgTimer.current) clearTimeout(msgTimer.current); }, []);
 
+  const activeStudents   = useMemo(() => students.filter(countsAsActive), [students]);
+  // Active status but no admission number — held out of the active roster until assigned.
+  const needsAdmNo       = useMemo(() => students.filter(s => isActiveStudentStatus(s.status) && !hasAdmissionNo(s.admissionNo)), [students]);
+  // Everyone else registered here (inactive, cancelled…) — soft-deleted rows stay hidden.
+  const inactiveStudents = useMemo(() => students.filter(s => !isActiveStudentStatus(s.status) && s.status !== "deleted"), [students]);
+  const listed = view === "active" ? activeStudents : view === "inactive" ? inactiveStudents : needsAdmNo;
+
+  const inBatch = (s: CenterStudentRec) =>
+    batchFilter === "all" ? true
+    : batchFilter === "none" ? !batches.some(b => b.id === s.batchId)
+    : s.batchId === batchFilter;
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return activeStudents
+    return listed
+      .filter(inBatch)
       .filter(s => !q || s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q))
       .sort((a, b) => safeCompare(a.name, b.name));
-  }, [activeStudents, search]);
+  }, [listed, search, batchFilter, batches]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { if (view === "needsAdmNo" && needsAdmNo.length === 0) setView("active"); }, [view, needsAdmNo.length]);
 
   // Only already-active students are hidden from the picker — inactive ones
   // registered here are exactly who "+ Add Active Students" should offer.
-  const activeUids = useMemo(() => new Set(activeStudents.map(s => s.uid)), [activeStudents]);
+  const activeUids = useMemo(() => new Set([...activeStudents, ...needsAdmNo].map(s => s.uid)), [activeStudents, needsAdmNo]);
 
   // No named batches → everyone is in the implicit General Batch (see lib/batches).
   function batchLabel(id: string | null | undefined): string {
@@ -788,32 +1124,72 @@ function CenterStudentsTab({ students, batches, onUpdateStatuses, onAddStudents,
     setMsg(null);
     await onAddStudents(picked);
     setShowAdd(false);
-    setMsg({ type: "success", text: `${picked.length} student${picked.length !== 1 ? "s" : ""} added as Active.` });
+    flash({ type: "success", text: `${picked.length} student${picked.length !== 1 ? "s" : ""} added as Active.` });
   }
 
-  // Removes one student from the active roster — the only way left to take a
-  // student out of Active from this tab, now that bulk checkboxes are gone.
-  async function handleDeactivate(uid: string) {
-    setRemovingUid(uid);
-    setMsg(null);
+  async function handleDeactivate(s: CenterStudentRec) {
+    setBusyUid(s.uid);
     try {
-      const nextActive = new Set(activeStudents.filter(s => s.uid !== uid).map(s => s.uid));
-      await onUpdateStatuses(nextActive);
-      setMsg({ type: "success", text: "Student marked inactive." });
+      if (!canApprove) {
+        if (!me) throw new Error("Not signed in.");
+        await requestStudentDeactivation(s.uid, { uid: me.uid, role: myRole, name: me.displayName, wing });
+        onStatusChanged(s.uid, DEACTIVATION_REQUESTED);
+        flash({ type: "success", text: "Your request has been sent for review." });
+        return;
+      }
+      await onSetStatus(s.uid, "inactive");
+      flash({ type: "success", text: `${s.name} marked inactive.`, undo: { uid: s.uid, prev: s.status || "active" } });
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Failed to update." });
+      flash({ type: "error", text: err instanceof Error ? err.message : "Failed to update." });
     } finally {
-      setRemovingUid(null);
+      setBusyUid(null);
     }
   }
 
+  async function handleRestore(s: CenterStudentRec, prev = "active", viaUndo = false) {
+    setBusyUid(s.uid);
+    try {
+      await onSetStatus(s.uid, prev);
+      flash({ type: "success", text: viaUndo ? `Undone — ${s.name} is active again.` : `${s.name} restored to Active.` });
+    } catch (err) {
+      flash({ type: "error", text: err instanceof Error ? err.message : "Failed to restore." });
+    } finally {
+      setBusyUid(null);
+    }
+  }
+
+  const pill = (on: boolean): React.CSSProperties => ({
+    padding: "5px 12px", borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: "pointer",
+    border: on ? "1.5px solid #4f46e5" : "1px solid #e5e7eb",
+    background: on ? "#eef2ff" : "#fff", color: on ? "#4338ca" : "#6b7280",
+  });
+  const rowBtn = (tone: "neutral" | "restore", disabled: boolean): React.CSSProperties => ({
+    background: tone === "restore" ? "#f0fdf4" : "none",
+    border: `1px solid ${tone === "restore" ? "#bbf7d0" : "#e5e7eb"}`, borderRadius: 6,
+    padding: "3px 9px", fontSize: 11, fontWeight: tone === "restore" ? 700 : 400,
+    color: tone === "restore" ? "#15803d" : "#6b7280", cursor: disabled ? "default" : "pointer",
+    opacity: disabled ? 0.5 : 1, whiteSpace: "nowrap" as const,
+  });
+
   return (
     <div>
+      {preview && (
+        <StudentPreviewModal
+          student={preview}
+          centerName={centerName}
+          batchName={batchLabel(preview.batchId)}
+          wing={wing}
+          onClose={() => setPreview(null)}
+          onStatusChanged={(uid, st) => { onStatusChanged(uid, st); setPreview(p => (p && p.uid === uid ? { ...p, status: st } : p)); }}
+          onAdmissionNoAssigned={(uid, no) => { onAdmissionNoAssigned(uid, no); setPreview(p => (p && p.uid === uid ? { ...p, admissionNo: no } : p)); }}
+        />
+      )}
       {showAdd && (
         <AddStudentsModal
           wing={wing}
           centerId={centerId}
           centerName={centerName}
+          batches={batches}
           excludeUids={activeUids}
           onClose={() => setShowAdd(false)}
           onAssign={handleAssign}
@@ -821,16 +1197,63 @@ function CenterStudentsTab({ students, batches, onUpdateStatuses, onAddStudents,
       )}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-        <input
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Search by name or ID…"
-          style={{ ...formStyles.input, width: 200 }}
-        />
-        <button onClick={() => setShowAdd(true)} style={{ ...formStyles.submitBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
-          + Add Active Students
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const, alignItems: "center" }}>
+          <div role="tablist" aria-label="Student status" style={{ display: "flex", gap: 6 }}>
+            <button role="tab" aria-selected={view === "active"} onClick={() => setView("active")} style={pill(view === "active")}>
+              Active ({activeStudents.length})
+            </button>
+            <button role="tab" aria-selected={view === "inactive"} onClick={() => setView("inactive")} style={pill(view === "inactive")}>
+              Inactive ({inactiveStudents.length})
+            </button>
+            {needsAdmNo.length > 0 && (
+              <button role="tab" aria-selected={view === "needsAdmNo"} onClick={() => setView("needsAdmNo")}
+                title="Active students with no admission number — not counted as active until one is assigned"
+                style={{ ...pill(view === "needsAdmNo"), ...(view === "needsAdmNo" ? { borderColor: "#dc2626", background: "#fef2f2", color: "#b91c1c" } : { color: "#b91c1c", borderColor: "#fecaca" }) }}>
+                ⚠ Needs Adm. No. ({needsAdmNo.length})
+              </button>
+            )}
+          </div>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by name or ID…"
+            style={{ ...formStyles.input, width: 200 }}
+          />
+        </div>
+        <button onClick={() => setShowAdd(true)} title="Add active students" aria-label="Add active students"
+          style={{
+            width: 36, height: 36, borderRadius: "50%", border: "none", background: "#4f46e5", color: "#fff",
+            fontSize: 22, fontWeight: 600, lineHeight: 1, cursor: "pointer", flexShrink: 0,
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 2px 8px rgba(79,70,229,0.35)",
+          }}>
+          +
         </button>
       </div>
+
+      {batches.length >= 2 && (() => {
+        const unassigned = listed.filter(s => !batches.some(b => b.id === s.batchId)).length;
+        const bp = (on: boolean): React.CSSProperties => ({
+          padding: "4px 11px", borderRadius: 999, fontSize: 11.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" as const,
+          border: on ? "1.5px solid #6366f1" : "1px solid #e5e7eb", background: on ? "#eef2ff" : "#fff", color: on ? "#4338ca" : "#4b5563",
+        });
+        return (
+          <div role="group" aria-label="Filter by batch" style={{ display: "flex", gap: 6, flexWrap: "wrap" as const, marginBottom: 10, alignItems: "center" }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", marginRight: 2 }}>🗂 Batch:</span>
+            <button type="button" onClick={() => setBatchFilter("all")} style={bp(batchFilter === "all")}>All ({listed.length})</button>
+            {batches.map(b => (
+              <button key={b.id} type="button" onClick={() => setBatchFilter(b.id)} style={bp(batchFilter === b.id)}>
+                {b.name || "Unnamed"} ({listed.filter(s => s.batchId === b.id).length})
+              </button>
+            ))}
+            {unassigned > 0 && (
+              <button type="button" onClick={() => setBatchFilter("none")} style={{ ...bp(batchFilter === "none"), color: batchFilter === "none" ? "#b45309" : "#b45309" }}>
+                No batch ({unassigned})
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {msg && (
         <div style={{
@@ -838,59 +1261,102 @@ function CenterStudentsTab({ students, batches, onUpdateStatuses, onAddStudents,
           background: msg.type === "success" ? "#f0fdf4" : "#fef2f2",
           border: `1px solid ${msg.type === "success" ? "#bbf7d0" : "#fecaca"}`,
           color: msg.type === "success" ? "#16a34a" : "#dc2626",
-        }}>
-          {msg.text}
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+        }} role="status">
+          <span>{msg.text}</span>
+          {msg.undo && (() => {
+            const u = msg.undo;
+            const st = students.find(x => x.uid === u.uid);
+            return st ? (
+              <button onClick={() => handleRestore(st, u.prev, true)} disabled={busyUid === u.uid}
+                style={{ background: "#fff", border: "1px solid #86efac", borderRadius: 6, padding: "3px 12px", fontSize: 12, fontWeight: 700, color: "#15803d", cursor: "pointer", flexShrink: 0 }}>
+                {busyUid === u.uid ? "…" : "↶ Undo"}
+              </button>
+            ) : null;
+          })()}
         </div>
       )}
 
-      {activeStudents.length === 0 ? (
+      {listed.length === 0 ? (
         <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>
-          No active students at this centre yet. Use &ldquo;+ Add Active Students&rdquo; to attach some.
+          {view === "active"
+            ? <>No active students at this centre yet. Use the <strong>+</strong> button to add some.</>
+            : view === "inactive" ? <>No inactive students at this centre.</> : <>Every active student has an admission number.</>}
         </div>
       ) : filtered.length === 0 ? (
         <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No students match.</div>
       ) : (
-        <div style={{ maxHeight: 420, overflowY: "auto" as const, border: "1px solid #e5e7eb", borderRadius: 8 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 12 }}>
+        <>
+        {view === "needsAdmNo" && (
+          <div role="alert" style={{ marginBottom: 10, fontSize: 12.5, padding: "9px 12px", borderRadius: 8, background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" }}>
+            <b>Missing Admission Number</b> — these students can&apos;t be classified as Active until one is assigned.
+            Click a student to enter it.
+          </div>
+        )}
+        <div style={{ maxHeight: 520, overflowY: "auto" as const, border: "1px solid #e5e7eb", borderRadius: 10 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" as const, fontSize: 13 }}>
             <thead>
               <tr>
-                <th style={{ ...viewStyles.histTh, width: 52 }}><span className="sr-only">Photo</span></th>
-                <th style={viewStyles.histTh}>Student</th>
-                <th style={viewStyles.histTh}>Instrument</th>
-                <th style={viewStyles.histTh}>Batch</th>
-                <th style={{ ...viewStyles.histTh, width: 90 }} />
+                <th style={{ ...rosterTh, width: 64 }}><span className="sr-only">Photo</span></th>
+                <th style={{ ...rosterTh, width: "38%" }}>Student</th>
+                <th style={rosterTh}>Instrument</th>
+                <th style={rosterTh}>Batch</th>
+                <th style={{ ...rosterTh, width: view === "active" ? 160 : 210 }} />
               </tr>
             </thead>
             <tbody>
               {filtered.map((s, i) => (
-                <tr key={s.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-                  <td style={{ ...viewStyles.histTd, paddingRight: 0, verticalAlign: "middle" as const }}>
+                <tr key={s.uid}
+                  onClick={() => setPreview(s)}
+                  onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setPreview(s); } }}
+                  tabIndex={0}
+                  title="View student details"
+                  aria-label={`View details for ${s.name}`}
+                  className="hover:bg-indigo-50 focus:bg-indigo-50 focus:outline-none"
+                  style={{ background: i % 2 === 0 ? "#fff" : "#fafafa", cursor: "pointer" }}>
+                  <td style={{ ...rosterTd, paddingRight: 0, verticalAlign: "middle" as const }}>
                     <StudentAvatar name={s.name} photo={s.photo} />
                   </td>
-                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>
-                    <div style={{ fontWeight: 600, color: "#111827" }}>{s.name}</div>
-                    <div style={{ fontSize: 11, color: "#9ca3af", fontFamily: "monospace", marginTop: 1 }}>{s.admissionNo || "No admission no."}</div>
+                  <td style={{ ...rosterTd, verticalAlign: "middle" as const }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, color: "#111827" }}>{s.name}</div>
+                    {hasAdmissionNo(s.admissionNo)
+                      ? <div style={{ fontSize: 11.5, color: "#9ca3af", fontFamily: "monospace", marginTop: 2 }}>{s.admissionNo}</div>
+                      : <div style={{ fontSize: 11.5, color: "#b91c1c", fontWeight: 700, marginTop: 2 }}>⚠ Missing admission no.</div>}
                   </td>
-                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>{s.instrument && s.instrument !== "-" ? s.instrument : "—"}</td>
-                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>{batchLabel(s.batchId)}</td>
-                  <td style={{ ...viewStyles.histTd, verticalAlign: "middle" as const }}>
-                    <button
-                      onClick={() => handleDeactivate(s.uid)}
-                      disabled={removingUid === s.uid}
-                      style={{
-                        background: "none", border: "1px solid #e5e7eb", borderRadius: 6,
-                        padding: "3px 9px", fontSize: 11, color: "#6b7280", cursor: "pointer",
-                        opacity: removingUid === s.uid ? 0.5 : 1,
-                      }}
-                    >
-                      {removingUid === s.uid ? "…" : "Deactivate"}
-                    </button>
+                  <td style={{ ...rosterTd, verticalAlign: "middle" as const }}>{s.instrument && s.instrument !== "-" ? s.instrument : "—"}</td>
+                  <td style={{ ...rosterTd, verticalAlign: "middle" as const }}>{batchLabel(s.batchId)}</td>
+                  <td style={{ ...rosterTd, verticalAlign: "middle" as const }}>
+                    {view === "needsAdmNo" ? (
+                      <button onClick={e => { e.stopPropagation(); setPreview(s); }}
+                        style={{ ...rowBtn("restore", false), background: "#fef2f2", borderColor: "#fecaca", color: "#b91c1c" }}>
+                        Assign No.
+                      </button>
+                    ) : view === "active" ? (
+                      s.status === DEACTIVATION_REQUESTED ? (
+                        <span title={wing === WINGS.ROL_PLUS ? "Inactivation requested — waiting for an Admin" : "Inactivation requested — waiting for a Chief Teacher / Director"}
+                          style={{ fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" as const }}>
+                          ⏳ Pending review
+                        </span>
+                      ) : (
+                        <button onClick={e => { e.stopPropagation(); handleDeactivate(s); }} disabled={busyUid === s.uid} style={rowBtn("neutral", busyUid === s.uid)}>
+                          {busyUid === s.uid ? "…" : canApprove ? "Deactivate" : "Request inactive"}
+                        </button>
+                      )
+                    ) : (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
+                        <StatusBadge status={s.status || "inactive"} />
+                        <button onClick={e => { e.stopPropagation(); handleRestore(s); }} disabled={busyUid === s.uid} style={rowBtn("restore", busyUid === s.uid)}>
+                          {busyUid === s.uid ? "…" : "↺ Restore"}
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        </>
       )}
     </div>
   );
@@ -929,6 +1395,326 @@ function StudentAvatar({ name, photo, size = 36 }: { name: string; photo?: strin
   );
 }
 
+// ─── Student preview (click a roster row) ─────────────────────────────────────
+// Opens over the centre modal. Loads the student doc + their ledger on open;
+// balance and month status use the same finance helpers as the Finance page.
+
+const INR = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const fmtYM = (ym: string) => { const [y, m] = ym.split("-"); return `${SHORT_MONTHS[Number(m) - 1] ?? m} ${y}`; };
+const fmtLongDate = (iso: string) => { const d = new Date(iso); return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); };
+
+/** Age from a stored age, or from a DD/MM/YYYY / ISO date of birth. */
+function ageOf(st: Record<string, unknown>): string {
+  if (st.age !== undefined && st.age !== null && String(st.age).trim()) return String(st.age).trim();
+  const dob = typeof st.dob === "string" ? st.dob.trim() : typeof st.dateOfBirth === "string" ? st.dateOfBirth.trim() : "";
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(dob);
+  const d = m ? new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])) : new Date(dob);
+  if (!dob || isNaN(d.getTime())) return "";
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  if (now.getMonth() < d.getMonth() || (now.getMonth() === d.getMonth() && now.getDate() < d.getDate())) age--;
+  return age >= 0 && age < 120 ? String(age) : "";
+}
+
+function StudentPreviewModal({ student, centerName, batchName, wing, onClose, onStatusChanged, onAdmissionNoAssigned }: {
+  student: CenterStudentRec; centerName: string; batchName: string; wing: Wing | undefined; onClose: () => void;
+  onStatusChanged: (uid: string, status: string) => void;
+  onAdmissionNoAssigned: (uid: string, admissionNo: string) => void;
+}) {
+  const { user: me, role: myRole } = useAuth();
+  const canApprove = canApproveDeactivation(myRole, wing);
+  const [confirming, setConfirming] = useState(false);
+  const [acting, setActing]         = useState(false);
+  const [note, setNote]             = useState<{ ok: boolean; text: string } | null>(null);
+  const missingAdmNo = !hasAdmissionNo(student.admissionNo);
+  const canAssign    = canAssignAdmissionNo(myRole, wing);
+  const [admInput, setAdmInput]     = useState("");
+  const [admBusy, setAdmBusy]       = useState(false);
+  const [admErr, setAdmErr]         = useState("");
+
+  async function assignAdmissionNo() {
+    const no = admInput.trim();
+    if (no.length < 4) { setAdmErr("At least 4 characters."); return; }
+    setAdmBusy(true); setAdmErr("");
+    try {
+      if (await isAdmissionNoTaken(no)) throw new Error(`Admission number ${no} is already in use. Please enter a different one.`);
+      await updateDoc(doc(db, "users", student.uid), {
+        admissionNumber: no, admissionNo: no, studentID: no,
+        admissionNoAutoGenerated: false,
+        admissionNoEnteredBy: me?.uid ?? "", admissionNoEnteredAt: new Date().toISOString(),
+        updatedAt: serverTimestamp(),
+      });
+      onAdmissionNoAssigned(student.uid, no);
+      setAdmInput("");
+      setNote({ ok: true, text: `Admission number ${no} assigned — ${student.name} is now on the active roster.` });
+    } catch (e) {
+      setAdmErr(e instanceof Error ? e.message : "Could not save the admission number.");
+    } finally {
+      setAdmBusy(false);
+    }
+  }
+  const [doc_, setDoc_] = useState<Record<string, unknown> | null>(null);
+  const [txs, setTxs]   = useState<Transaction[]>([]);
+  const [err, setErr]   = useState("");
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const [snap, txSnap] = await Promise.all([
+          getDoc(doc(db, "users", student.uid)),
+          getDocs(query(collection(db, "transactions"), where("studentUid", "==", student.uid))),
+        ]);
+        if (!live) return;
+        setDoc_(snap.exists() ? snap.data() : {});
+        setTxs(txSnap.docs.map(d => ({ id: d.id, ...d.data() }) as Transaction));
+      } catch (e) {
+        if (live) setErr(e instanceof Error ? e.message : "Could not load this student.");
+      }
+    })();
+    return () => { live = false; };
+  }, [student.uid]);
+
+  // Escape closes just this preview (capture phase, so the centre modal underneath stays open).
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+
+  const str = (k: string) => (doc_ && typeof doc_[k] === "string" ? (doc_[k] as string).trim() : "");
+  const fin = useMemo(() => {
+    const balance = computeStudentBalances(txs).get(student.uid) ?? 0;
+    const settlements = computeDueSettlements(txs);
+    const thisMonth = new Date().toISOString().slice(0, 7);
+    const current = Array.from(settlements.values()).find(x => x.studentUid === student.uid && x.billingMonth === thisMonth) ?? null;
+    const dueTx = current ? txs.find(t => t.id === current.dueId) : undefined;
+    const overdue = outstandingDuesForStudent(settlements, student.uid).filter(x => x.billingMonth < thisMonth);
+    return { balance, current, dueDate: dueTx?.date ?? "", overdue, thisMonth };
+  }, [txs, student.uid]);
+
+  const loading = !doc_ && !err;
+  const pending   = student.status === DEACTIVATION_REQUESTED;
+  const isActive  = isActiveStudentStatus(student.status) && !pending;
+  const requester = doc_ ? ((doc_.deactivationRequestedByName as string) || "") : "";
+  const requestedAt = doc_ && typeof doc_.deactivationRequestedAt === "string" ? doc_.deactivationRequestedAt : "";
+  const requestedBy = doc_ && typeof doc_.deactivationRequestedBy === "string" ? doc_.deactivationRequestedBy : null;
+  const duesNote = fin.balance > 0 ? ` ${INR(fin.balance)} outstanding stays on the Finance page (Pending balance) until paid.` : "";
+
+  async function act(kind: "request" | "approve" | "reject") {
+    if (!me) return;
+    setActing(true); setNote(null);
+    const by = { uid: me.uid, role: myRole, name: me.displayName, wing };
+    try {
+      if (kind === "request") {
+        await requestStudentDeactivation(student.uid, by);
+        onStatusChanged(student.uid, DEACTIVATION_REQUESTED);
+        setNote({ ok: true, text: "Your request has been sent for review." });
+      } else if (kind === "approve") {
+        await approveStudentDeactivation(student.uid, by, requestedBy);
+        onStatusChanged(student.uid, "inactive");
+        setNote({ ok: true, text: `${student.name} is now inactive.${duesNote}` });
+      } else {
+        await rejectStudentDeactivation(student.uid, by, requestedBy);
+        onStatusChanged(student.uid, "active");
+        setNote({ ok: true, text: "Request rejected — the student stays active." });
+      }
+      setConfirming(false);
+    } catch (e) {
+      setNote({ ok: false, text: e instanceof Error ? e.message : "Something went wrong." });
+    } finally {
+      setActing(false);
+    }
+  }
+  const monthlyFee = doc_ ? Number(doc_.monthlyFee ?? 0) : 0;
+  const perClass   = doc_ ? Number(doc_.feePerClass ?? 0) : 0;
+  const feeLabel = doc_?.feeCycle === "per_class" && perClass > 0 ? `${INR(perClass)} / class` : monthlyFee > 0 ? `${INR(monthlyFee)} / month` : "—";
+  const instrument = str("instrument") && str("instrument") !== "-" ? str("instrument") : student.instrument || "";
+  const course = str("course") && str("course") !== "-" ? str("course") : "";
+
+  const monthState = fin.current
+    ? fin.current.state === "paid"
+      ? { label: "Paid", color: "#15803d", bg: "#dcfce7" }
+      : fin.current.state === "partial"
+        ? { label: `Partly paid · ${INR(fin.current.remaining)} left`, color: "#b45309", bg: "#fef3c7" }
+        : { label: "Pending", color: "#b91c1c", bg: "#fee2e2" }
+    : { label: "Not billed yet", color: "#6b7280", bg: "#f3f4f6" };
+
+  const row = (label: string, value: React.ReactNode) => (
+    <div style={{ display: "grid", gridTemplateColumns: "110px 1fr", gap: 8, fontSize: 13, padding: "3px 0" }}>
+      <span style={{ color: "#6b7280" }}>{label}</span>
+      <span style={{ color: "#111827", fontWeight: 500, minWidth: 0, overflowWrap: "anywhere" as const }}>{value || "—"}</span>
+    </div>
+  );
+  const section = (title: string, children: React.ReactNode) => (
+    <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 20px" }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: "#9ca3af", letterSpacing: "0.08em", textTransform: "uppercase" as const, marginBottom: 6 }}>{title}</div>
+      {children}
+    </div>
+  );
+  const linkBtn: React.CSSProperties = {
+    flex: "1 1 150px", textAlign: "center" as const, padding: "8px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600,
+    textDecoration: "none", border: "1px solid #c7d2fe", background: "#eef2ff", color: "#4338ca",
+  };
+
+  return (
+    <div
+      onClick={e => { e.stopPropagation(); if (!boxRef.current?.contains(e.target as Node)) onClose(); }}
+      style={{ position: "fixed", inset: 0, zIndex: 1100, background: "rgba(17,24,39,0.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    >
+      <div ref={boxRef} role="dialog" aria-modal="true" aria-label={`${student.name} — student details`}
+        style={{ background: "#fff", borderRadius: 14, width: "100%", maxWidth: 460, maxHeight: "90vh", overflowY: "auto", boxShadow: "0 16px 48px rgba(0,0,0,0.22)" }}>
+        {/* Header */}
+        <div style={{ display: "flex", gap: 14, alignItems: "center", padding: "18px 20px" }}>
+          <StudentAvatar name={student.name} photo={student.photo || str("photo") || str("photoURL")} size={64} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#111827" }}>{student.name}</div>
+            {missingAdmNo
+              ? <div style={{ fontSize: 12, color: "#b91c1c", fontWeight: 700, marginTop: 2 }}>⚠ No admission number</div>
+              : <div style={{ fontSize: 12, fontFamily: "monospace", color: "#4f46e5", fontWeight: 700, marginTop: 2 }}>{student.admissionNo}</div>}
+            <div style={{ marginTop: 6 }}>
+              {student.status === DEACTIVATION_REQUESTED
+                ? <span style={{ fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 999, padding: "2px 9px" }}>⏳ Inactivation pending review</span>
+                : <StatusBadge status={isActiveStudentStatus(student.status) ? "active" : (student.status || "inactive")} />}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close student details" title="Close (Esc)"
+            className="rounded-full p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
+            style={{ border: "none", background: "transparent", cursor: "pointer", alignSelf: "flex-start", lineHeight: 0 }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+          </button>
+        </div>
+
+        {missingAdmNo && isActiveStudentStatus(student.status) && (
+          <div role="alert" style={{ margin: "0 20px 12px", background: "#fef2f2", border: "1.5px solid #fca5a5", borderRadius: 10, padding: "10px 12px" }}>
+            <div style={{ fontSize: 12.5, fontWeight: 800, color: "#991b1b" }}>
+              ⚠ Missing Admission Number — cannot be classified as Active until assigned
+            </div>
+            {canAssign ? (
+              <>
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <input value={admInput} onChange={e => { setAdmInput(cleanAdmissionNo(e.target.value)); setAdmErr(""); }}
+                    onKeyDown={e => { if (e.key === "Enter") assignAdmissionNo(); }}
+                    placeholder="Enter admission number" aria-label="Admission number" autoComplete="off"
+                    style={{ flex: 1, minWidth: 0, border: "1.5px solid #fca5a5", borderRadius: 8, padding: "7px 10px", fontSize: 13, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.04em" }} />
+                  <button type="button" onClick={assignAdmissionNo} disabled={admBusy || admInput.trim().length < 4}
+                    style={{ padding: "7px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" as const, opacity: admBusy || admInput.trim().length < 4 ? 0.55 : 1 }}>
+                    {admBusy ? "Saving…" : "Assign Admission Number"}
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: admErr ? "#dc2626" : "#991b1b", marginTop: 5, opacity: admErr ? 1 : 0.75 }}>
+                  {admErr || "Entered manually · checked for duplicates."}
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: "#991b1b", marginTop: 4 }}>{wing === WINGS.ROL_PLUS ? "Ask an Admin to enter it." : "Ask a Chief Teacher or Director to enter it."}</div>
+            )}
+          </div>
+        )}
+        {err && <div style={{ margin: "0 20px 12px", fontSize: 12.5, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px" }}>{err}</div>}
+        {loading ? (
+          <div style={{ padding: "28px 20px", textAlign: "center" as const, fontSize: 13, color: "#9ca3af", borderTop: "1px solid #f3f4f6" }}>Loading details…</div>
+        ) : (
+          <>
+            {section("Contact", <>
+              {row("Phone", str("phone") ? <a href={`tel:${str("phone")}`} style={{ color: "#4f46e5", textDecoration: "none" }}>{str("phone")}</a> : "")}
+              {row("Email", str("email") ? <a href={`mailto:${str("email")}`} style={{ color: "#4f46e5", textDecoration: "none" }}>{str("email")}</a> : "")}
+              {row("Parent", str("parentName"))}
+            </>)}
+            {section("Academic", <>
+              {row("Age", doc_ ? (ageOf(doc_) ? `${ageOf(doc_)} yrs` : "") : "")}
+              {row("Instrument", instrument)}
+              {course && row("Course", course)}
+              {row("Centre", centerName)}
+              {row("Batch", batchName)}
+            </>)}
+            {section("Fees", <>
+              {row("Fee", feeLabel)}
+              {row(`${fmtYM(fin.thisMonth)}`, <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const }}>
+                <span style={{ fontSize: 11.5, fontWeight: 700, color: monthState.color, background: monthState.bg, borderRadius: 999, padding: "2px 9px" }}>{monthState.label}</span>
+                {fin.current && fin.current.state !== "paid" && fin.dueDate && <span style={{ fontSize: 12, color: "#6b7280" }}>due {fmtLongDate(fin.dueDate)}</span>}
+              </span>)}
+              {row("Outstanding", fin.balance > 0
+                ? <span style={{ color: "#b91c1c", fontWeight: 700 }}>{INR(fin.balance)} due</span>
+                : fin.balance < 0
+                  ? <span style={{ color: "#15803d", fontWeight: 700 }}>{INR(-fin.balance)} credit</span>
+                  : <span style={{ color: "#15803d", fontWeight: 700 }}>₹0</span>)}
+              {fin.overdue.length > 0 && row("Unpaid months",
+                <span style={{ color: "#b91c1c" }}>{fin.overdue.map(o => `${fmtYM(o.billingMonth)} (${INR(o.remaining)})`).join(", ")}</span>)}
+            </>)}
+          </>
+        )}
+
+        {/* Status: request / approve / reject inactivation */}
+        {!loading && (pending || isActive) && (
+          <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 20px" }}>
+            {pending && (
+              <div style={{ fontSize: 12.5, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 12px", marginBottom: canApprove ? 10 : 0 }}>
+                <b>Inactivation requested</b>{requester ? ` by ${requester}` : ""}{requestedAt ? ` on ${fmtLongDate(requestedAt)}` : ""}.
+                {canApprove ? (fin.balance > 0 ? ` ${INR(fin.balance)} is outstanding — it stays on Finance after approval.` : "") : (wing === WINGS.ROL_PLUS ? " Waiting for an Admin to review." : " Waiting for a Chief Teacher / Director to review.")}
+              </div>
+            )}
+            {pending && canApprove && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+                <button type="button" disabled={acting} onClick={() => act("approve")}
+                  style={{ flex: 1, padding: "8px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", opacity: acting ? 0.6 : 1 }}>
+                  {acting ? "…" : "Approve inactivation"}
+                </button>
+                <button type="button" disabled={acting} onClick={() => act("reject")}
+                  style={{ flex: 1, padding: "8px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: "#fff", color: "#374151", fontSize: 12.5, fontWeight: 700, cursor: "pointer", opacity: acting ? 0.6 : 1 }}>
+                  Reject request
+                </button>
+              </div>
+            )}
+            {isActive && !confirming && (
+              <button type="button" disabled={acting} onClick={() => (canApprove ? setConfirming(true) : act("request"))}
+                style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #fecaca", background: "#fef2f2", color: "#b91c1c", fontSize: 12.5, fontWeight: 700, cursor: "pointer", opacity: acting ? 0.6 : 1 }}>
+                {acting ? "…" : canApprove ? "Mark inactive" : "Mark inactive (send for review)"}
+              </button>
+            )}
+            {isActive && confirming && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 12.5, color: "#7f1d1d", marginBottom: 8 }}>
+                  Mark <b>{student.name}</b> inactive? They leave this centre&apos;s roster and attendance.{duesNote}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" disabled={acting} onClick={() => act("approve")}
+                    style={{ flex: 1, padding: "7px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", opacity: acting ? 0.6 : 1 }}>
+                    {acting ? "…" : "Yes, mark inactive"}
+                  </button>
+                  <button type="button" disabled={acting} onClick={() => setConfirming(false)}
+                    style={{ flex: 1, padding: "7px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: "#fff", color: "#374151", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {note && (
+          <div role="status" style={{ margin: "0 20px 10px", fontSize: 12.5, borderRadius: 8, padding: "8px 12px",
+            color: note.ok ? "#15803d" : "#dc2626", background: note.ok ? "#f0fdf4" : "#fef2f2", border: `1px solid ${note.ok ? "#bbf7d0" : "#fecaca"}` }}>
+            {note.text}
+          </div>
+        )}
+
+        {/* Quick actions — the student profile holds the per-student ledger, attendance and edit form */}
+        <div style={{ borderTop: "1px solid #f3f4f6", padding: "14px 20px 18px", display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+          <Link href={`/dashboard/students/${student.uid}?tab=financial`} style={linkBtn}>₹ Financial ledger</Link>
+          <Link href={`/dashboard/students/${student.uid}?tab=attendance`} style={linkBtn}>✓ Attendance record</Link>
+          <Link href={`/dashboard/students/${student.uid}`} style={{ ...linkBtn, background: "#4f46e5", color: "#fff", border: "1px solid #4f46e5" }}>✏ Edit student</Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Add Active Students modal (students registered at this centre only) ──────
 
 // A student belongs to the centre if their `centerId` matches, any entry of a
@@ -941,45 +1727,76 @@ function isRegisteredAtCenter(st: Record<string, unknown>, centerId: string, cen
   return !!raw && raw === centerName.trim().toLowerCase();
 }
 
-function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, onAssign }: {
+// Directors / Chief Teachers / Founder / Admin search the wing's whole student
+// register (the same `users` records /dashboard/registry shows); teachers only
+// see students already registered at this centre.
+const REGISTRY_SEARCH_ROLES: string[] = [ROLES.FOUNDER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.ADMIN];
+
+type AddCandidate = PickedStudent & { status: string; hereRegistered: boolean; currentCentre: string; activeElsewhere: boolean };
+
+function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, onClose, onAssign }: {
   wing: Wing | undefined;
   centerId: string;
   centerName: string;
+  /** The centre's named batches ([] → everyone joins the implicit General Batch). */
+  batches: CenterBatch[];
   excludeUids: Set<string>;
   onClose: () => void;
   onAssign: (picked: PickedStudent[]) => Promise<void>;
 }) {
-  const [loading, setLoading]     = useState(true);
-  const [candidates, setCandidates] = useState<(PickedStudent & { status: string })[]>([]);
-  const [search, setSearch]       = useState("");
-  const [selected, setSelected]   = useState<Set<string>>(new Set());
-  const [saving, setSaving]       = useState(false);
-  const [error, setError]         = useState("");
+  const { role } = useAuth();
+  const registryWide = !!role && REGISTRY_SEARCH_ROLES.includes(role);
+  const [loading, setLoading]       = useState(true);
+  const [candidates, setCandidates] = useState<AddCandidate[]>([]);
+  const [search, setSearch]         = useState("");
+  const [selected, setSelected]     = useState<Set<string>>(new Set());
+  const [batchId, setBatchId]       = useState<string>(batches[0]?.id ?? "");
+  const [saving, setSaving]         = useState(false);
+  const [error, setError]           = useState("");
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
-        const stuSnap = await getDocs(query(collection(db, "users"), where("role", "==", "student")));
+        const [stuSnap, ctrSnap] = await Promise.all([
+          getDocs(query(collection(db, "users"), where("role", "==", "student"))),
+          getDocs(collection(db, "centers")),
+        ]);
         if (cancelled) return;
+        const centreNames = new Map(ctrSnap.docs.map(d => [d.id, String(d.data().name ?? d.id)]));
         const list = stuSnap.docs
-          .filter(d => (!wing || inWing(d.data(), wing)) && isRegisteredAtCenter(d.data(), centerId, centerName))
+          .filter(d => {
+            const st = d.data();
+            if (wing && !inWing(st, wing)) return false;
+            if (st.status === "deleted" || st.studentStatus === "deleted") return false;
+            return registryWide || isRegisteredAtCenter(st, centerId, centerName);
+          })
           .map(d => {
             const st = d.data();
+            const cid = typeof st.centerId === "string" ? st.centerId : "";
+            const status = (st.status ?? st.studentStatus ?? "active") as string;
+            const here = isRegisteredAtCenter(st, centerId, centerName);
+            const freeText = typeof st.centre === "string" && st.centre.trim() && !centreNames.has(st.centre) ? st.centre.trim() : "";
+            const currentCentre = here ? centerName : (cid && centreNames.get(cid)) || freeText;
             return {
-              uid:         d.id,
-              name:        (st.displayName ?? st.name ?? "-") as string,
-              admissionNo: (st.admissionNo ?? st.admissionNumber ?? "") as string,
-              createdAt:   toISODateLocal(st.createdAt),
-              status:      (st.status ?? st.studentStatus ?? "active") as string,
-              photo:       studentPhoto(st),
-              instrument:  (st.instrument ?? "") as string,
-              batchId:     (st.batchId ?? null) as string | null,
+              uid:          d.id,
+              name:         (st.displayName ?? st.name ?? "-") as string,
+              admissionNo:  (st.admissionNo ?? st.admissionNumber ?? "") as string,
+              createdAt:    toISODateLocal(st.createdAt),
+              status,
+              photo:        studentPhoto(st),
+              instrument:   (st.instrument ?? "") as string,
+              batchId:      (st.batchId ?? null) as string | null,
+              fromCenterId: here ? null : (cid || null),
+              hereRegistered: here,
+              currentCentre,
+              activeElsewhere: !here && !!currentCentre && isActiveStudentStatus(status),
             };
           })
           .filter(s => !excludeUids.has(s.uid))
-          .sort((a, b) => safeCompare(a.name, b.name));
+          // This centre's own (inactive) students first, then the rest of the register.
+          .sort((a, b) => Number(b.hereRegistered) - Number(a.hereRegistered) || safeCompare(a.name, b.name));
         setCandidates(list);
       } catch (err) {
         console.error("[AddStudentsModal] load error:", err);
@@ -990,13 +1807,15 @@ function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, on
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wing, centerId, centerName]);
+  }, [wing, centerId, centerName, registryWide]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return candidates;
+    // With no query, registry-wide search lists only this centre's own students
+    // (plus anything already ticked) — the whole register appears as you type.
+    if (!q) return registryWide ? candidates.filter(c => c.hereRegistered || selected.has(c.uid)) : candidates;
     return candidates.filter(s => s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q));
-  }, [candidates, search]);
+  }, [candidates, search, registryWide, selected]);
 
   function toggle(uid: string) {
     setSelected(prev => {
@@ -1006,22 +1825,32 @@ function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, on
     });
   }
 
+  const movingCount = candidates.filter(c => selected.has(c.uid) && c.activeElsewhere).length;
+
   async function handleAssign() {
-    const picked = candidates.filter(c => selected.has(c.uid));
+    const picked = candidates.filter(c => selected.has(c.uid) && hasAdmissionNo(c.admissionNo));
     if (picked.length === 0) return;
     setSaving(true);
     setError("");
     try {
-      await onAssign(picked.map(({ uid, name, admissionNo, createdAt, photo, instrument, batchId }) => ({ uid, name, admissionNo, createdAt, photo, instrument, batchId })));
+      await onAssign(picked.map(({ uid, name, admissionNo, createdAt, photo, instrument, fromCenterId }) => ({
+        uid, name, admissionNo, createdAt, photo, instrument, fromCenterId,
+        // Everyone joins the chosen batch (null = the centre's General Batch).
+        batchId: batches.length ? batchId || null : null,
+      })));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to assign students.");
       setSaving(false);
     }
   }
 
+  const emptyText = candidates.length === 0
+    ? registryWide ? "No students found in the register." : `No unassigned/inactive students found for ${centerName}.`
+    : search.trim() ? "No students match." : `No inactive students registered at ${centerName} — type a name or admission no. to search the whole register.`;
+
   return (
     <div style={modalStyles.overlay} onClick={onClose}>
-      <div style={{ ...modalStyles.box, maxWidth: 520, maxHeight: "80vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
+      <div style={{ ...modalStyles.box, maxWidth: 560, maxHeight: "84vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
         <div style={modalStyles.header}>
           <span style={modalStyles.title}>Add Active Students</span>
           <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
@@ -1035,30 +1864,48 @@ function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, on
             placeholder="Search by name or admission no…"
             style={{ ...formStyles.input, width: "100%", boxSizing: "border-box" as const }}
           />
+          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>
+            {registryWide ? "Searching the whole student register" : `Showing students registered at ${centerName}`}
+          </div>
         </div>
 
         <div style={{ padding: "12px 20px", flex: 1, overflowY: "auto" as const }}>
           {loading ? (
             <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>Loading…</div>
           ) : filtered.length === 0 ? (
-            <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>
-              {candidates.length === 0 ? `No unassigned/inactive students found for ${centerName}.` : "No students match."}
-            </div>
+            <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>{emptyText}</div>
           ) : (
             <div style={{ border: "1px solid #e5e7eb", borderRadius: 8 }}>
               {filtered.map((s, i) => {
                 const isSelected = selected.has(s.uid);
+                // No admission number → can't become an active student yet.
+                const blocked = !hasAdmissionNo(s.admissionNo);
+                const initials = s.name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]?.toUpperCase()).join("") || "?";
                 return (
-                  <label key={s.uid} style={{
-                    display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", fontSize: 12.5, cursor: "pointer",
+                  <label key={s.uid} title={blocked ? "Assign an admission number before adding as Active" : undefined} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", fontSize: 12.5, cursor: blocked ? "not-allowed" : "pointer",
+                    opacity: blocked ? 0.6 : 1,
                     background: isSelected ? "#eef2ff" : i % 2 === 0 ? "#fff" : "#fafafa",
                     borderBottom: "1px solid #f3f4f6",
                   }}>
-                    <input type="checkbox" checked={isSelected} onChange={() => toggle(s.uid)} />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 600, color: "#111827" }}>{s.name}</div>
+                    <input type="checkbox" checked={isSelected && !blocked} disabled={blocked} onChange={() => toggle(s.uid)} />
+                    <div style={{ width: 32, height: 32, borderRadius: "50%", overflow: "hidden", flexShrink: 0, background: "#e0e7ff", color: "#4338ca", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11.5, fontWeight: 700 }}>
+                      {s.photo ? <img src={s.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initials}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{s.name}</div>
                       <div style={{ fontSize: 11, color: "#9ca3af" }}>
-                        {s.admissionNo || "no adm. no."}{s.status !== "active" ? ` · ${s.status}` : ""}
+                        {blocked
+                          ? <span style={{ color: "#b91c1c", fontWeight: 700 }}>⚠ no adm. no. — assign one first</span>
+                          : <span style={{ fontFamily: "monospace" }}>{s.admissionNo}</span>}
+                        {" · "}
+                        {s.hereRegistered
+                          ? <span>This centre{s.status !== "active" ? ` · ${s.status}` : ""}</span>
+                          : s.currentCentre
+                            ? <span style={{ color: s.activeElsewhere ? "#b45309" : undefined }}>
+                                {s.currentCentre}{s.activeElsewhere ? " (active — will be moved)" : ` · ${s.status}`}
+                              </span>
+                            : <span style={{ color: "#059669" }}>Unassigned</span>}
                       </div>
                     </div>
                   </label>
@@ -1074,8 +1921,20 @@ function AddStudentsModal({ wing, centerId, centerName, excludeUids, onClose, on
           </div>
         )}
 
-        <div style={{ ...modalStyles.body, borderTop: "1px solid #e5e7eb", flexDirection: "row" as const, justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: "#6b7280" }}>{selected.size} selected</span>
+        <div style={{ ...modalStyles.body, borderTop: "1px solid #e5e7eb", flexDirection: "row" as const, justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const }}>
+            <span style={{ fontSize: 12, color: "#6b7280" }}>
+              {selected.size} selected{movingCount > 0 ? ` · ${movingCount} moving from another centre` : ""}
+            </span>
+            {batches.length > 0 ? (
+              <select value={batchId} onChange={e => setBatchId(e.target.value)} aria-label="Batch"
+                style={{ ...formStyles.input, width: "auto", padding: "6px 8px", fontSize: 12 }}>
+                {batches.map(b => <option key={b.id} value={b.id}>{b.name || "Unnamed batch"}</option>)}
+              </select>
+            ) : (
+              <span style={{ fontSize: 11.5, color: "#9ca3af" }}>Batch: {DEFAULT_BATCH_NAME}</span>
+            )}
+          </div>
           <button
             onClick={handleAssign}
             disabled={selected.size === 0 || saving}
@@ -1262,17 +2121,6 @@ function CentersContent() {
   const [dayError, setDayError]     = useState("");
   const { toasts, toast, remove }   = useToast();
 
-  // ── Bulk import (names only) ──────────────────────────────────────────────
-  const [showImport, setShowImport]   = useState(false);
-  const [importNames, setImportNames] = useState<string[]>([]);
-  const [importErr, setImportErr]     = useState("");
-  const [importing, setImporting]     = useState(false);
-  const importFileRef                 = useRef<HTMLInputElement>(null);
-
-  const existingNamesLC = useMemo(
-    () => new Set(centers.map(c => sortKey(c.name).trim().toLowerCase())),
-    [centers],
-  );
   // Oldest centre first, by effective demo date (manual override, else the
   // earliest student admission). Undated centres go last, by creation time.
   const sortedCenters = useMemo(() => [...centers].sort((a, b) => {
@@ -1286,68 +2134,6 @@ function CentersContent() {
   const inactiveCentersList = useMemo(() => sortedCenters.filter(c => c.status !== "active"), [sortedCenters]);
   const pendingFirstClass   = useMemo(() => activeCentersList.filter(needsFirstClassDate), [activeCentersList]);
   const firstClassInputRef  = useRef<HTMLInputElement>(null);
-  const newImportNames = useMemo(
-    () => importNames.filter(n => !existingNamesLC.has(n.toLowerCase())),
-    [importNames, existingNamesLC],
-  );
-
-  function openImport() {
-    setShowForm(false);
-    setImportNames([]);
-    setImportErr("");
-    setShowImport(true);
-  }
-  function closeImport() {
-    setShowImport(false);
-    setImportNames([]);
-    setImportErr("");
-    if (importFileRef.current) importFileRef.current.value = "";
-  }
-
-  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImportErr("");
-    setImportNames([]);
-    const { rows, error } = await parseFile(file);
-    if (error) { setImportErr(error); return; }
-    // Accept a "name" column (also centre/center/centername), else the first column.
-    const pick = (r: Record<string, string>) =>
-      (r.name ?? r.centrename ?? r.centername ?? r.centre ?? r.center ?? Object.values(r)[0] ?? "").trim();
-    const seen = new Set<string>();
-    const names: string[] = [];
-    for (const r of rows) {
-      const n = pick(r);
-      if (n && !seen.has(n.toLowerCase())) { seen.add(n.toLowerCase()); names.push(n); }
-    }
-    if (names.length === 0) { setImportErr("No centre names found. Put one name per row (a header like \"Name\" is fine)."); return; }
-    setImportNames(names);
-  }
-
-  async function handleImportRun() {
-    if (newImportNames.length === 0 || importing) return;
-    setImporting(true);
-    let created = 0;
-    try {
-      for (const name of newImportNames) {
-        try {
-          await createCenter({
-            name, location: "", timeSlot: "", teacherUid: "",
-            studentUids: [], status: "active", wing,
-          } as Parameters<typeof createCenter>[0]);
-          created++;
-        } catch (err) {
-          console.error(`Failed to create center "${name}":`, err);
-        }
-      }
-      toast(`Imported ${created} centre${created !== 1 ? "s" : ""}. Add teacher, days & times on each.`, created > 0 ? "success" : "error");
-      closeImport();
-      setLoading(true);
-      await fetchCenters();
-    } finally {
-      setImporting(false);
-    }
-  }
 
   async function fetchCenters() {
     const cachedCenters = getCached<Center[]>(`centers:${wing}:centers`);
@@ -1380,6 +2166,7 @@ function CentersContent() {
         const admitted = toLocalYMD(st.dateOfAdmission ?? st.admissionDate ?? st.createdAt);
         if (admitted && (!earliest.has(cid) || admitted < earliest.get(cid)!)) earliest.set(cid, admitted);
         if (!isActiveStudentStatus((st.status ?? st.studentStatus ?? "active") as string)) return;
+        if (!hasAdmissionNo(st.admissionNo ?? st.admissionNumber)) return;   // held until assigned
         counts.set(cid, (counts.get(cid) ?? 0) + 1);
       });
       setActiveCounts(counts);
@@ -1414,7 +2201,6 @@ function CentersContent() {
     // just a sane starting point instead of forcing a blank pick every time.
     setForm({ ...EMPTY_FORM, wing });
     setDayError("");
-    setShowImport(false);
     setShowForm(true);
   }
 
@@ -1469,7 +2255,7 @@ function CentersContent() {
     const timeSlot = buildTimeSlot(form.daysOfWeek, form.startTime, form.endTime);
     try {
       if (editTarget) {
-        await updateCenter(editTarget.id, {
+        const rename = await updateCenter(editTarget.id, {
           name:       form.name.trim(),
           teacherUid: form.teacherUid.trim(),
           status:     form.status,
@@ -1487,10 +2273,15 @@ function CentersContent() {
           startTime:  form.startTime,
           endTime:    form.endTime,
         });
+        // First batches → current students go into Batch 1; renames follow onto students.
+        await syncStudentsToBatches(editTarget.id, explicitBatches(editTarget as unknown as Record<string, unknown>), form.batches)
+          .catch(err => console.error("[centre] batch sync:", err));
+        invalidateCache(`registry:${form.wing}:entries`);
+        invalidateCache(`students:${form.wing}:students`);
         toast(
           form.wing !== wing
             ? `Center updated and moved to ${WING_LABELS[form.wing]} — it won't appear in this ${WING_LABELS[wing]} view.`
-            : "Center updated successfully.",
+            : rename ? renameMessage(rename) : "Center updated successfully.",
           "success",
         );
       } else {
@@ -1535,9 +2326,15 @@ function CentersContent() {
           center={viewTarget}
           onClose={() => setViewTarget(null)}
           teachers={teachers}
-          onSaved={updated => {
+          onActiveCount={(cid, n) => setActiveCounts(prev => {
+            const next = new Map(prev);
+            next.set(cid, n);
+            setCached(`centers:${wing}:activeCounts`, next);
+            return next;
+          })}
+          onSaved={(updated, rename) => {
             setCenters(prev => prev.map(c => c.id === updated.id ? updated : c));
-            toast("Center updated successfully.", "success");
+            toast(rename ? renameMessage(rename) : "Center updated successfully.", "success");
             fetchCenters();
           }}
         />
@@ -1580,74 +2377,11 @@ function CentersContent() {
             style={{ ...styles.addBtn, background: "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
             ▦ Teacher Availability
           </button>
-          <button onClick={showImport ? closeImport : openImport}
-            style={{ ...styles.addBtn, background: showImport ? "#f3f4f6" : "#fff", color: "#4338ca", border: "1px solid #c7d2fe" }}>
-            {showImport ? "Cancel" : "⬆ Import names"}
-          </button>
           <button onClick={showForm ? closeForm : openCreate} style={styles.addBtn}>
             + Add Center
           </button>
         </div>
       </div>
-
-      {/* Bulk import — names only */}
-      {showImport && (
-        <div style={formStyles.wrapper}>
-          <div style={formStyles.sectionTitle}>Import centre names from Excel / CSV</div>
-          <div style={{ fontSize: 12.5, color: "#6b7280", marginBottom: 12 }}>
-            One centre name per row (a header row like <b>Name</b> is fine, or just a plain list).
-            Each centre is created as <b>Active</b> with no teacher, days or times — fill those in
-            afterwards by editing the centre.
-          </div>
-          <input
-            ref={importFileRef}
-            type="file"
-            accept=".xlsx,.csv"
-            onChange={handleImportFile}
-            style={{ fontSize: 13, marginBottom: 10 }}
-          />
-          {importErr && (
-            <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#dc2626", marginBottom: 10 }}>
-              {importErr}
-            </div>
-          )}
-          {importNames.length > 0 && (
-            <>
-              <div style={{ fontSize: 12, color: "#374151", marginBottom: 6 }}>
-                {importNames.length} name{importNames.length !== 1 ? "s" : ""} found ·{" "}
-                <b style={{ color: "#16a34a" }}>{newImportNames.length} new</b>
-                {importNames.length - newImportNames.length > 0 && (
-                  <span style={{ color: "#9ca3af" }}> · {importNames.length - newImportNames.length} already exist</span>
-                )}
-              </div>
-              <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid #e5e7eb", borderRadius: 8, padding: 8, display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
-                {importNames.map(n => {
-                  const dup = existingNamesLC.has(n.toLowerCase());
-                  return (
-                    <span key={n} style={{
-                      fontSize: 12, padding: "3px 10px", borderRadius: 99,
-                      background: dup ? "#f3f4f6" : "#dcfce7",
-                      color: dup ? "#9ca3af" : "#15803d",
-                      textDecoration: dup ? "line-through" : "none",
-                    }}>
-                      {n}
-                    </span>
-                  );
-                })}
-              </div>
-            </>
-          )}
-          <div style={formStyles.actions}>
-            <button
-              onClick={handleImportRun}
-              disabled={newImportNames.length === 0 || importing}
-              style={{ ...formStyles.submitBtn, opacity: newImportNames.length === 0 || importing ? 0.5 : 1 }}
-            >
-              {importing ? "Importing…" : `Import ${newImportNames.length} centre${newImportNames.length !== 1 ? "s" : ""}`}
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Add / Edit Center — slide-over drawer */}
       <div onClick={closeForm} style={{
@@ -1753,7 +2487,8 @@ function CentersContent() {
 
           <section style={{ ...drawerStyles.section, borderBottom: "none", marginBottom: 0 }}>
             <div style={drawerStyles.sectionTitle}>Batches Setup</div>
-            <BatchesEditor batches={form.batches} onChange={handleBatchesChange} />
+            <BatchesEditor batches={form.batches} onChange={handleBatchesChange} teachers={teachers}
+              base={{ daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime, teacherUid: form.teacherUid }} />
           </section>
         </div>
 
@@ -1887,6 +2622,7 @@ function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdi
   const teacher = teachers.find(t => t.uid === center.teacherUid);
   const schedule = splitSchedule(center);
   const pendingFirst = needsFirstClassDate(center);
+  const cardBatches = explicitBatches(center as unknown as Record<string, unknown>);
 
   function goToActiveStudents(e: React.MouseEvent) {
     e.stopPropagation();
@@ -1942,10 +2678,33 @@ function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdi
       {pendingFirst && (
         <span style={styles.pendingBadge}>⏳ Pending First Class Date</span>
       )}
-      <div style={styles.cardMeta}>
-        <span>{schedule.days || "-"}</span>
-        {schedule.time && <span style={{ fontSize: 12, fontWeight: 500, color: "#4f46e5" }}>{schedule.time}</span>}
-      </div>
+      {cardBatches.length >= 2 ? (
+        // Several batches — each on its own line instead of one centre schedule.
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ alignSelf: "flex-start", fontSize: 11, fontWeight: 700, color: "#4338ca", background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 999, padding: "1px 8px" }}>
+            🗂 {cardBatches.length} batches
+          </span>
+          {cardBatches.slice(0, 3).map(b => (
+            <div key={b.id} style={{ fontSize: 12, lineHeight: 1.35, minWidth: 0 }}>
+              <span style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{b.name || "Unnamed"}</span>
+              <span style={{ color: "#6b7280" }}> · {b.daysOfWeek.join("/") || "—"}</span>
+              {(b.startTime || b.endTime) && <span style={{ color: "#4f46e5", fontWeight: 500 }}> · {formatTimeRange12(b.startTime, b.endTime)}</span>}
+            </div>
+          ))}
+          {cardBatches.length > 3 && <span style={{ fontSize: 11.5, color: "#6b7280" }}>+{cardBatches.length - 3} more</span>}
+        </div>
+      ) : (
+        <div style={styles.cardMeta}>
+          {cardBatches.length === 1 && cardBatches[0].name && (
+            <span style={{ fontSize: 11.5, fontWeight: 600, color: "#4338ca" }}>🗂 {cardBatches[0].name}</span>
+          )}
+          <span>{(cardBatches.length === 1 ? cardBatches[0].daysOfWeek.join("/") : schedule.days) || "-"}</span>
+          {(() => {
+            const t = cardBatches.length === 1 ? formatTimeRange12(cardBatches[0].startTime, cardBatches[0].endTime) : schedule.time;
+            return t ? <span style={{ fontSize: 12, fontWeight: 500, color: "#4f46e5" }}>{t}</span> : null;
+          })()}
+        </div>
+      )}
       {(center.demoClassDate || autoDemoDate || center.firstClassDate) && (
         <div style={{ fontSize: 11.5, color: "#6b7280" }}>
           Demo:{" "}
@@ -2538,9 +3297,15 @@ const chipStyles: Record<string, React.CSSProperties> = {
 };
 
 const batchStyles: Record<string, React.CSSProperties> = {
-  row:       { display: "flex", flexDirection: "column", gap: 8, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, padding: 10 },
-  removeBtn: { background: "#fff", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 6, width: 28, height: 28, fontSize: 13, cursor: "pointer", flexShrink: 0 },
-  addBtn:    { alignSelf: "flex-start", background: "#fff", color: "#4f46e5", border: "1px solid #c7d2fe", borderRadius: 6, padding: "6px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
+  card:      { display: "flex", alignItems: "center", gap: 10, background: "#fff", border: "1px solid #e5e7eb", borderLeft: "3px solid #6366f1", borderRadius: 8, padding: "10px 12px" },
+  draft:     { display: "flex", flexDirection: "column", gap: 10, background: "#eef2ff", border: "1.5px solid #c7d2fe", borderRadius: 10, padding: 12 },
+  field:     { display: "flex", flexDirection: "column", gap: 4 },
+  label:     { fontSize: 11, fontWeight: 700, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.04em" },
+  iconBtn:   { background: "#fff", color: "#4f46e5", border: "1px solid #c7d2fe", borderRadius: 6, width: 30, height: 30, fontSize: 13, cursor: "pointer" },
+  removeBtn: { background: "#fff", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 6, width: 30, height: 30, fontSize: 13, cursor: "pointer", flexShrink: 0 },
+  cancelBtn: { background: "#fff", color: "#374151", border: "1px solid #d1d5db", borderRadius: 7, padding: "7px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
+  saveBtn:   { background: "#4f46e5", color: "#fff", border: "none", borderRadius: 7, padding: "7px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" },
+  addBtn:    { width: "100%", background: "#f5f3ff", color: "#4338ca", border: "1.5px dashed #a5b4fc", borderRadius: 10, padding: "11px 14px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" },
 };
 
 const actionStyles: Record<string, React.CSSProperties> = {
@@ -2570,6 +3335,15 @@ const modalStyles: Record<string, React.CSSProperties> = {
   closeBtn: { background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#6b7280", lineHeight: 1 },
   body:     { padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 },
 };
+
+// Active/Inactive student roster in the centre detail view — roomier than the
+// history tables (viewStyles.histTh/histTd).
+const rosterTh: React.CSSProperties = {
+  textAlign: "left", padding: "12px 18px", fontSize: 11, fontWeight: 700,
+  textTransform: "uppercase", letterSpacing: "0.05em", color: "#6b7280",
+  borderBottom: "1px solid #e5e7eb", background: "#f9fafb", position: "sticky", top: 0, zIndex: 1,
+};
+const rosterTd: React.CSSProperties = { padding: "14px 18px", fontSize: 13, color: "#111827", borderBottom: "1px solid #f3f4f6" };
 
 const viewStyles: Record<string, React.CSSProperties> = {
   quickFacts: {

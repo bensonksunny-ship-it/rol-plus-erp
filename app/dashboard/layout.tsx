@@ -92,9 +92,10 @@ const NAV_TOP: NavItem[] = [
   { label: "My Account", icon: "👤", href: "/dashboard/account", roles: [ROLES.MEMBER], matchPrefix: "/dashboard/account" },
   // ROL+: Screening hub (screening + applications). School of Music: the
   // Admissions page (applications list + Fast-Track wizard, all in one).
-  { label: "Screening",  icon: "🎹", href: "/dashboard/screening",  roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/screening",  wing: WINGS.ROL_PLUS },
-  { label: "Admissions", icon: "📝", href: "/dashboard/admissions", roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/admissions", wing: WINGS.SCHOOL_OF_MUSIC },
-  { label: "Registry",   icon: "📖", href: "/dashboard/registry",   roles: LEADERSHIP, capability: C.STUDENTS_VIEW_ALL, matchPrefix: "/dashboard/registry", wing: WINGS.SCHOOL_OF_MUSIC },
+  // Same admissions system in both wings (screening lives inside Admissions);
+  // the old ROL+ /dashboard/screening hub stays reachable by URL, off the menu.
+  { label: "Admissions", icon: "📝", href: "/dashboard/admissions", roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/admissions,/dashboard/screening" },
+  { label: "Registry",   icon: "📖", href: "/dashboard/registry",   roles: LEADERSHIP, capability: C.STUDENTS_VIEW_ALL, matchPrefix: "/dashboard/registry" },
   // Founder + Chief Teacher (lower-level accounts only) — kept last in the sidebar.
   { label: "Users",        icon: "🧑‍💻", href: "/dashboard/users", roles: [ROLES.FOUNDER, ROLES.CHIEF_TEACHER], capability: C.USERS_MANAGE, matchPrefix: "/dashboard/users" },
 ];

@@ -15,9 +15,14 @@ export interface FeeStructure {
 
 export type CreateFeeStructureInput = Omit<FeeStructure, "id" | "createdAt" | "updatedAt">;
 
-export type PaymentMethod = "UPI" | "Cash" | "Bank" | "auto" | "auto-monthly" | "manual";
+export type PaymentMethod = "UPI" | "Cash" | "Card" | "Bank" | "auto" | "auto-monthly" | "manual";
 export type TransactionStatus = "completed" | "pending" | "failed" | "due";
-export type TransactionKind = "payment" | "deposit" | "charge" | "fee_due";
+/**
+ * "admission_fee" — one-off fee paid before enrolment (School of Music).
+ * Counts as money collected, but never touches a student's balance or
+ * settles a monthly due.
+ */
+export type TransactionKind = "payment" | "deposit" | "charge" | "fee_due" | "admission_fee";
 
 export interface Transaction {
   id:            string;
@@ -35,6 +40,13 @@ export interface Transaction {
   billingMonth?: string;
   rawAmount?:    number;
   discountAmt?:  number;
+
+  // Admission fee (type "admission_fee") — paid before the student exists, so
+  // it carries the applicant's details; studentUid is filled in on enrolment.
+  admissionId?:     string;
+  payerName?:       string;
+  admissionNumber?: string;
+  reference?:       string | null;
 }
 
 export type CreateTransactionInput = Omit<Transaction, "id" | "createdAt">;

@@ -7,18 +7,20 @@
 // there is one enrolment path. The writes live in services/screening/enroll.
 // =============================================================================
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { collection, doc, getDoc, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { WINGS } from "@/config/constants";
+import { useWing } from "@/hooks/useWing";
 import { wingOf } from "@/lib/wing";
-import { explicitBatches, batchSchedule, DEFAULT_BATCH_NAME } from "@/lib/batches";
+import { explicitBatches, batchSchedule } from "@/lib/batches";
 import { canEnterAdmissionNo, cleanAdmissionNo } from "@/lib/admissionNumber";
 import { readScreeningMarks } from "@/lib/screeningQuestions";
 import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening } from "@/lib/generateAdmissionCard";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { enrollApplicant } from "@/services/screening/enroll.service";
+import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
 import { getWingSyllabus } from "@/services/lesson/lesson.service";
 import type { CenterBatch } from "@/types";
 import {
@@ -26,7 +28,6 @@ import {
   type SyllabusInstrument, type SyllabusLevel,
 } from "@/types/lesson";
 
-const WING = WINGS.SCHOOL_OF_MUSIC;
 const ACCENT = "#d97706";
 
 interface CentreOpt { id: string; name: string; monthlyFee?: number; batches: CenterBatch[] }
@@ -55,7 +56,7 @@ const inputCss: React.CSSProperties = {
 const section: React.CSSProperties = { border: "1px solid #f0f0f0", borderRadius: 14, padding: 16, background: "#fff" };
 
 export default function EnrollStudentModal({
-  application, admissionId, screening: screeningProp, onClose, onEnrolled, inline = false,
+  application: applicationProp, admissionId, screening: screeningProp, onClose, onEnrolled, inline = false,
 }: {
   application: Record<string, unknown>;
   admissionId: string;
@@ -67,7 +68,14 @@ export default function EnrollStudentModal({
   inline?: boolean;
 }) {
   const { user } = useAuthContext();
-  const canEditAdmNo = canEnterAdmissionNo(user?.role);
+  // Same enrolment system in both wings — each only sees its own centres,
+  // screenings and syllabus, and the student is created in this wing.
+  const { wing: WING } = useWing();
+  const canEditAdmNo = canEnterAdmissionNo(user?.role, WING);
+  // Local copy so recording the admission fee here unlocks enrolment at once.
+  const [application, setApplication] = useState<Record<string, unknown>>(applicationProp);
+  const [showFee, setShowFee] = useState(false);
+  const feePaid = application.admissionFeePaid === true && Number(application.admissionFeeAmount) > 0;
   const name = str(application.fullName) || "Student";
 
   // ── Screening (needed for the level suggestion, links and the card) ──────
@@ -94,7 +102,7 @@ export default function EnrollStudentModal({
       }
     })();
     return () => { live = false; };
-  }, [screeningProp, application.screeningId, name]);
+  }, [screeningProp, application.screeningId, name, WING]);
 
   const slab = str((screening?.config as { track?: string } | undefined)?.track);
 
@@ -121,7 +129,7 @@ export default function EnrollStudentModal({
         if (match) setCentreId(match.id);
       })
       .catch(err => console.error("[EnrollStudentModal] load centres:", err));
-  }, [application.centre]);
+  }, [application.centre, WING]);
 
   const centre = centres.find(c => c.id === centreId);
   const batches = useMemo(() => centre?.batches ?? [], [centre]);
@@ -138,7 +146,7 @@ export default function EnrollStudentModal({
     if (!level) return;
     setSlotCount(null);
     getWingSyllabus(WING, level, instrument).then(ls => setSlotCount(ls.length)).catch(() => setSlotCount(null));
-  }, [level, instrument]);
+  }, [level, instrument, WING]);
 
   const [fee, setFee] = useState(() => (typeof application.monthlyFee === "number" ? String(application.monthlyFee) : ""));
   const [feeTouched, setFeeTouched] = useState(false);
@@ -148,6 +156,8 @@ export default function EnrollStudentModal({
 
   const [startDate, setStartDate] = useState(todayYMD());
   const [admNo, setAdmNo] = useState(() => str(application.admissionNumber));
+  const admNoRef = useRef<HTMLInputElement>(null);
+  const admNoMissing = admNo.trim() === "";
 
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -155,6 +165,7 @@ export default function EnrollStudentModal({
   const missing = [
     !screening && "screening",
     !str(application.photo) && "photo",
+    !feePaid && "admission fee",
     !centreId && "centre",
     needsBatch && !batchId && "batch",
     !level && "syllabus level",
@@ -172,7 +183,7 @@ export default function EnrollStudentModal({
       const uid = await enrollApplicant({
         application, admissionId, screening,
         centreId, batch, admissionNo: admNo, instrument, syllabusLevel: level,
-        monthlyFee: Number(fee), startDate, enrolledBy: user?.uid ?? "",
+        monthlyFee: Number(fee), startDate, enrolledBy: user?.uid ?? "", wing: WING,
       });
       // The admission card is a convenience — never fail the enrolment over it.
       await generateAdmissionCardPDF(
@@ -190,6 +201,46 @@ export default function EnrollStudentModal({
 
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {showFee && (
+        <AdmissionFeeModal
+          application={{ ...application, id: admissionId }}
+          onClose={() => setShowFee(false)}
+          onPaid={fee => setApplication(a => ({ ...a, ...fee }))}
+          onDownloadCard={rec => generateAdmissionCardPDF(
+            { ...rec, id: admissionId, admissionNumber: admNo.trim() || str(rec.admissionNumber) },
+            screening ? fastTrackCardScreening(screening, instrument) : null,
+          )}
+        />
+      )}
+      {/* Admission fee is mandatory — enrolment stays locked until it's paid. */}
+      {!feePaid ? (
+        <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, padding: "10px 12px" }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#9a3412" }}>💰 Admission Fee Pending — record the payment to enrol.</span>
+          <button onClick={() => setShowFee(true)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#9a3412", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            Record Admission Fee
+          </button>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "#15803d", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: "8px 12px" }}>
+          ✓ Admission Fee Paid · ₹{Number(application.admissionFeeAmount).toLocaleString("en-IN")}
+        </div>
+      )}
+      {/* Admission number is manual-only — enrolment is blocked until it is entered. */}
+      {admNoMissing && (
+        <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px" }}>
+          <div style={{ fontSize: 13, color: "#b91c1c", fontWeight: 600 }}>
+            ⚠ No Admission Number Given — Manual entry required before enrollment
+          </div>
+          {canEditAdmNo ? (
+            <button type="button" onClick={() => { admNoRef.current?.scrollIntoView({ block: "center", behavior: "smooth" }); admNoRef.current?.focus(); }}
+              style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+              Enter Admission Number
+            </button>
+          ) : (
+            <span style={{ fontSize: 12, color: "#b91c1c" }}>Ask a Chief Teacher or Director to enter it.</span>
+          )}
+        </div>
+      )}
       {/* Who + readiness */}
       <div style={{ ...section, display: "flex", gap: 14, alignItems: "center" }}>
         <div style={{ width: 52, height: 64, borderRadius: 8, overflow: "hidden", background: "#f3f4f6", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -217,31 +268,27 @@ export default function EnrollStudentModal({
           <div style={{ fontSize: 11, color: "#92400e", marginTop: 6 }}>Applied for “{str(application.centre)}” — not an active centre, please choose one.</div>
         )}
 
-        {centre && (
+        {/* Batch picker only when there's a real choice. No batches → the
+            centre's General Batch; one batch → auto-assigned (see effect above). */}
+        {centre && needsBatch && (
           <div style={{ marginTop: 14 }}>
-            <label style={labelCss}>Batch {needsBatch && "*"}</label>
-            {batches.length === 0 ? (
-              <div style={{ fontSize: 13, color: "#374151" }}>
-                {DEFAULT_BATCH_NAME} <span style={{ color: "#9ca3af" }}>(centre schedule — this centre has no separate batches)</span>
-              </div>
-            ) : (
-              <div role="radiogroup" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {batches.map(b => {
-                  const on = batchId === b.id;
-                  const sched = batchSchedule(b);
-                  return (
-                    <label key={b.id} style={{
-                      display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 10, cursor: "pointer",
-                      border: on ? `2px solid ${ACCENT}` : "1.5px solid #e5e7eb", background: on ? "#fffbeb" : "#fff",
-                    }}>
-                      <input type="radio" name="enrol-batch" checked={on} onChange={() => setBatchId(b.id)} />
-                      <span style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>{b.name || "Unnamed batch"}</span>
-                      {sched && <span style={{ fontSize: 12, color: "#6b7280" }}>{sched}</span>}
-                    </label>
-                  );
-                })}
-              </div>
-            )}
+            <label style={labelCss}>Batch *</label>
+            <div role="radiogroup" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {batches.map(b => {
+                const on = batchId === b.id;
+                const sched = batchSchedule(b);
+                return (
+                  <label key={b.id} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 10, cursor: "pointer",
+                    border: on ? `2px solid ${ACCENT}` : "1.5px solid #e5e7eb", background: on ? "#fffbeb" : "#fff",
+                  }}>
+                    <input type="radio" name="enrol-batch" checked={on} onChange={() => setBatchId(b.id)} />
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>{b.name || "Unnamed batch"}</span>
+                    {sched && <span style={{ fontSize: 12, color: "#6b7280" }}>{sched}</span>}
+                  </label>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -280,7 +327,7 @@ export default function EnrollStudentModal({
         </div>
         <div>
           <label style={labelCss}>Admission number *</label>
-          <input value={admNo} readOnly={!canEditAdmNo} autoComplete="off"
+          <input ref={admNoRef} value={admNo} readOnly={!canEditAdmNo} autoComplete="off"
             onChange={e => setAdmNo(cleanAdmissionNo(e.target.value))}
             placeholder={canEditAdmNo ? "Enter admission number" : "Not entered yet"}
             style={{ ...inputCss, fontFamily: "monospace", fontWeight: 800, letterSpacing: "0.06em", background: canEditAdmNo ? "#fff" : "#f3f4f6" }} />
