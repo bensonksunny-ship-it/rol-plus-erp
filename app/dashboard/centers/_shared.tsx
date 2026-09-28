@@ -12,6 +12,8 @@ import type { Center, CenterBatch, Wing } from "@/types";
 import { DEFAULT_BATCH_NAME, effectiveBatches, explicitBatches } from "@/lib/batches";
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
+import { normAdmNo } from "@/lib/dedup";
+import MergeDuplicatesModal from "@/components/dedup/MergeDuplicatesModal";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -20,7 +22,7 @@ import { useWing } from "@/hooks/useWing";
 import { isSchoolOfMusic, inWing, wingOf } from "@/lib/wing";
 import { getCached, invalidateCache, setCached } from "@/lib/dataCache";
 import { deleteCenter } from "@/services/admin/delete.service";
-import { safeCompare } from "@/lib/sortKey";
+import { safeCompare, sortKey } from "@/lib/sortKey";
 import Link from "next/link";
 import { computeDueSettlements, computeStudentBalances, outstandingDuesForStudent } from "@/services/finance/finance.service";
 import type { Transaction } from "@/types/finance";
@@ -385,6 +387,9 @@ const ATT_STATUS_COLOR: Record<string, { bg: string; fg: string }> = {
 interface CenterAttRec { id: string; studentUid: string; date: string; status: string; }
 interface CenterStudentRec {
   uid: string; name: string; admissionNo: string; status: string; createdAt: string;
+  /** When the student became inactive (ISO) — inactivatedAt, else the approval
+   *  time, else the last update. "" when unknown. Drives the 60-day window. */
+  inactiveSince?: string;
   /** Profile photo (admission `photo` data URL, or an uploaded photoURL) — "" when none. */
   photo?: string;
   instrument?: string;
@@ -429,6 +434,30 @@ function countsAsActive(s: { status: string; admissionNo: string }): boolean {
 /** Who may type an admission number in — per wing (ROL+ → Founder / Admin). */
 function canAssignAdmissionNo(role: string | null | undefined, wing: string | null | undefined): boolean {
   return canEnterAdmissionNo(role, wing) || (wing !== WINGS.ROL_PLUS && role === ROLES.ADMIN);
+}
+
+/**
+ * Collapse duplicate student records (same admission number — e.g. imported
+ * twice) to one roster row. Keeps the most complete record: active, then in a
+ * batch, then the most attendance, then the oldest. The hidden copies are
+ * returned so staff can merge them for real (MergeDuplicatesModal).
+ */
+function dedupeRoster(list: CenterStudentRec[], attCount: Map<string, number>): { unique: CenterStudentRec[]; hidden: CenterStudentRec[] } {
+  const score = (r: CenterStudentRec) =>
+    (isActiveStudentStatus(r.status) ? 1_000_000 : 0) + (r.batchId ? 100_000 : 0) + (attCount.get(r.uid) ?? 0);
+  const groups = new Map<string, CenterStudentRec[]>();
+  for (const r of list) {
+    const k = normAdmNo(r.admissionNo) || `uid:${r.uid}`;
+    const g = groups.get(k);
+    if (g) g.push(r); else groups.set(k, [r]);
+  }
+  const unique: CenterStudentRec[] = [], hidden: CenterStudentRec[] = [];
+  for (const g of groups.values()) {
+    g.sort((a, b) => score(b) - score(a) || safeCompare(a.createdAt, b.createdAt));
+    unique.push(g[0]);
+    hidden.push(...g.slice(1));
+  }
+  return { unique, hidden };
 }
 
 /** Toast text after a save; spells out the rename cascade when the name changed. */
@@ -570,6 +599,11 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
   const [tab, setTab] = useState<ViewTab>("students");
   const [attRecs,  setAttRecs]  = useState<CenterAttRec[]>([]);
   const [students, setStudents] = useState<CenterStudentRec[]>([]);
+  // Duplicate records (same admission no.) collapsed out of the roster.
+  const [hiddenDups, setHiddenDups] = useState<CenterStudentRec[]>([]);
+  const [showMerge, setShowMerge]   = useState(false);
+  const { role: viewerRole } = useAuth();
+  const canMergeDuplicates = !!viewerRole && ([ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR] as string[]).includes(viewerRole);
   const [txs,      setTxs]      = useState<CenterTxRec[]>([]);
   const [loading,  setLoading]  = useState(true);
 
@@ -588,7 +622,12 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
           const r = d.data();
           return { id: d.id, studentUid: (r.studentUid ?? "") as string, date: (r.date ?? "") as string, status: (r.status ?? "") as string };
         }));
-        setStudents(stuSnap.docs.map(d => {
+        const attCount = new Map<string, number>();
+        attSnap.docs.forEach(d => {
+          const uid = (d.data().studentUid ?? "") as string;
+          if (uid) attCount.set(uid, (attCount.get(uid) ?? 0) + 1);
+        });
+        const { unique, hidden } = dedupeRoster(stuSnap.docs.filter(d => d.data().status !== "merged").map(d => {
           const st = d.data();
           return {
             uid: d.id,
@@ -599,8 +638,11 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
             photo: studentPhoto(st),
             instrument: (st.instrument ?? "") as string,
             batchId: (st.batchId ?? null) as string | null,
+            inactiveSince: sortKey(st.inactivatedAt) || sortKey(st.deactivationApprovedAt) || sortKey(st.updatedAt),
           };
-        }));
+        }), attCount);
+        setStudents(unique);
+        setHiddenDups(hidden);
         setTxs(txSnap.docs.map(d => {
           const t = d.data();
           return {
@@ -637,7 +679,11 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
    */
   async function setStudentStatus(uid: string, status: string) {
     const batch = writeBatch(db);
-    batch.update(doc(db, "users", uid), { status, studentStatus: status, updatedAt: serverTimestamp() });
+    const nowInactive = !isActiveStudentStatus(status);
+    batch.update(doc(db, "users", uid), {
+      status, studentStatus: status, updatedAt: serverTimestamp(),
+      inactivatedAt: nowInactive ? new Date().toISOString() : null,
+    });
     await batch.commit();
     patchStudentStatus(uid, status);
   }
@@ -653,7 +699,9 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
 
   /** Reflect a status already written elsewhere (inactivation request / approval). */
   function patchStudentStatus(uid: string, status: string) {
-    setStudents(prev => prev.map(s => (s.uid === uid ? { ...s, status } : s)));
+    setStudents(prev => prev.map(s => (s.uid === uid
+      ? { ...s, status, inactiveSince: isActiveStudentStatus(status) ? "" : new Date().toISOString() }
+      : s)));
     const w = wingOf(center);
     invalidateCache(`students:${w}:students`);
     invalidateCache(`centers:${w}:activeCounts`);
@@ -822,8 +870,10 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
                 <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || formatTimesIn12h(center.timeSlot) || "-"} />
                 <QuickFact label="Time"     value={formatTimeRange12(raw.startTime, raw.endTime) || "-"} />
               </>}
-              <QuickFact label="Students" value={String(students.length)} />
-              {isSchoolOfMusic(center.wing) && center.monthlyFee ? (
+              {/* Primary metric = current strength; all-time registrations only as a subtle secondary line. */}
+              <QuickFact label="Students" value={String(activeCount)}
+                hint={students.length !== activeCount ? `Active: ${activeCount} | Historic total: ${students.length}` : undefined} />
+              {center.monthlyFee ? (
                 <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
               ) : null}
               {(center.batches ?? []).length === 0 && <QuickFact label="Batches" value={`${DEFAULT_BATCH_NAME} (centre schedule)`} />}
@@ -878,6 +928,28 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
               ) : tab === "attendance" ? (
                 <CenterAttendanceHistoryTab records={attRecs} studentMap={studentMap} centerName={center.name} />
               ) : tab === "students" ? (
+                <>
+                {hiddenDups.length > 0 && (
+                  <div role="status" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "9px 12px", marginBottom: 10, fontSize: 12.5, color: "#92400e" }}>
+                    <span>
+                      ⚠ {hiddenDups.length} duplicate record{hiddenDups.length !== 1 ? "s" : ""} hidden — same admission number as a student below
+                      ({[...new Set(hiddenDups.map(d => d.name))].slice(0, 3).join(", ")}{new Set(hiddenDups.map(d => d.name)).size > 3 ? "…" : ""}).
+                      {!canMergeDuplicates && " Ask a Director or Admin to merge them."}
+                    </span>
+                    {canMergeDuplicates && (
+                      <button type="button" onClick={() => setShowMerge(true)}
+                        style={{ padding: "6px 12px", borderRadius: 7, border: "none", background: "#d97706", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                        Review &amp; merge
+                      </button>
+                    )}
+                  </div>
+                )}
+                {showMerge && (
+                  <MergeDuplicatesModal
+                    onClose={() => setShowMerge(false)}
+                    centreName={id => (id === center.id ? center.name : id ? "Another centre" : "")}
+                  />
+                )}
                 <CenterStudentsTab
                   students={students}
                   onSetStatus={setStudentStatus}
@@ -889,6 +961,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
                   centerId={center.id}
                   centerName={center.name}
                 />
+                </>
               ) : (
                 <CenterInsightsTab records={attRecs} students={students} transactions={txs} />
               )}
@@ -900,11 +973,12 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
   );
 }
 
-function QuickFact({ label, value }: { label: string; value: string }) {
+function QuickFact({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div>
+    <div title={hint}>
       <div style={viewStyles.quickFactLabel}>{label}</div>
       <div style={viewStyles.quickFactValue}>{value}</div>
+      {hint && <div style={{ fontSize: 10.5, color: "#9ca3af", marginTop: 2 }}>{hint}</div>}
     </div>
   );
 }
@@ -1054,6 +1128,9 @@ function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
 
 // ─── Students Tab (roster + active/inactive management) ────────────────────
 
+/** The centre's Inactive tab only lists students made inactive this recently. */
+const INACTIVE_WINDOW_DAYS = 60;
+
 function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, onAdmissionNoAssigned, onAddStudents, wing, centerId, centerName }: {
   students: CenterStudentRec[];
   /** Persist one student's status (and update the roster). */
@@ -1093,7 +1170,17 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
   // Active status but no admission number — held out of the active roster until assigned.
   const needsAdmNo       = useMemo(() => students.filter(s => isActiveStudentStatus(s.status) && !hasAdmissionNo(s.admissionNo)), [students]);
   // Everyone else registered here (inactive, cancelled…) — soft-deleted rows stay hidden.
-  const inactiveStudents = useMemo(() => students.filter(s => !isActiveStudentStatus(s.status) && s.status !== "deleted"), [students]);
+  // Only students made inactive in the last 60 days — older ones stay in the
+  // Master Registry. A record with no date at all is shown (can't prove it's old).
+  const inactiveStudents = useMemo(() => {
+    const cutoff = new Date(Date.now() - INACTIVE_WINDOW_DAYS * 86400000).toISOString();
+    return students.filter(s =>
+      !isActiveStudentStatus(s.status) && s.status !== "deleted"
+      && (!s.inactiveSince || s.inactiveSince >= cutoff));
+  }, [students]);
+  // Inactive for longer than the window — hidden here, still in the Registry.
+  const olderInactive = students.filter(s =>
+    !isActiveStudentStatus(s.status) && s.status !== "deleted" && !inactiveStudents.includes(s)).length;
   const listed = view === "active" ? activeStudents : view === "inactive" ? inactiveStudents : needsAdmNo;
 
   const inBatch = (s: CenterStudentRec) =>
@@ -1120,11 +1207,26 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
     return batches.find(b => b.id === id)?.name ?? "—";
   }
 
-  async function handleAssign(picked: PickedStudent[]) {
+  async function handleAssign(picked: PickedStudent[], deactivate: { uid: string; name: string }[]) {
     setMsg(null);
-    await onAddStudents(picked);
+    if (picked.length) await onAddStudents(picked);
+    // Unticked current students: approvers inactivate them; teachers send them for review.
+    if (deactivate.length) {
+      if (canApprove) {
+        await Promise.all(deactivate.map(d => onSetStatus(d.uid, "inactive")));
+      } else {
+        if (!me) throw new Error("Not signed in.");
+        await Promise.all(deactivate.map(d =>
+          requestStudentDeactivation(d.uid, { uid: me.uid, role: myRole, name: me.displayName, wing })
+            .then(() => onStatusChanged(d.uid, DEACTIVATION_REQUESTED))));
+      }
+    }
     setShowAdd(false);
-    flash({ type: "success", text: `${picked.length} student${picked.length !== 1 ? "s" : ""} added as Active.` });
+    const parts = [
+      picked.length ? `${picked.length} added as Active` : "",
+      deactivate.length ? (canApprove ? `${deactivate.length} moved to Inactive` : `${deactivate.length} sent for inactivation review`) : "",
+    ].filter(Boolean);
+    flash({ type: "success", text: `Roster saved — ${parts.join(", ")}.` });
   }
 
   async function handleDeactivate(s: CenterStudentRec) {
@@ -1190,7 +1292,8 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
           centerId={centerId}
           centerName={centerName}
           batches={batches}
-          excludeUids={activeUids}
+          excludeUids={new Set(needsAdmNo.map(s => s.uid))}
+          canApprove={canApprove}
           onClose={() => setShowAdd(false)}
           onAssign={handleAssign}
         />
@@ -1220,7 +1323,7 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
             style={{ ...formStyles.input, width: 200 }}
           />
         </div>
-        <button onClick={() => setShowAdd(true)} title="Add active students" aria-label="Add active students"
+        <button onClick={() => setShowAdd(true)} title="Manage active students — add or remove from the roster" aria-label="Manage active students"
           style={{
             width: 36, height: 36, borderRadius: "50%", border: "none", background: "#4f46e5", color: "#fff",
             fontSize: 22, fontWeight: 600, lineHeight: 1, cursor: "pointer", flexShrink: 0,
@@ -1277,11 +1380,24 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
         </div>
       )}
 
+      {view === "inactive" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const, fontSize: 12.5, color: "#475569", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
+          <span aria-hidden>ℹ️</span>
+          <span>
+            Showing students marked inactive in the last {INACTIVE_WINDOW_DAYS} days.{" "}
+            {olderInactive > 0
+              ? <><b>{olderInactive}</b> older inactive record{olderInactive !== 1 ? "s are" : " is"} in the{" "}</>
+              : <>Older inactive records are accessible in the{" "}</>}
+            <a href="/dashboard/registry" style={{ color: "#4f46e5", fontWeight: 600 }}>Master Registry</a>.
+          </span>
+        </div>
+      )}
+
       {listed.length === 0 ? (
         <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>
           {view === "active"
             ? <>No active students at this centre yet. Use the <strong>+</strong> button to add some.</>
-            : view === "inactive" ? <>No inactive students at this centre.</> : <>Every active student has an admission number.</>}
+            : view === "inactive" ? <>No students marked inactive here in the last {INACTIVE_WINDOW_DAYS} days.</> : <>Every active student has an admission number.</>}
         </div>
       ) : filtered.length === 0 ? (
         <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No students match.</div>
@@ -1734,15 +1850,18 @@ const REGISTRY_SEARCH_ROLES: string[] = [ROLES.FOUNDER, ROLES.DIRECTOR, ROLES.CH
 
 type AddCandidate = PickedStudent & { status: string; hereRegistered: boolean; currentCentre: string; activeElsewhere: boolean };
 
-function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, onClose, onAssign }: {
+function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, canApprove, onClose, onAssign }: {
   wing: Wing | undefined;
   centerId: string;
   centerName: string;
   /** The centre's named batches ([] → everyone joins the implicit General Batch). */
   batches: CenterBatch[];
   excludeUids: Set<string>;
+  /** Approvers inactivate unticked students; teachers send them for review. */
+  canApprove: boolean;
   onClose: () => void;
-  onAssign: (picked: PickedStudent[]) => Promise<void>;
+  /** `picked` → make Active here; `deactivate` → this centre's actives left unticked. */
+  onAssign: (picked: PickedStudent[], deactivate: { uid: string; name: string }[]) => Promise<void>;
 }) {
   const { role } = useAuth();
   const registryWide = !!role && REGISTRY_SEARCH_ROLES.includes(role);
@@ -1753,6 +1872,9 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
   const [batchId, setBatchId]       = useState<string>(batches[0]?.id ?? "");
   const [saving, setSaving]         = useState(false);
   const [error, setError]           = useState("");
+  const [confirmOff, setConfirmOff] = useState(false);
+  /** This centre's students who are Active right now — shown ticked; unticking one makes them Inactive on save. */
+  const isActiveHere = (c: AddCandidate) => c.hereRegistered && isActiveStudentStatus(c.status);
 
   useEffect(() => {
     let cancelled = false;
@@ -1795,9 +1917,13 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
             };
           })
           .filter(s => !excludeUids.has(s.uid))
-          // This centre's own (inactive) students first, then the rest of the register.
-          .sort((a, b) => Number(b.hereRegistered) - Number(a.hereRegistered) || safeCompare(a.name, b.name));
+          // This centre's active roster first, then its inactive students, then the rest of the register.
+          .sort((a, b) =>
+            Number(b.hereRegistered && isActiveStudentStatus(b.status)) - Number(a.hereRegistered && isActiveStudentStatus(a.status))
+            || Number(b.hereRegistered) - Number(a.hereRegistered) || safeCompare(a.name, b.name));
         setCandidates(list);
+        // Current actives start ticked — the roster is saved as a whole.
+        setSelected(new Set(list.filter(c => c.hereRegistered && isActiveStudentStatus(c.status)).map(c => c.uid)));
       } catch (err) {
         console.error("[AddStudentsModal] load error:", err);
         setError("Failed to load students.");
@@ -1818,6 +1944,7 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
   }, [candidates, search, registryWide, selected]);
 
   function toggle(uid: string) {
+    setConfirmOff(false);
     setSelected(prev => {
       const next = new Set(prev);
       if (next.has(uid)) next.delete(uid); else next.add(uid);
@@ -1827,17 +1954,26 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
 
   const movingCount = candidates.filter(c => selected.has(c.uid) && c.activeElsewhere).length;
 
+  // Newly activated = ticked and not already active here; turned off = active here but unticked.
+  const toActivate   = candidates.filter(c => selected.has(c.uid) && !isActiveHere(c) && hasAdmissionNo(c.admissionNo));
+  const toInactivate = candidates.filter(c => isActiveHere(c) && !selected.has(c.uid));
+  const hasChanges   = toActivate.length > 0 || toInactivate.length > 0;
+
   async function handleAssign() {
-    const picked = candidates.filter(c => selected.has(c.uid) && hasAdmissionNo(c.admissionNo));
-    if (picked.length === 0) return;
+    if (!hasChanges) return;
+    if (toInactivate.length > 0 && !confirmOff) { setConfirmOff(true); return; }
     setSaving(true);
     setError("");
     try {
-      await onAssign(picked.map(({ uid, name, admissionNo, createdAt, photo, instrument, fromCenterId }) => ({
-        uid, name, admissionNo, createdAt, photo, instrument, fromCenterId,
-        // Everyone joins the chosen batch (null = the centre's General Batch).
-        batchId: batches.length ? batchId || null : null,
-      })));
+      await onAssign(
+        toActivate.map(({ uid, name, admissionNo, createdAt, photo, instrument, fromCenterId }) => ({
+          uid, name, admissionNo, createdAt, photo, instrument, fromCenterId,
+          // New arrivals join the chosen batch (null = the centre's General Batch);
+          // students already active here keep theirs.
+          batchId: batches.length ? batchId || null : null,
+        })),
+        toInactivate.map(c => ({ uid: c.uid, name: c.name })),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to assign students.");
       setSaving(false);
@@ -1852,7 +1988,7 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
     <div style={modalStyles.overlay} onClick={onClose}>
       <div style={{ ...modalStyles.box, maxWidth: 560, maxHeight: "84vh", display: "flex", flexDirection: "column" as const }} onClick={e => e.stopPropagation()}>
         <div style={modalStyles.header}>
-          <span style={modalStyles.title}>Add Active Students</span>
+          <span style={modalStyles.title}>Manage Active Students</span>
           <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
         </div>
 
@@ -1865,7 +2001,8 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
             style={{ ...formStyles.input, width: "100%", boxSizing: "border-box" as const }}
           />
           <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>
-            {registryWide ? "Searching the whole student register" : `Showing students registered at ${centerName}`}
+            Ticked = Active at {centerName}. Untick a current student to move them to Inactive on save.
+            {registryWide ? " Type to search the whole register." : ""}
           </div>
         </div>
 
@@ -1899,7 +2036,11 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
                           ? <span style={{ color: "#b91c1c", fontWeight: 700 }}>⚠ no adm. no. — assign one first</span>
                           : <span style={{ fontFamily: "monospace" }}>{s.admissionNo}</span>}
                         {" · "}
-                        {s.hereRegistered
+                        {isActiveHere(s)
+                          ? (isSelected
+                              ? <span style={{ color: "#15803d", fontWeight: 600 }}>Active here</span>
+                              : <span style={{ color: "#b91c1c", fontWeight: 700 }}>→ will become Inactive</span>)
+                          : s.hereRegistered
                           ? <span>This centre{s.status !== "active" ? ` · ${s.status}` : ""}</span>
                           : s.currentCentre
                             ? <span style={{ color: s.activeElsewhere ? "#b45309" : undefined }}>
@@ -1924,7 +2065,10 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
         <div style={{ ...modalStyles.body, borderTop: "1px solid #e5e7eb", flexDirection: "row" as const, justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" as const, gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const }}>
             <span style={{ fontSize: 12, color: "#6b7280" }}>
-              {selected.size} selected{movingCount > 0 ? ` · ${movingCount} moving from another centre` : ""}
+              {selected.size} active
+              {toActivate.length > 0 ? ` · +${toActivate.length} new` : ""}
+              {toInactivate.length > 0 ? <b style={{ color: "#b91c1c" }}>{` · ${toInactivate.length} → Inactive`}</b> : null}
+              {movingCount > 0 ? ` · ${movingCount} moving from another centre` : ""}
             </span>
             {batches.length > 0 ? (
               <select value={batchId} onChange={e => setBatchId(e.target.value)} aria-label="Batch"
@@ -1937,12 +2081,37 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, on
           </div>
           <button
             onClick={handleAssign}
-            disabled={selected.size === 0 || saving}
-            style={{ ...formStyles.submitBtn, opacity: selected.size === 0 || saving ? 0.5 : 1 }}
+            disabled={!hasChanges || saving}
+            style={{ ...formStyles.submitBtn, opacity: !hasChanges || saving ? 0.5 : 1 }}
           >
-            {saving ? "Assigning…" : `Assign ${selected.size || ""} as Active`}
+            {saving ? "Saving…" : "Save roster"}
           </button>
         </div>
+        {confirmOff && toInactivate.length > 0 && (
+          <div role="alertdialog" aria-label="Confirm inactivation" style={{ margin: "0 20px 16px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#7f1d1d" }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+              {canApprove
+                ? `${toInactivate.length} student${toInactivate.length !== 1 ? "s" : ""} will be marked Inactive:`
+                : `${toInactivate.length} student${toInactivate.length !== 1 ? "s" : ""} will be sent for inactivation review:`}
+            </div>
+            <div style={{ marginBottom: 6 }}>{toInactivate.map(c => c.name).join(", ")}</div>
+            <div style={{ fontSize: 11.5, opacity: 0.85, marginBottom: 8 }}>
+              {canApprove
+                ? "They leave this centre's roster, batches and attendance. Any outstanding fees stay on Finance until paid."
+                : "They stay active until a Chief Teacher / Director / Admin approves."}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={handleAssign} disabled={saving}
+                style={{ padding: "6px 12px", borderRadius: 7, border: "none", background: "#dc2626", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                {saving ? "Saving…" : "Confirm & save"}
+              </button>
+              <button type="button" onClick={() => setConfirmOff(false)} disabled={saving}
+                style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", color: "#374151", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+                Back
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2156,6 +2325,7 @@ function CentersContent() {
       setCached(`centers:${wing}:teachers`, sortedTeachers);
 
       const counts = new Map<string, number>();
+      const counted = new Set<string>();   // centre|admission no. — one count per person (duplicate records ignored)
       const earliest = new Map<string, string>();
       studentSnap.docs.forEach(d => {
         const st = d.data();
@@ -2167,6 +2337,10 @@ function CentersContent() {
         if (admitted && (!earliest.has(cid) || admitted < earliest.get(cid)!)) earliest.set(cid, admitted);
         if (!isActiveStudentStatus((st.status ?? st.studentStatus ?? "active") as string)) return;
         if (!hasAdmissionNo(st.admissionNo ?? st.admissionNumber)) return;   // held until assigned
+        if (st.status === "merged") return;
+        const personKey = `${cid}|${normAdmNo(String(st.admissionNo ?? st.admissionNumber ?? ""))}`;
+        if (counted.has(personKey)) return;
+        counted.add(personKey);
         counts.set(cid, (counts.get(cid) ?? 0) + 1);
       });
       setActiveCounts(counts);
@@ -3026,6 +3200,7 @@ function DeactivateCenterModal({ center, onClose, onConfirm }: {
         writes.push(b => b.update(doc(db, "users", s.uid), {
           status:        "inactive",
           studentStatus: "inactive",
+          inactivatedAt: new Date().toISOString(),
           updatedAt:     serverTimestamp(),
         }));
       }

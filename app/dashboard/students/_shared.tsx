@@ -641,7 +641,7 @@ function StudentsContent() {
           {(isAdmin || isTeacher) && (
             // Students are only created through the admissions pipeline
             // (application → screening → centre assignment → enrol).
-            <Link href={isSom ? "/dashboard/admissions" : "/dashboard/screening"}
+            <Link href="/dashboard/admissions"
               title="New students are enrolled through Admissions & Screening"
               style={{ fontSize: 12.5, fontWeight: 600, color: "var(--color-accent-text)", whiteSpace: "nowrap", alignSelf: "center" }}>
               🎓 New admission →

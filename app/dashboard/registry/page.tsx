@@ -459,7 +459,15 @@ function RegistryContent() {
         unsubscribe = onSnapshot(
           query(collection(db, "users"), where("role", "==", "student")),
           studSnap => {
+            // Admission numbers are unique across BOTH wings — the import's
+            // duplicate check must see the other wing's students too, or a
+            // student filed under ROL+ gets re-created here as a second record.
             const admNos = new Set<string>();
+            studSnap.docs.forEach(d => {
+              const v = d.data();
+              const no = String(v.admissionNumber ?? v.admissionNo ?? "").replace(/\s+/g, "").toUpperCase();
+              if (no && v.status !== "merged") admNos.add(no);
+            });
             const list: Entry[] = studSnap.docs
               .filter(d => wingOf(d.data()) === WING && d.data().status !== "merged")
               .map(d => {
@@ -631,7 +639,11 @@ function RegistryContent() {
     }
     setEntries(cur => cur.map(e => e.uid === uid ? { ...e, status: next } : e));
     try {
-      await updateDoc(doc(db, "users", uid), { status: next, studentStatus: next, updatedAt: serverTimestamp() });
+      await updateDoc(doc(db, "users", uid), {
+        status: next, studentStatus: next, updatedAt: serverTimestamp(),
+        // Centre rosters show inactive students for 60 days from this date.
+        inactivatedAt: next === "active" ? null : new Date().toISOString(),
+      });
       logAction({
         action: "REGISTRY_STATUS_CHANGE",
         initiatorId:   user?.uid ?? "unknown",
@@ -1087,7 +1099,10 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
       changed.push("dateOfAdmission");
     }
     if (f.status !== initial.status) {
-      Object.assign(patch, { status: nextStatus, studentStatus: nextStatus });
+      Object.assign(patch, {
+        status: nextStatus, studentStatus: nextStatus,
+        inactivatedAt: nextStatus === "active" ? null : new Date().toISOString(),
+      });
       changed.push("status");
     }
 

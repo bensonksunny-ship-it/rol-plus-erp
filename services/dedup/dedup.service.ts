@@ -9,7 +9,7 @@
 // =============================================================================
 
 import {
-  arrayRemove, arrayUnion, collection, doc, getDoc, getDocs, query, serverTimestamp,
+  arrayRemove, arrayUnion, collection, doc, getCountFromServer, getDoc, getDocs, query, serverTimestamp,
   setDoc, updateDoc, where, writeBatch,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
@@ -132,6 +132,44 @@ export function suggestPrimary(p: DuplicatePair): string {
   return t(p.a) <= t(p.b) ? p.a.id : p.b.id;
 }
 
+// ─── Auto-merge rules ─────────────────────────────────────────────────────────
+// Same admission number AND same name → the same student entered twice: merge
+// automatically. Same name but DIFFERENT admission numbers → two different
+// students (or a genuine re-admission): never merge, keep separate. Anything
+// else stays in the manual review list.
+
+const admOf  = (r: StudentRecord) => normAdmNo(str(r.data.admissionNumber) || str(r.data.admissionNo));
+const nameOf = (r: StudentRecord) => normName(str(r.data.displayName) || str(r.data.name));
+
+export function isAutoMergePair(p: DuplicatePair): boolean {
+  const a = admOf(p.a);
+  return !!a && a === admOf(p.b) && !!nameOf(p.a) && nameOf(p.a) === nameOf(p.b);
+}
+export function isSameNameDifferentAdmission(p: DuplicatePair): boolean {
+  const a = admOf(p.a), b = admOf(p.b);
+  return !!a && !!b && a !== b && !!nameOf(p.a) && nameOf(p.a) === nameOf(p.b);
+}
+
+const ACTIVE_RE = /^(active|confirm|confirmed|deactivation_requested|break_requested)$/i;
+
+/**
+ * Pick the master record for an auto-merge: the one carrying the most history
+ * (attendance + transactions), so fee ledgers and attendance stay on the record
+ * people already use; ties fall back to suggestPrimary (active, adm. no., older).
+ */
+export async function choosePrimary(p: DuplicatePair): Promise<string> {
+  const history = async (uid: string) => {
+    const [att, tx] = await Promise.all([
+      getCountFromServer(query(collection(db, "attendance"), where("studentUid", "==", uid))).catch(() => null),
+      getCountFromServer(query(collection(db, "transactions"), where("studentUid", "==", uid))).catch(() => null),
+    ]);
+    return (att?.data().count ?? 0) + (tx?.data().count ?? 0);
+  };
+  const [ha, hb] = await Promise.all([history(p.a.id), history(p.b.id)]);
+  if (ha !== hb) return ha > hb ? p.a.id : p.b.id;
+  return suggestPrimary(p);
+}
+
 export async function keepSeparate(uidA: string, uidB: string, by: string): Promise<void> {
   await setDoc(doc(db, "dedup_decisions", pairKey(uidA, uidB)), {
     decision: "separate", uids: [uidA, uidB], by, at: new Date().toISOString(),
@@ -198,6 +236,11 @@ export async function mergeStudents(primaryUid: string, secondaryUid: string, by
   // 2. Kept record: fill blanks from the duplicate, carry the cached balance.
   const patch: Record<string, unknown> = { updatedAt: serverTimestamp(), mergedFrom: arrayUnion(secondaryUid) };
   for (const f of FILL_FIELDS) if (blank(P[f]) && !blank(S[f])) patch[f] = S[f];
+  // Keep an active admission status if either record has one.
+  if (!ACTIVE_RE.test(str(P.status)) && ACTIVE_RE.test(str(S.status))) {
+    patch.status = S.status;
+    patch.studentStatus = S.studentStatus ?? S.status;
+  }
   const bal = (Number(P.currentBalance) || 0) + (Number(S.currentBalance) || 0);
   if (bal !== (Number(P.currentBalance) || 0)) patch.currentBalance = bal;
   await updateDoc(doc(db, "users", primaryUid), patch);

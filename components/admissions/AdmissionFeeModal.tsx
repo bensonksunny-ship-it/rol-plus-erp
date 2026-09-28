@@ -7,12 +7,11 @@
 import { useEffect, useState } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
-import { WINGS } from "@/config/constants";
 import { wingOf } from "@/lib/wing";
+import { useWing } from "@/hooks/useWing";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { recordAdmissionFee } from "@/services/finance/finance.service";
 
-const WING = WINGS.SCHOOL_OF_MUSIC;
 const DEFAULT_FEE = 1500;   // standard admission fee (₹); editable per payment
 const MODES: { value: "Cash" | "UPI" | "Card" | "Bank"; label: string }[] = [
   { value: "Cash", label: "Cash" },
@@ -64,6 +63,8 @@ export default function AdmissionFeeModal({ application, onClose, onPaid, onDown
   const [paid, setPaid] = useState<AdmissionFeePatch | null>(null);
   const [downloading, setDownloading] = useState(false);
 
+  // Both wings use this — list the active wing's centres.
+  const { wing: WING } = useWing();
   useEffect(() => {
     getDocs(query(collection(db, "centers"), where("status", "==", "active")))
       .then(snap => {
@@ -78,7 +79,7 @@ export default function AdmissionFeeModal({ application, onClose, onPaid, onDown
         if (match) setCentreId(match.id);
       })
       .catch(e => console.error("[AdmissionFeeModal] load centres:", e));
-  }, [application.centre]);
+  }, [application.centre, WING]);
 
   // UPI / Card / Bank transfers need a transaction reference; cash doesn't.
   const needsRef = mode !== "Cash";

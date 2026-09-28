@@ -68,6 +68,7 @@ export async function approveStudentDeactivation(studentUid: string, by: Actor, 
     deactivationApprovalStatus: "approved",
     deactivationApprovedBy:     by.uid,
     deactivationApprovedAt:     new Date().toISOString(),
+    inactivatedAt:              new Date().toISOString(),
     updatedAt:                  serverTimestamp(),
   });
   logAction({ action: "DEACTIVATION_APPROVED", initiatorId: requestedBy || by.uid, initiatorRole: asRole(requestedBy ? ROLES.TEACHER : by.role),

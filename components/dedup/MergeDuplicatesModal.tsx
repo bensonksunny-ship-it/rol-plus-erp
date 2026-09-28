@@ -1,12 +1,15 @@
 "use client";
 
-// Registry → "Scan & Merge Duplicates" (Founder / Admin / Director).
-// Lists suspected duplicate student pairs; each is merged or kept separate by
-// a person — nothing merges on its own. See services/dedup/dedup.service.
+// Registry / centre roster → "Scan & Merge Duplicates" (Founder / Admin / Director).
+// Rules (services/dedup/dedup.service):
+//   same admission no. + same name        → "Merge all exact duplicates" merges them
+//   same name, different admission numbers → different students: kept separate
+//   anything else                          → reviewed pair by pair below
 
 import { useEffect, useState } from "react";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import {
+  choosePrimary, isAutoMergePair, isSameNameDifferentAdmission,
   keepSeparate, mergeStudents, scanStudentDuplicates, suggestPrimary,
   type DuplicatePair, type StudentRecord,
 } from "@/services/dedup/dedup.service";
@@ -76,13 +79,19 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
   }
   useEffect(() => { rescan(); }, []);
 
-  /** Highest-confidence tier: same admission number AND name AND phone. */
-  const isExact = (p: DuplicatePair) =>
-    p.level === "same" && ["same admission number", "same name", "same phone"].every(r => p.reasons.includes(r));
+  /** Auto-merge tier: same admission number AND same name. */
+  const isExact = isAutoMergePair;
 
   async function mergeAllExact() {
     setConfirmBulk(false);
     setErr("");
+    // Same name, different admission numbers = different students → record "keep separate".
+    const distinct = (pairs ?? []).filter(p => isSameNameDifferentAdmission(p) && !done[p.key]);
+    let keptSeparate = 0;
+    for (const p of distinct) {
+      try { await keepSeparate(p.a.id, p.b.id, user?.uid ?? ""); keptSeparate++; }
+      catch (e) { console.warn("[MergeDuplicates] keep separate:", e); }
+    }
     let current = (pairs ?? []).filter(p => isExact(p) && !done[p.key]);
     const total = current.length;
     let merged = 0, failed = 0;
@@ -90,7 +99,8 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
     // Merge pair by pair, re-scanning so chains (A~B~C) resolve to one record.
     while (current.length) {
       const p = current[0];
-      const primary = suggestPrimary(p);
+      // Master = the record carrying the attendance / fee history.
+      const primary = await choosePrimary(p);
       const secondary = primary === p.a.id ? p.b.id : p.a.id;
       try { await mergeStudents(primary, secondary, user?.uid ?? ""); merged++; }
       catch (e) { console.warn("[MergeDuplicates] bulk merge:", e); failed++; }
@@ -102,7 +112,9 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
     }
     setBulk(null);
     setErr(failed ? `${failed} pair${failed !== 1 ? "s" : ""} could not be merged — review them below.` : "");
-    setDone(d => ({ ...d, __bulk: `✓ Merged ${merged} exact duplicate${merged !== 1 ? "s" : ""}` }));
+    setDone(d => ({ ...d, __bulk:
+      `✓ Successfully auto-merged ${merged} duplicate student record${merged !== 1 ? "s" : ""} (matching Name + Admission No). `
+      + `${keptSeparate} distinct record${keptSeparate !== 1 ? "s" : ""} with identical names ${keptSeparate !== 1 ? "were" : "was"} kept separate.` }));
     await rescan();
   }
 
@@ -137,7 +149,8 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
   const family = (pairs ?? []).filter(p => p.level === "family");
 
   const renderPair = (p: DuplicatePair) => {
-    const lv = LEVEL[p.level];
+    const distinct = isSameNameDifferentAdmission(p);
+    const lv = distinct ? { label: "Different students — same name", fg: "#065f46", bg: "#d1fae5" } : LEVEL[p.level];
     const outcome = done[p.key];
     return (
       <div key={p.key} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: outcome ? "#f9fafb" : "#fff", opacity: outcome ? 0.75 : 1 }}>
@@ -156,10 +169,22 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
               ))}
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
-              <button onClick={() => separate(p)} disabled={!!busy} style={btn("#fff", "#374151", "#d1d5db")}>Keep Separate</button>
-              <button onClick={() => merge(p)} disabled={!!busy} style={btn("#4f46e5", "#fff", "#4f46e5")}>
-                {busy === p.key ? "Merging…" : "Merge Records"}
-              </button>
+              {distinct ? (
+                <>
+                  <span style={{ fontSize: 11.5, color: "#6b7280", alignSelf: "center", marginRight: "auto" }}>Different admission numbers — not merged automatically.</span>
+                  <button onClick={() => merge(p)} disabled={!!busy} style={btn("#fff", "#6b7280", "#e5e7eb")}>
+                    {busy === p.key ? "Merging…" : "Merge anyway"}
+                  </button>
+                  <button onClick={() => separate(p)} disabled={!!busy} style={btn("#059669", "#fff", "#059669")}>✓ Keep Separate</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => separate(p)} disabled={!!busy} style={btn("#fff", "#374151", "#d1d5db")}>Keep Separate</button>
+                  <button onClick={() => merge(p)} disabled={!!busy} style={btn("#4f46e5", "#fff", "#4f46e5")}>
+                    {busy === p.key ? "Merging…" : "Merge Records"}
+                  </button>
+                </>
+              )}
             </div>
           </>
         )}
@@ -193,20 +218,22 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
             {done.__bulk && <div style={{ fontSize: 13, fontWeight: 700, color: "#15803d" }}>{done.__bulk}</div>}
             {(() => {
               const exact = strong.filter(p => isExact(p) && !done[p.key]);
+              const distinctCount = (pairs ?? []).filter(p => isSameNameDifferentAdmission(p) && !done[p.key]).length;
               if (bulk) return (
                 <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#3730a3", fontWeight: 700 }}>
                   Merging… {bulk.done} / {bulk.total}
                 </div>
               );
-              if (exact.length < 2) return null;
+              if (exact.length === 0 && distinctCount === 0) return null;
               return (
                 <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "10px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 12.5, color: "#3730a3" }}>
-                    <b>{exact.length}</b> pairs match on admission number, name <i>and</i> phone — almost certainly the same student entered twice.
+                    <b>{exact.length}</b> pair{exact.length !== 1 ? "s" : ""} match on admission number <i>and</i> name — the same student entered twice.
+                    {distinctCount > 0 && <> <b>{distinctCount}</b> same-name pair{distinctCount !== 1 ? "s" : ""} with different admission numbers will be kept separate.</>}
                   </span>
                   {confirmBulk ? (
                     <span style={{ display: "flex", gap: 6 }}>
-                      <button onClick={mergeAllExact} disabled={!!busy} style={btn("#4f46e5", "#fff", "#4f46e5")}>Yes, merge all {exact.length}</button>
+                      <button onClick={mergeAllExact} disabled={!!busy} style={btn("#4f46e5", "#fff", "#4f46e5")}>Yes, merge {exact.length}{distinctCount ? ` · keep ${distinctCount} separate` : ""}</button>
                       <button onClick={() => setConfirmBulk(false)} style={btn("#fff", "#374151", "#d1d5db")}>Cancel</button>
                     </span>
                   ) : (
