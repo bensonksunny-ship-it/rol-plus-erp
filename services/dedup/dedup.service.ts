@@ -6,6 +6,10 @@
 // then the duplicate is retired — role "merged_student", status "merged",
 // mergedInto → kept uid — and taken off its centre. Never deleted, so a wrong
 // merge can be traced.
+//
+// Re-enrolment is different: findEnrolmentMatch finds the student an incoming
+// admission belongs to, and enroll.service updates that record in place — no
+// second doc is ever created, so there is nothing to merge afterwards.
 // =============================================================================
 
 import {
@@ -14,8 +18,10 @@ import {
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
+import { inWing, wingOf } from "@/lib/wing";
+import type { Wing } from "@/types";
 import {
-  compareKeys, findMatches, normAdmNo, normEmail, normName, normPhone,
+  compareKeys, findMatches, normAdmNo, normDob, normEmail, normName, normPhone,
   type DedupCandidate, type DedupMatch, type MatchLevel, type PersonKeys,
 } from "@/lib/dedup";
 
@@ -29,6 +35,7 @@ function studentCandidate(id: string, d: Record<string, unknown>): DedupCandidat
     name: str(d.displayName) || str(d.name), phone: str(d.phone), email: str(d.email),
     dob: str(d.dob), admissionNo: str(d.admissionNumber) || str(d.admissionNo),
     status: str(d.status) || str(d.studentStatus) || "active", centre: str(d.centerId),
+    wing: wingOf(d),
   };
 }
 
@@ -66,6 +73,45 @@ export async function loadDedupCandidates(opts: { applications?: boolean; enquir
   }
   await Promise.all(jobs);
   return out;
+}
+
+// ─── Enrolment match ─────────────────────────────────────────────────────────
+
+export interface EnrolmentMatch { id: string; data: Record<string, unknown>; reasons: string[] }
+
+/**
+ * The existing student an enrolment should merge into instead of creating a
+ * new one — same wing only (no data crosses wings). Same person means:
+ *   • same admission number AND same name, or
+ *   • same name AND (same phone OR same date of birth) — even when the typed
+ *     admission number differs; the student keeps their original number.
+ * Same admission number with a different name is NOT a match (conflicting
+ * names are never auto-merged — the admission-number check blocks it instead).
+ * Several copies → prefer the admission-number match, then active, then one
+ * with a centre.
+ */
+export async function findEnrolmentMatch(keys: PersonKeys, wing: Wing): Promise<EnrolmentMatch | null> {
+  const snap = await getDocs(query(collection(db, "users"), where("role", "==", "student")));
+  const name = normName(keys.name), adm = normAdmNo(keys.admissionNo);
+  const phone = normPhone(keys.phone), dob = normDob(keys.dob);
+  if (!name) return null;
+  const hits: (EnrolmentMatch & { score: number })[] = [];
+  for (const d of snap.docs) {
+    const data = d.data() as Record<string, unknown>;
+    if (data.status === "merged" || !inWing(data, wing)) continue;
+    const c = studentCandidate(d.id, data);
+    if (normName(c.name) !== name) continue;
+    const sameAdm = !!adm && normAdmNo(c.admissionNo) === adm;
+    const samePhone = !!phone && normPhone(c.phone) === phone;
+    const sameDob = !!dob && normDob(c.dob) === dob;
+    if (!sameAdm && !samePhone && !sameDob) continue;
+    const reasons = ["same name", sameAdm && "same admission number", samePhone && "same phone", sameDob && "same date of birth"]
+      .filter(Boolean) as string[];
+    const score = (sameAdm ? 4 : 0) + (data.status === "active" ? 2 : 0) + (str(data.centerId) ? 1 : 0);
+    hits.push({ id: d.id, data, reasons, score });
+  }
+  hits.sort((x, y) => y.score - x.score);
+  return hits[0] ? { id: hits[0].id, data: hits[0].data, reasons: hits[0].reasons } : null;
 }
 
 /** Matches for a new/edited person, strongest first. */
@@ -135,7 +181,9 @@ export function suggestPrimary(p: DuplicatePair): string {
 // ─── Auto-merge rules ─────────────────────────────────────────────────────────
 // Same admission number AND same name → the same student entered twice: merge
 // automatically. Same name but DIFFERENT admission numbers → two different
-// students (or a genuine re-admission): never merge, keep separate. Anything
+// students (or a genuine re-admission): never merge, keep separate. Same
+// admission number but DIFFERENT names → conflicting data: never merge
+// automatically, needs a person to review. Applies to both wings. Anything
 // else stays in the manual review list.
 
 const admOf  = (r: StudentRecord) => normAdmNo(str(r.data.admissionNumber) || str(r.data.admissionNo));
@@ -148,6 +196,10 @@ export function isAutoMergePair(p: DuplicatePair): boolean {
 export function isSameNameDifferentAdmission(p: DuplicatePair): boolean {
   const a = admOf(p.a), b = admOf(p.b);
   return !!a && !!b && a !== b && !!nameOf(p.a) && nameOf(p.a) === nameOf(p.b);
+}
+export function isConflictingNames(p: DuplicatePair): boolean {
+  const a = admOf(p.a), na = nameOf(p.a), nb = nameOf(p.b);
+  return !!a && a === admOf(p.b) && !!na && !!nb && na !== nb;
 }
 
 const ACTIVE_RE = /^(active|confirm|confirmed|deactivation_requested|break_requested)$/i;

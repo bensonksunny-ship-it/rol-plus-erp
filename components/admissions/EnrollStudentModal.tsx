@@ -63,7 +63,7 @@ export default function EnrollStudentModal({
   /** The saved screening, if the caller already has it; otherwise it's looked up. */
   screening?: Screening | null;
   onClose: () => void;
-  onEnrolled: (r: { uid: string; name: string; centreName: string }) => void;
+  onEnrolled: (r: { uid: string; name: string; centreName: string; merged: boolean }) => void;
   /** Render as a page section (wizard step 3) instead of a modal. */
   inline?: boolean;
 }) {
@@ -180,17 +180,17 @@ export default function EnrollStudentModal({
     setErr("");
     try {
       const batch = batches.find(b => b.id === batchId) ?? null;
-      const uid = await enrollApplicant({
+      const result = await enrollApplicant({
         application, admissionId, screening,
         centreId, batch, admissionNo: admNo, instrument, syllabusLevel: level,
         monthlyFee: Number(fee), startDate, enrolledBy: user?.uid ?? "", wing: WING,
       });
       // The admission card is a convenience — never fail the enrolment over it.
       await generateAdmissionCardPDF(
-        { ...application, id: admissionId, admissionNumber: admNo.trim() },
+        { ...application, id: admissionId, admissionNumber: result.admissionNo },
         fastTrackCardScreening(screening, instrument),
       ).catch(e => console.error("[EnrollStudentModal] admission card PDF:", e));
-      onEnrolled({ uid, name, centreName: centre?.name ?? "" });
+      onEnrolled({ uid: result.uid, name, centreName: centre?.name ?? "", merged: result.merged });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Enrolment failed.");
       setSaving(false);

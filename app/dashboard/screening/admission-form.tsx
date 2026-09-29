@@ -265,21 +265,28 @@ export function AdmissionFormContent({
     if (!canSubmit || saving) return;
     setSaving(true); setSaveErr("");
     try {
-      if (showAdmNo && await isAdmissionNoTaken(admNo)) {
-        throw new Error(`Admission number ${admNo.trim()} is already in use. Please check and enter a different one.`);
-      }
       let dupIds: string[] = [];
+      let reEnrolAdmNo = "";
       if (!publicWing) {
         const matches = await checkDuplicates({
           name: effectiveName, phone, email, dob: `${dobDD}/${dobMM}/${dobYYYY}`,
           admissionNo: showAdmNo ? admNo : "",
         }, { applications: true });
-        // Exact match → never save. Family / same-name → wait for staff to confirm.
-        if (isBlockingDuplicate(matches) || (matches.length > 0 && !override)) {
+        // Exact match → never save, except an existing student of this wing
+        // (re-enrolment — merged at enrolment). Family / same-name → wait for
+        // staff to confirm.
+        if (isBlockingDuplicate(matches, wing) || (matches.length > 0 && !override)) {
           setDupMatches(matches);
           return;
         }
         dupIds = matches.map(m => m.candidate.id);
+        if (override === "reenrol") {
+          reEnrolAdmNo = matches.find(m => m.candidate.kind === "student" && m.candidate.wing === wing)?.candidate.admissionNo?.trim().toUpperCase() ?? "";
+        }
+      }
+      // A re-enrolled student's own admission number isn't "taken" by someone else.
+      if (showAdmNo && admNo.trim().toUpperCase() !== reEnrolAdmNo && await isAdmissionNoTaken(admNo)) {
+        throw new Error(`Admission number ${admNo.trim()} is already in use. Please check and enter a different one.`);
       }
       setDupMatches([]);
       const payload = {
@@ -737,6 +744,7 @@ export function AdmissionFormContent({
 
       <DuplicateWarning
         matches={dupMatches}
+        reEnrolWing={publicWing ? undefined : wing}
         onContinue={why => { setDupOverride(why); handleSubmit(why); }}
         onCancel={() => setDupMatches([])}
       />

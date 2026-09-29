@@ -25,8 +25,10 @@ import { MAX_TOTAL_MARKS, gradeForMarks, readScreeningMarks } from "@/lib/screen
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { PhotoCaptureModal } from "./photo-capture-modal";
 import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
-import { checkDuplicates } from "@/services/dedup/dedup.service";
-import { duplicateMessage } from "@/lib/dedup";
+import { findEnrolmentMatch } from "@/services/dedup/dedup.service";
+import { mergeIntoStudent } from "@/services/screening/enroll.service";
+import { ToastContainer } from "@/components/ui/Toast";
+import { useToast } from "@/hooks/useToast";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
 
 const s: Record<string, React.CSSProperties> = {
@@ -638,6 +640,7 @@ export function AdmissionsList({
   const [enrollCentre,     setEnrollCentre]     = useState("");
   const [enrolling,        setEnrolling]        = useState(false);
   const [enrollErr,        setEnrollErr]        = useState("");
+  const { toasts, toast, remove: removeToast } = useToast();
 
   // Click / tap outside the expanded applicant detail card — or Escape — closes
   // it. Never while another layer is open on top of it (edit form, delete
@@ -906,13 +909,12 @@ export function AdmissionsList({
     setEnrollErr("");
     try {
       const adm = completing.admission;
-      // Never create a second student for someone already in the Registry.
-      const same = (await checkDuplicates(
-        { name: str(adm.fullName), phone: str(adm.phone), email: str(adm.email), dob: str(adm.dob), admissionNo: str(adm.admissionNumber) },
-        { applications: false },
-      )).find(m => m.level === "same");
-      if (same) { setEnrollErr(duplicateMessage(same)); return; }
-      await addDoc(collection(db, "users"), {
+      // Already in the Registry (this wing)? Merge into that student instead of
+      // creating a duplicate — they keep their original admission number.
+      const match = await findEnrolmentMatch(
+        { name: str(adm.fullName), phone: str(adm.phone), dob: str(adm.dob), admissionNo: str(adm.admissionNumber) }, wing,
+      );
+      const studentDoc: Record<string, unknown> = {
         name:            str(adm.fullName),
         role:            "student",
         phone:           str(adm.phone),
@@ -933,12 +935,21 @@ export function AdmissionsList({
         wing,
         createdVia:      "import",
         createdAt:       serverTimestamp(),
-      });
+      };
+      if (match) {
+        await mergeIntoStudent(match, studentDoc, { admissionId: str(adm.id), enrolledBy: user?.uid ?? "" });
+      } else {
+        await addDoc(collection(db, "users"), studentDoc);
+      }
       await deleteAdmission(str(adm.id));
       setAdmissions(prev => prev.filter(a => str(a.id) !== str(adm.id)));
       closeCompleting();
+      toast(match
+        ? "Existing profile detected — enrollment completed & updated information merged into Registry."
+        : `Student ${str(adm.fullName)} successfully enrolled!`, "success");
     } catch (err) {
       console.error("Enrollment failed:", err);
+      setEnrollErr(err instanceof Error ? err.message : "Enrollment failed.");
     } finally {
       setEnrolling(false);
     }
@@ -1002,6 +1013,7 @@ export function AdmissionsList({
 
   return (
     <div>
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
       {formModal}
       {newAdmissionModals}
       {/* Edit overlay */}
@@ -1192,7 +1204,7 @@ export function AdmissionsList({
               </div>
               {enrollErr && (
                 <div role="alert" style={{ margin: "0 24px 12px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "#991b1b" }}>
-                  ⛔ {enrollErr} — not enrolled again.
+                  ⛔ {enrollErr}
                 </div>
               )}
               <div style={{ padding: "0 24px 24px", display: "flex", gap: 10 }}>

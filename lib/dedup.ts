@@ -33,6 +33,8 @@ export interface DedupCandidate extends PersonKeys {
   status: string;
   /** Centre name or id, for display. */
   centre?: string;
+  /** Owning wing (students only; legacy docs = default wing). */
+  wing?:   string;
 }
 
 export interface DedupMatch {

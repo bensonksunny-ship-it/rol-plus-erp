@@ -4,17 +4,20 @@ import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  arrayUnion,
   collection,
+  doc,
   getDocs,
+  onSnapshot,
   query,
+  updateDoc,
   where,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
-import { ROLES } from "@/config/constants";
+import { ROLES, CENTER_STATUS } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
-import { getCenterById } from "@/services/center/center.service";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
@@ -100,7 +103,7 @@ export default function TeacherDashboardPage() {
 
 function TeacherDashboardContent() {
   const { user } = useAuthContext();
-  const { isTeacherRole, filterCentres } = useCentreAccess();
+  const { isTeacherRole } = useCentreAccess();
   const router       = useRouter();
   const searchParams = useSearchParams();
 
@@ -145,41 +148,73 @@ function TeacherDashboardContent() {
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(null);
   const [statsLoading,  setStatsLoading]  = useState(false);
 
-  // ── Load assigned centres ────────────────────────────────────────────────
+  // ── Load assigned centres (live) ─────────────────────────────────────────
+  // Listens to the centres collection so an assignment made on the Enrollments
+  // page shows up here without a reload. A teacher's centres are the active ones
+  // where they are the centre teacher, a batch teacher, or listed in their own
+  // centerIds — the centre doc is the source of truth, centerIds can lag behind.
   useEffect(() => {
     if (!user) return;
-    if (isTeacherRole && centerIds.length === 0) { setCentreLoading(false); return; }
     setCentreLoading(true);
+    const uid = user.uid;
+    const healed = new Set<string>();
+    const unsub = onSnapshot(collection(db, "centers"), snap => {
+      const active = snap.docs
+        .map(d => ({ id: d.id, ...d.data() } as Center))
+        .filter(c => String(c.status ?? CENTER_STATUS.ACTIVE).toLowerCase() === CENTER_STATUS.ACTIVE);
+      const mine = isTeacherRole
+        ? active.filter(c => isAssignedTeacher(c, uid) || centerIds.includes(c.id))
+        : active;
+      mine.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+      setCenters(mine);
+      setCentreLoading(false);
+
+      // Self-heal: add centres assigned on the centre doc but missing from the
+      // teacher's centerIds, so centre-access checks on other pages allow them.
+      if (isTeacherRole) {
+        const missing = mine.map(c => c.id).filter(id => !centerIds.includes(id) && !healed.has(id));
+        if (missing.length > 0) {
+          missing.forEach(id => healed.add(id));
+          updateDoc(doc(db, "users", uid), { centerIds: arrayUnion(...missing) })
+            .catch(err => console.warn("Failed to sync teacher centerIds:", err));
+        }
+      }
+    }, err => {
+      console.error("Failed to load centers:", err);
+      setCentreLoading(false);
+    });
+    return unsub;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid, centerIdsKey, isTeacherRole]);
+
+  // Stable key of the assigned centre ids — the snapshot above re-emits on any
+  // centre edit, but attendance/stats only need refetching when the set changes.
+  const assignedIdsKey = useMemo(() => centers.map(c => c.id).join(","), [centers]);
+
+  useEffect(() => {
+    const cIds = assignedIdsKey ? assignedIdsKey.split(",") : [];
+    if (cIds.length === 0) { setMarkedCentreIds(new Set()); return; }
     (async () => {
       try {
-        let mine: Center[];
-        if (centerIds.length > 0) {
-          const results = await Promise.allSettled(centerIds.map(id => getCenterById(id)));
-          mine = results
-            .filter((r): r is PromiseFulfilledResult<Center> => r.status === "fulfilled")
-            .map(r => r.value);
-        } else {
-          const snap = await getDocs(collection(db, "centers"));
-          mine = snap.docs.map(d => ({ id: d.id, ...d.data() } as Center));
-        }
-        const filtered = filterCentres(mine);
-        setCenters(filtered);
-        const cIds = filtered.map(c => c.id).filter(Boolean);
-        if (cIds.length > 0) {
-          try {
-            setMarkedCentreIds(await fetchMarkedCentreIds(cIds, today));
-          } catch (err) {
-            console.error("Failed to load today attendance:", err);
-          }
-        }
+        setMarkedCentreIds(await fetchMarkedCentreIds(cIds, today));
       } catch (err) {
-        console.error("Failed to load centers:", err);
-      } finally {
-        setCentreLoading(false);
+        console.error("Failed to load today attendance:", err);
       }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, centerIdsKey]);
+  }, [assignedIdsKey, today]);
+
+  // Today's Classes: assigned centres with a class (the teacher's own batches,
+  // or the centre schedule) on today's weekday. My Centres lists all of them.
+  const slotUid = isTeacherRole ? (user?.uid ?? null) : null;
+  const todayCentres = useMemo(() => {
+    const dayNum = new Date().getDay();
+    return centers.flatMap(c => {
+      const times = classSlots(c, slotUid).filter(sl => sl.days.includes(dayNum)).map(sl => sl.time);
+      return times.length > 0 ? [{ centre: c, times: times.filter(Boolean) }] : [];
+    });
+  }, [centers, slotUid]);
+  const isTodayPending = (t: { centre: Center; times: string[] }) =>
+    !markedCentreIds.has(t.centre.id) && classHasEnded(t.times[t.times.length - 1] ?? t.centre.timeSlot ?? "");
 
   // ── Load centre workspace data when centreIdParam changes ────────────────
   const loadCenterData = useCallback(async (centerId: string) => {
@@ -409,7 +444,7 @@ function TeacherDashboardContent() {
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centreIdParam, centers]);
+  }, [centreIdParam, assignedIdsKey]);
 
   // ── Navigation helpers ────────────────────────────────────────────────────
   function goToCentre(id: string, tab: "attendance" | "students" | "progress" = "attendance") {
@@ -430,7 +465,7 @@ function TeacherDashboardContent() {
 
   // ── Centre Workspace (centreIdParam present + valid) ──────────────────────
   if (centreIdParam && selectedCentreObj) {
-    const daysOfWeek = parseDaysOfWeek(selectedCentreObj.timeSlot ?? "");
+    const daysOfWeek = classDayNames(selectedCentreObj, slotUid);
 
     return (
       <div style={s.page}>
@@ -505,9 +540,7 @@ function TeacherDashboardContent() {
     <div style={s.page}>
       {/* Hero */}
       {(() => {
-        const todayDayNum  = new Date().getDay();
-        const todayCentres = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum));
-        const pendingCount = todayCentres.filter(c => !markedCentreIds.has(c.id) && classHasEnded(c.timeSlot ?? "")).length;
+        const pendingCount = todayCentres.filter(isTodayPending).length;
         return (
           <div style={{
             background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
@@ -579,9 +612,7 @@ function TeacherDashboardContent() {
 
       {/* Pending panel */}
       {showPending && (() => {
-        const todayDayNum  = new Date().getDay();
-        const todayCentres = centers.filter(c => parseDaysOfWeek(c.timeSlot ?? "").some(d => DAY_MAP[d] === todayDayNum));
-        const unmarked     = todayCentres.filter(c => !markedCentreIds.has(c.id) && classHasEnded(c.timeSlot ?? ""));
+        const unmarked = todayCentres.filter(isTodayPending);
         return (
           <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 16, overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.07)" }}>
             <div style={{ padding: "14px 20px", borderBottom: "1px solid #f3f4f6", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -597,11 +628,11 @@ function TeacherDashboardContent() {
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", padding: "12px 0 6px" }}>
                   Attendance not marked today
                 </div>
-                {unmarked.map((c, i) => (
+                {unmarked.map(({ centre: c, times }, i) => (
                   <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 0", borderTop: i === 0 ? "none" : "1px solid #f3f4f6" }}>
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{c.name}</div>
-                      {c.timeSlot && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{c.timeSlot}</div>}
+                      {(times.join(", ") || c.timeSlot) && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{times.join(", ") || c.timeSlot}</div>}
                     </div>
                     <button
                       onClick={() => { setShowPending(false); goToCentre(c.id, "attendance"); }}
@@ -666,23 +697,10 @@ function TeacherDashboardContent() {
         </div>
       ) : (
         <>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>
-            Today's Classes
-          </div>
           {(() => {
-            const todayDayNum = new Date().getDay();
-            const todayCentres = centers.filter(c => {
-              const days = parseDaysOfWeek(c.timeSlot ?? "");
-              return days.some(d => DAY_MAP[d] === todayDayNum);
-            });
-            if (todayCentres.length === 0) {
-              return (
-                <div style={s.emptyState}>No classes scheduled for today.</div>
-              );
-            }
-            return (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-            {todayCentres.map(c => (
+            const sectionTitle = { fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: 12 };
+            const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 };
+            const card = (c: Center, timeLabel: string, showAttendance: boolean) => (
               <div key={c.id}
                 onClick={() => goToCentre(c.id, "attendance")}
                 style={{
@@ -699,8 +717,8 @@ function TeacherDashboardContent() {
                     {c.centerCode}
                   </span>
                 </div>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>{c.timeSlot || "—"}</div>
-                {(() => {
+                <div style={{ fontSize: 12, color: "#6b7280" }}>{timeLabel || "—"}</div>
+                {showAttendance && (() => {
                   const done = markedCentreIds.has(c.id);
                   return (
                     <div style={{
@@ -725,8 +743,25 @@ function TeacherDashboardContent() {
                   ))}
                 </div>
               </div>
-            ))}
-          </div>
+            );
+            return (
+              <>
+                <div style={sectionTitle}>Today&apos;s Classes</div>
+                {todayCentres.length === 0 ? (
+                  <div style={s.emptyState}>No classes scheduled for today.</div>
+                ) : (
+                  <div style={grid}>
+                    {todayCentres.map(t => card(t.centre, t.times.join(", ") || t.centre.timeSlot, true))}
+                  </div>
+                )}
+
+                <div style={{ ...sectionTitle, marginTop: 24 }}>
+                  {isTeacherRole ? "My Centres" : "All Centres"} ({centers.length})
+                </div>
+                <div style={grid}>
+                  {centers.map(c => card(c, scheduleLabel(c, slotUid), false))}
+                </div>
+              </>
             );
           })()}
         </>
@@ -749,6 +784,45 @@ const DAY_MAP: Record<string, number> = {
 function parseDaysOfWeek(timeSlot: string): string[] {
   const tokens = timeSlot.toLowerCase().split(/[\s/,]+/);
   return tokens.filter(t => t in DAY_MAP);
+}
+
+/** True when uid teaches at the centre — as the centre teacher or any batch's teacher. */
+function isAssignedTeacher(c: Center, uid: string): boolean {
+  return c.teacherUid === uid || (c.batches ?? []).some(b => b.teacherUid === uid);
+}
+
+/**
+ * The weekly class slots at a centre. With batches, each batch is a slot and a
+ * teacher (uid) sees only the batches they take ("" batch teacher = centre
+ * teacher), falling back to all batches if none are theirs. Without batches the
+ * centre's timeSlot is the one slot. uid null = everyone's slots (admins).
+ */
+function classSlots(c: Center, uid: string | null): { days: number[]; dayNames: string[]; time: string }[] {
+  const batches = c.batches ?? [];
+  if (batches.length === 0) {
+    const dayNames = parseDaysOfWeek(c.timeSlot ?? "");
+    return [{ days: dayNames.map(d => DAY_MAP[d]), dayNames, time: c.timeSlot ?? "" }];
+  }
+  const mine = uid ? batches.filter(b => (b.teacherUid || c.teacherUid) === uid) : [];
+  return (mine.length > 0 ? mine : batches).map(b => {
+    const dayNames = (b.daysOfWeek ?? []).map(d => d.toLowerCase()).filter(d => d in DAY_MAP);
+    const time = b.startTime && b.endTime ? `${b.startTime}–${b.endTime}` : "";
+    const label = batches.length > 1 && b.name ? `${b.name} ${time}`.trim() : time;
+    return { days: dayNames.map(d => DAY_MAP[d]), dayNames, time: label };
+  });
+}
+
+/** Every class day at the centre for this teacher, as lowercase day names. */
+function classDayNames(c: Center, uid: string | null): string[] {
+  return [...new Set(classSlots(c, uid).flatMap(sl => sl.dayNames))];
+}
+
+/** Full weekly schedule for a My Centres card, e.g. "Mon/Wed 17:00–18:00". */
+function scheduleLabel(c: Center, uid: string | null): string {
+  if ((c.batches ?? []).length === 0) return c.timeSlot ?? "";
+  return classSlots(c, uid)
+    .map(sl => [sl.time, sl.dayNames.map(d => d[0].toUpperCase() + d.slice(1, 3)).join("/")].filter(Boolean).join(" · "))
+    .join(" | ");
 }
 
 function parseClassEndMinutes(timeSlot: string): number | null {

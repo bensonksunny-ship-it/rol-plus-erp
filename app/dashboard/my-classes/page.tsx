@@ -1,14 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import { collection, getDocs, onSnapshot, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
-import { ROLES } from "@/config/constants";
+import { ROLES, CENTER_STATUS } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
+import { useCentreAccess } from "@/hooks/useCentreAccess";
 import { isTeacher } from "@/types";
-import { getCenterById } from "@/services/center/center.service";
+import { centreTeacherUids } from "@/services/center/center.service";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
@@ -85,8 +87,66 @@ interface StudentData {
 export default function MyClassesPage() {
   return (
     <ProtectedRoute allowedRoles={[ROLES.TEACHER, ROLES.ADMIN, ROLES.SUPER_ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
-      <MyClassesContent />
+      <Suspense fallback={<div style={s.state}>Loading…</div>}>
+        <MyClassesContent />
+      </Suspense>
     </ProtectedRoute>
+  );
+}
+
+// ─── Centre pill bar ──────────────────────────────────────────────────────────
+// One compact row that scrolls sideways. A thin visible scrollbar, edge fades and
+// ‹ › arrows show when more centres are off-screen, and the selected pill is
+// scrolled into view — so no centre is hidden without a cue.
+
+function CentrePills({ centers, selectedId, onSelect }: {
+  centers: Center[]; selectedId: string; onSelect: (id: string) => void;
+}) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+
+  const measure = useCallback(() => {
+    const el = rowRef.current;
+    if (!el) return;
+    setEdges({ left: el.scrollLeft > 2, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 2 });
+  }, []);
+
+  useEffect(() => {
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [measure, centers.length]);
+
+  useEffect(() => {
+    rowRef.current?.querySelector<HTMLElement>(`[data-centre="${selectedId}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+  }, [selectedId]);
+
+  const nudge = (dir: 1 | -1) => rowRef.current?.scrollBy({ left: dir * rowRef.current.clientWidth * 0.7, behavior: "smooth" });
+
+  return (
+    <div style={s.pillWrap}>
+      <style>{`.centre-pills::-webkit-scrollbar{height:4px}.centre-pills::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:99px}`}</style>
+      {edges.left && <button type="button" aria-label="Scroll centres left" onClick={() => nudge(-1)} style={{ ...s.pillArrow, left: 0 }}>‹</button>}
+      <div ref={rowRef} className="centre-pills" onScroll={measure} role="tablist" aria-label="Centres"
+        style={{
+          ...s.pillRow,
+          maskImage: `linear-gradient(to right, ${edges.left ? "transparent, #000 28px" : "#000"}, ${edges.right ? "#000 calc(100% - 28px), transparent" : "#000"})`,
+          WebkitMaskImage: `linear-gradient(to right, ${edges.left ? "transparent, #000 28px" : "#000"}, ${edges.right ? "#000 calc(100% - 28px), transparent" : "#000"})`,
+        }}>
+        {centers.map(c => {
+          const active = c.id === selectedId;
+          return (
+            <button key={c.id} type="button" role="tab" aria-selected={active} data-centre={c.id}
+              onClick={() => onSelect(c.id)}
+              style={{ ...s.pill, ...(active ? s.pillActive : {}) }}>
+              <span style={{ opacity: active ? 1 : 0.6 }}>🏫</span> {c.name}
+            </button>
+          );
+        })}
+      </div>
+      {edges.right && <button type="button" aria-label="Scroll centres right" onClick={() => nudge(1)} style={{ ...s.pillArrow, right: 0 }}>›</button>}
+    </div>
   );
 }
 
@@ -95,7 +155,11 @@ export default function MyClassesPage() {
 function MyClassesContent() {
   const { user } = useAuthContext();
 
-  const centerIds: string[] = user && isTeacher(user) ? user.centerIds : [];
+  const centerIds: string[] = user && isTeacher(user) ? user.centerIds ?? [] : [];
+  const { isTeacherRole } = useCentreAccess();
+  const router       = useRouter();
+  const searchParams = useSearchParams();
+  const centreParam  = searchParams.get("centerId") ?? "";
 
   const [centers,          setCenters]          = useState<Center[]>([]);
   const [selectedCenterId, setSelectedCenterId] = useState<string>("");
@@ -117,32 +181,50 @@ function MyClassesContent() {
   const [savingAtt,    setSavingAtt]    = useState<string | null>(null);
   const [attLoading,   setAttLoading]   = useState(false);
 
-  // ── Load centres ────────────────────────────────────────────────────────────
+  // ── Load centres (live) ─────────────────────────────────────────────────────
+  // Same matching as the teacher dashboard: a teacher's centres are the active
+  // ones where they are the centre teacher, any batch's teacher, or listed in
+  // their centerIds (which can lag behind the centre docs). Both wings.
   useEffect(() => {
     if (!user) return;
     setCentersLoading(true);
-    (async () => {
-      try {
-        let list: Center[];
-        if (centerIds.length > 0) {
-          const results = await Promise.allSettled(centerIds.map(id => getCenterById(id)));
-          list = results
-            .filter((r): r is PromiseFulfilledResult<Center> => r.status === "fulfilled")
-            .map(r => r.value);
-        } else {
-          const snap = await getDocs(collection(db, "centers"));
-          list = snap.docs.map(d => ({ id: d.id, ...d.data() } as Center));
-        }
-        setCenters(list);
-        if (list.length > 0) setSelectedCenterId(list[0].id);
-      } catch (err) {
-        console.error("Failed to load centres:", err);
-      } finally {
-        setCentersLoading(false);
-      }
-    })();
+    const uid = user.uid;
+    const unsub = onSnapshot(collection(db, "centers"), snap => {
+      const active = snap.docs
+        .map(d => ({ id: d.id, ...d.data() } as Center))
+        .filter(c => String(c.status ?? CENTER_STATUS.ACTIVE).toLowerCase() === CENTER_STATUS.ACTIVE);
+      const list = isTeacherRole
+        ? active.filter(c => centreTeacherUids(c.teacherUid, c.batches).has(uid) || centerIds.includes(c.id))
+        : active;
+      list.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+      setCenters(list);
+      setSelectedCenterId(prev => {
+        if (list.some(c => c.id === prev)) return prev;
+        const fromUrl = new URLSearchParams(window.location.search).get("centerId");
+        return list.some(c => c.id === fromUrl) ? fromUrl! : list[0]?.id ?? "";
+      });
+      setCentersLoading(false);
+    }, err => {
+      console.error("Failed to load centres:", err);
+      setCentersLoading(false);
+    });
+    return unsub;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid]);
+  }, [user?.uid, centerIds.join(","), isTeacherRole]);
+
+  // ── Keep the selected centre in the URL (?centerId=…) ───────────────────────
+  // Back/forward or a shared link changes the param → follow it.
+  useEffect(() => {
+    if (centreParam && centreParam !== selectedCenterId && centers.some(c => c.id === centreParam)) {
+      setSelectedCenterId(centreParam);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centreParam]);
+
+  const selectCentre = useCallback((id: string) => {
+    setSelectedCenterId(id);
+    router.replace(`/dashboard/my-classes?centerId=${id}`, { scroll: false });
+  }, [router]);
 
   // ── Load students when centre changes ────────────────────────────────────────
   useEffect(() => {
@@ -305,14 +387,7 @@ function MyClassesContent() {
           </div>
         </div>
       ) : (
-        <div style={s.tabStrip}>
-          {centers.map(c => (
-            <button key={c.id} onClick={() => setSelectedCenterId(c.id)}
-              style={{ ...s.tab, ...(selectedCenterId === c.id ? s.tabActive : {}) }}>
-              🏫 {c.name}
-            </button>
-          ))}
-        </div>
+        <CentrePills centers={centers} selectedId={selectedCenterId} onSelect={selectCentre} />
       )}
 
       {centers.length > 1 && selectedCentre?.timeSlot && (
@@ -606,9 +681,12 @@ const s: Record<string, React.CSSProperties> = {
   page:  { maxWidth: 820, margin: "0 auto", paddingBottom: 40 },
   state: { padding: "60px 0", textAlign: "center", fontSize: 14, color: "#9ca3af" },
 
-  tabStrip:  { display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, marginBottom: 16, scrollbarWidth: "none" },
-  tab:       { padding: "8px 18px", borderRadius: 99, border: "1px solid #e5e7eb", background: "#f9fafb", color: "#6b7280", fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" as const, flexShrink: 0 },
-  tabActive: { background: "#4f46e5", border: "1px solid #4f46e5", color: "#fff" },
+  // Compact centre pills: one scrolling row (see CentrePills).
+  pillWrap:   { position: "relative", marginBottom: 12 },
+  pillRow:    { display: "flex", alignItems: "center", gap: 8, overflowX: "auto", whiteSpace: "nowrap", padding: "8px 4px", scrollbarWidth: "thin", scrollbarColor: "#d1d5db transparent", scrollBehavior: "smooth" },
+  pill:       { display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 99, border: "none", background: "#f3f4f6", color: "#374151", fontSize: 12, fontWeight: 500, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, transition: "all 0.15s" },
+  pillActive: { background: "#4f46e5", color: "#fff", boxShadow: "0 1px 2px rgba(79,70,229,0.35)" },
+  pillArrow:  { position: "absolute", top: "50%", transform: "translateY(-50%)", zIndex: 1, width: 26, height: 26, borderRadius: "50%", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 16, lineHeight: 1, cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.12)", display: "flex", alignItems: "center", justifyContent: "center" },
 
   centreHeader:  { display: "flex", alignItems: "center", gap: 12, marginBottom: 20, padding: "16px 20px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12 },
   centreAvatar:  { fontSize: 22, flexShrink: 0 },

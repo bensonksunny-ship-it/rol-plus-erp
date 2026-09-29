@@ -118,7 +118,11 @@ function AdmissionsWizard() {
   // "🎓 Enroll Student" → Student Enrollment & Batch Assignment modal.
   const [enrollFor, setEnrollFor] = useState<Record<string, unknown> | null>(null);
   const { toasts, toast, remove } = useToast();
-  function enrolledToast(r: { name: string; centreName: string }) {
+  function enrolledToast(r: { name: string; centreName: string; merged: boolean }) {
+    if (r.merged) {
+      toast("Existing profile detected — enrollment completed & updated information merged into Registry.", "success");
+      return;
+    }
     toast(`Student ${r.name} successfully enrolled${r.centreName ? ` into ${r.centreName}` : ""}!`, "success");
   }
   const [newEnquiries, setNewEnquiries]   = useState(0);

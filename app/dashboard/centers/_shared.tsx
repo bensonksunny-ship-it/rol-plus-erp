@@ -633,7 +633,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
             uid: d.id,
             name: (st.displayName ?? st.name ?? "-") as string,
             admissionNo: (st.admissionNo ?? st.admissionNumber ?? "") as string,
-            status: (st.status ?? st.studentStatus ?? "active") as string,
+            status: (st.status ?? st.studentStatus ?? "") as string,
             createdAt: toISODateLocal(st.createdAt),
             photo: studentPhoto(st),
             instrument: (st.instrument ?? "") as string,
@@ -871,8 +871,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
                 <QuickFact label="Time"     value={formatTimeRange12(raw.startTime, raw.endTime) || "-"} />
               </>}
               {/* Primary metric = current strength; all-time registrations only as a subtle secondary line. */}
-              <QuickFact label="Students" value={String(activeCount)}
-                hint={students.length !== activeCount ? `Active: ${activeCount} | Historic total: ${students.length}` : undefined} />
+              <QuickFact label="Students" value={String(activeCount)} />
               {center.monthlyFee ? (
                 <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
               ) : null}
@@ -1129,7 +1128,6 @@ function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
 // ─── Students Tab (roster + active/inactive management) ────────────────────
 
 /** The centre's Inactive tab only lists students made inactive this recently. */
-const INACTIVE_WINDOW_DAYS = 60;
 
 function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, onAdmissionNoAssigned, onAddStudents, wing, centerId, centerName }: {
   students: CenterStudentRec[];
@@ -1146,10 +1144,12 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
   centerName: string;
 }) {
   const [search, setSearch]     = useState("");
-  const [msg, setMsg]           = useState<{ type: "success" | "error"; text: string; undo?: { uid: string; prev: string } } | null>(null);
+  const [msg, setMsg]           = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [showAdd, setShowAdd]   = useState(false);
-  const [busyUid, setBusyUid]   = useState<string | null>(null);
-  const [view, setView]         = useState<"active" | "inactive" | "needsAdmNo">("active");
+  const [view, setView]         = useState<"active" | "needsAdmNo">("active");
+  // Active students switched off but not yet saved — "Save Active Roster" commits them.
+  const [unticked, setUnticked] = useState<Set<string>>(new Set());
+  const [savingRoster, setSavingRoster] = useState(false);
   const [preview, setPreview]   = useState<CenterStudentRec | null>(null);
   // Batch filter — only offered when the centre runs more than one batch.
   const [batchFilter, setBatchFilter] = useState<string>("all");
@@ -1157,31 +1157,21 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
   const { user: me, role: myRole } = useAuth();
   const canApprove = canApproveDeactivation(myRole, wing);
 
-  // Banners auto-dismiss; an Undo banner stays 6 s — long enough to react.
+  // Banners auto-dismiss.
   const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   function flash(next: NonNullable<typeof msg>) {
     if (msgTimer.current) clearTimeout(msgTimer.current);
     setMsg(next);
-    msgTimer.current = setTimeout(() => setMsg(null), next.undo ? 6000 : 4000);
+    msgTimer.current = setTimeout(() => setMsg(null), 4000);
   }
   useEffect(() => () => { if (msgTimer.current) clearTimeout(msgTimer.current); }, []);
 
   const activeStudents   = useMemo(() => students.filter(countsAsActive), [students]);
   // Active status but no admission number — held out of the active roster until assigned.
   const needsAdmNo       = useMemo(() => students.filter(s => isActiveStudentStatus(s.status) && !hasAdmissionNo(s.admissionNo)), [students]);
-  // Everyone else registered here (inactive, cancelled…) — soft-deleted rows stay hidden.
-  // Only students made inactive in the last 60 days — older ones stay in the
-  // Master Registry. A record with no date at all is shown (can't prove it's old).
-  const inactiveStudents = useMemo(() => {
-    const cutoff = new Date(Date.now() - INACTIVE_WINDOW_DAYS * 86400000).toISOString();
-    return students.filter(s =>
-      !isActiveStudentStatus(s.status) && s.status !== "deleted"
-      && (!s.inactiveSince || s.inactiveSince >= cutoff));
-  }, [students]);
-  // Inactive for longer than the window — hidden here, still in the Registry.
-  const olderInactive = students.filter(s =>
-    !isActiveStudentStatus(s.status) && s.status !== "deleted" && !inactiveStudents.includes(s)).length;
-  const listed = view === "active" ? activeStudents : view === "inactive" ? inactiveStudents : needsAdmNo;
+  // Inactive students are never listed here — the centre roster shows only
+  // students manually added as Active. Inactive records live in the Master Registry.
+  const listed = view === "active" ? activeStudents : needsAdmNo;
 
   const inBatch = (s: CenterStudentRec) =>
     batchFilter === "all" ? true
@@ -1229,34 +1219,30 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
     flash({ type: "success", text: `Roster saved — ${parts.join(", ")}.` });
   }
 
-  async function handleDeactivate(s: CenterStudentRec) {
-    setBusyUid(s.uid);
-    try {
-      if (!canApprove) {
-        if (!me) throw new Error("Not signed in.");
-        await requestStudentDeactivation(s.uid, { uid: me.uid, role: myRole, name: me.displayName, wing });
-        onStatusChanged(s.uid, DEACTIVATION_REQUESTED);
-        flash({ type: "success", text: "Your request has been sent for review." });
-        return;
-      }
-      await onSetStatus(s.uid, "inactive");
-      flash({ type: "success", text: `${s.name} marked inactive.`, undo: { uid: s.uid, prev: s.status || "active" } });
-    } catch (err) {
-      flash({ type: "error", text: err instanceof Error ? err.message : "Failed to update." });
-    } finally {
-      setBusyUid(null);
-    }
+  // Switched-off students still on the active roster (a pending-review row can't be toggled).
+  const pendingOff = useMemo(
+    () => activeStudents.filter(s => unticked.has(s.uid) && s.status !== DEACTIVATION_REQUESTED),
+    [activeStudents, unticked]);
+
+  function toggleActive(uid: string) {
+    setUnticked(prev => {
+      const next = new Set(prev);
+      if (next.has(uid)) next.delete(uid); else next.add(uid);
+      return next;
+    });
   }
 
-  async function handleRestore(s: CenterStudentRec, prev = "active", viaUndo = false) {
-    setBusyUid(s.uid);
+  /** Commits the switches: every switched-off student goes Inactive (or to review for teachers). */
+  async function saveActiveRoster() {
+    if (pendingOff.length === 0) return;
+    setSavingRoster(true);
     try {
-      await onSetStatus(s.uid, prev);
-      flash({ type: "success", text: viaUndo ? `Undone — ${s.name} is active again.` : `${s.name} restored to Active.` });
+      await handleAssign([], pendingOff.map(s => ({ uid: s.uid, name: s.name })));
+      setUnticked(new Set());
     } catch (err) {
-      flash({ type: "error", text: err instanceof Error ? err.message : "Failed to restore." });
+      flash({ type: "error", text: err instanceof Error ? err.message : "Failed to save roster." });
     } finally {
-      setBusyUid(null);
+      setSavingRoster(false);
     }
   }
 
@@ -1304,9 +1290,6 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
           <div role="tablist" aria-label="Student status" style={{ display: "flex", gap: 6 }}>
             <button role="tab" aria-selected={view === "active"} onClick={() => setView("active")} style={pill(view === "active")}>
               Active ({activeStudents.length})
-            </button>
-            <button role="tab" aria-selected={view === "inactive"} onClick={() => setView("inactive")} style={pill(view === "inactive")}>
-              Inactive ({inactiveStudents.length})
             </button>
             {needsAdmNo.length > 0 && (
               <button role="tab" aria-selected={view === "needsAdmNo"} onClick={() => setView("needsAdmNo")}
@@ -1367,29 +1350,40 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
           display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
         }} role="status">
           <span>{msg.text}</span>
-          {msg.undo && (() => {
-            const u = msg.undo;
-            const st = students.find(x => x.uid === u.uid);
-            return st ? (
-              <button onClick={() => handleRestore(st, u.prev, true)} disabled={busyUid === u.uid}
-                style={{ background: "#fff", border: "1px solid #86efac", borderRadius: 6, padding: "3px 12px", fontSize: 12, fontWeight: 700, color: "#15803d", cursor: "pointer", flexShrink: 0 }}>
-                {busyUid === u.uid ? "…" : "↶ Undo"}
-              </button>
-            ) : null;
-          })()}
         </div>
       )}
 
-      {view === "inactive" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const, fontSize: 12.5, color: "#475569", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
-          <span aria-hidden>ℹ️</span>
+      {view === "active" && activeStudents.length > 0 && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const,
+          marginBottom: 10, padding: "9px 12px", borderRadius: 8, fontSize: 12.5,
+          background: pendingOff.length ? "#fffbeb" : "#f8fafc",
+          border: `1px solid ${pendingOff.length ? "#fde68a" : "#e2e8f0"}`,
+          color: pendingOff.length ? "#92400e" : "#475569",
+        }}>
           <span>
-            Showing students marked inactive in the last {INACTIVE_WINDOW_DAYS} days.{" "}
-            {olderInactive > 0
-              ? <><b>{olderInactive}</b> older inactive record{olderInactive !== 1 ? "s are" : " is"} in the{" "}</>
-              : <>Older inactive records are accessible in the{" "}</>}
-            <a href="/dashboard/registry" style={{ color: "#4f46e5", fontWeight: 600 }}>Master Registry</a>.
+            {pendingOff.length === 0
+              ? <>Switch a student <b>off</b> and save to remove them from the active roster.</>
+              : canApprove
+                ? <><b>{pendingOff.length}</b> switched off — they&apos;ll be marked <b>Inactive</b> on save (still in the Master Registry).</>
+                : <><b>{pendingOff.length}</b> switched off — they&apos;ll be <b>sent for inactivation review</b> on save.</>}
           </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            {pendingOff.length > 0 && (
+              <button type="button" onClick={() => setUnticked(new Set())} disabled={savingRoster}
+                style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, color: "#374151", cursor: "pointer" }}>
+                Discard
+              </button>
+            )}
+            <button type="button" onClick={saveActiveRoster} disabled={savingRoster || pendingOff.length === 0}
+              style={{
+                background: "#4f46e5", border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 12.5, fontWeight: 700, color: "#fff",
+                cursor: savingRoster || pendingOff.length === 0 ? "default" : "pointer",
+                opacity: savingRoster || pendingOff.length === 0 ? 0.5 : 1,
+              }}>
+              {savingRoster ? "Saving…" : "Save Active Roster"}
+            </button>
+          </div>
         </div>
       )}
 
@@ -1397,7 +1391,7 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
         <div style={{ textAlign: "center" as const, padding: "48px 0", color: "#9ca3af", fontSize: 13 }}>
           {view === "active"
             ? <>No active students at this centre yet. Use the <strong>+</strong> button to add some.</>
-            : view === "inactive" ? <>No students marked inactive here in the last {INACTIVE_WINDOW_DAYS} days.</> : <>Every active student has an admission number.</>}
+            : <>Every active student has an admission number.</>}
         </div>
       ) : filtered.length === 0 ? (
         <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No students match.</div>
@@ -1417,7 +1411,7 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
                 <th style={{ ...rosterTh, width: "38%" }}>Student</th>
                 <th style={rosterTh}>Instrument</th>
                 <th style={rosterTh}>Batch</th>
-                <th style={{ ...rosterTh, width: view === "active" ? 160 : 210 }} />
+                <th style={{ ...rosterTh, width: 160 }}>{view === "active" ? "Active" : ""}</th>
               </tr>
             </thead>
             <tbody>
@@ -1429,7 +1423,11 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
                   title="View student details"
                   aria-label={`View details for ${s.name}`}
                   className="hover:bg-indigo-50 focus:bg-indigo-50 focus:outline-none"
-                  style={{ background: i % 2 === 0 ? "#fff" : "#fafafa", cursor: "pointer" }}>
+                  style={{
+                    background: view === "active" && unticked.has(s.uid) ? "#fef2f2" : i % 2 === 0 ? "#fff" : "#fafafa",
+                    opacity: view === "active" && unticked.has(s.uid) ? 0.7 : 1,
+                    cursor: "pointer",
+                  }}>
                   <td style={{ ...rosterTd, paddingRight: 0, verticalAlign: "middle" as const }}>
                     <StudentAvatar name={s.name} photo={s.photo} />
                   </td>
@@ -1447,24 +1445,14 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
                         style={{ ...rowBtn("restore", false), background: "#fef2f2", borderColor: "#fecaca", color: "#b91c1c" }}>
                         Assign No.
                       </button>
-                    ) : view === "active" ? (
-                      s.status === DEACTIVATION_REQUESTED ? (
+                    ) : s.status === DEACTIVATION_REQUESTED ? (
                         <span title={wing === WINGS.ROL_PLUS ? "Inactivation requested — waiting for an Admin" : "Inactivation requested — waiting for a Chief Teacher / Director"}
                           style={{ fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 999, padding: "2px 8px", whiteSpace: "nowrap" as const }}>
                           ⏳ Pending review
                         </span>
                       ) : (
-                        <button onClick={e => { e.stopPropagation(); handleDeactivate(s); }} disabled={busyUid === s.uid} style={rowBtn("neutral", busyUid === s.uid)}>
-                          {busyUid === s.uid ? "…" : canApprove ? "Deactivate" : "Request inactive"}
-                        </button>
-                      )
-                    ) : (
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
-                        <StatusBadge status={s.status || "inactive"} />
-                        <button onClick={e => { e.stopPropagation(); handleRestore(s); }} disabled={busyUid === s.uid} style={rowBtn("restore", busyUid === s.uid)}>
-                          {busyUid === s.uid ? "…" : "↺ Restore"}
-                        </button>
-                      </div>
+                        <ActiveSwitch on={!unticked.has(s.uid)} disabled={savingRoster} label={s.name}
+                          onToggle={() => toggleActive(s.uid)} />
                     )}
                   </td>
                 </tr>
@@ -1475,6 +1463,34 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
         </>
       )}
     </div>
+  );
+}
+
+// ─── Active on/off switch for a roster row ─────────────────────────────────────
+
+function ActiveSwitch({ on, disabled, label, onToggle }: {
+  on: boolean; disabled?: boolean; label: string; onToggle: () => void;
+}) {
+  return (
+    <button type="button" role="switch" aria-checked={on} aria-label={`${label} active`} disabled={disabled}
+      title={on ? "Active — switch off to remove from the roster" : "Will be removed on save — switch on to keep"}
+      onClick={e => { e.stopPropagation(); onToggle(); }}
+      onKeyDown={e => e.stopPropagation()}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: 0,
+        cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1,
+      }}>
+      <span aria-hidden style={{
+        position: "relative", width: 36, height: 20, borderRadius: 999, flexShrink: 0,
+        background: on ? "#16a34a" : "#d1d5db", transition: "background 0.15s",
+      }}>
+        <span style={{
+          position: "absolute", top: 2, left: on ? 18 : 2, width: 16, height: 16, borderRadius: "50%",
+          background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,0.25)", transition: "left 0.15s",
+        }} />
+      </span>
+      <span style={{ fontSize: 11.5, fontWeight: 700, color: on ? "#15803d" : "#b91c1c" }}>{on ? "Active" : "Inactive"}</span>
+    </button>
   );
 }
 
@@ -1897,7 +1913,7 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, ca
           .map(d => {
             const st = d.data();
             const cid = typeof st.centerId === "string" ? st.centerId : "";
-            const status = (st.status ?? st.studentStatus ?? "active") as string;
+            const status = (st.status ?? st.studentStatus ?? "") as string;
             const here = isRegisteredAtCenter(st, centerId, centerName);
             const freeText = typeof st.centre === "string" && st.centre.trim() && !centreNames.has(st.centre) ? st.centre.trim() : "";
             const currentCentre = here ? centerName : (cid && centreNames.get(cid)) || freeText;
@@ -2041,10 +2057,10 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, ca
                               ? <span style={{ color: "#15803d", fontWeight: 600 }}>Active here</span>
                               : <span style={{ color: "#b91c1c", fontWeight: 700 }}>→ will become Inactive</span>)
                           : s.hereRegistered
-                          ? <span>This centre{s.status !== "active" ? ` · ${s.status}` : ""}</span>
+                          ? <span>This centre · {s.status || "not active"}</span>
                           : s.currentCentre
                             ? <span style={{ color: s.activeElsewhere ? "#b45309" : undefined }}>
-                                {s.currentCentre}{s.activeElsewhere ? " (active — will be moved)" : ` · ${s.status}`}
+                                {s.currentCentre}{s.activeElsewhere ? " (active — will be moved)" : ` · ${s.status || "not active"}`}
                               </span>
                             : <span style={{ color: "#059669" }}>Unassigned</span>}
                       </div>
@@ -2122,7 +2138,7 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, ca
 function CenterInsightsTab({ records, students, transactions }: {
   records: CenterAttRec[]; students: CenterStudentRec[]; transactions: CenterTxRec[];
 }) {
-  const activeStudents = students.filter(s => s.status === "active").length;
+  const activeStudents = students.filter(countsAsActive).length;
 
   const attTrend = useMemo(() => Array.from({ length: 14 }, (_, i) => {
     const date    = isoDaysAgo(13 - i);
@@ -2335,7 +2351,7 @@ function CentersContent() {
         // active ones — same precedence as the registry's "Admitted on".
         const admitted = toLocalYMD(st.dateOfAdmission ?? st.admissionDate ?? st.createdAt);
         if (admitted && (!earliest.has(cid) || admitted < earliest.get(cid)!)) earliest.set(cid, admitted);
-        if (!isActiveStudentStatus((st.status ?? st.studentStatus ?? "active") as string)) return;
+        if (!isActiveStudentStatus((st.status ?? st.studentStatus ?? "") as string)) return;
         if (!hasAdmissionNo(st.admissionNo ?? st.admissionNumber)) return;   // held until assigned
         if (st.status === "merged") return;
         const personKey = `${cid}|${normAdmNo(String(st.admissionNo ?? st.admissionNumber ?? ""))}`;

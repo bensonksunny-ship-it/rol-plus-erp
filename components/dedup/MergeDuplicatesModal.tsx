@@ -4,12 +4,14 @@
 // Rules (services/dedup/dedup.service):
 //   same admission no. + same name        → "Merge all exact duplicates" merges them
 //   same name, different admission numbers → different students: kept separate
+//   same admission no., different names    → conflicting names: manual review
 //   anything else                          → reviewed pair by pair below
+// Shared by both wings.
 
 import { useEffect, useState } from "react";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import {
-  choosePrimary, isAutoMergePair, isSameNameDifferentAdmission,
+  choosePrimary, isAutoMergePair, isConflictingNames, isSameNameDifferentAdmission,
   keepSeparate, mergeStudents, scanStudentDuplicates, suggestPrimary,
   type DuplicatePair, type StudentRecord,
 } from "@/services/dedup/dedup.service";
@@ -145,12 +147,20 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
     }
   }
 
-  const strong = (pairs ?? []).filter(p => p.level !== "family");
-  const family = (pairs ?? []).filter(p => p.level === "family");
+  const all = pairs ?? [];
+  const exactPairs  = all.filter(isExact);
+  const reviewPairs = all.filter(p => isSameNameDifferentAdmission(p) || isConflictingNames(p));
+  const inGroup = (p: DuplicatePair) => isExact(p) || isSameNameDifferentAdmission(p) || isConflictingNames(p);
+  const strong = all.filter(p => !inGroup(p) && p.level !== "family");
+  const family = all.filter(p => !inGroup(p) && p.level === "family");
 
   const renderPair = (p: DuplicatePair) => {
-    const distinct = isSameNameDifferentAdmission(p);
-    const lv = distinct ? { label: "Different students — same name", fg: "#065f46", bg: "#d1fae5" } : LEVEL[p.level];
+    const sameName = isSameNameDifferentAdmission(p);
+    const conflict = isConflictingNames(p);
+    const distinct = sameName || conflict;   // default action: Keep Separate
+    const lv = sameName ? { label: "Different students — same name", fg: "#065f46", bg: "#d1fae5" }
+      : conflict ? { label: "Conflicting names — review required", fg: "#9a3412", bg: "#ffedd5" }
+      : LEVEL[p.level];
     const outcome = done[p.key];
     return (
       <div key={p.key} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: outcome ? "#f9fafb" : "#fff", opacity: outcome ? 0.75 : 1 }}>
@@ -171,7 +181,9 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
               {distinct ? (
                 <>
-                  <span style={{ fontSize: 11.5, color: "#6b7280", alignSelf: "center", marginRight: "auto" }}>Different admission numbers — not merged automatically.</span>
+                  <span style={{ fontSize: 11.5, color: "#6b7280", alignSelf: "center", marginRight: "auto" }}>
+                    {conflict ? "Same admission number but different names — check which is right before merging." : "Different admission numbers — not merged automatically."}
+                  </span>
                   <button onClick={() => merge(p)} disabled={!!busy} style={btn("#fff", "#6b7280", "#e5e7eb")}>
                     {busy === p.key ? "Merging…" : "Merge anyway"}
                   </button>
@@ -217,7 +229,8 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {done.__bulk && <div style={{ fontSize: 13, fontWeight: 700, color: "#15803d" }}>{done.__bulk}</div>}
             {(() => {
-              const exact = strong.filter(p => isExact(p) && !done[p.key]);
+              const exact = exactPairs.filter(p => !done[p.key]);
+              const conflictCount = all.filter(p => isConflictingNames(p) && !done[p.key]).length;
               const distinctCount = (pairs ?? []).filter(p => isSameNameDifferentAdmission(p) && !done[p.key]).length;
               if (bulk) return (
                 <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#3730a3", fontWeight: 700 }}>
@@ -230,6 +243,7 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
                   <span style={{ fontSize: 12.5, color: "#3730a3" }}>
                     <b>{exact.length}</b> pair{exact.length !== 1 ? "s" : ""} match on admission number <i>and</i> name — the same student entered twice.
                     {distinctCount > 0 && <> <b>{distinctCount}</b> same-name pair{distinctCount !== 1 ? "s" : ""} with different admission numbers will be kept separate.</>}
+                    {conflictCount > 0 && <> <b>{conflictCount}</b> pair{conflictCount !== 1 ? "s" : ""} with the same admission number but different names won&apos;t be touched — review below.</>}
                   </span>
                   {confirmBulk ? (
                     <span style={{ display: "flex", gap: 6 }}>
@@ -242,11 +256,26 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
                 </div>
               );
             })()}
-            <div style={{ fontSize: 12.5, fontWeight: 700, color: "#374151" }}>
-              {strong.length} likely duplicate{strong.length !== 1 ? "s" : ""}
-            </div>
-            {strong.length === 0 && <div style={{ fontSize: 12.5, color: "#6b7280" }}>None — only shared phone / email pairs below.</div>}
-            {strong.map(renderPair)}
+            {exactPairs.length > 0 && (
+              <>
+                <div style={groupHead}>Exact Duplicates (Auto-Merged) · {exactPairs.length}</div>
+                <div style={groupNote}>Same name and same admission number — merged by “Merge all exact duplicates”.</div>
+                {exactPairs.map(renderPair)}
+              </>
+            )}
+            {reviewPairs.length > 0 && (
+              <>
+                <div style={groupHead}>Requires Manual Review · {reviewPairs.length}</div>
+                <div style={groupNote}>Same name with different admission numbers, or same admission number with different names. Never merged automatically.</div>
+                {reviewPairs.map(renderPair)}
+              </>
+            )}
+            {strong.length > 0 && (
+              <>
+                <div style={groupHead}>Other possible duplicates · {strong.length}</div>
+                {strong.map(renderPair)}
+              </>
+            )}
 
             {family.length > 0 && (
               <>
@@ -263,6 +292,9 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
     </div>
   );
 }
+
+const groupHead: React.CSSProperties = { fontSize: 13, fontWeight: 800, color: "#374151", marginTop: 6 };
+const groupNote: React.CSSProperties = { fontSize: 12, color: "#6b7280", marginTop: -6 };
 
 function btn(bg: string, fg: string, border: string): React.CSSProperties {
   return { padding: "8px 16px", borderRadius: 9, border: `1px solid ${border}`, background: bg, color: fg, fontSize: 12.5, fontWeight: 700, cursor: "pointer" };

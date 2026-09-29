@@ -17,10 +17,38 @@ import {
 import { db } from "@/services/firebase/firebase";
 import { DEFAULT_WING } from "@/config/constants";
 import { inWing, wingOf } from "@/lib/wing";
-import type { Wing } from "@/types";
+import type { CenterBatch, Wing } from "@/types";
 import type { Center, CreateCenterInput, UpdateCenterInput } from "@/types/center";
 
 const COLLECTION = "centers";
+
+/** Every teacher who takes a class at the centre: the centre teacher plus each batch teacher. */
+export function centreTeacherUids(teacherUid: string | undefined, batches: CenterBatch[] | undefined): Set<string> {
+  const uids = new Set<string>();
+  if (teacherUid) uids.add(teacherUid);
+  for (const b of batches ?? []) if (b.teacherUid) uids.add(b.teacherUid);
+  return uids;
+}
+
+/**
+ * Keep users.centerIds in step with a centre's teacher assignments: teachers no
+ * longer assigned lose the centre, newly assigned ones gain it. Best-effort per
+ * teacher — the teacher portal also matches centres by teacherUid directly.
+ */
+async function syncTeacherCentreIds(centreId: string, prev: Set<string>, next: Set<string>, caller: string) {
+  const writes: Promise<void>[] = [];
+  for (const uid of prev) {
+    if (next.has(uid)) continue;
+    writes.push(updateDoc(doc(db, "users", uid), { centerIds: arrayRemove(centreId), updatedAt: serverTimestamp() })
+      .catch(err => console.warn(`[center.service] ${caller}: failed to remove ${centreId} from teacher ${uid}:`, err)));
+  }
+  for (const uid of next) {
+    if (prev.has(uid)) continue;
+    writes.push(updateDoc(doc(db, "users", uid), { centerIds: arrayUnion(centreId), updatedAt: serverTimestamp() })
+      .catch(err => console.warn(`[center.service] ${caller}: failed to add ${centreId} to teacher ${uid}:`, err)));
+  }
+  await Promise.all(writes);
+}
 
 /** Auto-increment counter for CTR001, CTR002… */
 async function getNextCenterSeq(): Promise<number> {
@@ -65,16 +93,9 @@ export async function createCenter(data: CreateCenterInput): Promise<Center> {
     throw new Error("CENTER_CREATE_FAILED: document not found after write");
   }
 
-  // Sync: add this centerId to the assigned teacher's centerIds array.
-  // arrayUnion is idempotent — safe to call even if already present.
-  if (data.teacherUid) {
-    await updateDoc(doc(db, "users", data.teacherUid), {
-      centerIds: arrayUnion(ref.id),
-      updatedAt: serverTimestamp(),
-    }).catch(err =>
-      console.warn(`[center.service] createCenter: failed to sync teacher ${data.teacherUid} centerIds:`, err)
-    );
-  }
+  // Sync: add this centerId to the centre teacher's and every batch teacher's
+  // centerIds array. arrayUnion is idempotent — safe even if already present.
+  await syncTeacherCentreIds(ref.id, new Set(), centreTeacherUids(data.teacherUid, data.batches), "createCenter");
 
   return { id: snap.id, ...snap.data() } as Center;
 }
@@ -170,8 +191,9 @@ export async function cascadeCenterRename(
 /**
  * Update a center by ID. Only updates provided fields.
  * Side-effects:
- *  - when teacherUid changes, removes centerId from old teacher's centerIds
- *    and adds it to the new teacher's centerIds — keeps teacher ↔ student visibility consistent.
+ *  - when the centre teacher or a batch teacher changes, removes centerId from
+ *    teachers no longer assigned and adds it to newly assigned ones' centerIds —
+ *    keeps teacher ↔ student visibility consistent.
  *  - when the name changes, cascades it to records that store the name (see
  *    cascadeCenterRename) and returns what was updated.
  */
@@ -183,6 +205,9 @@ export async function updateCenter(id: string, data: UpdateCenterInput): Promise
   const prevTeacherUid = existing.exists()
     ? ((existing.data().teacherUid as string) ?? "")
     : "";
+  const prevBatches = existing.exists()
+    ? ((existing.data().batches as CenterBatch[] | undefined) ?? [])
+    : [];
   const prevName = existing.exists() ? String(existing.data().name ?? "") : "";
   const prevWing = (existing.exists() ? wingOf(existing.data()) : DEFAULT_WING) as Wing;
 
@@ -201,26 +226,14 @@ export async function updateCenter(id: string, data: UpdateCenterInput): Promise
 
   await updateDoc(ref, payload);
 
-  // Sync teacher.centerIds when teacherUid is being changed.
-  if (data.teacherUid !== undefined && data.teacherUid !== prevTeacherUid) {
-    // Remove centerId from previous teacher (if any)
-    if (prevTeacherUid) {
-      await updateDoc(doc(db, "users", prevTeacherUid), {
-        centerIds: arrayRemove(id),
-        updatedAt: serverTimestamp(),
-      }).catch(err =>
-        console.warn(`[center.service] updateCenter: failed to remove ${id} from old teacher ${prevTeacherUid}:`, err)
-      );
-    }
-    // Add centerId to new teacher (if any)
-    if (data.teacherUid) {
-      await updateDoc(doc(db, "users", data.teacherUid), {
-        centerIds: arrayUnion(id),
-        updatedAt: serverTimestamp(),
-      }).catch(err =>
-        console.warn(`[center.service] updateCenter: failed to add ${id} to new teacher ${data.teacherUid}:`, err)
-      );
-    }
+  // Sync teacher.centerIds when the centre teacher or any batch teacher changes.
+  if (data.teacherUid !== undefined || data.batches !== undefined) {
+    await syncTeacherCentreIds(
+      id,
+      centreTeacherUids(prevTeacherUid, prevBatches),
+      centreTeacherUids(data.teacherUid ?? prevTeacherUid, data.batches ?? prevBatches),
+      "updateCenter",
+    );
   }
 
   const newName = data.name?.trim();
