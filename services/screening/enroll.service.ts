@@ -16,13 +16,13 @@
 // =============================================================================
 
 import {
-  addDoc, arrayRemove, arrayUnion, collection, doc, serverTimestamp, updateDoc,
+  addDoc, arrayRemove, arrayUnion, collection, doc, getDoc, serverTimestamp, updateDoc,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import { WINGS } from "@/config/constants";
-import { isAdmissionNoTaken } from "@/lib/admissionNumber";
+import { admissionNoBlockedMessage, checkAdmissionNo } from "@/lib/admissionNumber";
 import { linkAdmissionFeeToStudent } from "@/services/finance/finance.service";
-import { findEnrolmentMatch, type EnrolmentMatch } from "@/services/dedup/dedup.service";
+import { findEnrolmentMatch, mergeStudents, type EnrolmentMatch } from "@/services/dedup/dedup.service";
 import type { CenterBatch, Wing } from "@/types";
 import type { SyllabusInstrument, SyllabusLevel } from "@/types/lesson";
 
@@ -129,8 +129,11 @@ export async function enrollApplicant(i: EnrollInput): Promise<EnrollResult> {
   const originalAdmNo = match ? str(match.data.admissionNumber).trim() : "";
   const finalAdmNo = originalAdmNo || admNo;
   // A typed number is only assigned when the student has none yet — then it must be free.
-  if (!originalAdmNo && await isAdmissionNoTaken(admNo, i.admissionId)) {
-    throw new Error(`Admission number ${admNo} is already in use. Please enter a different one.`);
+  if (!originalAdmNo) {
+    const check = await checkAdmissionNo(admNo, str(a.fullName), i.admissionId);
+    // Same person, but filed under the other wing — don't merge across wings here.
+    if (check.kind === "match") throw new Error(`Admission number ${admNo} is already registered to ${check.studentName} in the other wing. Please verify the number.`);
+    if (check.kind !== "free") throw new Error(admissionNoBlockedMessage(admNo, check));
   }
   const admittedOn = i.startDate ? new Date(`${i.startDate}T00:00:00`).toISOString() : new Date().toISOString();
   const { id: screeningId, ...screeningData } = i.screening;
@@ -163,6 +166,7 @@ export async function enrollApplicant(i: EnrollInput): Promise<EnrollResult> {
     dateOfAdmission: admittedOn,
     firstClassDate:  i.startDate || null,
     instruments:     strArr(a.instrumentsToLearn),
+    ...(str(a.course) ? { course: str(a.course), courseLevel: str(a.courseLevel) } : {}),
     musicalSkill:    str(a.musicalSkill),
     photo:           str(a.photo) || null,
     screening:       { ...screeningData, id: screeningId, studentId: "" },
@@ -226,4 +230,76 @@ export async function enrollApplicant(i: EnrollInput): Promise<EnrollResult> {
     }),
   ]);
   return { uid, merged: !!match, admissionNo: finalAdmNo };
+}
+
+/**
+ * Edit Application → "Confirm & Merge Record": the application's number and
+ * name match an existing student. Overlay the application's details onto that
+ * student (same rules as a re-enrolment — identity, original admission number,
+ * fee set-up and balance are preserved), move the admission-fee receipt and the
+ * screening to them, and link the application as enrolled into them. If the
+ * application was already enrolled as a different student record, that record
+ * is merged into the existing one (attendance, fees, screenings… re-pointed).
+ */
+export async function mergeApplicationIntoStudent(i: {
+  application: Record<string, unknown>;
+  admissionId: string;
+  studentUid:  string;
+  /** Centre doc id resolved from the application's centre, if any. */
+  centreId?:   string | null;
+  by:          string;
+}): Promise<void> {
+  const snap = await getDoc(doc(db, "users", i.studentUid));
+  if (!snap.exists()) throw new Error("That student record no longer exists.");
+  const student = snap.data() as Record<string, unknown>;
+  const a = i.application;
+  const incoming: Record<string, unknown> = {
+    phone:         str(a.phone),
+    email:         str(a.email),
+    age:           str(a.age),
+    dob:           str(a.dob),
+    parentName:    str(a.parentName),
+    workingStatus: str(a.workingStatus),
+    schoolCompany: str(a.schoolCompany),
+    address1:      str(a.address1),
+    address2:      str(a.address2),
+    instruments:   strArr(a.instrumentsToLearn),
+    ...(str(a.course) ? { course: str(a.course), courseLevel: str(a.courseLevel) } : {}),
+    musicalSkill:  str(a.musicalSkill),
+    photo:         str(a.photo) || null,
+    ...(i.centreId ? { centre: i.centreId, centerId: i.centreId } : {}),
+  };
+  await mergeIntoStudent({ id: i.studentUid, data: student, reasons: ["same name", "same admission number"] }, incoming,
+    { admissionId: i.admissionId, enrolledBy: i.by });
+  if (i.centreId && str(student.centerId) !== i.centreId) {
+    await updateDoc(doc(db, "centers", i.centreId), { studentUids: arrayUnion(i.studentUid), updatedAt: serverTimestamp() })
+      .catch(err => console.warn("[merge] centre roster mirror:", err));
+  }
+
+  // Consolidate: fee receipt + screening under the kept student id.
+  const admNo = str(student.admissionNumber) || str(student.admissionNo) || str(a.admissionNumber);
+  const feeTxId = str(a.admissionFeeTxId);
+  if (feeTxId) {
+    await linkAdmissionFeeToStudent(feeTxId, i.studentUid, i.centreId || str(student.centerId), admNo)
+      .catch(err => console.warn("[merge] link admission fee:", err));
+  }
+  const screeningId = str(a.screeningId);
+  if (screeningId) {
+    await updateDoc(doc(db, "screenings", screeningId), { studentId: i.studentUid })
+      .catch(err => console.warn("[merge] link screening:", err));
+  }
+  // Already enrolled as a different record → fold that record into this one.
+  const prevUid = str(a.enrolledStudentId);
+  if (prevUid && prevUid !== i.studentUid) await mergeStudents(i.studentUid, prevUid, i.by);
+
+  await updateDoc(doc(db, "admissions", i.admissionId), {
+    admissionNumber:    admNo,
+    enrolledStudentId:  i.studentUid,
+    mergedIntoExisting: true,
+    mergeReasons:       ["same name", "same admission number"],
+    status:             "enrolled",
+    enrolledAt:         str(a.enrolledAt) || new Date().toISOString(),
+    enrolledBy:         str(a.enrolledBy) || i.by,
+    updatedAt:          new Date().toISOString(),
+  });
 }

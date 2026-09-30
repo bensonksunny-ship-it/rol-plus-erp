@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { collection, getDocs, onSnapshot, query, where } from "firebase/firestore";
@@ -10,7 +10,10 @@ import { ROLES, CENTER_STATUS } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import { isTeacher } from "@/types";
+import { courseLabel } from "@/lib/course";
 import { centreTeacherUids } from "@/services/center/center.service";
+import { useWing } from "@/hooks/useWing";
+import { inWing } from "@/lib/wing";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
@@ -94,59 +97,80 @@ export default function MyClassesPage() {
   );
 }
 
-// ─── Centre pill bar ──────────────────────────────────────────────────────────
-// One compact row that scrolls sideways. A thin visible scrollbar, edge fades and
-// ‹ › arrows show when more centres are off-screen, and the selected pill is
-// scrolled into view — so no centre is hidden without a cue.
+// ─── Centre boxes ─────────────────────────────────────────────────────────────
+// Every assigned centre as a card (name, code, schedule) — the look of the old
+// Faculty Suite "My Centres" grid. Tapping one selects it; its roster and
+// attendance load below.
 
-function CentrePills({ centers, selectedId, onSelect }: {
-  centers: Center[]; selectedId: string; onSelect: (id: string) => void;
+const DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+interface ScheduleSlot { name: string; days: string; time: string }
+
+/** The centre's weekly schedule — a teacher sees only their own batches (if any). */
+function centreSlots(c: Center, uid: string | null): ScheduleSlot[] {
+  const batches = c.batches ?? [];
+  if (batches.length === 0) return c.timeSlot ? [{ name: "", days: "", time: c.timeSlot }] : [];
+  const mine = uid ? batches.filter(b => (b.teacherUid || c.teacherUid) === uid) : [];
+  return (mine.length > 0 ? mine : batches).map(b => ({
+    name: batches.length > 1 ? b.name : "",
+    days: [...(b.daysOfWeek ?? [])]
+      .sort((x, y) => DAY_ABBR.indexOf(x.slice(0, 3)) - DAY_ABBR.indexOf(y.slice(0, 3))).join(" · "),
+    time: b.startTime && b.endTime ? `${b.startTime} – ${b.endTime}` : "",
+  }));
+}
+
+function CentreBoxes({ centers, selectedId, onSelect, uid }: {
+  centers: Center[]; selectedId: string; onSelect: (id: string) => void; uid: string | null;
 }) {
-  const rowRef = useRef<HTMLDivElement>(null);
-  const [edges, setEdges] = useState({ left: false, right: false });
-
-  const measure = useCallback(() => {
-    const el = rowRef.current;
-    if (!el) return;
-    setEdges({ left: el.scrollLeft > 2, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 2 });
-  }, []);
-
-  useEffect(() => {
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, [measure, centers.length]);
-
-  useEffect(() => {
-    rowRef.current?.querySelector<HTMLElement>(`[data-centre="${selectedId}"]`)
-      ?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-  }, [selectedId]);
-
-  const nudge = (dir: 1 | -1) => rowRef.current?.scrollBy({ left: dir * rowRef.current.clientWidth * 0.7, behavior: "smooth" });
-
+  const [hover, setHover] = useState<string | null>(null);
   return (
-    <div style={s.pillWrap}>
-      <style>{`.centre-pills::-webkit-scrollbar{height:4px}.centre-pills::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:99px}`}</style>
-      {edges.left && <button type="button" aria-label="Scroll centres left" onClick={() => nudge(-1)} style={{ ...s.pillArrow, left: 0 }}>‹</button>}
-      <div ref={rowRef} className="centre-pills" onScroll={measure} role="tablist" aria-label="Centres"
-        style={{
-          ...s.pillRow,
-          maskImage: `linear-gradient(to right, ${edges.left ? "transparent, #000 28px" : "#000"}, ${edges.right ? "#000 calc(100% - 28px), transparent" : "#000"})`,
-          WebkitMaskImage: `linear-gradient(to right, ${edges.left ? "transparent, #000 28px" : "#000"}, ${edges.right ? "#000 calc(100% - 28px), transparent" : "#000"})`,
-        }}>
+    <section style={{ marginBottom: 24 }}>
+      <div style={s.boxHead}>
+        <div>
+          <div style={s.boxTitle}>My Centres</div>
+          <div style={s.boxSub}>Pick a centre to see its students and attendance below.</div>
+        </div>
+        <span style={s.boxCount}>{centers.length} centre{centers.length !== 1 ? "s" : ""}</span>
+      </div>
+      <div role="tablist" aria-label="Centres" style={s.boxGrid}>
         {centers.map(c => {
           const active = c.id === selectedId;
+          const lifted = !active && hover === c.id;
+          const slots  = centreSlots(c, uid);
           return (
-            <button key={c.id} type="button" role="tab" aria-selected={active} data-centre={c.id}
+            <button key={c.id} type="button" role="tab" aria-selected={active}
               onClick={() => onSelect(c.id)}
-              style={{ ...s.pill, ...(active ? s.pillActive : {}) }}>
-              <span style={{ opacity: active ? 1 : 0.6 }}>🏫</span> {c.name}
+              onMouseEnter={() => setHover(c.id)} onMouseLeave={() => setHover(h => (h === c.id ? null : h))}
+              style={{ ...s.box, ...(active ? s.boxActive : {}), ...(lifted ? s.boxHover : {}) }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+                <span aria-hidden style={{ ...s.boxIcon, ...(active ? s.boxIconActive : {}) }}>🏫</span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ ...s.boxName, color: active ? "#fff" : "#111827" }} title={c.name}>{c.name}</div>
+                  {c.centerCode && (
+                    <span style={{ ...s.boxCode, ...(active ? { background: "rgba(255,255,255,0.18)", color: "#fff" } : {}) }}>
+                      {c.centerCode}
+                    </span>
+                  )}
+                </div>
+                {active && <span style={s.boxTick}>✓ Selected</span>}
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
+                {slots.length === 0 ? (
+                  <span style={{ fontSize: 13, color: active ? "rgba(255,255,255,0.8)" : "#9ca3af" }}>No schedule set</span>
+                ) : slots.map((sl, i) => (
+                  <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                    {sl.name && <span style={{ fontSize: 12.5, fontWeight: 700, color: active ? "#fff" : "#374151", marginRight: 2 }}>{sl.name}</span>}
+                    {sl.days && <span style={{ ...s.boxChip, ...(active ? s.boxChipActive : {}) }}>📅 {sl.days}</span>}
+                    {sl.time && <span style={{ ...s.boxChip, ...(active ? s.boxChipActive : {}) }}>⏰ {sl.time}</span>}
+                  </div>
+                ))}
+              </div>
             </button>
           );
         })}
       </div>
-      {edges.right && <button type="button" aria-label="Scroll centres right" onClick={() => nudge(1)} style={{ ...s.pillArrow, right: 0 }}>›</button>}
-    </div>
+    </section>
   );
 }
 
@@ -157,6 +181,7 @@ function MyClassesContent() {
 
   const centerIds: string[] = user && isTeacher(user) ? user.centerIds ?? [] : [];
   const { isTeacherRole } = useCentreAccess();
+  const { wing } = useWing();
   const router       = useRouter();
   const searchParams = useSearchParams();
   const centreParam  = searchParams.get("centerId") ?? "";
@@ -184,14 +209,17 @@ function MyClassesContent() {
   // ── Load centres (live) ─────────────────────────────────────────────────────
   // Same matching as the teacher dashboard: a teacher's centres are the active
   // ones where they are the centre teacher, any batch's teacher, or listed in
-  // their centerIds (which can lag behind the centre docs). Both wings.
+  // their centerIds (which can lag behind the centre docs). Strictly scoped to
+  // the active wing — switching wings re-subscribes and drops other wings' centres.
   useEffect(() => {
     if (!user) return;
     setCentersLoading(true);
+    setCenters([]);
     const uid = user.uid;
     const unsub = onSnapshot(collection(db, "centers"), snap => {
       const active = snap.docs
         .map(d => ({ id: d.id, ...d.data() } as Center))
+        .filter(c => inWing(c, wing))
         .filter(c => String(c.status ?? CENTER_STATUS.ACTIVE).toLowerCase() === CENTER_STATUS.ACTIVE);
       const list = isTeacherRole
         ? active.filter(c => centreTeacherUids(c.teacherUid, c.batches).has(uid) || centerIds.includes(c.id))
@@ -210,7 +238,7 @@ function MyClassesContent() {
     });
     return unsub;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, centerIds.join(","), isTeacherRole]);
+  }, [user?.uid, centerIds.join(","), isTeacherRole, wing]);
 
   // ── Keep the selected centre in the URL (?centerId=…) ───────────────────────
   // Back/forward or a shared link changes the param → follow it.
@@ -221,6 +249,14 @@ function MyClassesContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [centreParam]);
 
+  // A ?centerId= from another wing (e.g. after switching wings) is out of scope —
+  // point the URL at the centre actually shown for this wing.
+  useEffect(() => {
+    if (centersLoading || !centreParam || centers.some(c => c.id === centreParam)) return;
+    router.replace(selectedCenterId ? `/dashboard/my-classes?centerId=${selectedCenterId}` : "/dashboard/my-classes", { scroll: false });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centersLoading, centreParam, centers, selectedCenterId]);
+
   const selectCentre = useCallback((id: string) => {
     setSelectedCenterId(id);
     router.replace(`/dashboard/my-classes?centerId=${id}`, { scroll: false });
@@ -228,10 +264,12 @@ function MyClassesContent() {
 
   // ── Load students when centre changes ────────────────────────────────────────
   useEffect(() => {
-    if (!selectedCenterId) return;
     setStudents([]);
     setExpandedUid(null);
     setView("students");
+    // No centre in this wing → empty roster, never the previous wing's students.
+    if (!selectedCenterId) { setStudentsLoading(false); return; }
+    let cancelled = false;
     setStudentsLoading(true);
     (async () => {
       try {
@@ -240,6 +278,7 @@ function MyClassesContent() {
           where("role",     "==", "student"),
           where("centerId", "==", selectedCenterId),
         ));
+        if (cancelled) return;
         setStudents(
           snap.docs
             .filter(d => {
@@ -251,7 +290,7 @@ function MyClassesContent() {
               return {
                 uid:        d.id,
                 name:       (u.displayName ?? u.name ?? "—") as string,
-                instrument: (u.instrument ?? "—") as string,
+                instrument: courseLabel(u) || "—",   // course title, else instrument
                 status:     (u.status ?? u.studentStatus ?? "active") as string,
               };
             })
@@ -259,9 +298,10 @@ function MyClassesContent() {
       } catch (err) {
         console.error("Failed to load students:", err);
       } finally {
-        setStudentsLoading(false);
+        if (!cancelled) setStudentsLoading(false);
       }
     })();
+    return () => { cancelled = true; };
   }, [selectedCenterId]);
 
   // ── Load attendance when view/centre/date changes ────────────────────────────
@@ -270,18 +310,21 @@ function MyClassesContent() {
     setAttMap({});
     setAttPickerUid(null);
     setAttLoading(true);
+    let cancelled = false;
     (async () => {
       try {
         const recs = await getAttendanceByCentreDate(selectedCenterId, attDate);
+        if (cancelled) return;
         const map: Record<string, AttendanceStatus> = {};
         recs.forEach(r => { if (r.studentUid) map[r.studentUid] = r.status as AttendanceStatus; });
         setAttMap(map);
       } catch (err) {
         console.error("Failed to load attendance:", err);
       } finally {
-        setAttLoading(false);
+        if (!cancelled) setAttLoading(false);
       }
     })();
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, selectedCenterId, attDate]);
 
@@ -387,11 +430,8 @@ function MyClassesContent() {
           </div>
         </div>
       ) : (
-        <CentrePills centers={centers} selectedId={selectedCenterId} onSelect={selectCentre} />
-      )}
-
-      {centers.length > 1 && selectedCentre?.timeSlot && (
-        <div style={s.centreSlotBar}>{selectedCentre.timeSlot}</div>
+        <CentreBoxes centers={centers} selectedId={selectedCenterId} onSelect={selectCentre}
+          uid={isTeacherRole ? (user?.uid ?? null) : null} />
       )}
 
       {/* Error banner */}
@@ -681,18 +721,27 @@ const s: Record<string, React.CSSProperties> = {
   page:  { maxWidth: 820, margin: "0 auto", paddingBottom: 40 },
   state: { padding: "60px 0", textAlign: "center", fontSize: 14, color: "#9ca3af" },
 
-  // Compact centre pills: one scrolling row (see CentrePills).
-  pillWrap:   { position: "relative", marginBottom: 12 },
-  pillRow:    { display: "flex", alignItems: "center", gap: 8, overflowX: "auto", whiteSpace: "nowrap", padding: "8px 4px", scrollbarWidth: "thin", scrollbarColor: "#d1d5db transparent", scrollBehavior: "smooth" },
-  pill:       { display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 99, border: "none", background: "#f3f4f6", color: "#374151", fontSize: 12, fontWeight: 500, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, transition: "all 0.15s" },
-  pillActive: { background: "#4f46e5", color: "#fff", boxShadow: "0 1px 2px rgba(79,70,229,0.35)" },
-  pillArrow:  { position: "absolute", top: "50%", transform: "translateY(-50%)", zIndex: 1, width: 26, height: 26, borderRadius: "50%", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 16, lineHeight: 1, cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.12)", display: "flex", alignItems: "center", justifyContent: "center" },
+  // Centre boxes (see CentreBoxes).
+  boxHead:   { display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" },
+  boxTitle:  { fontSize: 22, fontWeight: 800, color: "#111827", letterSpacing: "-0.01em" },
+  boxSub:    { fontSize: 13, color: "#6b7280", marginTop: 2 },
+  boxCount:  { fontSize: 12.5, fontWeight: 700, color: "#4f46e5", background: "#ede9fe", borderRadius: 999, padding: "5px 12px" },
+  boxGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 290px), 1fr))", gap: 16 },
+  box:       { textAlign: "left", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, padding: "20px 22px", minHeight: 150, cursor: "pointer", fontFamily: "inherit", transition: "transform 0.15s, box-shadow 0.15s, border-color 0.15s", minWidth: 0, boxShadow: "0 1px 3px rgba(17,24,39,0.06)" },
+  boxHover:  { transform: "translateY(-2px)", borderColor: "#c7d2fe", boxShadow: "0 10px 24px rgba(79,70,229,0.14)" },
+  boxActive: { border: "1px solid #4f46e5", background: "#4f46e5", backgroundImage: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)", boxShadow: "0 12px 28px rgba(79,70,229,0.35)", color: "#fff" },
+  boxIcon:   { width: 52, height: 52, borderRadius: 14, background: "#eef2ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, flexShrink: 0 },
+  boxIconActive: { background: "rgba(255,255,255,0.2)" },
+  boxName:   { fontSize: 18, fontWeight: 800, lineHeight: 1.25, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  boxCode:   { display: "inline-block", marginTop: 5, fontSize: 11.5, fontWeight: 700, background: "#ede9fe", color: "#4f46e5", borderRadius: 6, padding: "2px 8px" },
+  boxTick:   { fontSize: 11.5, fontWeight: 800, color: "#4f46e5", background: "rgba(255,255,255,0.95)", borderRadius: 999, padding: "4px 10px", flexShrink: 0, whiteSpace: "nowrap" },
+  boxChip:   { fontSize: 12.5, fontWeight: 600, color: "#374151", background: "#f3f4f6", borderRadius: 8, padding: "4px 10px" },
+  boxChipActive: { color: "#fff", background: "rgba(255,255,255,0.18)" },
 
   centreHeader:  { display: "flex", alignItems: "center", gap: 12, marginBottom: 20, padding: "16px 20px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12 },
   centreAvatar:  { fontSize: 22, flexShrink: 0 },
   centreName:    { fontSize: 16, fontWeight: 700, color: "#111" },
   centreSlot:    { fontSize: 12, color: "#9ca3af", marginTop: 2 },
-  centreSlotBar: { fontSize: 12, color: "#9ca3af", marginBottom: 8, paddingLeft: 4 },
 
   emptyState: { padding: "48px 24px", textAlign: "center", fontSize: 14, color: "#9ca3af", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12 },
   errBanner:  { display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fef2f2", border: "1px solid #fecaca", color: "#dc2626", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 14 },

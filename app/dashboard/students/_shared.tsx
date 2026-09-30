@@ -1035,7 +1035,7 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, showStatus, expande
             </div>
             <div>
               <div style={p.detailLabel}>Instrument / Course</div>
-              <div style={p.detailValue}>{s.instrument}{s.course ? ` · ${s.course}` : ""}</div>
+              <div style={p.detailValue}>{s.course && s.course !== "-" ? s.course : s.instrument}</div>
             </div>
             <div>
               <div style={p.detailLabel}>Billing Frequency</div>

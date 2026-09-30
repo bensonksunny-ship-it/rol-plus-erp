@@ -23,6 +23,7 @@ import { getCached, setCached } from "@/lib/dataCache";
 import { normName, normPhone } from "@/lib/dedup";
 import MergeDuplicatesModal from "@/components/dedup/MergeDuplicatesModal";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
+import { COURSE_LEVELS } from "@/lib/course";
 
 // The register shows the wing currently selected (ROL+ or School of Music) —
 // same system for both, each wing's students kept separate.
@@ -174,6 +175,12 @@ const REGISTRY_COLUMNS = [
   "name", "dateofadmission", "centre",
   "phonenumber", "admissionno", "course", "status", "screeninggrade",
 ];
+/** Course Level from a course title — "Introduction to Keyboard" → "Introduction"; "" when none. */
+function courseLevelOf(course: string): string {
+  const c = course.trim().toLowerCase();
+  return COURSE_LEVELS.find(l => c.startsWith(`${l.toLowerCase()} `)) ?? "";
+}
+
 const HEADER_WORDS = /name|centre|center|admission|phone|mobile|course|instrument|status|date|screening|grade/i;
 
 // Fields for the "paste by column" mode.
@@ -365,6 +372,7 @@ function RegistryContent() {
   const [loading, setLoading] = useState(() => !getCached<Entry[]>(`registry:${WING}:entries`));
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [levelFilter,  setLevelFilter]  = useState("all");   // Course Level: Introduction / Intermediate / Advanced / "none"
   const [showImport, setShowImport] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
   const [pastedText, setPastedText] = useState("");
@@ -465,7 +473,7 @@ function RegistryContent() {
             const admNos = new Set<string>();
             studSnap.docs.forEach(d => {
               const v = d.data();
-              const no = String(v.admissionNumber ?? v.admissionNo ?? "").replace(/\s+/g, "").toUpperCase();
+              const no = String(v.admissionNumber || v.admissionNo || "").replace(/\s+/g, "").toUpperCase();
               if (no && v.status !== "merged") admNos.add(no);
             });
             const list: Entry[] = studSnap.docs
@@ -581,6 +589,7 @@ function RegistryContent() {
     const needle = q.trim().toLowerCase();
     return entries.filter(e => {
       if (statusFilter !== "all" && filterStatus(e) !== statusFilter) return false;
+      if (levelFilter !== "all" && courseLevelOf(e.course) !== (levelFilter === "none" ? "" : levelFilter)) return false;
       if (!needle) return true;
       return (
         e.name.toLowerCase().includes(needle) ||
@@ -592,7 +601,7 @@ function RegistryContent() {
         e.screening.toLowerCase().includes(needle)
       );
     });
-  }, [entries, q, statusFilter]);
+  }, [entries, q, statusFilter, levelFilter]);
 
   // Keep the selection in sync with what's actually on the register.
   useEffect(() => {
@@ -696,7 +705,7 @@ function RegistryContent() {
             style={s.search}
             value={q}
             onChange={e => setQ(e.target.value)}
-            placeholder="Search name, admission no., phone…"
+            placeholder="Search name, admission no., phone, course…"
           />
           {statuses.length > 1 && (
             <select style={s.select} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
@@ -704,6 +713,11 @@ function RegistryContent() {
               {statuses.map(st => <option key={st} value={st}>{st}</option>)}
             </select>
           )}
+          <select style={s.select} value={levelFilter} onChange={e => setLevelFilter(e.target.value)} aria-label="Course level">
+            <option value="all">All course levels</option>
+            {COURSE_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
+            <option value="none">Level not set</option>
+          </select>
           {canImport && (
             <button style={s.importBtn} onClick={() => setShowImport(true)}>⬆ Import Excel</button>
           )}

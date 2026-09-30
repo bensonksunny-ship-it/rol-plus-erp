@@ -21,6 +21,7 @@ import { useAuthContext } from "@/features/auth/AuthContext";
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { enrollApplicant } from "@/services/screening/enroll.service";
 import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
+import { AdmissionFinalPhase } from "@/components/admissions/AdmissionProgress";
 import { getWingSyllabus } from "@/services/lesson/lesson.service";
 import type { CenterBatch } from "@/types";
 import {
@@ -225,21 +226,14 @@ export default function EnrollStudentModal({
           ✓ Admission Fee Paid · ₹{Number(application.admissionFeeAmount).toLocaleString("en-IN")}
         </div>
       )}
-      {/* Admission number is manual-only — enrolment is blocked until it is entered. */}
+      {/* Admission number is the manual-only final phase — enrolment completes once it is entered. */}
       {admNoMissing && (
-        <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px" }}>
-          <div style={{ fontSize: 13, color: "#b91c1c", fontWeight: 600 }}>
-            ⚠ No Admission Number Given — Manual entry required before enrollment
-          </div>
-          {canEditAdmNo ? (
-            <button type="button" onClick={() => { admNoRef.current?.scrollIntoView({ block: "center", behavior: "smooth" }); admNoRef.current?.focus(); }}
-              style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
-              Enter Admission Number
-            </button>
-          ) : (
-            <span style={{ fontSize: 12, color: "#b91c1c" }}>Ask a Chief Teacher or Director to enter it.</span>
-          )}
-        </div>
+        <AdmissionFinalPhase
+          rec={screening ? { ...application, screeningId: str(application.screeningId) || screening.id } : application}
+          admNo={admNo}
+          onAssign={canEditAdmNo ? () => { admNoRef.current?.scrollIntoView({ block: "center", behavior: "smooth" }); admNoRef.current?.focus(); } : undefined}
+          note={canEditAdmNo ? undefined : "A Chief Teacher or Director enters the admission number."}
+        />
       )}
       {/* Who + readiness */}
       <div style={{ ...section, display: "flex", gap: 14, alignItems: "center" }}>

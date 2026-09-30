@@ -10,6 +10,7 @@ import { getAllTeacherQuality } from "@/services/quality/quality.service";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center } from "@/types";
 import { getTeacherDisplayName } from "@/lib/teacherName";
+import { countActiveStudents } from "@/lib/activeStudents";
 
 // ─── Local types ───────────────────────────────────────────────────────────────
 
@@ -64,6 +65,8 @@ interface SystemData {
   attendance:   AttendanceDoc[];
   transactions: TransactionDoc[];
   quality:      TeacherQuality[];
+  /** Current active headcount (active status + adm. no. + active centre). */
+  activeHeadcount: number;
 }
 
 // ─── Date helpers ──────────────────────────────────────────────────────────────
@@ -170,7 +173,9 @@ function SuperAdminContent() {
           };
         });
 
-        setData({ students, teachers, centers, attendance, transactions, quality });
+        const activeCenterIds = new Set(centers.filter(c => c.status === "active").map(c => c.id));
+        const activeHeadcount = countActiveStudents(studentSnap.docs.map(d => d.data()), activeCenterIds);
+        setData({ students, teachers, centers, attendance, transactions, quality, activeHeadcount });
       } catch (err) {
         console.error("SuperAdmin load error:", err);
         setError("Failed to load system data.");
@@ -213,7 +218,7 @@ function Dashboard({ data, router }: { data: SystemData; router: ReturnType<type
 
   // ── Global metrics ──────────────────────────────────────────────────────────
   const totalStudents   = data.students.length;
-  const activeStudents  = data.students.filter(s => s.status === "active").length;
+  const activeStudents  = data.activeHeadcount;
   const inactiveStudents= data.students.filter(s => s.status === "inactive").length;
   const pendingDeact    = data.students.filter(s => s.status === "deactivation_requested").length;
   const totalTeachers   = data.teachers.length;
@@ -831,8 +836,8 @@ function StudentMetricCard({
       <div style={s.metricBody}>
         <div style={s.metricIcon}>👥</div>
         <div style={s.metricLabel}>Total Students</div>
-        <div style={{ ...s.metricValue, color: "#4f46e5" }}>{totalStudents}</div>
-        <div style={s.metricSub}>{activeStudents} active · {inactiveStudents} inactive</div>
+        <div style={{ ...s.metricValue, color: "#4f46e5" }}>{activeStudents}</div>
+        <div style={s.metricSub}>{totalStudents} total registered · {inactiveStudents} inactive</div>
         {trendLabel !== "—" && (
           <div style={{ fontSize: 11, fontWeight: 600, color: trendColor, marginTop: 4 }}>
             {trendLabel}

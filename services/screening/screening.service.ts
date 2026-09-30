@@ -8,6 +8,7 @@ import {
   query,
   where,
 } from "firebase/firestore";
+import { newApplicationRef } from "@/lib/applicationRef";
 import { db } from "@/services/firebase/firebase";
 import type { ScreeningResult } from "@/types";
 import { initStudentSyllabus } from "@/services/syllabus/lm-syllabus.service";
@@ -87,7 +88,7 @@ export async function getAllScreenings(): Promise<ScreeningResult[]> {
 
 export async function saveAdmission(data: Record<string, unknown>): Promise<string> {
   const ref  = doc(collection(db, "admissions"));
-  const full = { ...data, id: ref.id, submittedAt: new Date().toISOString() };
+  const full = { ...data, applicationRef: data.applicationRef || newApplicationRef(), id: ref.id, submittedAt: new Date().toISOString() };
   await setDoc(ref, full);
   return ref.id;
 }

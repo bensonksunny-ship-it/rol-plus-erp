@@ -1,10 +1,10 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getDoc, getDocs, collection, query, where, doc, updateDoc, writeBatch, serverTimestamp, arrayUnion, arrayRemove } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
-import { getCenters, createCenter, updateCenter, type CenterRenameResult } from "@/services/center/center.service";
+import { getCenters, createCenter, updateCenter, centreTeacherUids, type CenterRenameResult } from "@/services/center/center.service";
 import { getTeachers } from "@/services/teacher/teacher.service";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
@@ -12,7 +12,9 @@ import type { Center, CenterBatch, Wing } from "@/types";
 import { DEFAULT_BATCH_NAME, effectiveBatches, explicitBatches } from "@/lib/batches";
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
+import { courseLabel } from "@/lib/course";
 import { normAdmNo } from "@/lib/dedup";
+import { hasAdmissionNo, isActiveStudentStatus } from "@/lib/activeStudents";
 import MergeDuplicatesModal from "@/components/dedup/MergeDuplicatesModal";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
@@ -65,14 +67,38 @@ function StatusBadge({ status }: { status: string }) {
   return <span style={{ ...styles.badge, ...style }}>{status}</span>;
 }
 
-function FormField({ label, required, children, fullWidth }: {
+/** "Type new" | "Select existing" switch beside the New Center name field. */
+function NameModeToggle({ existing, onChange }: { existing: boolean; onChange: (existing: boolean) => void }) {
+  const opt = (on: boolean): React.CSSProperties => ({ ...nameModeStyles.opt, ...(on ? nameModeStyles.optOn : {}) });
+  return (
+    <div role="group" aria-label="Center name mode" style={nameModeStyles.group}>
+      <button type="button" aria-pressed={!existing} onClick={() => existing && onChange(false)} style={opt(!existing)}>✏ Type new</button>
+      <button type="button" aria-pressed={existing} onClick={() => !existing && onChange(true)} style={opt(existing)}>📋 Select existing</button>
+    </div>
+  );
+}
+
+const nameModeStyles: Record<string, React.CSSProperties> = {
+  group:  { display: "inline-flex", border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", flexShrink: 0 },
+  opt:    { border: "none", background: "#fff", color: "#6b7280", fontSize: 11.5, fontWeight: 600, padding: "3px 9px", cursor: "pointer" },
+  optOn:  { background: "#eef2ff", color: "#4338ca" },
+  link:   { border: "none", background: "none", color: "#4f46e5", fontSize: 12, fontWeight: 600, cursor: "pointer", padding: 0 },
+  locked: { background: "#f9fafb", color: "#374151", cursor: "default" },
+};
+
+function FormField({ label, required, children, fullWidth, action }: {
   label: string; required?: boolean; children: React.ReactNode; fullWidth?: boolean;
+  /** Small control shown at the right of the label (e.g. a mode toggle). */
+  action?: React.ReactNode;
 }) {
   return (
     <div style={{ ...formStyles.field, ...(fullWidth ? { gridColumn: "1 / -1" } : {}) }}>
-      <label style={formStyles.label}>
-        {label}{required && <span style={formStyles.required}> *</span>}
-      </label>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <label style={formStyles.label}>
+          {label}{required && <span style={formStyles.required}> *</span>}
+        </label>
+        {action}
+      </div>
       {children}
     </div>
   );
@@ -130,13 +156,18 @@ interface CentreSchedule { daysOfWeek: string[]; startTime: string; endTime: str
 
 const IMPLICIT_BATCH = "__batch1__";
 
-function BatchesEditor({ batches, onChange, teachers, base }: {
+function BatchesEditor({ batches, onChange, teachers, base, lockedIds }: {
   batches: CenterBatch[];
   onChange: (b: CenterBatch[]) => void;
   teachers: TeacherUser[];
   /** Centre schedule + teacher — shown as Batch 1 until the centre has real batches. */
   base: CentreSchedule;
+  /** Append-only mode: these (already saved) batches, and the implicit Batch 1, can't be edited or removed. */
+  lockedIds?: Set<string>;
 }) {
+  const appendOnly = !!lockedIds;
+  const [autoLocked, setAutoLocked] = useState<Set<string>>(new Set());
+  const isLocked = (id: string) => !!lockedIds?.has(id) || autoLocked.has(id);
   const [draft, setDraft] = useState<BatchDraft | null>(null);
   const [draftErr, setDraftErr] = useState("");
 
@@ -187,6 +218,8 @@ function BatchesEditor({ batches, onChange, teachers, base }: {
     if (draft.endTime <= draft.startTime) { setDraftErr("End time must be after the start time."); return; }
     // The first extra batch turns the centre's own schedule into Batch 1 (keeps every student there).
     const current = batches.length === 0 && !draft.id ? [batchOneFromBase()] : batches;
+    // Append-only: that Batch 1 holds the centre's existing students — keep it locked too.
+    if (appendOnly && current !== batches) setAutoLocked(new Set([current[0].id]));
     if (current.some(b => b.id !== draft.id && b.name.trim().toLowerCase() === name.toLowerCase())) {
       setDraftErr("Another batch already has this name."); return;
     }
@@ -266,9 +299,11 @@ function BatchesEditor({ batches, onChange, teachers, base }: {
               👤 {teacherName(base.teacherUid) || "Centre teacher"} · all current students
             </div>
           </div>
-          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            <button type="button" onClick={openImplicit} style={batchStyles.iconBtn} title="Rename Batch 1" aria-label="Rename Batch 1">✎</button>
-          </div>
+          {!appendOnly && (
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              <button type="button" onClick={openImplicit} style={batchStyles.iconBtn} title="Rename Batch 1" aria-label="Rename Batch 1">✎</button>
+            </div>
+          )}
         </div>
       )}
       {draft?.id === IMPLICIT_BATCH && draftForm}
@@ -285,10 +320,14 @@ function BatchesEditor({ batches, onChange, teachers, base }: {
               👤 {teacherName(b.teacherUid) || "Centre teacher"}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            <button type="button" onClick={() => openEdit(b)} style={batchStyles.iconBtn} title="Edit batch" aria-label={`Edit ${b.name}`}>✎</button>
-            <button type="button" onClick={() => removeBatch(b.id)} style={batchStyles.removeBtn} title="Remove batch" aria-label={`Remove ${b.name}`}>🗑</button>
-          </div>
+          {isLocked(b.id) ? (
+            <span style={{ fontSize: 10.5, fontWeight: 700, color: "#6b7280", flexShrink: 0 }} title="Existing batch — edit it from Edit Center">Existing</span>
+          ) : (
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              <button type="button" onClick={() => openEdit(b)} style={batchStyles.iconBtn} title="Edit batch" aria-label={`Edit ${b.name}`}>✎</button>
+              <button type="button" onClick={() => removeBatch(b.id)} style={batchStyles.removeBtn} title="Remove batch" aria-label={`Remove ${b.name}`}>🗑</button>
+            </div>
+          )}
         </div>
       ))}
 
@@ -392,6 +431,7 @@ interface CenterStudentRec {
   inactiveSince?: string;
   /** Profile photo (admission `photo` data URL, or an uploaded photoURL) — "" when none. */
   photo?: string;
+  /** Course title ("Introduction to Keyboard"), else the instrument(s) — see lib/course. */
   instrument?: string;
   batchId?: string | null;
 }
@@ -411,23 +451,6 @@ interface PickedStudent {
   fromCenterId?: string | null;
 }
 
-/** A student counts as "active" whether their `status` field carries the
- *  Students page's own vocabulary ("active") or the Registry's ("confirm" /
- *  "confirmed") — matches the definition used everywhere else in the app. */
-function isActiveStudentStatus(status: string): boolean {
-  // Pending inactivation / break requests are still attending until approved
-  // (same rule as the Students page).
-  return /^(active|confirm|confirmed|deactivation_requested|break_requested)$/i.test((status || "").trim());
-}
-
-/**
- * Admission number is the prerequisite for being an active student: without
- * one a student is held in "Needs Adm. No." — not on the active roster, not in
- * the centre's count — until someone enters it.
- */
-function hasAdmissionNo(no: unknown): boolean {
-  return typeof no === "string" && no.trim() !== "" && no.trim() !== "—" && no.trim() !== "-";
-}
 function countsAsActive(s: { status: string; admissionNo: string }): boolean {
   return isActiveStudentStatus(s.status) && hasAdmissionNo(s.admissionNo);
 }
@@ -636,7 +659,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
             status: (st.status ?? st.studentStatus ?? "") as string,
             createdAt: toISODateLocal(st.createdAt),
             photo: studentPhoto(st),
-            instrument: (st.instrument ?? "") as string,
+            instrument: courseLabel(st),
             batchId: (st.batchId ?? null) as string | null,
             inactiveSince: sortKey(st.inactivatedAt) || sortKey(st.deactivationApprovedAt) || sortKey(st.updatedAt),
           };
@@ -1409,7 +1432,7 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
               <tr>
                 <th style={{ ...rosterTh, width: 64 }}><span className="sr-only">Photo</span></th>
                 <th style={{ ...rosterTh, width: "38%" }}>Student</th>
-                <th style={rosterTh}>Instrument</th>
+                <th style={rosterTh}>Course</th>
                 <th style={rosterTh}>Batch</th>
                 <th style={{ ...rosterTh, width: 160 }}>{view === "active" ? "Active" : ""}</th>
               </tr>
@@ -1667,8 +1690,7 @@ function StudentPreviewModal({ student, centerName, batchName, wing, onClose, on
   const monthlyFee = doc_ ? Number(doc_.monthlyFee ?? 0) : 0;
   const perClass   = doc_ ? Number(doc_.feePerClass ?? 0) : 0;
   const feeLabel = doc_?.feeCycle === "per_class" && perClass > 0 ? `${INR(perClass)} / class` : monthlyFee > 0 ? `${INR(monthlyFee)} / month` : "—";
-  const instrument = str("instrument") && str("instrument") !== "-" ? str("instrument") : student.instrument || "";
-  const course = str("course") && str("course") !== "-" ? str("course") : "";
+  const course = (doc_ ? courseLabel(doc_ as Record<string, unknown>) : "") || student.instrument || "";
 
   const monthState = fin.current
     ? fin.current.state === "paid"
@@ -1761,8 +1783,7 @@ function StudentPreviewModal({ student, centerName, batchName, wing, onClose, on
             </>)}
             {section("Academic", <>
               {row("Age", doc_ ? (ageOf(doc_) ? `${ageOf(doc_)} yrs` : "") : "")}
-              {row("Instrument", instrument)}
-              {course && row("Course", course)}
+              {row("Course", course)}
               {row("Centre", centerName)}
               {row("Batch", batchName)}
             </>)}
@@ -1924,7 +1945,7 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, ca
               createdAt:    toISODateLocal(st.createdAt),
               status,
               photo:        studentPhoto(st),
-              instrument:   (st.instrument ?? "") as string,
+              instrument:   courseLabel(st),
               batchId:      (st.batchId ?? null) as string | null,
               fromCenterId: here ? null : (cid || null),
               hereRegistered: here,
@@ -2301,9 +2322,36 @@ function CentersContent() {
   const [viewTarget, setViewTarget] = useState<Center | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Center | null>(null);
   const [showMatrix, setShowMatrix] = useState(false);
+
+  // Deep link: ?centerId=…&openModal=true (e.g. a dashboard "Today's Classes"
+  // card) opens that centre's detail modal once the centres have loaded. The
+  // params are then dropped so closing the modal / refreshing doesn't reopen it.
+  const router       = useRouter();
+  const pathname     = usePathname();
+  const searchParams = useSearchParams();
+  const deepCentreId = searchParams.get("openModal") === "true" ? searchParams.get("centerId") ?? "" : "";
+  useEffect(() => {
+    if (!deepCentreId || centers.length === 0) return;
+    const target = centers.find(c => c.id === deepCentreId);
+    if (!target) return;
+    setViewTarget(target);
+    const q = new URLSearchParams(searchParams.toString());
+    q.delete("centerId");
+    q.delete("openModal");
+    router.replace(`${pathname}?${q.toString()}`, { scroll: false });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepCentreId, centers]);
   const [form, setForm]           = useState({ ...EMPTY_FORM });
   const [saving, setSaving]         = useState(false);
   const [dayError, setDayError]     = useState("");
+  // "Select existing" name mode — new batches are appended to a registered centre (by id)
+  // instead of typing a centre name, so no duplicate / mistyped centre is created.
+  const [useExisting, setUseExisting]       = useState(false);
+  const [existingId, setExistingId]         = useState("");
+  const [existingSearch, setExistingSearch] = useState("");
+  const [nameError, setNameError]           = useState("");
+  // Edit panel: the name is locked until "✏ Edit Name" — a rename cascades to rosters and admissions.
+  const [renaming, setRenaming]             = useState(false);
   const { toasts, toast, remove }   = useToast();
 
   // Oldest centre first, by effective demo date (manual override, else the
@@ -2320,20 +2368,26 @@ function CentersContent() {
   const pendingFirstClass   = useMemo(() => activeCentersList.filter(needsFirstClassDate), [activeCentersList]);
   const firstClassInputRef  = useRef<HTMLInputElement>(null);
 
+  // Bumped per fetch so a slow response for a wing the user has already
+  // switched away from can never overwrite the current wing's centres.
+  const fetchSeq = useRef(0);
+
   async function fetchCenters() {
+    const seq = ++fetchSeq.current;
     const cachedCenters = getCached<Center[]>(`centers:${wing}:centers`);
-    if (cachedCenters) {
-      setCenters(cachedCenters);
-      setTeachers(getCached(`centers:${wing}:teachers`) ?? []);
-      setActiveCounts(getCached(`centers:${wing}:activeCounts`) ?? new Map());
-      setEarliestAdmissions(getCached(`centers:${wing}:earliestAdmissions`) ?? new Map());
-    }
+    // Seed from this wing's cache, or clear — never keep showing another wing's centres.
+    setCenters(cachedCenters ?? []);
+    setTeachers(getCached(`centers:${wing}:teachers`) ?? []);
+    setActiveCounts(getCached(`centers:${wing}:activeCounts`) ?? new Map());
+    setEarliestAdmissions(getCached(`centers:${wing}:earliestAdmissions`) ?? new Map());
+    if (!cachedCenters) setLoading(true);
     try {
       const [data, teacherList, studentSnap] = await Promise.all([
         getCenters(wing),
         getTeachers(wing),
         getDocs(query(collection(db, "users"), where("role", "==", "student"))),
       ]);
+      if (seq !== fetchSeq.current) return;
       setCenters(data);
       setCached(`centers:${wing}:centers`, data);
       const sortedTeachers = teacherList.sort((a, b) => safeCompare(getTeacherDisplayName(a), getTeacherDisplayName(b)));
@@ -2366,15 +2420,60 @@ function CentersContent() {
     } catch (err) {
       console.error("Failed to fetch centers:", err);
     } finally {
-      setLoading(false);
+      if (seq === fetchSeq.current) setLoading(false);
     }
   }
 
+  // Switching wings closes any open centre modal/form — it belongs to the old wing.
+  useEffect(() => {
+    setViewTarget(null);
+    setEditTarget(null);
+    setDeleteTarget(null);
+    setShowForm(false);
+    setShowMatrix(false);
+    fetchCenters();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { fetchCenters(); }, [wing]);
+  }, [wing]);
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
     setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
+    if (e.target.name === "name") setNameError("");
+  }
+
+  const existingCenter = useMemo(() => centers.find(c => c.id === existingId) ?? null, [centers, existingId]);
+  const existingBatchIds = useMemo(
+    () => new Set(existingCenter ? explicitBatches(existingCenter as unknown as Record<string, unknown>).map(b => b.id) : []),
+    [existingCenter]);
+  const existingMatches = useMemo(() => {
+    const q = existingSearch.trim().toLowerCase();
+    return [...centers]
+      .filter(c => c.status === "active" && (!q || c.name.toLowerCase().includes(q)))
+      .sort((a, b) => safeCompare(a.name, b.name));
+  }, [centers, existingSearch]);
+
+  /** Bind the form to a registered centre: it inherits the centre's wing, teacher, schedule and batches. */
+  function pickExisting(c: Center) {
+    const raw = c as Center & { daysOfWeek?: Day[]; startTime?: string; endTime?: string };
+    setExistingId(c.id);
+    setForm({
+      ...EMPTY_FORM,
+      name:       c.name,
+      teacherUid: c.teacherUid,
+      status:     c.status as "active" | "inactive",
+      wing:       wingOf(c),
+      daysOfWeek: raw.daysOfWeek ?? [],
+      startTime:  raw.startTime  ?? "",
+      endTime:    raw.endTime    ?? "",
+      batches:    explicitBatches(c as unknown as Record<string, unknown>),
+    });
+  }
+
+  function toggleUseExisting(on: boolean) {
+    setUseExisting(on);
+    setExistingId("");
+    setExistingSearch("");
+    setNameError("");
+    setForm({ ...EMPTY_FORM, wing });
   }
 
   function handleDaysChange(days: Day[]) {
@@ -2397,6 +2496,7 @@ function CentersContent() {
   function openEdit(center: Center) {
     const raw = center as Center & { daysOfWeek?: Day[]; startTime?: string; endTime?: string };
     setEditTarget(center);
+    setRenaming(false);
     setForm({
       name:       center.name,
       teacherUid: center.teacherUid,
@@ -2429,6 +2529,11 @@ function CentersContent() {
     setEditTarget(null);
     setForm({ ...EMPTY_FORM });
     setDayError("");
+    setUseExisting(false);
+    setExistingId("");
+    setExistingSearch("");
+    setNameError("");
+    setRenaming(false);
   }
 
   const [deactivateTarget, setDeactivateTarget] = useState<Center | null>(null);
@@ -2437,7 +2542,52 @@ function CentersContent() {
     e.preventDefault();
     // Active → Inactive goes through the transfer/cancel step first.
     if (editTarget && editTarget.status === "active" && form.status === "inactive") { setDeactivateTarget(editTarget); return; }
+    if (!editTarget && useExisting) { await appendToExisting(); return; }
+    // A typed name that matches a registered centre would make a second card — point to "Select existing".
+    if (!editTarget && form.wing === wing) {
+      const typed = form.name.trim().toLowerCase();
+      if (centers.some(c => c.name.trim().toLowerCase() === typed)) {
+        setNameError("A centre with this name is already registered — switch to \"📋 Select existing\" to add a batch to it.");
+        return;
+      }
+    }
     await saveForm();
+  }
+
+  /** Appends the new batches to the selected centre's batches[] — same centerId, no new card. */
+  async function appendToExisting() {
+    if (!existingCenter) { toast("Select a registered centre first.", "error"); return; }
+    const added = form.batches.filter(b => !existingBatchIds.has(b.id));
+    // A batch-less centre gets its schedule turned into Batch 1 as well — only count the user's new ones.
+    const newCount = existingBatchIds.size === 0 ? Math.max(0, added.length - 1) : added.length;
+    if (newCount === 0) { toast("Add at least one new batch.", "error"); return; }
+    setSaving(true);
+    try {
+      // Re-read: if the centre's batches changed since this list loaded, don't overwrite them.
+      const fresh = await getDoc(doc(db, "centers", existingCenter.id));
+      if (!fresh.exists()) throw new Error("This centre no longer exists.");
+      const prev = explicitBatches(fresh.data());
+      if (prev.length !== existingBatchIds.size || prev.some(b => !existingBatchIds.has(b.id))) {
+        throw new Error("This centre's batches were changed elsewhere — close and try again.");
+      }
+      // Existing batches are always kept exactly as saved.
+      const next = [...prev, ...added];
+      await updateCenter(existingCenter.id, { batches: next });
+      await syncStudentsToBatches(existingCenter.id, prev, next)
+        .catch(err => console.error("[centre] batch sync:", err));
+      const w = wingOf(existingCenter);
+      invalidateCache(`registry:${w}:entries`);
+      invalidateCache(`students:${w}:students`);
+      toast(`${newCount} batch${newCount !== 1 ? "es" : ""} added to ${existingCenter.name}.`, "success");
+      closeForm();
+      setLoading(true);
+      await fetchCenters();
+    } catch (err) {
+      console.error("Failed to add batch:", err);
+      toast(err instanceof Error && err.message ? err.message : "Failed to add batch.", "error");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function saveForm() {
@@ -2507,6 +2657,7 @@ function CentersContent() {
   }
 
   const isEditing = !!editTarget;
+  const nameMissing = useExisting && !isEditing ? !existingCenter : !form.name.trim();
 
   return (
     <div>
@@ -2600,12 +2751,75 @@ function CentersContent() {
         </div>
 
         <div style={drawerStyles.body}>
+          {useExisting && !isEditing ? (
+            <section style={drawerStyles.section}>
+              <div style={drawerStyles.sectionTitle}>Basic Information</div>
+              <FormField label="Center Name" required fullWidth
+                action={<NameModeToggle existing onChange={toggleUseExisting} />}>
+              {existingCenter ? (
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, padding: "10px 12px", borderRadius: 8, border: "1px solid #c7d2fe", background: "#f5f7ff" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>🔒 {existingCenter.name}</div>
+                    <div style={{ fontSize: 12, color: "#4b5563", marginTop: 3 }}>
+                      {WING_LABELS[wingOf(existingCenter)]}
+                      {" · 👤 "}{(() => { const t = teachers.find(x => x.uid === existingCenter.teacherUid); return t ? getTeacherDisplayName(t) : "No teacher"; })()}
+                      {batchSummary({ id: "", name: "", daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime })
+                        ? ` · ${batchSummary({ id: "", name: "", daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime })}` : ""}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 3 }}>
+                      New batches inherit this centre&apos;s wing and teacher; set each batch&apos;s own days &amp; time below.
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => toggleUseExisting(true)} style={drawerStyles.cancelBtn}>Change</button>
+                </div>
+              ) : (
+                <div>
+                  <input value={existingSearch} onChange={e => setExistingSearch(e.target.value)} autoFocus={showForm}
+                    placeholder="Search active centres…" aria-label="Search registered centres" style={formStyles.input} />
+                  <div role="listbox" aria-label="Registered centres"
+                    style={{ marginTop: 6, maxHeight: 260, overflowY: "auto" as const, border: "1px solid #e5e7eb", borderRadius: 8 }}>
+                    {existingMatches.length === 0 ? (
+                      <div style={{ padding: 12, fontSize: 12.5, color: "#9ca3af" }}>
+                        {centers.length === 0 ? `No centres registered in ${WING_LABELS[wing]} yet.` : "No active centres match."}
+                      </div>
+                    ) : existingMatches.map(c => (
+                      <button key={c.id} type="button" role="option" aria-selected={false} onClick={() => pickExisting(c)}
+                        style={{ display: "flex", width: "100%", justifyContent: "space-between", gap: 8, padding: "9px 12px", border: "none",
+                          borderBottom: "1px solid #f3f4f6", background: "#fff", cursor: "pointer", textAlign: "left" as const, fontSize: 13 }}>
+                        <span style={{ fontWeight: 600, color: "#111827" }}>{c.name}</span>
+                        <span style={{ fontSize: 11.5, color: c.status === "active" ? "#15803d" : "#9ca3af" }}>
+                          {explicitBatches(c as unknown as Record<string, unknown>).length || 1} batch{explicitBatches(c as unknown as Record<string, unknown>).length > 1 ? "es" : ""}
+                          {c.status !== "active" ? " · inactive" : ""}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              </FormField>
+            </section>
+          ) : (<>
           <section style={drawerStyles.section}>
             <div style={drawerStyles.sectionTitle}>Basic Information</div>
             <div style={drawerStyles.grid}>
-              <FormField label="Center Name" required fullWidth>
+              <FormField label="Center Name" required fullWidth
+                action={isEditing
+                  ? (renaming
+                      ? <button type="button" onClick={() => { setRenaming(false); setNameError(""); setForm(f => ({ ...f, name: editTarget!.name })); }}
+                          style={nameModeStyles.link}>Cancel rename</button>
+                      : <button type="button" onClick={() => setRenaming(true)} style={nameModeStyles.link}>✏ Edit Name</button>)
+                  : <NameModeToggle existing={false} onChange={toggleUseExisting} />}>
                 <input name="name" value={form.name} onChange={handleChange} required
-                  placeholder="e.g. Koramangala Center" style={formStyles.input} />
+                  readOnly={isEditing && !renaming} autoFocus={renaming}
+                  placeholder="e.g. Koramangala Center"
+                  style={{ ...formStyles.input, ...(isEditing && !renaming ? nameModeStyles.locked : {}) }} />
+                {nameError
+                  ? <span style={formStyles.errorText}>{nameError}</span>
+                  : !form.name.trim()
+                    ? <span style={formStyles.errorText}>Center name is required.</span>
+                    : isEditing && renaming && form.name.trim() !== editTarget!.name.trim()
+                      ? <span style={formStyles.helperText}>The new name is updated on this centre&apos;s students, admissions and rosters when you save.</span>
+                      : null}
               </FormField>
               <FormField label="Status">
                 <select name="status" value={form.status} onChange={handleChange} style={formStyles.input}>
@@ -2675,18 +2889,25 @@ function CentersContent() {
             </div>
           </section>
 
-          <section style={{ ...drawerStyles.section, borderBottom: "none", marginBottom: 0 }}>
-            <div style={drawerStyles.sectionTitle}>Batches Setup</div>
-            <BatchesEditor batches={form.batches} onChange={handleBatchesChange} teachers={teachers}
-              base={{ daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime, teacherUid: form.teacherUid }} />
-          </section>
+          </>)}
+
+          {(!useExisting || isEditing || existingCenter) && (
+            <section style={{ ...drawerStyles.section, borderBottom: "none", marginBottom: 0 }}>
+              <div style={drawerStyles.sectionTitle}>Batches Setup</div>
+              <BatchesEditor key={useExisting && !isEditing ? existingId : "form"}
+                batches={form.batches} onChange={handleBatchesChange} teachers={teachers}
+                base={{ daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime, teacherUid: form.teacherUid }}
+                lockedIds={useExisting && !isEditing ? existingBatchIds : undefined} />
+            </section>
+          )}
         </div>
 
         <div style={drawerStyles.footer}>
           <button type="button" onClick={closeForm} style={drawerStyles.cancelBtn}>Cancel</button>
-          <button type="submit" disabled={saving}
-            style={{ ...drawerStyles.primaryBtn, opacity: saving ? 0.6 : 1, cursor: saving ? "not-allowed" : "pointer" }}>
-            {saving ? "Saving…" : isEditing ? "Update Center" : "Create Center"}
+          <button type="submit" disabled={saving || nameMissing}
+            title={nameMissing ? (useExisting && !isEditing ? "Select a centre first" : "Enter a centre name first") : undefined}
+            style={{ ...drawerStyles.primaryBtn, opacity: saving || nameMissing ? 0.6 : 1, cursor: saving || nameMissing ? "not-allowed" : "pointer" }}>
+            {saving ? "Saving…" : isEditing ? "Update Center" : useExisting ? "Add Batch to Center" : "Create Center"}
           </button>
         </div>
       </form>
@@ -2724,7 +2945,6 @@ function CentersContent() {
                 <CenterCard key={center.id} center={center}
                   teachers={teachers}
                   activeCount={activeCounts.get(center.id) ?? 0}
-                  autoDemoDate={earliestAdmissions.get(center.id) ?? ""}
                   onView={() => setViewTarget(center)}
                   onEdit={() => openEdit(center)}
                   onDelete={() => setDeleteTarget(center)} />
@@ -2742,7 +2962,6 @@ function CentersContent() {
                   <CenterCard key={center.id} center={center}
                     teachers={teachers}
                     activeCount={activeCounts.get(center.id) ?? 0}
-                    autoDemoDate={earliestAdmissions.get(center.id) ?? ""}
                     onView={() => setViewTarget(center)}
                     onEdit={() => openEdit(center)}
                     onDelete={() => setDeleteTarget(center)} />
@@ -2780,20 +2999,6 @@ const reminderStyles: Record<string, React.CSSProperties> = {
   btn:     { background: "#f59e0b", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
 };
 
-/** Card schedule as two lines: days ("Mon/Wed") and time ("5:00 PM – 6:00 PM"). */
-function splitSchedule(center: Center): { days: string; time: string } {
-  const raw = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
-  if (raw.daysOfWeek?.length || raw.startTime) {
-    return {
-      days: (raw.daysOfWeek ?? []).join("/"),
-      time: formatTimeRange12(raw.startTime, raw.endTime),
-    };
-  }
-  // Legacy docs only carry the combined "Mon/Wed 17:00–18:30" string.
-  const m = /^(.*?)\s*(\d{1,2}:\d{2}.*)$/.exec(center.timeSlot ?? "");
-  return m ? { days: m[1].trim(), time: formatTimesIn12h(m[2].trim()) } : { days: center.timeSlot ?? "", time: "" };
-}
-
 /** Deterministic 0–7 hue index from the centre name → .center-hue-N in globals.css. */
 function getCenterHue(name: string): number {
   let hash = 0;
@@ -2801,23 +3006,27 @@ function getCenterHue(name: string): number {
   return Math.abs(hash) % 8;
 }
 
-function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdit, onDelete }: {
-  center: Center; teachers: TeacherUser[]; activeCount: number; autoDemoDate: string;
+// Minimal card: name, teacher, wing tag and active-student count. Schedule,
+// batches, demo / first-class dates and the roster live in the detail modal
+// (click the card). Edit / Delete stay behind the ⋮ menu. Both wings.
+function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }: {
+  center: Center; teachers: TeacherUser[]; activeCount: number;
   onView: () => void; onEdit: () => void; onDelete: () => void;
 }) {
-  const router = useRouter();
   const [hover, setHover]     = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const teacher = teachers.find(t => t.uid === center.teacherUid);
-  const schedule = splitSchedule(center);
-  const pendingFirst = needsFirstClassDate(center);
+  // Centre teacher, else the batch teachers (a centre can be run by batch teachers only).
+  const teacherNames = [...centreTeacherUids(center.teacherUid, center.batches)]
+    .map(uid => teachers.find(t => t.uid === uid))
+    .filter((t): t is TeacherUser => !!t)
+    .map(t => getTeacherDisplayName(t));
+  // The view is already wing-filtered, so the card names the batch instead of the wing.
+  // No batches → the implicit General Batch that runs on the centre schedule.
   const cardBatches = explicitBatches(center as unknown as Record<string, unknown>);
-
-  function goToActiveStudents(e: React.MouseEvent) {
-    e.stopPropagation();
-    router.push(`/dashboard/enrollments?view=students&center=${encodeURIComponent(center.id)}&status=active`);
-  }
+  const batchLabel = cardBatches.length === 0
+    ? DEFAULT_BATCH_NAME
+    : `${cardBatches[0].name || "Unnamed batch"}${cardBatches.length > 1 ? ` (+${cardBatches.length - 1})` : ""}`;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -2830,93 +3039,47 @@ function CenterCard({ center, teachers, activeCount, autoDemoDate, onView, onEdi
 
   return (
     <div
+      role="button" tabIndex={0}
       onClick={onView}
+      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onView(); } }}
       className={`center-hue-${getCenterHue(center.name.trim().toLowerCase())}`}
       style={{ ...styles.card, ...(hover ? styles.cardHover : {}), cursor: "pointer", position: "relative", borderTop: "3px solid var(--center-hue)" }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      title="Open centre details"
     >
-      <div style={{ ...styles.cardHeader, justifyContent: "flex-end" as const }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div ref={menuRef} style={{ position: "relative" }}>
-            <button
-              onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
-              style={actionStyles.menuBtn}
-              title="More actions"
-              aria-label="More actions"
-            >
-              ⋮
-            </button>
-            {menuOpen && (
-              <div style={actionStyles.menuPanel} onClick={e => e.stopPropagation()}>
-                <button onClick={() => { setMenuOpen(false); onEdit(); }} style={actionStyles.menuItem}>
-                  ✏ Edit
-                </button>
-                <button onClick={() => { setMenuOpen(false); onDelete(); }} style={{ ...actionStyles.menuItem, ...actionStyles.menuItemDanger }}>
-                  ✕ Delete
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-      <div style={{ ...styles.cardName, color: "var(--center-hue)", fontWeight: 700 }}>{center.name}</div>
-      <div style={styles.cardMeta}>
-        {teacher
-          ? <span>{getTeacherDisplayName(teacher)}</span>
-          : <span style={{ color: "#9ca3af", fontSize: 12 }}>Unassigned</span>}
-      </div>
-      {pendingFirst && (
-        <span style={styles.pendingBadge}>⏳ Pending First Class Date</span>
-      )}
-      {cardBatches.length >= 2 ? (
-        // Several batches — each on its own line instead of one centre schedule.
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={{ alignSelf: "flex-start", fontSize: 11, fontWeight: 700, color: "#4338ca", background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 999, padding: "1px 8px" }}>
-            🗂 {cardBatches.length} batches
-          </span>
-          {cardBatches.slice(0, 3).map(b => (
-            <div key={b.id} style={{ fontSize: 12, lineHeight: 1.35, minWidth: 0 }}>
-              <span style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{b.name || "Unnamed"}</span>
-              <span style={{ color: "#6b7280" }}> · {b.daysOfWeek.join("/") || "—"}</span>
-              {(b.startTime || b.endTime) && <span style={{ color: "#4f46e5", fontWeight: 500 }}> · {formatTimeRange12(b.startTime, b.endTime)}</span>}
+      <div style={styles.cardHeader}>
+        <div style={{ ...styles.cardName, color: "var(--center-hue)" }}>{center.name}</div>
+        <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
+          <button
+            onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
+            style={actionStyles.menuBtn}
+            title="More actions"
+            aria-label="More actions"
+          >
+            ⋮
+          </button>
+          {menuOpen && (
+            <div style={actionStyles.menuPanel} onClick={e => e.stopPropagation()}>
+              <button onClick={() => { setMenuOpen(false); onEdit(); }} style={actionStyles.menuItem}>
+                ✏ Edit
+              </button>
+              <button onClick={() => { setMenuOpen(false); onDelete(); }} style={{ ...actionStyles.menuItem, ...actionStyles.menuItemDanger }}>
+                ✕ Delete
+              </button>
             </div>
-          ))}
-          {cardBatches.length > 3 && <span style={{ fontSize: 11.5, color: "#6b7280" }}>+{cardBatches.length - 3} more</span>}
-        </div>
-      ) : (
-        <div style={styles.cardMeta}>
-          {cardBatches.length === 1 && cardBatches[0].name && (
-            <span style={{ fontSize: 11.5, fontWeight: 600, color: "#4338ca" }}>🗂 {cardBatches[0].name}</span>
           )}
-          <span>{(cardBatches.length === 1 ? cardBatches[0].daysOfWeek.join("/") : schedule.days) || "-"}</span>
-          {(() => {
-            const t = cardBatches.length === 1 ? formatTimeRange12(cardBatches[0].startTime, cardBatches[0].endTime) : schedule.time;
-            return t ? <span style={{ fontSize: 12, fontWeight: 500, color: "#4f46e5" }}>{t}</span> : null;
-          })()}
         </div>
-      )}
-      {(center.demoClassDate || autoDemoDate || center.firstClassDate) && (
-        <div style={{ fontSize: 11.5, color: "#6b7280" }}>
-          Demo:{" "}
-          {center.demoClassDate
-            ? fmtDMY(center.demoClassDate)
-            : autoDemoDate
-              ? <span title="Earliest student admission at this centre — set a Demo Class Date to override">{fmtDMY(autoDemoDate)} (auto)</span>
-              : "—"}
-          {" | "}
-          First Class:{" "}
-          {center.firstClassDate
-            ? fmtDMY(center.firstClassDate)
-            : <span style={{ color: "#b45309", fontWeight: 600 }}>Pending</span>}
-        </div>
-      )}
-      <button
-        onClick={goToActiveStudents}
-        style={styles.activeStudentsBadge}
-        title={`${activeCount} active student${activeCount !== 1 ? "s" : ""} — view them`}
-      >
-        🎓 {activeCount} →
-      </button>
+      </div>
+      <div style={styles.cardMeta} title={cardBatches.map(b => b.name).filter(Boolean).join(", ") || undefined}>
+        {teacherNames.length
+          ? <span style={styles.cardTeacher} title={teacherNames.join(", ")}>
+              {teacherNames[0]}{teacherNames.length > 1 && <span style={{ color: "var(--color-text-secondary)" }}> +{teacherNames.length - 1}</span>}
+            </span>
+          : <span style={{ color: "#9ca3af", flexShrink: 0 }}>Unassigned</span>}
+        <span style={{ color: "var(--color-text-secondary)", flexShrink: 0 }}>•</span>
+        <span style={styles.cardBatch}>{batchLabel}</span>
+      </div>
+      <span style={styles.activeStudentsBadge}>👤 {activeCount} Active</span>
     </div>
   );
 }
@@ -3148,9 +3311,9 @@ function DeactivateCenterModal({ center, onClose, onConfirm }: {
             admissionNo: (d.data().admissionNo ?? d.data().admissionNumber ?? "") as string,
           }))
           .sort((a, b) => safeCompare(a.name, b.name)));
-        // Same-wing centres first — a transfer normally stays within the wing.
+        // Transfers stay inside the centre's own wing — never across wings.
         setDests(cenSnap.docs
-          .filter(d => d.id !== center.id)
+          .filter(d => d.id !== center.id && inWing(d.data(), wingOf(center)))
           .map(d => ({ id: d.id, name: (d.data().name ?? d.id) as string, wing: wingOf(d.data()), batches: explicitBatches(d.data()) }))
           .sort((a, b) => Number(b.wing === viewingWing) - Number(a.wing === viewingWing) || safeCompare(a.name, b.name)));
       } catch (err) {
@@ -3449,19 +3612,19 @@ const styles: Record<string, React.CSSProperties> = {
   heading:     { fontSize: 22, fontWeight: 600, color: "var(--color-text-primary)" },
   addBtn:      { background: "#4f46e5", color: "#fff", border: "none", padding: "8px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" },
   stateRow:    { padding: "24px 16px", textAlign: "center", fontSize: 13, color: "var(--color-text-secondary)", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10 },
-  grid:        { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 },
-  card:        { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, padding: "16px 18px", display: "flex", flexDirection: "column", gap: 10 },
-  cardHover:   { boxShadow: "0 4px 14px rgba(0,0,0,0.08)" },
-  cardHeader:  { display: "flex", alignItems: "center", justifyContent: "space-between" },
-  cardName:    { fontSize: 15, fontWeight: 600, color: "var(--color-text-primary)" },
-  pendingBadge: { alignSelf: "flex-start", fontSize: 11, fontWeight: 600, color: "#b45309", background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 99, padding: "2px 8px" },
-  cardMeta:    { display: "flex", flexDirection: "column", gap: 2, fontSize: 13, color: "var(--color-text-primary)" },
+  grid:        { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 12 },
+  card:        { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 8, transition: "box-shadow 0.15s, border-color 0.15s" },
+  cardHover:   { boxShadow: "0 4px 14px rgba(0,0,0,0.08)", borderColor: "#6366f1" },
+  cardHeader:  { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 6 },
+  cardName:    { fontSize: 15, fontWeight: 800, color: "var(--color-text-primary)", lineHeight: 1.25, minWidth: 0, wordBreak: "break-word" },
+  cardTeacher: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--color-text-primary)" },
+  cardBatch:   { minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  cardMeta:    { display: "flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)" },
   cardMetaLabel:{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.04em" },
   codeChip:    { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "2px 8px", borderRadius: 4, fontWeight: 600 },
   activeStudentsBadge: {
-    display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
-    background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", borderRadius: 8,
-    padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", textAlign: "left",
+    alignSelf: "flex-start", background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0",
+    borderRadius: 99, padding: "3px 10px", fontSize: 12, fontWeight: 700,
   },
   badge:       { display: "inline-block", padding: "2px 10px", borderRadius: 99, fontSize: 11, fontWeight: 600, textTransform: "capitalize" },
 };

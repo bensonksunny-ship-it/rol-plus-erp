@@ -24,8 +24,9 @@ import { db } from "@/services/firebase/firebase";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useWing } from "@/hooks/useWing";
 import { saveAdmission } from "@/services/screening/screening.service";
-import { canEnterAdmissionNo, cleanAdmissionNo, isAdmissionNoTaken } from "@/lib/admissionNumber";
+import { newApplicationRef } from "@/lib/applicationRef";
 import type { Wing } from "@/types";
+import { COURSE_LEVELS, formatCourse } from "@/lib/course";
 import { checkDuplicates } from "@/services/dedup/dedup.service";
 import DuplicateWarning, { isBlockingDuplicate, type DuplicateOverride } from "@/components/dedup/DuplicateWarning";
 import type { DedupMatch } from "@/lib/dedup";
@@ -50,6 +51,8 @@ const s: Record<string, React.CSSProperties> = {
     color: "#6b7280", fontSize: 13, fontWeight: 700, cursor: "pointer",
   },
 };
+
+export const INSTRUMENT_OPTIONS = ["Piano", "Keyboard", "Guitar", "Drums", "Violin", "Vocal"];
 
 export function OptionGroup({ options, value, onChange }: {
   options: string[];
@@ -147,11 +150,10 @@ export function AdmissionFormContent({
   const inputStyle: React.CSSProperties = publicWing ? { ...s.input, fontSize: 16 } : s.input;
   const [website, setWebsite] = useState(""); // honeypot (public mode only)
 
-  // Admission number — typed in by a Founder / Director / Chief Teacher on the
-  // School of Music staff form (never generated, never asked of parents).
-  // Teachers don't see it; leadership adds it at the Enrol step instead.
-  const showAdmNo = minimal && !publicWing && canEnterAdmissionNo(user?.role, wing);
-  const [admNo, setAdmNo] = useState("");
+  // No admission number here — this form may be filled by a parent (QR or a staff
+  // device). Each application gets an APP-YYYY-XXXX reference instead; leadership
+  // enters the official admission number in Edit Application or at Enrol.
+  const [savedRef, setSavedRef] = useState("");
 
   // Personal information
   // ROL+ (non-minimal) keeps a single Full Name field. Wing 2 (minimal) splits
@@ -181,6 +183,9 @@ export function AdmissionFormContent({
   // Musical skills
   const [purposeOfLearning,   setPurposeOfLearning]   = useState("");
   const [instrumentsToLearn,  setInstrumentsToLearn]  = useState<string[]>(initial?.instrumentsToLearn ?? []);
+  // Course Level (staff forms, both wings): required, and allows one instrument —
+  // "Introduction" + "Keyboard" → course "Introduction to Keyboard".
+  const [courseLevel,         setCourseLevel]         = useState("");
   const [previousExperience,  setPreviousExperience]  = useState("");
   const [instrumentsPlayed,   setInstrumentsPlayed]   = useState<string[]>([]);
   const [musicalSkill,        setMusicalSkill]        = useState("");
@@ -226,8 +231,11 @@ export function AdmissionFormContent({
 
   const dobOk = !minimal || computedAge !== "";
 
-  const admNoOk   = !showAdmNo || admNo.trim().length >= 4;
-  const canSubmit = nameOk && dobOk && phone.trim().length > 0 && admNoOk;
+  // The public /apply form (parents) skips Course Level; staff set it when editing the application.
+  const askCourse = !publicWing;
+  const courseOk  = !askCourse || (!!courseLevel && instrumentsToLearn.length === 1);
+  const course    = askCourse ? formatCourse(courseLevel, instrumentsToLearn[0]) : "";
+  const canSubmit = nameOk && dobOk && phone.trim().length > 0 && courseOk;
 
   function compressImage(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -266,11 +274,10 @@ export function AdmissionFormContent({
     setSaving(true); setSaveErr("");
     try {
       let dupIds: string[] = [];
-      let reEnrolAdmNo = "";
       if (!publicWing) {
         const matches = await checkDuplicates({
           name: effectiveName, phone, email, dob: `${dobDD}/${dobMM}/${dobYYYY}`,
-          admissionNo: showAdmNo ? admNo : "",
+          admissionNo: "",
         }, { applications: true });
         // Exact match → never save, except an existing student of this wing
         // (re-enrolment — merged at enrolment). Family / same-name → wait for
@@ -280,17 +287,11 @@ export function AdmissionFormContent({
           return;
         }
         dupIds = matches.map(m => m.candidate.id);
-        if (override === "reenrol") {
-          reEnrolAdmNo = matches.find(m => m.candidate.kind === "student" && m.candidate.wing === wing)?.candidate.admissionNo?.trim().toUpperCase() ?? "";
-        }
-      }
-      // A re-enrolled student's own admission number isn't "taken" by someone else.
-      if (showAdmNo && admNo.trim().toUpperCase() !== reEnrolAdmNo && await isAdmissionNoTaken(admNo)) {
-        throw new Error(`Admission number ${admNo.trim()} is already in use. Please check and enter a different one.`);
       }
       setDupMatches([]);
       const payload = {
         wing,
+        applicationRef:      newApplicationRef(),   // the public route issues its own
         fullName:            effectiveName,
         firstName:           firstName.trim(),
         middleName:          middleName.trim(),
@@ -307,6 +308,7 @@ export function AdmissionFormContent({
         centre,
         purposeOfLearning,
         instrumentsToLearn,
+        ...(askCourse ? { courseLevel, course } : {}),
         previousExperience,
         instrumentsPlayed,
         musicalSkill,
@@ -316,11 +318,6 @@ export function AdmissionFormContent({
         photo:               photoDataUrl ?? null,
         submittedBy:         user?.uid ?? "",
         ...(dupIds.length ? { possibleDuplicateOf: dupIds, duplicateOverride: override } : {}),
-        ...(showAdmNo ? {
-          admissionNumber:      admNo.trim(),
-          admissionNoEnteredBy: user?.uid ?? "",
-          admissionNoEnteredAt: new Date().toISOString(),
-        } : {}),
       };
       let admissionId: string;
       if (publicWing) {
@@ -332,8 +329,10 @@ export function AdmissionFormContent({
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error ?? "Failed to submit. Please try again.");
         admissionId = String(data.id ?? "");
+        setSavedRef(String(data.applicationRef ?? ""));
       } else {
         admissionId = await saveAdmission(payload);
+        setSavedRef(payload.applicationRef);
       }
       if (onSubmitted) {
         onSubmitted(admissionId, payload);
@@ -352,11 +351,11 @@ export function AdmissionFormContent({
     setAge(""); setDobDD(""); setDobMM(""); setDobYYYY("");
     setParentName(""); setWorkingStatus(""); setSchoolCompany("");
     setPhone(""); setEmail(""); setAddress1(""); setAddress2(""); setCentre("");
-    setPurposeOfLearning(""); setInstrumentsToLearn([]); setPreviousExperience("");
+    setPurposeOfLearning(""); setInstrumentsToLearn([]); setCourseLevel(""); setPreviousExperience("");
     setInstrumentsPlayed([]); setMusicalSkill(""); setHowHeardAboutUs("");
     setInitialExperience(null); setParentPartnerProgram("");
     setPhotoDataUrl(null);
-    setAdmNo("");
+    setSavedRef("");
     setSaved(false); setSaveErr("");
   }
 
@@ -371,6 +370,11 @@ export function AdmissionFormContent({
               ? <>Thank you! <strong>{effectiveName}</strong>&apos;s application has been received. Our team will contact you on <strong>{phone}</strong> to schedule the screening.</>
               : <><strong>{effectiveName}</strong>&apos;s admission form has been saved successfully.</>}
           </div>
+          {savedRef && (
+            <div style={{ fontSize: 13, color: "#166534", marginTop: -12, marginBottom: 24 }}>
+              Application reference: <strong style={{ fontFamily: "monospace", fontSize: 15, letterSpacing: "0.04em" }}>{savedRef}</strong>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
             <button onClick={reset} style={s.primaryBtn}>{publicWing ? "Submit another application" : "+ New Application"}</button>
             {onDone && (
@@ -396,22 +400,6 @@ export function AdmissionFormContent({
       {/* ── Personal Information ─────────────────────────────────────────────── */}
       <div style={s.card}>
         <div style={s.sectionTitle}>Personal Information</div>
-
-        {showAdmNo && (
-          <div style={{ marginBottom: 18, background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 12, padding: "12px 14px" }}>
-            <label style={s.label}>Admission Number *</label>
-            <input
-              value={admNo}
-              onChange={e => setAdmNo(cleanAdmissionNo(e.target.value))}
-              placeholder="Enter the admission number"
-              autoComplete="off"
-              style={{ ...inputStyle, fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.06em", background: "#fff" }}
-            />
-            <div style={{ fontSize: 11, color: admNo && !admNoOk ? "#dc2626" : "#92400e", marginTop: 6 }}>
-              {admNo && !admNoOk ? "At least 4 characters." : "Entered by the Chief Teacher / Director — checked for duplicates on save."}
-            </div>
-          </div>
-        )}
 
         {minimal ? (
           <>
@@ -561,14 +549,34 @@ export function AdmissionFormContent({
         <div style={{ marginBottom: 20 }}>
           <label style={s.label}>
             Musical Instrument to Learn{" "}
-            <span style={{ color: "#9ca3af", fontWeight: 400, fontSize: 12 }}>(select all that apply)</span>
+            {askCourse
+              ? <span style={{ color: "#dc2626" }}>*</span>
+              : <span style={{ color: "#9ca3af", fontWeight: 400, fontSize: 12 }}>(select all that apply)</span>}
           </label>
-          <MultiOptionGroup
-            options={["Piano", "Keyboard", "Guitar", "Drums", "Violin", "Vocal"]}
-            values={instrumentsToLearn}
-            onChange={setInstrumentsToLearn}
-          />
+          {askCourse ? (
+            <OptionGroup
+              options={INSTRUMENT_OPTIONS}
+              value={instrumentsToLearn[0] ?? ""}
+              onChange={v => setInstrumentsToLearn(v ? [v] : [])}
+            />
+          ) : (
+            <MultiOptionGroup
+              options={INSTRUMENT_OPTIONS}
+              values={instrumentsToLearn}
+              onChange={setInstrumentsToLearn}
+            />
+          )}
         </div>
+
+        {askCourse && (
+          <div style={{ marginBottom: 20 }}>
+            <label style={s.label}>Course Level <span style={{ color: "#dc2626" }}>*</span></label>
+            <OptionGroup options={[...COURSE_LEVELS]} value={courseLevel} onChange={setCourseLevel} />
+            <div style={{ fontSize: 12, marginTop: 6, color: courseOk ? "#4f46e5" : "#9ca3af", fontWeight: courseOk ? 600 : 400 }}>
+              {courseOk ? `Course: ${course}` : "Pick one instrument and a course level — e.g. Introduction to Keyboard."}
+            </div>
+          </div>
+        )}
 
         <div style={{ marginBottom: minimal ? 0 : 20 }}>
           <label style={s.label}>Previous Experience in Music</label>

@@ -18,6 +18,8 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, CENTER_STATUS } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
+import { useWing } from "@/hooks/useWing";
+import { inWing } from "@/lib/wing";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
@@ -37,10 +39,13 @@ import {
 import type { Center } from "@/types";
 import type { StudentUser } from "@/types";
 import { isTeacher } from "@/types";
+import { courseLabel } from "@/lib/course";
 import type { Lesson, LessonItem, StudentLessonProgress } from "@/types/lesson";
 import type { Role, ScreeningResult } from "@/types";
 import { getScreeningByStudent } from "@/services/screening/screening.service";
 import { DiagnosticCard } from "@/components/DiagnosticCard";
+import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
+import { normAdmNo } from "@/lib/dedup";
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -104,6 +109,7 @@ export default function TeacherDashboardPage() {
 function TeacherDashboardContent() {
   const { user } = useAuthContext();
   const { isTeacherRole } = useCentreAccess();
+  const { wing } = useWing();
   const router       = useRouter();
   const searchParams = useSearchParams();
 
@@ -144,23 +150,32 @@ function TeacherDashboardContent() {
     attendedThisWeek: number;
     weeklyClassAvg:   number;
     noSyllabus:       number;
+    /** Active students behind "Total Students" — listed in its modal. */
+    students:         { uid: string; centerId: string; name: string; admissionNo: string }[];
+    /** Per-centre group sessions this week — the "Weekly Class Avg" breakdown. */
+    perCentre:        { centerId: string; sessions: number; avgPresent: number; presentStudents: number }[];
   }
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(null);
   const [statsLoading,  setStatsLoading]  = useState(false);
+  const [statModal,     setStatModal]     = useState<"students" | "classAvg" | null>(null);
 
   // ── Load assigned centres (live) ─────────────────────────────────────────
   // Listens to the centres collection so an assignment made on the Enrollments
   // page shows up here without a reload. A teacher's centres are the active ones
   // where they are the centre teacher, a batch teacher, or listed in their own
   // centerIds — the centre doc is the source of truth, centerIds can lag behind.
+  // Strictly scoped to the active wing: switching wings re-subscribes and drops
+  // every other wing's centre (and with it their classes, students and stats).
   useEffect(() => {
     if (!user) return;
     setCentreLoading(true);
+    setCenters([]);
     const uid = user.uid;
     const healed = new Set<string>();
     const unsub = onSnapshot(collection(db, "centers"), snap => {
       const active = snap.docs
         .map(d => ({ id: d.id, ...d.data() } as Center))
+        .filter(c => inWing(c, wing))
         .filter(c => String(c.status ?? CENTER_STATUS.ACTIVE).toLowerCase() === CENTER_STATUS.ACTIVE);
       const mine = isTeacherRole
         ? active.filter(c => isAssignedTeacher(c, uid) || centerIds.includes(c.id))
@@ -185,7 +200,15 @@ function TeacherDashboardContent() {
     });
     return unsub;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, centerIdsKey, isTeacherRole]);
+  }, [user?.uid, centerIdsKey, isTeacherRole, wing]);
+
+  // A centre workspace from another wing (e.g. open when the wing was switched)
+  // is out of scope — fall back to this wing's Faculty Suite overview.
+  useEffect(() => {
+    if (centreLoading || !centreIdParam) return;
+    if (!centers.some(c => c.id === centreIdParam)) router.replace("/dashboard/teacher");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [centreLoading, centreIdParam, centers]);
 
   // Stable key of the assigned centre ids — the snapshot above re-emits on any
   // centre edit, but attendance/stats only need refetching when the set changes.
@@ -194,17 +217,21 @@ function TeacherDashboardContent() {
   useEffect(() => {
     const cIds = assignedIdsKey ? assignedIdsKey.split(",") : [];
     if (cIds.length === 0) { setMarkedCentreIds(new Set()); return; }
+    let cancelled = false;
     (async () => {
       try {
-        setMarkedCentreIds(await fetchMarkedCentreIds(cIds, today));
+        const marked = await fetchMarkedCentreIds(cIds, today);
+        if (!cancelled) setMarkedCentreIds(marked);
       } catch (err) {
         console.error("Failed to load today attendance:", err);
       }
     })();
+    return () => { cancelled = true; };
   }, [assignedIdsKey, today]);
 
   // Today's Classes: assigned centres with a class (the teacher's own batches,
-  // or the centre schedule) on today's weekday. My Centres lists all of them.
+  // or the centre schedule) on today's weekday. Every other centre is reached
+  // through My Classes (/dashboard/my-classes).
   const slotUid = isTeacherRole ? (user?.uid ?? null) : null;
   const todayCentres = useMemo(() => {
     const dayNum = new Date().getDay();
@@ -242,7 +269,7 @@ function TeacherDashboardContent() {
           return {
             uid:          d.id,
             name:         (u.displayName ?? u.name ?? "—") as string,
-            instrument:   (u.instrument ?? "—") as string,
+            instrument:   courseLabel(u) || "—",   // course title, else instrument
             status:       ((u.status ?? u.studentStatus ?? "active") as string),
             centerId:     (u.centerId ?? "") as string,
             hasScreening: !!u.screening,
@@ -344,9 +371,15 @@ function TeacherDashboardContent() {
 
   // ── Overview stats (total students, attended this week, no syllabus) ────────
   useEffect(() => {
-    if (centreIdParam || centers.length === 0) return;
-    const cIds = centers.map(c => c.id).filter(Boolean);
-    if (cIds.length === 0) return;
+    if (centreIdParam || centreLoading) return;
+    const cIds = assignedIdsKey ? assignedIdsKey.split(",") : [];
+    // No centres in this wing → zeroed stats, never the previous wing's numbers.
+    if (cIds.length === 0) {
+      setOverviewStats({ totalStudents: 0, attendedThisWeek: 0, weeklyClassAvg: 0, noSyllabus: 0, students: [], perCentre: [] });
+      setStatsLoading(false);
+      return;
+    }
+    let cancelled = false;
     setStatsLoading(true);
     setOverviewStats(null);
     (async () => {
@@ -359,12 +392,23 @@ function TeacherDashboardContent() {
             where("centerId", "==", cId),
           )))
         );
-        const allStudents: { uid: string; centerId: string }[] = [];
+        // Same active rule as the Center Suite / centre cards: active status +
+        // admission no. + an active centre; duplicate records count once.
+        const activeCentreIds = new Set(centers.filter(c => c.status === "active").map(c => c.id));
+        const allStudents: OverviewStats["students"] = [];
+        const seen = new Set<string>();
         studentSnaps.forEach(snap =>
           snap.docs.forEach(d => {
-            const u      = d.data();
-            const status = (u.status ?? u.studentStatus ?? "active") as string;
-            if (status === "active") allStudents.push({ uid: d.id, centerId: u.centerId as string });
+            const u = d.data();
+            if (!isCurrentlyActiveStudent(u, activeCentreIds)) return;
+            const key = `${u.centerId}|${normAdmNo(u.admissionNo ?? u.admissionNumber)}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            allStudents.push({
+              uid: d.id, centerId: u.centerId as string,
+              name: String(u.displayName ?? u.name ?? "—"),
+              admissionNo: String(u.admissionNo ?? u.admissionNumber ?? ""),
+            });
           })
         );
 
@@ -380,6 +424,7 @@ function TeacherDashboardContent() {
         const presentUids = new Set<string>();
         let weeklyAvgSum = 0;
         let centresWithSessions = 0;
+        const perCentre: OverviewStats["perCentre"] = [];
         await Promise.all(
           cIds.map(async cId => {
             const snap = await getDocs(query(
@@ -399,8 +444,13 @@ function TeacherDashboardContent() {
             });
             const sessionDates = Object.keys(byDate);
             if (sessionDates.length === 0) return;
-            weeklyAvgSum += sessionDates.reduce((s, dt) => s + byDate[dt], 0) / sessionDates.length;
+            const avgPresent = sessionDates.reduce((s, dt) => s + byDate[dt], 0) / sessionDates.length;
+            weeklyAvgSum += avgPresent;
             centresWithSessions++;
+            perCentre.push({
+              centerId: cId, sessions: sessionDates.length, avgPresent: Math.round(avgPresent * 10) / 10,
+              presentStudents: new Set(groupDocs.filter(d => d.status === "present" && d.studentUid).map(d => d.studentUid)).size,
+            });
           })
         );
         const attendedThisWeek = presentUids.size;
@@ -436,15 +486,17 @@ function TeacherDashboardContent() {
         }
         const noSyllabus = possiblyNoSyllabus.filter(st => !studentSpecificIds.has(st.uid)).length;
 
-        setOverviewStats({ totalStudents: allStudents.length, attendedThisWeek, weeklyClassAvg, noSyllabus });
+        if (cancelled) return;   // wing/centres changed mid-load — a newer run owns the stats
+        setOverviewStats({ totalStudents: allStudents.length, attendedThisWeek, weeklyClassAvg, noSyllabus, students: allStudents, perCentre });
       } catch (err) {
         console.error("Failed to load overview stats:", err);
       } finally {
-        setStatsLoading(false);
+        if (!cancelled) setStatsLoading(false);
       }
     })();
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centreIdParam, assignedIdsKey]);
+  }, [centreIdParam, assignedIdsKey, centreLoading]);
 
   // ── Navigation helpers ────────────────────────────────────────────────────
   function goToCentre(id: string, tab: "attendance" | "students" | "progress" = "attendance") {
@@ -554,6 +606,10 @@ function TeacherDashboardContent() {
               <div style={{ fontSize: 12, opacity: 0.8 }}>
                 {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
               </div>
+              <Link href="/dashboard/my-classes"
+                style={{ display: "inline-block", marginTop: 8, fontSize: 12, fontWeight: 600, color: "#fff", opacity: 0.9, textDecoration: "none", borderBottom: "1px solid rgba(255,255,255,0.45)" }}>
+                View All Classes &amp; Centers →
+              </Link>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {/* Notifications */}
@@ -654,38 +710,57 @@ function TeacherDashboardContent() {
             label: "Total Students",
             value: statsLoading ? "…" : overviewStats ? String(overviewStats.totalStudents) : "—",
             icon: "👥", color: "#4f46e5", bg: "#ede9fe",
+            hint: "See your active students", onClick: () => setStatModal("students"),
           },
           {
             label: "Attended This Week",
             value: statsLoading ? "…" : overviewStats ? String(overviewStats.attendedThisWeek) : "—",
             icon: "📅", color: "#0369a1", bg: "#e0f2fe",
+            hint: "Open this month's attendance register", onClick: () => router.push("/dashboard/attendance?range=this-week"),
           },
           {
             label: "Weekly Class Avg",
             value: statsLoading ? "…" : overviewStats ? String(overviewStats.weeklyClassAvg) : "—",
             icon: "✅", color: "#16a34a", bg: "#dcfce7",
+            hint: "See this week's class attendance by centre", onClick: () => setStatModal("classAvg"),
           },
           {
             label: "No Syllabus Yet",
             value: statsLoading ? "…" : overviewStats ? String(overviewStats.noSyllabus) : "—",
             icon: "📋", color: overviewStats?.noSyllabus ? "#dc2626" : "#16a34a",
             bg:   overviewStats?.noSyllabus ? "#fef2f2" : "#f0fdf4",
+            hint: "Manage syllabus & lessons", onClick: () => router.push("/dashboard/syllabus"),
           },
         ].map(card => (
-          <div key={card.label} style={{
-            background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12,
-            padding: "14px 16px", display: "flex", flexDirection: "column", gap: 6,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <button key={card.label} type="button" onClick={card.onClick} title={card.hint} aria-label={`${card.label}: ${card.value} — ${card.hint}`}
+            className="group border border-gray-200 bg-white transition-all hover:shadow-md hover:border-indigo-500 active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            style={{
+              borderRadius: 12, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 6,
+              cursor: "pointer", textAlign: "left" as const, font: "inherit", width: "100%",
+            }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.05em" }}>
                 {card.label}
               </span>
               <span style={{ background: card.bg, borderRadius: 8, padding: "3px 7px", fontSize: 13 }}>{card.icon}</span>
             </div>
-            <div style={{ fontSize: 26, fontWeight: 800, color: card.color, lineHeight: 1 }}>{card.value}</div>
-          </div>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", width: "100%" }}>
+              <span style={{ fontSize: 26, fontWeight: 800, color: card.color, lineHeight: 1 }}>{card.value}</span>
+              <span aria-hidden className="text-gray-300 transition-all group-hover:text-indigo-500 group-hover:translate-x-0.5" style={{ fontSize: 16, fontWeight: 700 }}>→</span>
+            </div>
+          </button>
         ))}
       </div>
+
+      {statModal && overviewStats && (
+        <FacultyStatModal
+          kind={statModal}
+          stats={overviewStats}
+          centreName={id => centers.find(c => c.id === id)?.name ?? "Unknown centre"}
+          onOpenCentre={id => { setStatModal(null); goToCentre(id, statModal === "students" ? "students" : "attendance"); }}
+          onClose={() => setStatModal(null)}
+        />
+      )}
 
 
       {/* Empty state */}
@@ -700,7 +775,7 @@ function TeacherDashboardContent() {
           {(() => {
             const sectionTitle = { fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: 12 };
             const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 };
-            const card = (c: Center, timeLabel: string, showAttendance: boolean) => (
+            const card = (c: Center, timeLabel: string) => (
               <div key={c.id}
                 onClick={() => goToCentre(c.id, "attendance")}
                 style={{
@@ -718,7 +793,7 @@ function TeacherDashboardContent() {
                   </span>
                 </div>
                 <div style={{ fontSize: 12, color: "#6b7280" }}>{timeLabel || "—"}</div>
-                {showAttendance && (() => {
+                {(() => {
                   const done = markedCentreIds.has(c.id);
                   return (
                     <div style={{
@@ -748,19 +823,17 @@ function TeacherDashboardContent() {
               <>
                 <div style={sectionTitle}>Today&apos;s Classes</div>
                 {todayCentres.length === 0 ? (
-                  <div style={s.emptyState}>No classes scheduled for today.</div>
+                  <div style={{ ...s.emptyState, marginTop: 0 }}>
+                    No classes scheduled for today.{" "}
+                    <Link href="/dashboard/my-classes" style={{ color: "#4f46e5", fontWeight: 600, textDecoration: "none" }}>
+                      Open My Classes →
+                    </Link>
+                  </div>
                 ) : (
                   <div style={grid}>
-                    {todayCentres.map(t => card(t.centre, t.times.join(", ") || t.centre.timeSlot, true))}
+                    {todayCentres.map(t => card(t.centre, t.times.join(", ") || t.centre.timeSlot))}
                   </div>
                 )}
-
-                <div style={{ ...sectionTitle, marginTop: 24 }}>
-                  {isTeacherRole ? "My Centres" : "All Centres"} ({centers.length})
-                </div>
-                <div style={grid}>
-                  {centers.map(c => card(c, scheduleLabel(c, slotUid), false))}
-                </div>
               </>
             );
           })()}
@@ -815,14 +888,6 @@ function classSlots(c: Center, uid: string | null): { days: number[]; dayNames: 
 /** Every class day at the centre for this teacher, as lowercase day names. */
 function classDayNames(c: Center, uid: string | null): string[] {
   return [...new Set(classSlots(c, uid).flatMap(sl => sl.dayNames))];
-}
-
-/** Full weekly schedule for a My Centres card, e.g. "Mon/Wed 17:00–18:00". */
-function scheduleLabel(c: Center, uid: string | null): string {
-  if ((c.batches ?? []).length === 0) return c.timeSlot ?? "";
-  return classSlots(c, uid)
-    .map(sl => [sl.time, sl.dayNames.map(d => d[0].toUpperCase() + d.slice(1, 3)).join("/")].filter(Boolean).join(" · "))
-    .join(" | ");
 }
 
 function parseClassEndMinutes(timeSlot: string): number | null {
@@ -1407,7 +1472,7 @@ function StudentsView({ students, teacherUid, onViewProgress }: {
         <table style={s.table}>
           <thead>
             <tr>
-              {["Name", "Instrument", "Progress", "Status", ""].map(h => (
+              {["Name", "Course", "Progress", "Status", ""].map(h => (
                 <th key={h} style={s.th}>{h}</th>
               ))}
             </tr>
@@ -1840,3 +1905,130 @@ const s: Record<string, React.CSSProperties> = {
   successBanner: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 14 },
   errText:       { fontSize: 12, color: "#dc2626", marginLeft: 8 },
 };
+
+// ─── Faculty Suite stat drill-down (Total Students / Weekly Class Avg) ─────────
+
+function FacultyStatModal({ kind, stats, centreName, onOpenCentre, onClose }: {
+  kind: "students" | "classAvg";
+  stats: {
+    students:  { uid: string; centerId: string; name: string; admissionNo: string }[];
+    perCentre: { centerId: string; sessions: number; avgPresent: number; presentStudents: number }[];
+    weeklyClassAvg: number;
+  };
+  centreName: (id: string) => string;
+  onOpenCentre: (centerId: string) => void;
+  onClose: () => void;
+}) {
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Students grouped by centre, name order within each.
+  const groups = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const byCentre = new Map<string, typeof stats.students>();
+    stats.students
+      .filter(st => !q || st.name.toLowerCase().includes(q) || st.admissionNo.toLowerCase().includes(q))
+      .forEach(st => byCentre.set(st.centerId, [...(byCentre.get(st.centerId) ?? []), st]));
+    return [...byCentre.entries()]
+      .map(([cid, list]) => ({ cid, name: centreName(cid), list: list.sort((a, b) => a.name.localeCompare(b.name)) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [stats.students, search, centreName]);
+
+  // Enrolled (active) count per centre, for the class-avg breakdown.
+  const enrolled = useMemo(() => {
+    const m = new Map<string, number>();
+    stats.students.forEach(st => m.set(st.centerId, (m.get(st.centerId) ?? 0) + 1));
+    return m;
+  }, [stats.students]);
+  const centreRows = useMemo(() => {
+    const ids = new Set([...stats.perCentre.map(p => p.centerId), ...enrolled.keys()]);
+    return [...ids].map(cid => {
+      const p = stats.perCentre.find(x => x.centerId === cid);
+      return { cid, name: centreName(cid), sessions: p?.sessions ?? 0, avgPresent: p?.avgPresent ?? 0, presentStudents: p?.presentStudents ?? 0, enrolled: enrolled.get(cid) ?? 0 };
+    }).sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name));
+  }, [stats.perCentre, enrolled, centreName]);
+
+  const title = kind === "students" ? `Active Students (${stats.students.length})` : "Weekly Class Attendance";
+  const rowBtn: React.CSSProperties = { width: "100%", textAlign: "left", background: "none", border: "none", cursor: "pointer", font: "inherit", padding: 0 };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()}
+        style={{ background: "#fff", borderRadius: 14, width: "100%", maxWidth: 560, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #f3f4f6" }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>{title}</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+              {kind === "students"
+                ? "Active students with an admission number, across your active centres"
+                : `Group classes in the last 7 days · overall avg ${stats.weeklyClassAvg} present per class`}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#6b7280" }}>✕</button>
+        </div>
+
+        <div style={{ overflowY: "auto", padding: "12px 20px 18px" }}>
+          {kind === "students" ? (
+            <>
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name or admission no…" autoFocus
+                style={{ width: "100%", padding: "8px 12px", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 13, marginBottom: 12, boxSizing: "border-box" }} />
+              {groups.length === 0 ? (
+                <div style={{ textAlign: "center", color: "#9ca3af", fontSize: 13, padding: "24px 0" }}>
+                  {stats.students.length === 0 ? "No active students yet." : "No students match."}
+                </div>
+              ) : groups.map(g => (
+                <div key={g.cid} style={{ marginBottom: 14 }}>
+                  <button type="button" onClick={() => onOpenCentre(g.cid)} title={`Open ${g.name}`} className="hover:text-indigo-600"
+                    style={{ ...rowBtn, display: "flex", justifyContent: "space-between", fontSize: 12, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+                    <span>{g.name} · {g.list.length}</span><span aria-hidden>→</span>
+                  </button>
+                  <div style={{ border: "1px solid #f3f4f6", borderRadius: 8 }}>
+                    {g.list.map((st, i) => (
+                      <div key={st.uid} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "7px 12px", fontSize: 13, background: i % 2 ? "#fafafa" : "#fff" }}>
+                        <span style={{ fontWeight: 600, color: "#111827" }}>{st.name}</span>
+                        <span style={{ fontFamily: "monospace", fontSize: 12, color: "#9ca3af" }}>{st.admissionNo}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          ) : centreRows.length === 0 ? (
+            <div style={{ textAlign: "center", color: "#9ca3af", fontSize: 13, padding: "24px 0" }}>No classes recorded this week.</div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#6b7280", fontSize: 11, textTransform: "uppercase" }}>
+                  <th style={{ padding: "6px 4px" }}>Centre</th>
+                  <th style={{ padding: "6px 4px" }}>Classes</th>
+                  <th style={{ padding: "6px 4px" }}>Avg present</th>
+                  <th style={{ padding: "6px 4px" }}>Attended / active</th>
+                </tr>
+              </thead>
+              <tbody>
+                {centreRows.map(r => {
+                  const pct = r.enrolled > 0 ? Math.round((r.presentStudents / r.enrolled) * 100) : null;
+                  return (
+                    <tr key={r.cid} onClick={() => onOpenCentre(r.cid)} title={`Open ${r.name} attendance`} className="hover:bg-indigo-50" style={{ cursor: "pointer", borderTop: "1px solid #f3f4f6" }}>
+                      <td style={{ padding: "8px 4px", fontWeight: 600, color: "#111827" }}>{r.name}</td>
+                      <td style={{ padding: "8px 4px", color: r.sessions ? "#374151" : "#dc2626" }}>{r.sessions || "None"}</td>
+                      <td style={{ padding: "8px 4px", fontWeight: 700, color: "#16a34a" }}>{r.sessions ? r.avgPresent : "—"}</td>
+                      <td style={{ padding: "8px 4px", color: "#374151" }}>
+                        {r.presentStudents} / {r.enrolled}{pct !== null && <span style={{ color: "#9ca3af" }}> ({pct}%)</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -12,6 +12,7 @@ import { getClassesByCenter } from "@/services/attendance/attendance.service";
 import { getAllTeacherQuality } from "@/services/quality/quality.service";
 import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic } from "@/lib/wing";
+import { countActiveStudents } from "@/lib/activeStudents";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center, Wing } from "@/types";
@@ -288,9 +289,13 @@ function CommandCenter() {
   const transactions = data?.transactions ?? [];
   const quality      = data?.quality      ?? [];
 
-  // KPI: students
-  const totalStudents   = students.length;
-  const activeStudents  = students.filter(s => s.status === "active").length;
+  // KPI: students — headline is the current active headcount (active status +
+  // admission no. + assigned to an active centre); the register total is context only.
+  const registeredStudents = students.length;
+  const activeCenterIds = useMemo(() => new Set(centers.filter(c => c.status === "active").map(c => c.id)), [centers]);
+  const activeStudents  = useMemo(
+    () => countActiveStudents(students as unknown as Record<string, unknown>[], activeCenterIds),
+    [students, activeCenterIds]);
   const groupStudents   = students.filter(s => s.classType === "group").length;
   const personalStudents = students.filter(s => s.classType === "personal").length;
 
@@ -495,7 +500,7 @@ function CommandCenter() {
 
       {/* ── 2. KPI ROW ── */}
       <div style={s.kpiStrip}>
-        <KpiCard label="Total Students"   value={String(totalStudents)}   sub={`${activeStudents} active`} color="#4f46e5"
+        <KpiCard label="Total Students"   value={String(activeStudents)}   sub={`${registeredStudents} total registered`} color="#4f46e5"
           onClick={() => router.push("/dashboard/students")} />
         <KpiCard label="Active Centres"   value={String(centers.filter(c=>c.status==="active").length)} sub={`of ${centers.length} total`} color="#0891b2"
           onClick={() => router.push("/dashboard/centers")} />
@@ -971,8 +976,18 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
 }) {
   const router = useRouter();
   const { wing } = useWing();
+  const { user } = useAuthContext();
   const todayISO = useMemo(() => isoToday(), []);
   const [selectedDate, setSelectedDate] = useState(todayISO);
+
+  // A card opens that centre: its detail modal in Enrollments for leadership,
+  // or My Classes with it selected for teachers (Enrollments is leadership-only).
+  function openCentre(centerId: string) {
+    const id = encodeURIComponent(centerId);
+    router.push(user?.role === ROLES.TEACHER
+      ? `/dashboard/my-classes?centerId=${id}`
+      : `/dashboard/enrollments?view=centers&centerId=${id}&openModal=true`);
+  }
   const [centers, setCenters] = useState<Center[]>([]);
   const [activeCountByCenter, setActiveCountByCenter] = useState<Record<string, number>>({});
   const [dateAttRecs, setDateAttRecs] = useState<{ centerId: string; status: string }[]>([]);
@@ -1100,7 +1115,8 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
           return (
             <button
               key={c.id}
-              onClick={() => router.push("/dashboard/attendance")}
+              onClick={() => openCentre(c.id)}
+              title={`Open ${c.name}`}
               style={{
                 background: st.bg, border: `1px solid ${st.border}`,
                 borderRadius: 10, padding: "12px 16px",
@@ -1503,6 +1519,8 @@ function AdminDashboard() {
   const months3   = useMemo(() => [thisMonth, isoMonthStart(1), isoMonthStart(2)], [thisMonth]);
 
   const [students,  setStudents]  = useState<AdminStudentDoc[]>([]);
+  // Current active headcount — same rule as the Center Suite and centre cards.
+  const [activeHeadcount, setActiveHeadcount] = useState(0);
   const [teachers,  setTeachers]  = useState<AdminTeacherDoc[]>([]);
   const [centers,   setCenters]   = useState<Center[]>([]);
   const [txList,    setTxList]    = useState<{ month: string; amount: number; studentUid: string; status: string; type: string; method: string; billingMonth: string }[]>([]);
@@ -1540,6 +1558,8 @@ function AdminDashboard() {
           lastBilledMonth:(d.data().lastBilledMonth ?? null) as string | null,
         }));
         setStudents(studs);
+        const activeIds = new Set(centersData.filter(c => c.status === "active").map(c => c.id));
+        setActiveHeadcount(countActiveStudents(studSnap.docs.filter(d => inWing(d.data(), wing)).map(d => d.data()), activeIds));
 
         setTeachers(teachSnap.docs
           .filter(d => inWing(d.data(), wing))
@@ -1644,7 +1664,6 @@ function AdminDashboard() {
   }
 
   // ── Derived stats ────────────────────────────────────────────────────────
-  const activeStudents  = students.filter(s => s.status === "active").length;
   const groupStudents   = students.filter(s => s.classType === "group").length;
   const personalStudents = students.filter(s => s.classType === "personal").length;
   const feeDueMap = useMemo(() => {
@@ -1949,7 +1968,7 @@ function AdminDashboard() {
 
       {/* ── KPI STRIP ── */}
       <div style={adm.kpiStrip}>
-        <KpiTile label="Students" value={loading ? "…" : String(students.length)} sub={loading ? "" : isSchoolOfMusic(wing) ? `${activeStudents} active` : `${activeStudents} active · ${groupStudents} group · ${personalStudents} personal`} />
+        <KpiTile label="Students" value={loading ? "…" : String(activeHeadcount)} sub={loading ? "" : isSchoolOfMusic(wing) ? `${students.length} total registered` : `${students.length} total registered · ${groupStudents} group · ${personalStudents} personal`} />
         <div style={adm.kpiDiv} />
         <KpiTile label="Centres" value={loading ? "…" : String(centers.length)} sub={`${centers.filter(c => c.status === "active").length} active`} />
         <div style={adm.kpiDiv} />
@@ -2134,7 +2153,7 @@ function AdminDashboard() {
       {/* ── QUICK ACCESS ── */}
       <div style={adm.quickGrid}>
         {[
-          { icon: "🎓", label: "Students",   sub: `${activeStudents} active`, href: "/dashboard/students" },
+          { icon: "🎓", label: "Students",   sub: `${activeHeadcount} active`, href: "/dashboard/students" },
           { icon: "🏫", label: "Centres",    sub: `${centers.length} total`, href: "/dashboard/centers" },
           { icon: "👤", label: "Teachers",   sub: `${teachers.filter(t => t.status === "active").length} active`, href: "/dashboard/teachers" },
           { icon: "💰", label: "Finance",    sub: "Collect & track fees", href: "/dashboard/finance" },

@@ -10,7 +10,7 @@ import { db } from "@/services/firebase/firebase";
 import Link from "next/link";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
-import { canEnterAdmissionNo, cleanAdmissionNo, isAdmissionNoTaken } from "@/lib/admissionNumber";
+import { admissionNoBlockedMessage, canEnterAdmissionNo, checkAdmissionNo, cleanAdmissionNo } from "@/lib/admissionNumber";
 import { useWing } from "@/hooks/useWing";
 import {
   getAllAdmissions,
@@ -19,14 +19,16 @@ import {
   deleteAdmission,
   moveAdmissionToWing,
 } from "@/services/screening/screening.service";
-import { AdmissionFormContent, OptionGroup, MultiOptionGroup } from "./admission-form";
+import { AdmissionFormContent, OptionGroup, MultiOptionGroup, INSTRUMENT_OPTIONS } from "./admission-form";
+import { COURSE_LEVELS, formatCourse, isCourseLevel } from "@/lib/course";
 import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening } from "@/lib/generateAdmissionCard";
 import { MAX_TOTAL_MARKS, gradeForMarks, readScreeningMarks } from "@/lib/screeningQuestions";
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { PhotoCaptureModal } from "./photo-capture-modal";
 import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
 import { findEnrolmentMatch } from "@/services/dedup/dedup.service";
-import { mergeIntoStudent } from "@/services/screening/enroll.service";
+import { AdmissionFinalPhase, AdmNoPendingPill } from "@/components/admissions/AdmissionProgress";
+import { mergeApplicationIntoStudent, mergeIntoStudent } from "@/services/screening/enroll.service";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
@@ -61,7 +63,8 @@ function EditAdmissionOverlay({
 }: {
   record:      Record<string, unknown>;
   centresList: { id: string; name: string }[];
-  onSave:      (updated: Record<string, unknown>) => Promise<void>;
+  /** `mergeInto` = existing student uid the user confirmed merging this application into. */
+  onSave:      (updated: Record<string, unknown>, mergeInto?: string) => Promise<void>;
   onCancel:    () => void;
 }) {
   const { user } = useAuthContext();
@@ -89,6 +92,9 @@ function EditAdmissionOverlay({
   const [centre,             setCentre]             = useState(() => { const raw = rs(record.centre); const found = centresList.find(c => c.id === raw); return found ? found.name : raw; });
   const [purposeOfLearning,  setPurposeOfLearning]  = useState(rs(record.purposeOfLearning));
   const [instrumentsToLearn, setInstrumentsToLearn] = useState<string[]>(ra(record.instrumentsToLearn));
+  // Course Level (both wings): required; allows one instrument. Older records with
+  // several instruments must be narrowed to one before saving.
+  const [courseLevel,        setCourseLevel]        = useState(isCourseLevel(record.courseLevel) ? String(record.courseLevel) : "");
   const [previousExperience, setPreviousExperience] = useState(rs(record.previousExperience));
   const [instrumentsPlayed,  setInstrumentsPlayed]  = useState<string[]>(ra(record.instrumentsPlayed));
   const [musicalSkill,       setMusicalSkill]       = useState(rs(record.musicalSkill));
@@ -129,14 +135,24 @@ function EditAdmissionOverlay({
     e.target.value = "";
   }
 
-  async function handleSave() {
+  // Same name + same admission number as an existing student → confirm a merge
+  // instead of blocking. A different name on that number is still blocked.
+  const [mergeTarget, setMergeTarget] = useState<{ studentUid: string; studentName: string; admNo: string } | null>(null);
+
+  async function handleSave(mergeInto?: string) {
     if (!fullName.trim() || !phone.trim() || saving) return;
     setSaving(true); setSaveErr("");
     try {
       const admNo   = admissionNumber.trim();
       const changed = admNo !== rs(record.admissionNumber).trim();
-      if (canEditAdmNo && changed && admNo && await isAdmissionNoTaken(admNo, rs(record.id))) {
-        throw new Error(`Admission number ${admNo} is already in use. Please enter a different one.`);
+      if (canEditAdmNo && changed && admNo && !mergeInto) {
+        const check = await checkAdmissionNo(admNo, fullName, rs(record.id));
+        if (check.kind === "match") {
+          setMergeTarget({ studentUid: check.studentUid, studentName: check.studentName || fullName.trim(), admNo });
+          setSaving(false);
+          return;
+        }
+        if (check.kind !== "free") throw new Error(admissionNoBlockedMessage(admNo, check));
       }
       await onSave({
         // Only the permitted roles may set it; record who did so it counts as manual entry.
@@ -150,17 +166,20 @@ function EditAdmissionOverlay({
         parentName: parentName.trim(), workingStatus, schoolCompany: schoolCompany.trim(),
         phone: phone.trim(), email: email.trim(),
         address1: address1.trim(), address2: address2.trim(), centre,
-        purposeOfLearning, instrumentsToLearn, previousExperience,
+        purposeOfLearning, instrumentsToLearn, courseLevel, course, previousExperience,
         instrumentsPlayed, musicalSkill, howHeardAboutUs: howHeardAboutUs.trim(),
         initialExperience, parentPartnerProgram, photo: photoDataUrl ?? null,
-      });
+      }, mergeInto);
     } catch (err) {
+      setMergeTarget(null);
       setSaveErr(err instanceof Error ? err.message : "Failed to save.");
       setSaving(false);
     }
   }
 
-  const canSave = fullName.trim().length > 0 && phone.trim().length > 0;
+  const courseOk = !!courseLevel && instrumentsToLearn.length === 1;
+  const course   = formatCourse(courseLevel, instrumentsToLearn[0]);
+  const canSave  = fullName.trim().length > 0 && phone.trim().length > 0 && courseOk;
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "24px 12px" }}>
@@ -186,9 +205,9 @@ function EditAdmissionOverlay({
               style={{ ...s.input, fontFamily: "monospace", fontSize: 15, fontWeight: 700, letterSpacing: "0.08em", color: "#4338ca", background: canEditAdmNo ? "#fff" : "#f3f4f6", maxWidth: 280 }}
             />
             {!admissionNumber.trim() && (
-              <div style={{ fontSize: 11.5, color: "#b91c1c", marginTop: 6, fontWeight: 600 }}>
-                ⚠ No Admission Number Given — Manual entry required before enrollment
-                {!canEditAdmNo && " (a Chief Teacher or Director must enter it)"}
+              <div style={{ fontSize: 11.5, color: "#4338ca", marginTop: 6, fontWeight: 600 }}>
+                ⏱ Final phase — assign the admission number to complete enrollment.
+                {!canEditAdmNo && " A Chief Teacher or Director enters it."}
               </div>
             )}
           </div>
@@ -276,8 +295,22 @@ function EditAdmissionOverlay({
               <OptionGroup options={["Formal Music Learning","Skill Development","Entertainment"]} value={purposeOfLearning} onChange={setPurposeOfLearning} />
             </div>
             <div style={{ marginBottom: 12 }}>
-              <label style={s.label}>Instruments to Learn</label>
-              <MultiOptionGroup options={["Piano","Keyboard","Guitar","Drums","Violin","Vocal"]} values={instrumentsToLearn} onChange={setInstrumentsToLearn} />
+              <label style={s.label}>Instrument to Learn <span style={{ color: "#dc2626" }}>*</span></label>
+              <OptionGroup options={INSTRUMENT_OPTIONS}
+                value={instrumentsToLearn.length === 1 ? instrumentsToLearn[0] : ""}
+                onChange={v => setInstrumentsToLearn(v ? [v] : [])} />
+              {instrumentsToLearn.length > 1 && (
+                <div style={{ fontSize: 12, color: "#b45309", marginTop: 6 }}>
+                  Previously chosen: {instrumentsToLearn.join(", ")} — pick one instrument for the course.
+                </div>
+              )}
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={s.label}>Course Level <span style={{ color: "#dc2626" }}>*</span></label>
+              <OptionGroup options={[...COURSE_LEVELS]} value={courseLevel} onChange={setCourseLevel} />
+              <div style={{ fontSize: 12, marginTop: 6, color: courseOk ? "#4f46e5" : "#9ca3af", fontWeight: courseOk ? 600 : 400 }}>
+                {courseOk ? `Course: ${course}` : "Pick one instrument and a course level — e.g. Introduction to Keyboard."}
+              </div>
             </div>
             <div style={{ marginBottom: 12 }}>
               <label style={s.label}>Previous Experience</label>
@@ -342,12 +375,33 @@ function EditAdmissionOverlay({
         {/* Footer */}
         <div style={{ padding: "14px 24px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 10 }}>
           <button onClick={onCancel} style={s.secondaryBtn}>Cancel</button>
-          <button onClick={handleSave} disabled={!canSave || saving}
+          <button onClick={() => handleSave()} disabled={!canSave || saving}
             style={{ ...s.primaryBtn, opacity: canSave && !saving ? 1 : 0.4, cursor: canSave && !saving ? "pointer" : "not-allowed" }}>
             {saving ? "Saving…" : "Save Changes"}
           </button>
         </div>
       </div>
+
+      {mergeTarget && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 320, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div role="dialog" aria-modal="true" style={{ background: "#fff", borderRadius: 14, width: "100%", maxWidth: 440, padding: "20px 22px", boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 15.5, fontWeight: 800, color: "#111", marginBottom: 8 }}>🔗 Matching Student Found</div>
+            <div style={{ fontSize: 13.5, color: "#374151", lineHeight: 1.55 }}>
+              <strong>{mergeTarget.studentName}</strong> (Admission No: <strong>{mergeTarget.admNo}</strong>) already exists in the system.
+              Would you like to merge this update into the existing record?
+            </div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 8 }}>
+              Their profile is updated with these details; the admission fee receipt and screening move to them. Their name, admission number and fee set-up stay as they are.
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 }}>
+              <button onClick={() => setMergeTarget(null)} disabled={saving} style={s.secondaryBtn}>Cancel</button>
+              <button onClick={() => handleSave(mergeTarget.studentUid)} disabled={saving} style={{ ...s.primaryBtn, opacity: saving ? 0.6 : 1 }}>
+                {saving ? "Merging…" : "Confirm & Merge Record"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -794,8 +848,25 @@ export function AdmissionsList({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleSaveEdit(id: string, updated: Record<string, unknown>) {
+  async function handleSaveEdit(id: string, updated: Record<string, unknown>, mergeInto?: string) {
     await updateAdmission(id, updated);
+    if (mergeInto) {
+      // Confirmed "Matching Student Found" → fold this application into them.
+      const rec = admissions.find(a => str(a.id) === id) ?? {};
+      const centreName = str(updated.centre);
+      const centreId = centresList.find(c => c.id === centreName || c.name === centreName)?.id ?? null;
+      await mergeApplicationIntoStudent({
+        application: { ...rec, ...updated }, admissionId: id, studentUid: mergeInto, centreId, by: user?.uid ?? "",
+      });
+      invalidateCache(`registry:${wing}:entries`);
+      invalidateCache(`students:${wing}:students`);
+      const linked = { ...updated, enrolledStudentId: mergeInto, mergedIntoExisting: true, status: "enrolled" };
+      setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, ...linked } : a));
+      setSelected(prev => prev && str(prev.id) === id ? { ...prev, ...linked } : prev);
+      setEditing(null);
+      toast("Record successfully updated and merged into Registry.", "success");
+      return;
+    }
     // Already enrolled → push a (re)entered admission number onto the student
     // record too, so the centre roster / Registry pick it up and the student
     // is no longer flagged "Missing admission number".
@@ -806,6 +877,15 @@ export function AdmissionsList({
       await updateDoc(doc(db, "users", studentUid), {
         admissionNumber: admNo, admissionNo: admNo, studentID: admNo,
         admissionNoAutoGenerated: false, updatedAt: serverTimestamp(),
+      });
+      invalidateCache(`registry:${wing}:entries`);
+      invalidateCache(`students:${wing}:students`);
+    }
+    // …and the course, so Registry / centre rosters / My Classes show the new title.
+    const course = str(updated.course);
+    if (studentUid && course && (course !== str(rec?.course) || str(updated.courseLevel) !== str(rec?.courseLevel))) {
+      await updateDoc(doc(db, "users", studentUid), {
+        course, courseLevel: str(updated.courseLevel), instruments: arr(updated.instrumentsToLearn), updatedAt: serverTimestamp(),
       });
       invalidateCache(`registry:${wing}:entries`);
       invalidateCache(`students:${wing}:students`);
@@ -930,6 +1010,7 @@ export function AdmissionsList({
         admissionNumber: str(adm.admissionNumber),
         studentID:       str(adm.admissionNumber),
         instruments:     arr(adm.instrumentsToLearn),
+        ...(str(adm.course) ? { course: str(adm.course), courseLevel: str(adm.courseLevel) } : {}),
         musicalSkill:    str(adm.musicalSkill),
         photo:           str(adm.photo) || null,
         wing,
@@ -1021,7 +1102,7 @@ export function AdmissionsList({
         <EditAdmissionOverlay
           record={editing}
           centresList={centresList}
-          onSave={async (updated) => { await handleSaveEdit(str(editing.id), updated); }}
+          onSave={async (updated, mergeInto) => { await handleSaveEdit(str(editing.id), updated, mergeInto); }}
           onCancel={() => setEditing(null)}
         />
       )}
@@ -1166,12 +1247,8 @@ export function AdmissionsList({
               </div>
               <div style={{ padding: "28px 24px" }}>
                 {!str(completing.admission.admissionNumber).trim() && (
-                  <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px", marginBottom: 16 }}>
-                    <span style={{ fontSize: 13, color: "#b91c1c", fontWeight: 600 }}>⚠ No Admission Number Given — Manual entry required before enrollment</span>
-                    <button onClick={() => setCompletingPhase("number")}
-                      style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                      Enter Admission Number
-                    </button>
+                  <div style={{ marginBottom: 16 }}>
+                    <AdmissionFinalPhase rec={completing.admission} admNo="" onAssign={() => setCompletingPhase("number")} />
                   </div>
                 )}
                 <label style={{ fontSize: 13, fontWeight: 700, color: "#374151", display: "block", marginBottom: 10 }}>
@@ -1231,12 +1308,8 @@ export function AdmissionsList({
           boxShadow: "0 4px 24px rgba(0,0,0,0.07)",
         }}>
           {!manualAdmissionNo(selected) && getApplicationStage(selected).key !== "enrolled" && (
-            <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
-              <span style={{ fontSize: 13, color: "#b91c1c", fontWeight: 600 }}>⚠ No Admission Number Given — Manual entry required before enrollment</span>
-              <button onClick={() => setEditing(selected)}
-                style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                Enter Admission Number
-              </button>
+            <div style={{ marginBottom: 14 }}>
+              <AdmissionFinalPhase rec={selected} admNo="" onAssign={() => setEditing(selected)} />
             </div>
           )}
           {/* Action row */}
@@ -1392,6 +1465,7 @@ export function AdmissionsList({
           {/* Musical info */}
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #f3f4f6", display: "flex", flexDirection: "column" as const, gap: 10 }}>
             {([
+              ["Application Ref.",       str(selected.applicationRef)],
               ["Purpose of Learning",    str(selected.purposeOfLearning)],
               ["Previous Experience",    str(selected.previousExperience)],
               ["Musical Skill",          str(selected.musicalSkill)],
@@ -1403,6 +1477,12 @@ export function AdmissionsList({
                 <div style={{ fontSize: 13, color: "#374151" }}>{v}</div>
               </div>
             ))}
+            <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>Course</div>
+              {str(selected.course)
+                ? <div style={{ fontSize: 13, fontWeight: 700, color: "#4f46e5" }}>{str(selected.course)}</div>
+                : <div style={{ fontSize: 12.5, color: "#b45309" }}>Course level not set — Edit to choose one</div>}
+            </div>
             {arr(selected.instrumentsToLearn).length > 0 && (
               <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>Instruments to Learn</div>
@@ -1556,7 +1636,11 @@ export function AdmissionsList({
                   <div style={{ fontSize: 11, fontFamily: shownAdmNo ? "monospace" : "inherit", fontWeight: shownAdmNo ? 700 : 500, letterSpacing: shownAdmNo ? "0.04em" : 0, color: shownAdmNo ? "#4f46e5" : "#6b7280" }}>
                     {shownAdmNo
                       ? <span title="Admission number">{shownAdmNo}</span>
-                      : <span title="Date of application">{date ? `Applied ${date}` : ""}</span>}
+                      : <span title="Application reference · date of application">
+                          {str(rec.applicationRef) && <span style={{ fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.03em" }}>{str(rec.applicationRef)}</span>}
+                          {str(rec.applicationRef) && date ? " · " : ""}
+                          {date ? `Applied ${date}` : ""}
+                        </span>}
                     {str(rec.source) === "public_qr" && (
                       <span title="Submitted by a parent via the QR code form"
                         style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: 0, background: "#fef3c7", color: "#b45309", padding: "1px 6px", borderRadius: 99 }}>
@@ -1564,10 +1648,7 @@ export function AdmissionsList({
                       </span>
                     )}
                     {!shownAdmNo && getApplicationStage(rec).key !== "enrolled" && (
-                      <span title="No Admission Number Given — Manual entry required before enrollment (Edit details)"
-                        style={{ marginLeft: 6, fontFamily: "inherit", fontSize: 10, fontWeight: 800, letterSpacing: 0, background: "#fee2e2", color: "#b91c1c", padding: "1px 7px", borderRadius: 99 }}>
-                        ⚠ No Adm. No.
-                      </span>
+                      <AdmNoPendingPill style={{ marginLeft: 6 }} />
                     )}
                     {onResume ? null : photoPending(rec) ? (
                       <span title="Take the candidate photo to complete this application"

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { newApplicationRef } from "@/lib/applicationRef";
 import { adminDb } from "@/services/firebase/firebase-admin";
 import { isWing, wingOf } from "@/lib/wing";
 import { checkDuplicatesServer } from "@/services/dedup/dedup.server";
@@ -103,9 +104,11 @@ export async function POST(req: NextRequest) {
       }, { status: 409 });
     }
     const ref = adminDb().collection("admissions").doc();
+    const applicationRef = newApplicationRef();
     // Same shape the in-app AdmissionFormContent (minimal) saves.
     await ref.set({
       id:                   ref.id,
+      applicationRef,
       wing,
       fullName:             [firstName, middleName, lastName].filter(Boolean).join(" "),
       firstName,
@@ -138,7 +141,7 @@ export async function POST(req: NextRequest) {
       ...(matches.length ? { possibleDuplicateOf: matches.map(m => m.candidate.id) } : {}),
       submittedAt:          new Date().toISOString(),
     });
-    return NextResponse.json({ id: ref.id });
+    return NextResponse.json({ id: ref.id, applicationRef });
   } catch (err) {
     console.error("[public/admissions] POST error:", err);
     return NextResponse.json({ error: "Could not submit the application. Please try again." }, { status: 500 });

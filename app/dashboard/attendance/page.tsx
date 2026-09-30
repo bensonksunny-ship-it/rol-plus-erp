@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   collection, getDocs, query, where,
 } from "firebase/firestore";
@@ -17,6 +17,9 @@ import {
   getExtraClassesByCentre,
 } from "@/services/attendance/attendance.service";
 import type { AttendanceStatus } from "@/services/attendance/attendance.service";
+import type { CenterBatch } from "@/types";
+import { buildMatrix, studentDays, type BatchFilter } from "./matrix";
+import { exportMonthlyCsv, exportMonthlyPdf, type ReportSection } from "./export";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,11 +29,14 @@ interface CentreRow {
   code:       string;
   daysOfWeek: string[];   // ["Mon","Wed","Fri"]
   teacherUid: string;
+  batches:    CenterBatch[];
 }
 
 interface StudentRow {
   uid:            string;
   name:           string;
+  admissionNo:    string;
+  batchId:        string | null;
   instrument:     string;
   classType:      "group" | "personal";
   classDays:      string[];    // personal only
@@ -86,8 +92,9 @@ const DAY_ABBR = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 function dowOf(iso: string): string {
   return DAY_ABBR[new Date(iso + "T00:00:00").getDay()];
 }
-function dayNum(iso: string): number {
-  return new Date(iso + "T00:00:00").getDate();
+// Column header, e.g. "Sep 02".
+function fmtColDate(iso: string): string {
+  return new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { month: "short", day: "2-digit" });
 }
 
 // Is this date a scheduled class for a centre (regular schedule or extra class)?
@@ -355,6 +362,13 @@ function ExtraClassModal({
 
 // ─── Centre Calendar Card ─────────────────────────────────────────────────────
 
+// Click a past cell to cycle its status; right-click for every option.
+const QUICK_CYCLE: AttendanceStatus[] = ["present", "absent", "break", "cancelled_teacher"];
+function nextQuickStatus(s: AttendanceStatus | null): AttendanceStatus {
+  const i = s ? QUICK_CYCLE.indexOf(s) : -1;
+  return i < 0 ? "present" : QUICK_CYCLE[(i + 1) % QUICK_CYCLE.length];
+}
+
 function CentreCard({
   centre,
   students,
@@ -362,7 +376,9 @@ function CentreCard({
   extraDates,
   month,
   today,
+  batchFilter,
   onCellClick,
+  onQuickSet,
   onAddExtra,
 }: {
   centre:      CentreRow;
@@ -371,14 +387,16 @@ function CentreCard({
   extraDates:  Set<string>;
   month:       string;
   today:       string;
+  batchFilter: BatchFilter;
   onCellClick: (m: ModalState) => void;
+  onQuickSet:  (centreId: string, studentUid: string, date: string, status: AttendanceStatus) => void;
   onAddExtra:  () => void;
 }) {
-  const allDates    = useMemo(() => datesInMonth(month), [month]);
-  const scheduledDates = useMemo(
-    () => allDates.filter(d => isScheduled(d, centre, extraDates)),
-    [allDates, centre, extraDates],
+  const { dates: scheduledDates, rows } = useMemo(
+    () => buildMatrix(centre, students, attendance, extraDates, month, today, batchFilter),
+    [centre, students, attendance, extraDates, month, today, batchFilter],
   );
+  const byUid = useMemo(() => new Map(students.map(s => [s.uid, s])), [students]);
 
   // attMap: `${studentUid}|${date}` → status
   const attMap = useMemo(() => {
@@ -387,23 +405,22 @@ function CentreCard({
     return m;
   }, [attendance]);
 
-  // upcoming scheduled class dates from today → 90 days ahead (for break multi-select)
-  const upcomingDates = useMemo(() => {
-    const maxD  = maxBreakDate();
+  // Dates from today → 90 days ahead (for the break multi-select), filtered per student below.
+  const upcomingAll = useMemo(() => {
     const dates: string[] = [];
-    const d     = new Date(today + "T00:00:00");
-    const end   = new Date(maxD  + "T00:00:00");
+    const d   = new Date(today + "T00:00:00");
+    const end = new Date(maxBreakDate() + "T00:00:00");
     while (d <= end) {
-      const iso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-      if (centre.daysOfWeek.includes(DAY_ABBR[d.getDay()]) || extraDates.has(iso)) {
-        dates.push(iso);
-      }
+      dates.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`);
       d.setDate(d.getDate() + 1);
     }
     return dates;
-  }, [today, centre.daysOfWeek, extraDates]);
+  }, [today]);
 
-  if (students.length === 0) return null;
+  if (rows.length === 0) return null;
+  const batchLabel = batchFilter === "all" ? "" : batchFilter === "general" ? "General Batch" : centre.batches.find(b => b.id === batchFilter)?.name ?? "";
+  const colCount = scheduledDates.length + 5;
+  const cellBase: React.CSSProperties = { ...td, textAlign: "center", padding: "5px 3px", minWidth: 40, borderLeft: "1px solid #f3f4f6" };
 
   return (
     <div style={card}>
@@ -411,13 +428,14 @@ function CentreCard({
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div>
           <span style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>
-            {centre.name}
+            {centre.name}{batchLabel && <span style={{ color: "#6b7280", fontWeight: 600 }}> · {batchLabel}</span>}
           </span>
           {centre.daysOfWeek.length > 0 && (
             <span style={{ marginLeft: 10, fontSize: 11, color: "#6b7280", background: "#f3f4f6", padding: "2px 8px", borderRadius: 99 }}>
               {centre.daysOfWeek.join(" · ")}
             </span>
           )}
+          <span style={{ marginLeft: 8, fontSize: 11, color: "#6b7280" }}>{rows.length} student{rows.length !== 1 ? "s" : ""}</span>
         </div>
         <button onClick={onAddExtra} style={btnSmall}>+ Extra Class</button>
       </div>
@@ -425,42 +443,42 @@ function CentreCard({
       {scheduledDates.length === 0 ? (
         <p style={{ fontSize: 13, color: "#9ca3af", margin: 0 }}>
           No scheduled classes in {fmtMonth(month)}.
-          {centre.daysOfWeek.length === 0 && " Centre has no class days configured."}
+          {centre.daysOfWeek.length === 0 && centre.batches.length === 0 && " Centre has no class days configured."}
         </p>
       ) : (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }}>
+          <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: 12, minWidth: "100%" }}>
             <thead>
               <tr>
-                <th style={th}>Student</th>
+                <th style={{ ...th, ...stickyCol, zIndex: 3, background: "#f9fafb" }}>Student</th>
                 {scheduledDates.map(date => {
                   const isExtra = extraDates.has(date) && !centre.daysOfWeek.includes(dowOf(date));
                   const isToday = date === today;
                   return (
                     <th key={date} style={{
-                      ...th, textAlign: "center", minWidth: 38, padding: "5px 3px",
+                      ...th, textAlign: "center", minWidth: 40, padding: "5px 3px",
                       borderLeft: "1px solid #e5e7eb",
                       background: isToday ? "#fef3c7" : isExtra ? "#f0fdf4" : "#f9fafb",
                       color: isToday ? "#92400e" : isExtra ? "#166534" : "#6b7280",
                     }}>
-                      <div style={{ fontWeight: 700 }}>{dayNum(date)}</div>
+                      <div style={{ fontWeight: 700 }}>{fmtColDate(date)}</div>
                       <div style={{ fontSize: 9 }}>{dowOf(date)}</div>
                       {isExtra && <div style={{ fontSize: 8, color: "#16a34a" }}>+extra</div>}
                     </th>
                   );
                 })}
                 {/* Summary */}
-                <th style={{ ...th, textAlign: "center", background: "#dcfce7", color: "#166534", minWidth: 36 }}>P</th>
-                <th style={{ ...th, textAlign: "center", background: "#fee2e2", color: "#991b1b", minWidth: 36 }}>A</th>
-                <th style={{ ...th, textAlign: "center", background: "#f9fafb", color: "#6b7280", minWidth: 36 }}>%</th>
+                <th style={{ ...th, textAlign: "center", background: "#f3f4f6", color: "#374151", minWidth: 44 }} title="Class days up to today (Break / Cancelled / Not Assigned excluded)">Total</th>
+                <th style={{ ...th, textAlign: "center", background: "#dcfce7", color: "#166534", minWidth: 36 }}>Present</th>
+                <th style={{ ...th, textAlign: "center", background: "#fee2e2", color: "#991b1b", minWidth: 36 }}>Absent</th>
+                <th style={{ ...th, textAlign: "center", background: "#f9fafb", color: "#6b7280", minWidth: 40 }}>%</th>
               </tr>
             </thead>
             <tbody>
-              {students.flatMap((st, i) => {
-                let p = 0, a = 0;
-                const colCount  = scheduledDates.length + 4;
-                const prevType  = i > 0 ? students[i - 1].classType : null;
-                const headers   = [];
+              {rows.flatMap((row, i) => {
+                const st = byUid.get(row.student.uid)!;
+                const prevType = i > 0 ? rows[i - 1].student.classType : null;
+                const headers = [];
                 if (i === 0 && st.classType === "group") {
                   headers.push(
                     <tr key="section-group">
@@ -478,94 +496,94 @@ function CentreCard({
                     </tr>
                   );
                 }
+                const rowBg = i % 2 === 0 ? "#fff" : "#fafafa";
+                const myDays = new Set(studentDays(centre, st));
+                const studentUpcoming = upcomingAll.filter(d => myDays.has(dowOf(d)) || extraDates.has(d));
+                // Past unrecorded break dates, so the modal can save them all at once.
+                const pastUnrecordedBreaks = st.breakStartDate
+                  ? scheduledDates.filter((d, k) => row.cells[k] !== "off" && d <= today && d >= st.breakStartDate! && !attMap.has(`${st.uid}|${d}`))
+                  : [];
+                const open = (date: string, current: AttendanceStatus | null, extra: Partial<ModalState> = {}) =>
+                  onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current, futureOnly: false, upcomingDates: studentUpcoming, ...extra });
+
                 return [
                   ...headers,
-                  <tr key={st.uid} style={{ background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
-                    <td style={{ ...td, minWidth: 140, whiteSpace: "nowrap" }}>
+                  <tr key={st.uid} style={{ background: rowBg }}>
+                    <td style={{ ...td, ...stickyCol, background: rowBg, minWidth: 160, whiteSpace: "nowrap" }}>
                       <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
-                      {st.instrument && <div style={{ fontSize: 10, color: "#9ca3af" }}>{st.instrument}</div>}
+                      <div style={{ fontSize: 10, color: "#9ca3af" }}>
+                        {st.admissionNo || "No adm. no."}
+                        {batchFilter === "all" && centre.batches.length > 0 && ` · ${row.batchName}`}
+                      </div>
                     </td>
-                    {(() => {
-                      // Bug 1 fix: personal students use their own classDays for
-                      // the multi-date break selector, not the center's schedule.
-                      const studentUpcoming =
-                        st.classType === "personal" && st.classDays.length > 0
-                          ? upcomingDates.filter(d => st.classDays.includes(dowOf(d)))
-                          : upcomingDates;
+                    {scheduledDates.map((date, k) => {
+                      const c        = row.cells[k];
+                      const status   = c === "off" ? null : c;
+                      const onBreak  = !!st.breakStartDate && date >= st.breakStartDate;
+                      const isFuture = date > today;
+                      const more = (e: React.MouseEvent, extra: Partial<ModalState> = {}) => { e.preventDefault(); open(date, status, extra); };
 
-                      // Bug 2 fix: collect all past unrecorded break dates for this
-                      // student so the modal can offer to save them all at once.
-                      const pastUnrecordedBreaks = st.breakStartDate
-                        ? scheduledDates.filter(d =>
-                            d <= today &&
-                            d >= st.breakStartDate! &&
-                            !attMap.has(`${st.uid}|${d}`)
-                          )
-                        : [];
+                      if (c === "off") {
+                        return (
+                          <td key={date} onContextMenu={e => { if (!isFuture) more(e); }}
+                            style={{ ...cellBase, color: "#e5e7eb", background: rowBg }}
+                            title="Not a class day for this student">–</td>
+                        );
+                      }
 
-                      return scheduledDates.map(date => {
-                        const onBreak   = !!st.breakStartDate && date >= st.breakStartDate;
-                        const isFuture  = date > today;
-                        const statusKey = `${st.uid}|${date}`;
-                        const status    = attMap.get(statusKey) ?? null;
-
-                        // Count for summary — Break and Not Assigned ("cancelled_student")
-                        // are intentionally excluded from both the P/A counts and the %
-                        // column, so non-class days never drag down a student's attendance.
-                        if (status === "present") p++;
-                        else if (status === "absent") a++;
-
-                        if (isFuture) {
-                          if (date <= maxBreakDate()) {
-                            return (
-                              <td key={date}
-                                onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: onBreak ? "break" : null, futureOnly: true, upcomingDates: studentUpcoming })}
-                                style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...(onBreak ? STATUS_COLOR.break : { background: "#f0f9ff", color: "#bae6fd" }) }}
-                                title="Mark break for this date"
-                              >
-                                {onBreak ? STATUS_SHORT.break : "·"}
-                              </td>
-                            );
-                          }
-                          return <td key={date} style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, background: "#fafafa", color: "#e5e7eb", borderLeft: "1px solid #f3f4f6" }}>·</td>;
-                        }
-
-                        // Bug 2 fix: past break cell with no record — show faded
-                        // indicator and pass all unrecorded past break dates so
-                        // the modal can save them all at once.
-                        if (onBreak && !status) {
+                      if (isFuture) {
+                        if (date <= maxBreakDate()) {
                           return (
                             <td key={date}
-                              onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: "break", futureOnly: false, upcomingDates: studentUpcoming, pastBreakDates: pastUnrecordedBreaks })}
-                              style={{ ...td, textAlign: "center", padding: "5px 3px", minWidth: 38, cursor: "pointer", borderLeft: "1px solid #f3f4f6", ...STATUS_COLOR.break, opacity: 0.5 }}
-                              title="Break (unsaved — click to record)"
+                              onClick={() => open(date, onBreak ? "break" : null, { futureOnly: true })}
+                              style={{ ...cellBase, cursor: "pointer", ...(onBreak ? STATUS_COLOR.break : { background: "#f0f9ff", color: "#bae6fd" }) }}
+                              title="Mark break for this date"
                             >
-                              {STATUS_SHORT.break}
+                              {onBreak ? STATUS_SHORT.break : "·"}
                             </td>
                           );
                         }
+                        return <td key={date} style={{ ...cellBase, background: "#fafafa", color: "#e5e7eb" }}>·</td>;
+                      }
 
-                        const sc = status ? STATUS_COLOR[status] : { bg: "#f9fafb", fg: "#d1d5db" };
+                      // Past break with no record — faded; opens the modal to save all unrecorded break dates.
+                      if (onBreak && !status) {
                         return (
                           <td key={date}
-                            onClick={() => onCellClick({ centreId: centre.id, studentUid: st.uid, studentName: st.name, date, current: status, futureOnly: false, upcomingDates: studentUpcoming })}
-                            style={{
-                              ...td, textAlign: "center", padding: "5px 3px", minWidth: 38,
-                              cursor: "pointer", borderLeft: "1px solid #f3f4f6",
-                              background: sc.bg, color: sc.fg,
-                            }}
-                            title={status ? STATUS_LABEL[status] : "Click to mark"}
+                            onClick={() => open(date, "break", { pastBreakDates: pastUnrecordedBreaks })}
+                            onContextMenu={e => more(e, { current: "break", pastBreakDates: pastUnrecordedBreaks })}
+                            style={{ ...cellBase, cursor: "pointer", ...STATUS_COLOR.break, opacity: 0.5 }}
+                            title="Break (unsaved — click to record)"
                           >
-                            {status ? STATUS_SHORT[status] : <span style={{ color: "#d1d5db" }}>·</span>}
+                            {STATUS_SHORT.break}
                           </td>
                         );
-                      });
-                    })()}
+                      }
+
+                      const sc = status ? STATUS_COLOR[status] : { bg: "#f9fafb", fg: "#d1d5db" };
+                      return (
+                        <td key={date}
+                          onClick={() => onQuickSet(centre.id, st.uid, date, nextQuickStatus(status))}
+                          onContextMenu={e => more(e)}
+                          style={{ ...cellBase, cursor: "pointer", userSelect: "none" }}
+                          title={`${status ? STATUS_LABEL[status] : "Not marked"} — click to change, right-click for more`}
+                        >
+                          <span style={{
+                            display: "inline-block", minWidth: 24, padding: "2px 4px", borderRadius: 6,
+                            background: sc.bg, color: sc.fg, fontWeight: 700, fontSize: 11,
+                          }}>
+                            {status ? STATUS_SHORT[status] : "·"}
+                          </span>
+                        </td>
+                      );
+                    })}
                     {/* Summary */}
-                    <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#16a34a", minWidth: 36 }}>{p}</td>
-                    <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#dc2626", minWidth: 36 }}>{a}</td>
-                    <td style={{ ...td, textAlign: "center", fontWeight: 700, fontSize: 12, color: p + a > 0 ? (p / (p+a) >= 0.75 ? "#16a34a" : p / (p+a) >= 0.5 ? "#d97706" : "#dc2626") : "#9ca3af", minWidth: 36 }}>
-                      {p + a > 0 ? `${Math.round(p/(p+a)*100)}%` : "—"}
+                    <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#374151", minWidth: 44 }}>{row.total}</td>
+                    <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#16a34a", minWidth: 36 }}>{row.present}</td>
+                    <td style={{ ...td, textAlign: "center", fontWeight: 700, color: "#dc2626", minWidth: 36 }}>{row.absent}</td>
+                    <td style={{ ...td, textAlign: "center", fontWeight: 700, fontSize: 12, minWidth: 40,
+                      color: row.pct == null ? "#9ca3af" : row.pct >= 75 ? "#16a34a" : row.pct >= 50 ? "#d97706" : "#dc2626" }}>
+                      {row.pct == null ? "—" : `${row.pct}%`}
                     </td>
                   </tr>
                 ];
@@ -775,6 +793,12 @@ function AttendanceContent() {
   const { wing }                       = useWing();
 
   const [tab,     setTab]     = useState<"today" | "history">("today");
+  // Deep link: ?range=this-week (Faculty Suite "Attended This Week") or ?tab=history
+  // opens the Monthly Register on the current month, which holds this week's classes.
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("range") === "this-week" || p.get("tab") === "history") setTab("history");
+  }, []);
   const [dayDate, setDayDate] = useState<string>(todayISO());
   const [month,   setMonth]   = useState<string>(currentMonth());
   const [centres, setCentres] = useState<CentreRow[]>([]);
@@ -815,6 +839,7 @@ function AttendanceContent() {
           code:       (data.centerCode as string) || "",
           daysOfWeek: Array.isArray(data.daysOfWeek) ? (data.daysOfWeek as string[]) : [],
           teacherUid: (data.teacherUid as string) || "",
+          batches:    Array.isArray(data.batches) ? (data.batches as CenterBatch[]) : [],
         };
       });
       setCentres(filterCentres(all));
@@ -872,6 +897,8 @@ function AttendanceContent() {
             return {
               uid:            d.id,
               name:           (data.displayName as string) || (data.name as string) || d.id,
+              admissionNo:    String(data.admissionNumber || data.admissionNo || ""),
+              batchId:        (data.batchId as string) || null,
               instrument:     (data.instrument  as string) || "",
               classType:      ((data.classType as string) === "personal" ? "personal" : "group") as "group" | "personal",
               classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
@@ -968,6 +995,86 @@ function AttendanceContent() {
     }
   }
 
+  // ── One-click marks (History grid) ────────────────────────────────────────
+  // Shown at once; saved after a short pause per cell, so clicking through
+  // P → A → ☕ only writes the final choice.
+  const patchAtt = useCallback((centreId: string, changes: { uid: string; date: string; status: AttendanceStatus }[]) => {
+    setAttMap(prev => {
+      const next = new Map(prev);
+      const recs = [...(next.get(centreId) ?? [])];
+      for (const ch of changes) {
+        const idx = recs.findIndex(r => r.studentUid === ch.uid && r.date === ch.date);
+        if (idx >= 0) recs[idx] = { ...recs[idx], status: ch.status };
+        else recs.push({ id: `${ch.uid}|${ch.date}`, studentUid: ch.uid, date: ch.date, status: ch.status });
+      }
+      next.set(centreId, recs);
+      return next;
+    });
+  }, []);
+
+  const pendingSaves = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; run: () => Promise<void> }>());
+  const [savingCount, setSavingCount] = useState(0);
+  const [quickErr,    setQuickErr]    = useState("");
+
+  function quickSet(centreId: string, uid: string, date: string, status: AttendanceStatus) {
+    if (!user) return;
+    const markedBy = user.uid;
+    patchAtt(centreId, [{ uid, date, status }]);
+    const key  = `${centreId}|${uid}|${date}`;
+    const prev = pendingSaves.current.get(key);
+    if (prev) clearTimeout(prev.timer);
+    else setSavingCount(n => n + 1);
+    const run = async () => {
+      pendingSaves.current.delete(key);
+      try {
+        await saveCentreAttendance({ studentUid: uid, centerId: centreId, date, status, markedBy });
+      } catch (err) {
+        console.error("[attendance] quick mark:", err);
+        setQuickErr("Some marks couldn't be saved — check your connection and reload the page.");
+      } finally {
+        setSavingCount(n => n - 1);
+      }
+    };
+    pendingSaves.current.set(key, { timer: setTimeout(run, 700), run });
+  }
+
+  // Leaving the page: save anything still waiting.
+  useEffect(() => {
+    const pending = pendingSaves.current;
+    return () => { for (const p of pending.values()) { clearTimeout(p.timer); void p.run(); } };
+  }, []);
+
+  // ── History filters + export ──────────────────────────────────────────────
+  const [centreFilter, setCentreFilter] = useState<string>("all");
+  const [batchFilter,  setBatchFilter]  = useState<BatchFilter>("all");
+  const [exporting,    setExporting]    = useState<"" | "csv" | "pdf">("");
+  useEffect(() => { setBatchFilter("all"); }, [centreFilter]);
+  useEffect(() => {
+    if (centreFilter !== "all" && !centres.some(c => c.id === centreFilter)) setCentreFilter("all");
+  }, [centres, centreFilter]);
+
+  const selectedCentre = centres.find(c => c.id === centreFilter) ?? null;
+  const visibleCentres = selectedCentre ? [selectedCentre] : centres;
+  const effectiveBatch: BatchFilter = selectedCentre ? batchFilter : "all";
+
+  async function handleExport(kind: "csv" | "pdf") {
+    const sections: ReportSection[] = visibleCentres.map(c => {
+      const { dates, rows } = buildMatrix(c, studentMap.get(c.id) ?? [], attMap.get(c.id) ?? [],
+        extraMap.get(c.id) ?? new Set(), month, today, effectiveBatch);
+      const batchLabel = effectiveBatch === "all" ? "" : effectiveBatch === "general" ? "General Batch"
+        : c.batches.find(b => b.id === effectiveBatch)?.name ?? "";
+      return { centreName: c.name, batchLabel, dates, rows };
+    }).filter(s => s.rows.length > 0);
+    if (sections.length === 0) return;
+    setExporting(kind);
+    try {
+      if (kind === "csv") exportMonthlyCsv(month, sections);
+      else await exportMonthlyPdf(month, sections);
+    } finally {
+      setExporting("");
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
   if (authLoading) return null;
 
@@ -988,12 +1095,12 @@ function AttendanceContent() {
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111827", margin: 0 }}>Attendance</h1>
           <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4, margin: 0 }}>
-            {tab === "today" ? "Mark the batches that have class on a given day" : "Month grid — review and correct any date"}
+            {tab === "today" ? "Mark the batches that have class on a given day" : "Every class day of the month per student — click to mark, export for records"}
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <button onClick={() => setTab("today")} style={tabBtn("today", "Today")}>Today</button>
-          <button onClick={() => setTab("history")} style={tabBtn("history", "History")}>History</button>
+          <button onClick={() => setTab("history")} style={tabBtn("history", "Monthly")}>Monthly Register</button>
         </div>
       </div>
 
@@ -1044,21 +1151,51 @@ function AttendanceContent() {
       {/* ── History tab (month grid) ── */}
       {!loading && centres.length > 0 && tab === "history" && (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
             <input type="month" value={month} min={minMonth()} max={maxBreakMonth()}
-              onChange={e => setMonth(e.target.value)} style={inputStyle} />
+              onChange={e => e.target.value && setMonth(e.target.value)} style={inputStyle} aria-label="Month" />
             {month !== currentMonth() && (
               <button onClick={() => setMonth(currentMonth())} style={btnGhost}>← This month</button>
             )}
+            <select value={centreFilter} onChange={e => setCentreFilter(e.target.value)} style={inputStyle} aria-label="Centre">
+              <option value="all">All centres</option>
+              {centres.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            {selectedCentre && selectedCentre.batches.length > 0 && (
+              <select value={batchFilter} onChange={e => setBatchFilter(e.target.value)} style={inputStyle} aria-label="Batch">
+                <option value="all">All batches</option>
+                {selectedCentre.batches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                <option value="general">General Batch (no batch)</option>
+              </select>
+            )}
+            <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+              {savingCount > 0 && <span style={{ fontSize: 12, color: "#6b7280" }}>Saving…</span>}
+              <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Export Monthly Report:</span>
+              <button onClick={() => handleExport("csv")} disabled={!!exporting} style={btnSmall}>
+                {exporting === "csv" ? "…" : "⬇ CSV"}
+              </button>
+              <button onClick={() => handleExport("pdf")} disabled={!!exporting} style={btnSmall}>
+                {exporting === "pdf" ? "Preparing…" : "⬇ PDF"}
+              </button>
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 10, marginBottom: 4, flexWrap: "wrap", alignItems: "center" }}>
             {ALL_STATUSES.map(s => (
               <span key={s} style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4, color: STATUS_COLOR[s].fg, background: STATUS_COLOR[s].bg, padding: "2px 8px", borderRadius: 99 }}>
                 <b>{STATUS_SHORT[s]}</b> {STATUS_LABEL[s]}
               </span>
             ))}
+            <span style={{ fontSize: 11, color: "#9ca3af" }}>– not a class day</span>
           </div>
-          {centres.map(centre => (
+          <p style={{ fontSize: 12, color: "#6b7280", margin: "6px 0 12px" }}>
+            Click a cell to cycle <b>P → A → ☕ → CT</b>; it saves automatically. Right-click (long-press on a phone) for all options.
+          </p>
+          {quickErr && (
+            <div style={{ fontSize: 13, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>
+              {quickErr}
+            </div>
+          )}
+          {visibleCentres.map(centre => (
             <CentreCard
               key={centre.id}
               centre={centre}
@@ -1067,7 +1204,9 @@ function AttendanceContent() {
               extraDates={extraMap.get(centre.id) ?? new Set()}
               month={month}
               today={today}
+              batchFilter={effectiveBatch}
               onCellClick={setModal}
+              onQuickSet={quickSet}
               onAddExtra={() => setExtraTarget(centre.id)}
             />
           ))}
@@ -1115,6 +1254,10 @@ const th: React.CSSProperties = {
   padding: "7px 10px", textAlign: "left", fontSize: 11, fontWeight: 700,
   color: "#6b7280", borderBottom: "2px solid #e5e7eb", whiteSpace: "nowrap",
   background: "#f9fafb",
+};
+// First column stays put while the date columns scroll sideways.
+const stickyCol: React.CSSProperties = {
+  position: "sticky", left: 0, zIndex: 1, boxShadow: "1px 0 0 #e5e7eb",
 };
 const td: React.CSSProperties = {
   padding: "8px 10px", verticalAlign: "middle", borderBottom: "1px solid #f3f4f6",
