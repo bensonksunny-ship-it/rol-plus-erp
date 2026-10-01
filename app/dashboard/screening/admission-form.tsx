@@ -30,6 +30,7 @@ import { COURSE_LEVELS, formatCourse } from "@/lib/course";
 import { checkDuplicates } from "@/services/dedup/dedup.service";
 import DuplicateWarning, { isBlockingDuplicate, type DuplicateOverride } from "@/components/dedup/DuplicateWarning";
 import type { DedupMatch } from "@/lib/dedup";
+import ClosePageButton from "@/components/public/ClosePageButton";
 
 const s: Record<string, React.CSSProperties> = {
   card: {
@@ -376,7 +377,9 @@ export function AdmissionFormContent({
             </div>
           )}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-            <button onClick={reset} style={s.primaryBtn}>{publicWing ? "Submit another application" : "+ New Application"}</button>
+            {publicWing
+              ? <ClosePageButton />
+              : <button onClick={reset} style={s.primaryBtn}>+ New Application</button>}
             {onDone && (
               <button onClick={onDone} style={s.secondaryBtn}>← Back to Applications</button>
             )}

@@ -19,7 +19,7 @@ import { ROLES, CENTER_STATUS } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import { useWing } from "@/hooks/useWing";
-import { inWing } from "@/lib/wing";
+import { inWing, teachingWings, wingOf, WING_SHORT } from "@/lib/wing";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
@@ -125,7 +125,12 @@ function TeacherDashboardContent() {
   const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
   // ── State ─────────────────────────────────────────────────────────────────
-  const [centers,          setCenters]          = useState<Center[]>([]);
+  // myCentres: the teacher's centres in every wing they teach in (Today's
+  // Classes, centre workspace). centers: just the active wing (stats, lists).
+  const [myCentres,        setMyCentres]        = useState<Center[]>([]);
+  const centers = useMemo(() => myCentres.filter(c => inWing(c, wing)), [myCentres, wing]);
+  const wingsKey = (isTeacherRole ? teachingWings(user, wing) : [wing]).join(",");
+  const multiWing = wingsKey.includes(",");
   const [centreLoading,    setCentreLoading]    = useState(true);
   const [markedCentreIds,  setMarkedCentreIds]  = useState<Set<string>>(new Set());
 
@@ -164,24 +169,25 @@ function TeacherDashboardContent() {
   // page shows up here without a reload. A teacher's centres are the active ones
   // where they are the centre teacher, a batch teacher, or listed in their own
   // centerIds — the centre doc is the source of truth, centerIds can lag behind.
-  // Strictly scoped to the active wing: switching wings re-subscribes and drops
-  // every other wing's centre (and with it their classes, students and stats).
+  // A teacher gets every wing they teach in (tagged per card); other roles only
+  // the active wing. Stats below still use the active wing's `centers`.
   useEffect(() => {
     if (!user) return;
     setCentreLoading(true);
-    setCenters([]);
+    setMyCentres([]);
     const uid = user.uid;
     const healed = new Set<string>();
+    const wings = wingsKey.split(",");
     const unsub = onSnapshot(collection(db, "centers"), snap => {
       const active = snap.docs
         .map(d => ({ id: d.id, ...d.data() } as Center))
-        .filter(c => inWing(c, wing))
+        .filter(c => wings.includes(wingOf(c)))
         .filter(c => String(c.status ?? CENTER_STATUS.ACTIVE).toLowerCase() === CENTER_STATUS.ACTIVE);
       const mine = isTeacherRole
         ? active.filter(c => isAssignedTeacher(c, uid) || centerIds.includes(c.id))
         : active;
       mine.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
-      setCenters(mine);
+      setMyCentres(mine);
       setCentreLoading(false);
 
       // Self-heal: add centres assigned on the centre doc but missing from the
@@ -200,19 +206,19 @@ function TeacherDashboardContent() {
     });
     return unsub;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, centerIdsKey, isTeacherRole, wing]);
+  }, [user?.uid, centerIdsKey, isTeacherRole, wingsKey]);
 
   // A centre workspace from another wing (e.g. open when the wing was switched)
   // is out of scope — fall back to this wing's Faculty Suite overview.
   useEffect(() => {
     if (centreLoading || !centreIdParam) return;
-    if (!centers.some(c => c.id === centreIdParam)) router.replace("/dashboard/teacher");
+    if (!myCentres.some(c => c.id === centreIdParam)) router.replace("/dashboard/teacher");
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centreLoading, centreIdParam, centers]);
+  }, [centreLoading, centreIdParam, myCentres]);
 
   // Stable key of the assigned centre ids — the snapshot above re-emits on any
   // centre edit, but attendance/stats only need refetching when the set changes.
-  const assignedIdsKey = useMemo(() => centers.map(c => c.id).join(","), [centers]);
+  const assignedIdsKey = useMemo(() => myCentres.map(c => c.id).join(","), [myCentres]);
 
   useEffect(() => {
     const cIds = assignedIdsKey ? assignedIdsKey.split(",") : [];
@@ -235,11 +241,11 @@ function TeacherDashboardContent() {
   const slotUid = isTeacherRole ? (user?.uid ?? null) : null;
   const todayCentres = useMemo(() => {
     const dayNum = new Date().getDay();
-    return centers.flatMap(c => {
+    return myCentres.flatMap(c => {
       const times = classSlots(c, slotUid).filter(sl => sl.days.includes(dayNum)).map(sl => sl.time);
       return times.length > 0 ? [{ centre: c, times: times.filter(Boolean) }] : [];
     });
-  }, [centers, slotUid]);
+  }, [myCentres, slotUid]);
   const isTodayPending = (t: { centre: Center; times: string[] }) =>
     !markedCentreIds.has(t.centre.id) && classHasEnded(t.times[t.times.length - 1] ?? t.centre.timeSlot ?? "");
 
@@ -513,7 +519,7 @@ function TeacherDashboardContent() {
   if (centreLoading) return <div style={s.center}>Loading Faculty Suite…</div>;
 
   // ── Derive selected centre object ─────────────────────────────────────────
-  const selectedCentreObj = centers.find(c => c.id === centreIdParam) ?? null;
+  const selectedCentreObj = myCentres.find(c => c.id === centreIdParam) ?? null;
 
   // ── Centre Workspace (centreIdParam present + valid) ──────────────────────
   if (centreIdParam && selectedCentreObj) {
@@ -756,7 +762,7 @@ function TeacherDashboardContent() {
         <FacultyStatModal
           kind={statModal}
           stats={overviewStats}
-          centreName={id => centers.find(c => c.id === id)?.name ?? "Unknown centre"}
+          centreName={id => myCentres.find(c => c.id === id)?.name ?? "Unknown centre"}
           onOpenCentre={id => { setStatModal(null); goToCentre(id, statModal === "students" ? "students" : "attendance"); }}
           onClose={() => setStatModal(null)}
         />
@@ -764,7 +770,7 @@ function TeacherDashboardContent() {
 
 
       {/* Empty state */}
-      {centers.length === 0 ? (
+      {myCentres.length === 0 ? (
         <div style={s.emptyState}>
           {isTeacherRole
             ? "You have not been assigned to any centre yet. Contact your administrator."
@@ -788,8 +794,15 @@ function TeacherDashboardContent() {
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                   <div style={{ fontSize: 15, fontWeight: 700, color: "#111" }}>{c.name}</div>
-                  <span style={{ fontSize: 11, background: "#ede9fe", color: "#4f46e5", borderRadius: 6, padding: "2px 8px", fontWeight: 600 }}>
-                    {c.centerCode}
+                  <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                    {multiWing && (
+                      <span title="Wing" style={{ fontSize: 11, background: wingOf(c) === "school_of_music" ? "#fef3c7" : "#e0f2fe", color: wingOf(c) === "school_of_music" ? "#92400e" : "#0369a1", borderRadius: 6, padding: "2px 8px", fontWeight: 700 }}>
+                        {WING_SHORT[wingOf(c)]}
+                      </span>
+                    )}
+                    <span style={{ fontSize: 11, background: "#ede9fe", color: "#4f46e5", borderRadius: 6, padding: "2px 8px", fontWeight: 600 }}>
+                      {c.centerCode}
+                    </span>
                   </span>
                 </div>
                 <div style={{ fontSize: 12, color: "#6b7280" }}>{timeLabel || "—"}</div>

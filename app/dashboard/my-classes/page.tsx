@@ -13,7 +13,7 @@ import { isTeacher } from "@/types";
 import { courseLabel } from "@/lib/course";
 import { centreTeacherUids } from "@/services/center/center.service";
 import { useWing } from "@/hooks/useWing";
-import { inWing } from "@/lib/wing";
+import { teachingWings, wingOf, WING_SHORT } from "@/lib/wing";
 import {
   getAttendanceByCentreDate,
   saveCentreAttendance,
@@ -119,8 +119,10 @@ function centreSlots(c: Center, uid: string | null): ScheduleSlot[] {
   }));
 }
 
-function CentreBoxes({ centers, selectedId, onSelect, uid }: {
+function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false }: {
   centers: Center[]; selectedId: string; onSelect: (id: string) => void; uid: string | null;
+  /** Tag each box with its wing (a teacher teaching in both wings). */
+  showWing?: boolean;
 }) {
   const [hover, setHover] = useState<string | null>(null);
   return (
@@ -149,6 +151,13 @@ function CentreBoxes({ centers, selectedId, onSelect, uid }: {
                   {c.centerCode && (
                     <span style={{ ...s.boxCode, ...(active ? { background: "rgba(255,255,255,0.18)", color: "#fff" } : {}) }}>
                       {c.centerCode}
+                    </span>
+                  )}
+                  {showWing && (
+                    <span style={{ ...s.boxCode, marginLeft: 6, ...(active
+                      ? { background: "rgba(255,255,255,0.18)", color: "#fff" }
+                      : wingOf(c) === "school_of_music" ? { background: "#fef3c7", color: "#92400e" } : { background: "#e0f2fe", color: "#0369a1" }) }}>
+                      {WING_SHORT[wingOf(c)]}
                     </span>
                   )}
                 </div>
@@ -209,17 +218,19 @@ function MyClassesContent() {
   // ── Load centres (live) ─────────────────────────────────────────────────────
   // Same matching as the teacher dashboard: a teacher's centres are the active
   // ones where they are the centre teacher, any batch's teacher, or listed in
-  // their centerIds (which can lag behind the centre docs). Strictly scoped to
-  // the active wing — switching wings re-subscribes and drops other wings' centres.
+  // their centerIds (which can lag behind the centre docs). A teacher sees every
+  // wing they teach in (each box tagged); other roles only the active wing.
+  const wingsKey = (isTeacherRole ? teachingWings(user, wing) : [wing]).join(",");
   useEffect(() => {
     if (!user) return;
     setCentersLoading(true);
     setCenters([]);
     const uid = user.uid;
+    const wings = wingsKey.split(",");
     const unsub = onSnapshot(collection(db, "centers"), snap => {
       const active = snap.docs
         .map(d => ({ id: d.id, ...d.data() } as Center))
-        .filter(c => inWing(c, wing))
+        .filter(c => wings.includes(wingOf(c)))
         .filter(c => String(c.status ?? CENTER_STATUS.ACTIVE).toLowerCase() === CENTER_STATUS.ACTIVE);
       const list = isTeacherRole
         ? active.filter(c => centreTeacherUids(c.teacherUid, c.batches).has(uid) || centerIds.includes(c.id))
@@ -238,7 +249,7 @@ function MyClassesContent() {
     });
     return unsub;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.uid, centerIds.join(","), isTeacherRole, wing]);
+  }, [user?.uid, centerIds.join(","), isTeacherRole, wingsKey]);
 
   // ── Keep the selected centre in the URL (?centerId=…) ───────────────────────
   // Back/forward or a shared link changes the param → follow it.
@@ -431,7 +442,7 @@ function MyClassesContent() {
         </div>
       ) : (
         <CentreBoxes centers={centers} selectedId={selectedCenterId} onSelect={selectCentre}
-          uid={isTeacherRole ? (user?.uid ?? null) : null} />
+          uid={isTeacherRole ? (user?.uid ?? null) : null} showWing={wingsKey.includes(",")} />
       )}
 
       {/* Error banner */}

@@ -6,6 +6,7 @@ import { collection, getDocs, query, where, orderBy, limit, doc, setDoc, getDoc,
 import { db } from "@/config/firebase";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { ROLES } from "@/config/constants";
+import { CAPABILITIES } from "@/config/permissions";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { getCenters } from "@/services/center/center.service";
 import { getClassesByCenter } from "@/services/attendance/attendance.service";
@@ -1010,6 +1011,7 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   const [centers, setCenters] = useState<Center[]>([]);
   const [activeCountByCenter, setActiveCountByCenter] = useState<Record<string, number>>({});
   const [dateAttRecs, setDateAttRecs] = useState<{ centerId: string; status: string }[]>([]);
+  const [staff, setStaff] = useState<FacultyMember[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1017,12 +1019,19 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
     async function load() {
       setLoading(true);
       try {
-        const [centersData, studentsSnap, attSnap] = await Promise.all([
+        const [centersData, studentsSnap, attSnap, staffSnap] = await Promise.all([
           getCenters(wing),
           getDocs(query(collection(db, "users"), where("role", "==", "student"), where("status", "==", "active"))),
           getDocs(query(collection(db, "attendance"), where("date", "==", selectedDate))),
+          // Anyone who can be a centre / batch teacher — names for the faculty panel.
+          getDocs(query(collection(db, "users"), where("role", "in", [ROLES.TEACHER, ROLES.CHIEF_TEACHER, ROLES.DIRECTOR]))),
         ]);
         if (cancelled) return;
+        setStaff(staffSnap.docs.map(d => {
+          const t = d.data();
+          return { uid: d.id, name: getTeacherDisplayName({ ...t, uid: d.id } as Parameters<typeof getTeacherDisplayName>[0]) || "Unnamed",
+            role: String(t.role ?? ""), active: (t.status ?? "active") === "active", inWing: inWing(t, wing) };
+        }));
         const cidSet = new Set(centersData.map(c => c.id));
         setCenters(centersData);
         const counts: Record<string, number> = {};
@@ -1048,10 +1057,25 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   }, [selectedDate, wing]);
 
   const dow = useMemo(() => DAY_ABBR[new Date(selectedDate + "T00:00:00").getDay()], [selectedDate]);
+  // Active centres with a class this weekday — the centre's own days or any batch's.
   const dateCentres = useMemo(
-    () => centers.filter(c => ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(dow)),
+    () => centers.filter(c => c.status === "active" && (
+      ((c as Center & { daysOfWeek?: string[] }).daysOfWeek ?? []).includes(dow)
+      || (c.batches ?? []).some(b => (b.daysOfWeek ?? []).includes(dow)))),
     [centers, dow]
   );
+
+  // Every class taught on this date: one per batch meeting that day (batch
+  // teacher, else the centre teacher), or the centre itself when it has no batches.
+  const sessions = useMemo<FacultySession[]>(() => dateCentres.flatMap(c => {
+    const batches = c.batches ?? [];
+    if (batches.length === 0) return [{ teacherUid: c.teacherUid ?? "", centreId: c.id, centreName: c.name, batchName: "", time: c.timeSlot ?? "" }];
+    return batches.filter(b => (b.daysOfWeek ?? []).includes(dow)).map(b => ({
+      teacherUid: b.teacherUid || c.teacherUid || "", centreId: c.id, centreName: c.name,
+      batchName: batches.length > 1 ? b.name : "",
+      time: b.startTime && b.endTime ? `${b.startTime}–${b.endTime}` : (c.timeSlot ?? ""),
+    }));
+  }), [dateCentres, dow]);
 
   const attByCenter = useMemo(() => {
     const m = new Map<string, { centerId: string; status: string }[]>();
@@ -1097,8 +1121,6 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
     border: "1px solid var(--color-border)", borderRadius: 8, padding: "6px 12px", cursor: "pointer", lineHeight: 1,
   };
 
-  if (dateCentres.length === 0 && !loading) return null;
-
   return (
     <div style={{ ...sectionStyle, marginBottom: 16 }}>
       <div style={{ ...headerStyle, marginBottom: 14, flexWrap: "wrap" as const, gap: 10 }}>
@@ -1134,6 +1156,9 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
           </span>
         ))}
       </div>
+      {!loading && dateCentres.length === 0 && (
+        <div style={{ fontSize: 13, color: "var(--color-text-secondary)", padding: "6px 0 4px" }}>No classes scheduled on this day.</div>
+      )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {dateCentres.map(c => {
           const status = statusFor(c.id, c.timeSlot ?? "");
@@ -1163,6 +1188,149 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
           );
         })}
       </div>
+
+      {!loading && (
+        <FacultyAvailability
+          isToday={isToday}
+          dateLabel={dateObj.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+          sessions={sessions}
+          staff={staff}
+          statusFor={statusFor}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Faculty availability for the selected date (inside Classes-for-date) ─────
+// Scheduled = teaches at least one class that day (centre teacher, or the
+// batch's own teacher); Off = active teachers of this wing with no class.
+
+interface FacultyMember { uid: string; name: string; role: string; active: boolean; inWing: boolean }
+interface FacultySession { teacherUid: string; centreId: string; centreName: string; batchName: string; time: string }
+
+const FACULTY_STATUS: Record<ClassDayStatus, { label: string; fg: string; bg: string; border: string }> = {
+  completed: { label: "✓ Marked",   fg: "var(--color-success)", bg: "var(--color-success-dim)", border: "var(--color-success-border)" },
+  recorded:  { label: "◐ Partly",   fg: "var(--color-warning)", bg: "var(--color-warning-dim)", border: "var(--color-warning-border)" },
+  pending:   { label: "⚠️ Pending",  fg: "var(--color-danger)",  bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)" },
+  scheduled: { label: "Upcoming",   fg: "var(--color-info)",    bg: "var(--color-info-dim)",    border: "var(--color-info)" },
+};
+
+function FacultyAvailability({ isToday, dateLabel, sessions, staff, statusFor }: {
+  isToday:   boolean;
+  dateLabel: string;
+  sessions:  FacultySession[];
+  staff:     FacultyMember[];
+  statusFor: (centerId: string, time: string) => ClassDayStatus;
+}) {
+  const [tab, setTab] = useState<"scheduled" | "off">("scheduled");
+  const byUid = new Map(staff.map(t => [t.uid, t]));
+  const startMin = (t: string) => parseClassTimeRange(t)?.startMin ?? 9999;
+
+  const groups = new Map<string, FacultySession[]>();
+  const unassigned: FacultySession[] = [];
+  for (const s of sessions) {
+    if (!s.teacherUid || !byUid.has(s.teacherUid)) { unassigned.push(s); continue; }
+    groups.set(s.teacherUid, [...(groups.get(s.teacherUid) ?? []), s]);
+  }
+  const scheduled = [...groups.entries()]
+    .map(([uid, list]) => ({ t: byUid.get(uid)!, list: [...list].sort((a, b) => startMin(a.time) - startMin(b.time)) }))
+    .sort((a, b) => startMin(a.list[0].time) - startMin(b.list[0].time) || a.t.name.localeCompare(b.t.name));
+  const off = staff
+    .filter(t => t.role === ROLES.TEACHER && t.active && t.inWing && !groups.has(t.uid))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const tabBtn = (key: "scheduled" | "off", label: string, count: number): React.CSSProperties => ({
+    display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999, cursor: "pointer",
+    fontSize: 12, fontWeight: 700, border: "1px solid var(--color-border)",
+    background: tab === key ? "var(--color-text-primary)" : "var(--color-surface-2)",
+    color: tab === key ? "var(--color-surface)" : "var(--color-text-secondary)",
+  });
+  const countPill: React.CSSProperties = { fontSize: 11, fontWeight: 800, borderRadius: 999, padding: "0 7px", background: "rgba(127,127,127,0.18)" };
+
+  return (
+    <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--color-border)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--color-text-secondary)" }}>
+          {isToday ? "Today's" : dateLabel} Faculty Availability
+        </div>
+        <div role="tablist" aria-label="Faculty availability" style={{ display: "flex", gap: 6 }}>
+          <button role="tab" aria-selected={tab === "scheduled"} onClick={() => setTab("scheduled")} style={tabBtn("scheduled", "Scheduled", scheduled.length)}>
+            🟢 Scheduled <span style={countPill}>{scheduled.length}</span>
+          </button>
+          <button role="tab" aria-selected={tab === "off"} onClick={() => setTab("off")} style={tabBtn("off", "Off", off.length)}>
+            ⚪ Off / No Schedule <span style={countPill}>{off.length}</span>
+          </button>
+        </div>
+      </div>
+
+      {tab === "scheduled" && (
+        scheduled.length === 0 && unassigned.length === 0 ? (
+          <div style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>No teachers have classes on this day.</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 300px), 1fr))", gap: 10 }}>
+            {scheduled.map(({ t, list }) => (
+              <div key={t.uid} style={{ border: "1px solid var(--color-border)", borderRadius: 12, padding: "12px 14px", background: "var(--color-surface)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                  <span aria-hidden style={{ width: 32, height: 32, borderRadius: "50%", background: "#4f46e5", color: "#fff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13, flexShrink: 0 }}>
+                    {t.name.charAt(0).toUpperCase()}
+                  </span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: "var(--color-text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</div>
+                    <div style={{ fontSize: 11, color: "var(--color-text-secondary)" }}>
+                      {list.length} class{list.length !== 1 ? "es" : ""}{t.role !== ROLES.TEACHER ? ` · ${t.role.replace(/_/g, " ")}` : ""}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  {list.map((s, k) => {
+                    const st = FACULTY_STATUS[statusFor(s.centreId, s.time)];
+                    return (
+                      <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+                        <div style={{ flex: 1, minWidth: 0, color: "var(--color-text-primary)" }}>
+                          <span style={{ fontWeight: 700 }}>{s.centreName}</span>
+                          {s.batchName && <span style={{ color: "var(--color-text-secondary)" }}> · {s.batchName}</span>}
+                          <div style={{ fontSize: 11.5, color: "var(--color-text-secondary)" }}>{fmtTimeSlotRange(s.time)}</div>
+                        </div>
+                        <span style={{ fontSize: 10.5, fontWeight: 800, color: st.fg, background: st.bg, border: `1px solid ${st.border}`, borderRadius: 99, padding: "2px 8px", whiteSpace: "nowrap" }}>
+                          {st.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            {unassigned.length > 0 && (
+              <div style={{ border: "1px dashed var(--color-warning-border)", borderRadius: 12, padding: "12px 14px", background: "var(--color-warning-dim)" }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "var(--color-warning)", marginBottom: 6 }}>⚠️ No teacher assigned</div>
+                {unassigned.map((s, k) => (
+                  <div key={k} style={{ fontSize: 12.5, color: "var(--color-text-primary)" }}>
+                    {s.centreName}{s.batchName ? ` · ${s.batchName}` : ""} <span style={{ color: "var(--color-text-secondary)" }}>({fmtTimeSlotRange(s.time)})</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      )}
+
+      {tab === "off" && (
+        off.length === 0 ? (
+          <div style={{ fontSize: 13, color: "var(--color-text-secondary)" }}>Every active teacher has a class on this day.</div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {off.map(t => (
+              <span key={t.uid} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 12px 6px 6px", borderRadius: 999, background: "var(--color-surface-2)", border: "1px solid var(--color-border)", fontSize: 12.5, color: "var(--color-text-secondary)" }}>
+                <span aria-hidden style={{ width: 22, height: 22, borderRadius: "50%", background: "rgba(127,127,127,0.2)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800 }}>
+                  {t.name.charAt(0).toUpperCase()}
+                </span>
+                {t.name}
+              </span>
+            ))}
+          </div>
+        )
+      )}
     </div>
   );
 }
@@ -1542,7 +1710,10 @@ interface BillingMonthStatus {
 
 // ── Admin Dashboard Component ──────────────────────────────────────────────────
 function AdminDashboard() {
-  const { user } = useAuthContext();
+  const { user, capabilities } = useAuthContext();
+  // Finance (fees, billing, collections) only for roles holding finance.view —
+  // Chief Teachers don't (config/permissions).
+  const canFinance = capabilities.has(CAPABILITIES.FINANCE_VIEW);
   const { wing } = useWing();
   const router   = useRouter();
 
@@ -1822,7 +1993,7 @@ function AdminDashboard() {
       list.push({ icon: "📉", msg: `Attendance low today — only ${attPct}%`, level: "critical", action: "View", href: "/dashboard/attendance" });
 
     // Overdue fees
-    if (pendingFeeAmt > 0)
+    if (canFinance && pendingFeeAmt > 0)
       list.push({ icon: "💰", msg: `₹${pendingFeeAmt.toLocaleString("en-IN")} outstanding — ${pendingFeeCount} student${pendingFeeCount > 1 ? "s" : ""}`, level: "warning", action: "Collect", href: "/dashboard/finance" });
 
     // Teachers with no center assigned
@@ -1841,11 +2012,11 @@ function AdminDashboard() {
       list.push({ icon: "🏫", msg: `${emptyCenters.length} centre${emptyCenters.length > 1 ? "s" : ""} with no active students: ${emptyCenters.map(c => c.name).join(", ")}`, level: "warning", action: "View", href: "/dashboard/centers" });
 
     // Unbilled students this month
-    if (unbilledCount > 0 && !thisMonthBilling?.completed)
+    if (canFinance && unbilledCount > 0 && !thisMonthBilling?.completed)
       list.push({ icon: "📋", msg: `${unbilledCount} student${unbilledCount > 1 ? "s" : ""} not yet billed for ${monthLabel(thisMonth)}`, level: "warning", action: "Bill", href: "/dashboard/finance" });
 
     return list;
-  }, [students, teachers, centers, attPct, pendingFeeAmt, pendingFeeCount, unbilledCount, thisMonth, thisMonthBilling]);
+  }, [students, teachers, centers, attPct, pendingFeeAmt, pendingFeeCount, unbilledCount, thisMonth, thisMonthBilling, canFinance]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -1913,7 +2084,7 @@ function AdminDashboard() {
                   <button style={adm.qaBtn} onClick={() => router.push("/dashboard/students")}>+ Student</button>
                   <button style={adm.qaBtn} onClick={() => router.push("/dashboard/teachers")}>+ Teacher</button>
                   <button style={adm.qaBtn} onClick={() => router.push("/dashboard/centers")}>+ Centre</button>
-                  <button style={{ ...adm.qaBtn, ...adm.qaBtnPrimary }} onClick={() => router.push("/dashboard/finance")}>Finance →</button>
+                  {canFinance && <button style={{ ...adm.qaBtn, ...adm.qaBtnPrimary }} onClick={() => router.push("/dashboard/finance")}>Finance →</button>}
                 </div>
               </div>
             </div>
@@ -2017,6 +2188,7 @@ function AdminDashboard() {
           sub={loading ? "" : !attStats ? "No records yet" : `${attStats.present} / ${attStats.total} present`}
           valueColor={attBad ? "var(--color-danger)" : attPct !== null ? "var(--color-success)" : undefined}
         />
+        {canFinance && <>
         <div style={adm.kpiDiv} />
         <KpiTile
           label="Pending Fees"
@@ -2024,6 +2196,7 @@ function AdminDashboard() {
           sub={loading ? "" : pendingFeeAmt === 0 ? "All collected" : `${pendingFeeCount} students due`}
           valueColor={pendingFeeAmt > 0 ? "var(--color-warning)" : "var(--color-success)"}
         />
+        </>}
       </div>
 
       {/* ── CLASSES FOR [DATE] ── */}
@@ -2057,7 +2230,8 @@ function AdminDashboard() {
       {/* ── WEEKLY ATTENDANCE BREAKDOWN (Class-1 vs Class-2) ── */}
       <WeeklyClassBreakdown />
 
-      {/* ── MONTHLY FINANCE PANEL ── */}
+      {/* ── MONTHLY FINANCE PANEL ── (finance roles only) */}
+      {canFinance && (
       <div style={adm.section}>
         <div style={adm.secHeader}>
           <span style={adm.secTitle}>Monthly Fee Collection</span>
@@ -2159,6 +2333,7 @@ function AdminDashboard() {
           </table>
         </div>
       </div>
+      )}
 
       {/* ── ALERTS ── */}
       <div style={adm.section}>
@@ -2193,7 +2368,7 @@ function AdminDashboard() {
           { icon: "🎓", label: "Students",   sub: `${activeHeadcount} active`, href: "/dashboard/students" },
           { icon: "🏫", label: "Centres",    sub: `${centers.length} total`, href: "/dashboard/centers" },
           { icon: "👤", label: "Teachers",   sub: `${teachers.filter(t => t.status === "active").length} active`, href: "/dashboard/teachers" },
-          { icon: "💰", label: "Finance",    sub: "Collect & track fees", href: "/dashboard/finance" },
+          ...(canFinance ? [{ icon: "💰", label: "Finance",    sub: "Collect & track fees", href: "/dashboard/finance" }] : []),
           { icon: "📊", label: "Attendance", sub: "View & mark", href: "/dashboard/attendance" },
           { icon: "📚", label: "Syllabus",   sub: "Lessons & progress", href: "/dashboard/syllabus" },
         ].map(item => (

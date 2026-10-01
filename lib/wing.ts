@@ -89,3 +89,18 @@ export function getUserWings(user: User | null | undefined): Wing[] {
   const home = wingOf(user);
   return explicit.includes(home) ? explicit : [...explicit, home];
 }
+
+/** Short wing name for tags on cards. */
+export const WING_SHORT: Record<Wing, string> = { rol_plus: "ROL+", school_of_music: "School of Music" } as Record<Wing, string>;
+
+/**
+ * Wings whose classes a teacher sees together (Faculty Suite Today's Classes,
+ * My Classes): every wing where they hold the Teacher role, plus the active
+ * one. A teacher's day spans both schools, so their class lists aren't split
+ * by the wing switcher — everything else stays wing-scoped.
+ */
+export function teachingWings(user: User | null | undefined, active: Wing): Wing[] {
+  const set = new Set<Wing>([active]);
+  for (const wg of WING_VALUES) if (getRolesForWing(user, wg).includes("teacher" as Role)) set.add(wg);
+  return [...set];
+}

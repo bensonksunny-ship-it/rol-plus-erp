@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
-import SchoolInfoView from "@/components/enquiry/SchoolInfoView";
+import SchoolInfoView, { EnquiryNextSteps } from "@/components/enquiry/SchoolInfoView";
 import { WINGS, WING_LABELS } from "@/config/constants";
 
 export default function PublicEnquiryPage() {
@@ -18,7 +18,7 @@ export default function PublicEnquiryPage() {
     const w = new URLSearchParams(window.location.search).get("wing");
     if (w && (Object.values(WINGS) as string[]).includes(w)) setWing(w);
     // Leaders' "Preview" link from Admissions → School Info.
-    if (new URLSearchParams(window.location.search).get("preview") === "info") setDone(true);
+    if (["info", "true"].includes(new URLSearchParams(window.location.search).get("preview") ?? "")) setDone(true);
   }, []);
 
   return (
@@ -33,7 +33,7 @@ export default function PublicEnquiryPage() {
         </div>
 
         {done && wing === WINGS.SCHOOL_OF_MUSIC ? (
-          <SchoolInfoView wing={wing} onAnother={() => setDone(false)} />
+          <SchoolInfoView wing={wing} />
         ) : (
         <div style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.07)", borderRadius: 18, padding: 22, boxShadow: "0 4px 14px rgba(0,0,0,0.05)" }}>
           {done ? (
@@ -43,12 +43,7 @@ export default function PublicEnquiryPage() {
               <div style={{ fontSize: 14, color: "#374151", marginTop: 6 }}>
                 We&apos;ve received your enquiry and will contact you shortly.
               </div>
-              <button onClick={() => setDone(false)} style={{
-                marginTop: 20, padding: "10px 20px", borderRadius: 10, border: "1px solid #e5e7eb",
-                background: "#fff", color: "#374151", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer",
-              }}>
-                Submit another enquiry
-              </button>
+              <EnquiryNextSteps wing={wing} />
             </div>
           ) : (
             <EnquiryForm wing={wing} source="qr" submitLabel="Send enquiry" onCreated={() => { setDone(true); window.scrollTo({ top: 0, behavior: "smooth" }); }} />

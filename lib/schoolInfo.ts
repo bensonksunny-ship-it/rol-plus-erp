@@ -7,10 +7,13 @@
 
 export interface SchoolLeader { role: string; name: string; bio: string }
 export interface SchoolCourse { level: string; tagline: string; detail: string }
+/** A gallery photo in Firebase Storage (school-info/{wing}/{id}.jpg). */
+export interface SchoolPhoto { id: string; url: string; path: string; caption: string }
 
 export interface SchoolInfo {
   established:    string;   // e.g. "2005"
   background:     string;
+  photos:         SchoolPhoto[];
   leaders:        SchoolLeader[];
   courses:        SchoolCourse[];
   instruments:    string[];
@@ -21,12 +24,16 @@ export interface SchoolInfo {
   phone:          string;   // "+91 99218 74088"
 }
 
+export const MAX_SCHOOL_PHOTOS = 24;
+const STORAGE_URL_PREFIX = "https://firebasestorage.googleapis.com/v0/b/rol-plus-erp.firebasestorage.app/";
+
 export const schoolInfoDocId = (wing: string) => `school_info_${wing}`;
 
 /** Starting point: only what the brief gave — course tiers, instruments, phone. */
 export const DEFAULT_SCHOOL_INFO: SchoolInfo = {
   established: "",
   background: "",
+  photos: [],
   leaders: [
     { role: "Founder", name: "", bio: "" },
     { role: "Director", name: "", bio: "" },
@@ -54,6 +61,13 @@ export function sanitizeSchoolInfo(raw: unknown): SchoolInfo {
   return {
     established: text(r.established, 40),
     background:  text(r.background, 1500),
+    // Only images in this project's Storage bucket — never arbitrary links.
+    photos: list(r.photos, MAX_SCHOOL_PHOTOS, x => {
+      const o = (x ?? {}) as Record<string, unknown>;
+      const url = text(o.url, 1000), path = text(o.path, 200);
+      if (!url.startsWith(STORAGE_URL_PREFIX) || !path.startsWith("school-info/")) return null;
+      return { id: text(o.id, 40) || path, url, path, caption: text(o.caption, 80) };
+    }),
     leaders: list(r.leaders, 6, x => {
       const o = (x ?? {}) as Record<string, unknown>;
       const l = { role: text(o.role, 40), name: text(o.name, 80), bio: text(o.bio, 600) };

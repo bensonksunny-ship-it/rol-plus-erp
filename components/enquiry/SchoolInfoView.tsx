@@ -9,6 +9,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { WING_LABELS } from "@/config/constants";
 import { DEFAULT_SCHOOL_INFO, telHref, type SchoolInfo } from "@/lib/schoolInfo";
 import { loadSchoolInfo } from "@/services/schoolInfo.service";
+import SchoolGallery from "./SchoolGallery";
+import ClosePageButton from "@/components/public/ClosePageButton";
 
 const INK = "#1e1b4b", MUTED = "#4b5563", INDIGO = "#4f46e5";
 
@@ -31,7 +33,28 @@ const Lines = ({ text }: { text: string }) => (
   <>{text.split("\n").map((l, i) => <div key={i}>{l}</div>)}</>
 );
 
-export default function SchoolInfoView({ wing, onAnother }: { wing: string; onAnother: () => void }) {
+/**
+ * After an enquiry: apply straight away if the details suit them, or close the
+ * page. Shared by both wings' enquiry thank-you screens.
+ */
+export function EnquiryNextSteps({ wing }: { wing: string }) {
+  return (
+    <div style={{ marginTop: 18, textAlign: "center" }}>
+      <div style={{ fontSize: 13.5, color: MUTED, marginBottom: 10 }}>Happy with the details? You can apply for admission right away.</div>
+      <a href={`/apply?wing=${encodeURIComponent(wing)}`} style={{
+        display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", boxSizing: "border-box",
+        padding: "13px 20px", background: "#15803d", color: "#fff", fontWeight: 700, fontSize: 15.5, borderRadius: 12,
+        textDecoration: "none", boxShadow: "0 6px 16px rgba(21,128,61,0.25)",
+      }}>
+        📝 Apply for Admission →
+      </a>
+      <ClosePageButton style={{ marginTop: 10, width: "100%", boxSizing: "border-box" }} />
+    </div>
+  );
+}
+
+/** `preview`: staff viewing it inside the dashboard — drops the parent-only Apply / Close-page buttons. */
+export default function SchoolInfoView({ wing, preview = false }: { wing: string; preview?: boolean }) {
   const [info, setInfo] = useState<SchoolInfo | null>(null);
   useEffect(() => {
     let live = true;
@@ -61,6 +84,12 @@ export default function SchoolInfoView({ wing, onAnother }: { wing: string; onAn
 
       {info && (
         <>
+          {i.photos.length > 0 && (
+            <Section icon="📸" title="School Gallery / Campus Highlights">
+              <SchoolGallery photos={i.photos} />
+            </Section>
+          )}
+
           {hasAbout && (
             <Section icon="🏛️" title="About Our Academy">
               {i.established && <div><b style={{ color: INK }}>Established:</b> {i.established}</div>}
@@ -153,11 +182,7 @@ export default function SchoolInfoView({ wing, onAnother }: { wing: string; onAn
         </a>
       </div>
 
-      <div style={{ textAlign: "center", marginTop: 16 }}>
-        <button onClick={onAnother} style={{ padding: "10px 18px", borderRadius: 10, border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>
-          Submit another enquiry
-        </button>
-      </div>
+      {!preview && <EnquiryNextSteps wing={wing} />}
     </div>
   );
 }

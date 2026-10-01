@@ -19,7 +19,7 @@ import Link from "next/link";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
-import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
+import { LEGACY_SUPER_ADMIN_ROLE, ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES } from "@/config/permissions";
 import { useWing } from "@/hooks/useWing";
 import EnrollStudentModal from "@/components/admissions/EnrollStudentModal";
@@ -32,6 +32,8 @@ import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/
 import { EnquiriesDrawer } from "./enquiries";
 import { ScreeningQuestionsModal } from "@/components/screening/ScreeningQuestionsModal";
 import { SchoolInfoEditor } from "@/components/admissions/SchoolInfoEditor";
+import { SchoolInfoPreview } from "@/components/admissions/SchoolInfoPreview";
+import { useRoleHub } from "@/hooks/useRoleHub";
 import { useAuth } from "@/hooks/useAuth";
 import { canLeadWing } from "@/lib/elevatedAccount";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
@@ -139,6 +141,15 @@ function AdmissionsWizard() {
   const { user: me } = useAuth();
   const canEditQuestions = canLeadWing(me, WING);
   const [showSchoolInfo, setShowSchoolInfo] = useState(false);
+  // School Info: editable only while acting in a leadership role of this wing
+  // (ROL+ → Founder / Admin; School of Music → Founder / Admin / Director /
+  // Chief Teacher). Anyone else — e.g. a Teacher, or a leader switched into
+  // their Teacher role — gets the read-only parent preview.
+  const { role: activeRole } = useRoleHub();
+  const SCHOOL_INFO_EDITORS: string[] = WING === WINGS.ROL_PLUS
+    ? [ROLES.FOUNDER, LEGACY_SUPER_ADMIN_ROLE, ROLES.ADMIN]
+    : [ROLES.FOUNDER, LEGACY_SUPER_ADMIN_ROLE, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER];
+  const canEditSchoolInfo = canEditQuestions && !!activeRole && SCHOOL_INFO_EDITORS.includes(activeRole);
   const [showQuestions, setShowQuestions] = useState(false);
   // Deep links: ?tab=enquiries opens the Enquiries drawer; ?tab=questions opens
   // the rubric editor (both were tabs once).
@@ -211,9 +222,9 @@ function AdmissionsWizard() {
                 </svg>
               </button>
             )}
-            {canEditQuestions && WING === WINGS.SCHOOL_OF_MUSIC && (
+            {WING === WINGS.SCHOOL_OF_MUSIC && (
               <button type="button" onClick={() => setShowSchoolInfo(true)}
-                title="School Info shown to parents after an enquiry"
+                title={canEditSchoolInfo ? "Edit the School Info parents see after an enquiry" : "See the School Info parents see after an enquiry"}
                 style={{ ...btn, background: "#fff", color: "#4f46e5", border: "1.5px solid #c7d2fe", padding: "9px 14px" }}>
                 <span aria-hidden>ℹ️</span> School Info
               </button>
@@ -242,7 +253,9 @@ function AdmissionsWizard() {
             onShowQr={() => { setQrTarget("enquiry"); setShowQr(true); }}
           />
         )}
-        {showSchoolInfo && <SchoolInfoEditor wing={WING} onClose={() => setShowSchoolInfo(false)} />}
+        {showSchoolInfo && (canEditSchoolInfo
+          ? <SchoolInfoEditor wing={WING} onClose={() => setShowSchoolInfo(false)} />
+          : <SchoolInfoPreview wing={WING} onClose={() => setShowSchoolInfo(false)} />)}
         {showQuestions && (
           <ScreeningQuestionsModal wing={WING} onClose={() => {
             setShowQuestions(false);

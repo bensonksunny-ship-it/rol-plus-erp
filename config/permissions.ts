@@ -104,7 +104,7 @@ const DIRECTOR_CAPS: Capability[] = WING_ADMIN_FULL.filter(
 );
 
 /**
- * School of Music Chief Teacher — broad academic + operational + full finance,
+ * Chief Teacher — broad academic + operational (no finance),
  * plus staff creation for teachers / parents / other chief teachers. Excludes
  * the sensitive items reserved to the Director.
  */
@@ -119,8 +119,7 @@ const CHIEF_TEACHER_CAPS: Capability[] = [
   C.SCREENING_MANAGE,
   C.LESSONS_VIEW,
   C.LESSONS_MANAGE,
-  C.FINANCE_VIEW,
-  C.FINANCE_MANAGE,
+  // No FINANCE_VIEW / FINANCE_MANAGE — Finance is hidden from Chief Teachers (both wings).
   C.ANALYTICS_VIEW,
   C.REPORTS_VIEW,
   C.LEADERBOARDS_VIEW,

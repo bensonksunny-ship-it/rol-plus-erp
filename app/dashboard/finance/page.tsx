@@ -13,6 +13,8 @@ import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic } from "@/lib/wing";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
+import { CAPABILITIES } from "@/config/permissions";
+import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
 import {
   getTransactions,
   editTransaction,
@@ -32,6 +34,8 @@ import type {
 } from "@/types/finance";
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
+import { logAction } from "@/services/audit/audit.service";
+import type { Role } from "@/types";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -49,13 +53,16 @@ interface StudentFeeRow {
   monthlyFee:      number;
   balance:         number;   // <0 = prepay credit remaining; >0 = owes money
   status:          string;
+  /** Active student in an active centre of this wing (same rule as rosters/dashboards). */
+  rosterActive:    boolean;
   attendanceCount: number;
   estimatedFee:    number;
 }
 
 interface CenterOption { id: string; name: string; centerCode: string; }
 
-/** Finance is organised by centre; students without one are grouped under this key. */
+/** Finance is organised by centre. Only students who still owe money can lack one
+ *  (inactive / unassigned) — they're grouped under this key until settled. */
 const UNASSIGNED = "__unassigned__";
 function centreKey(s: { centerId: string }): string { return s.centerId || UNASSIGNED; }
 
@@ -111,7 +118,8 @@ function minMonth(): string {
 
 export default function FinancePage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER]}>
+    // Chief Teachers have no Finance access — a direct URL redirects to the dashboard.
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR]} requiredCapability={CAPABILITIES.FINANCE_VIEW}>
       <Suspense fallback={null}>
         <FinanceContent />
       </Suspense>
@@ -166,6 +174,10 @@ function FinanceContent() {
   // Adjust fee state
   const [adjustFee, setAdjustFee]            = useState<string>("");
   const [adjustSubmitting, setAdjustSubmitting] = useState(false);
+  // School of Music roster: inline monthly-fee edit + one-click "Mark Fee Due".
+  const [feeEdit,       setFeeEdit]       = useState<{ uid: string; value: string } | null>(null);
+  const [feeEditSaving, setFeeEditSaving] = useState(false);
+  const [markingDueUid, setMarkingDueUid] = useState<string | null>(null);
   const adjustInputRef                       = useRef<HTMLInputElement>(null);
 
 
@@ -270,11 +282,15 @@ function FinanceContent() {
 
       const balanceMap = computeStudentBalances(txData, isCurrent ? undefined : monthEnd);
 
+      // Roster: active students in an active centre of this wing — plus anyone
+      // else (inactive / unassigned) who still owes money, until it's settled.
+      const activeCenterIds = new Set(wingCenterDocs.filter(d => d.data().status === "active").map(d => d.id));
       setStudents(studentSnap.docs
         .filter(d => {
           const cid = (d.data().centerId ?? "") as string;
           return cid ? wingCenterIds.has(cid) : inWing(d.data(), wing);
         })
+        .filter(d => isCurrentlyActiveStudent(d.data(), activeCenterIds) || (balanceMap.get(d.id) ?? 0) > 0)
         .map(d => {
         const s           = d.data();
         const c           = cMap.get(s.centerId as string);
@@ -291,15 +307,16 @@ function FinanceContent() {
           name:            (s.displayName ?? s.name ?? "—") as string,
           studentID:       (s.studentID   ?? "—") as string,
           admissionNo:     (s.admissionNo ?? s.admissionNumber ?? "—") as string,
-          centerName:      c?.name ?? (s.centerId as string) ?? "—",
-          centerId:        (s.centerId   ?? "") as string,
+          centerName:      c?.name ?? "No centre assigned",
+          centerId:        c ? (s.centerId as string) : "",
           classType:       ((s.classType   as string) === "personal" ? "personal" : "group"),
           billingMode:     ((s.billingMode as string) === "prepay"   ? "prepay"   : "postpay"),
           feeCycle:        (s.feeCycle   ?? "—") as string,
           feePerClass,
           monthlyFee,
           balance,
-          status:          (s.status ?? "active") as string,
+          status:          (s.status ?? s.studentStatus ?? "") as string,
+          rosterActive:    isCurrentlyActiveStudent(s, activeCenterIds),
           attendanceCount: attCount,
           estimatedFee,
         };
@@ -422,7 +439,7 @@ function FinanceContent() {
       : 0;
     const overdueStudents = students.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid));
     const pendingBal      = overdueStudents.reduce((acc, s) => acc + (feeDueMap.get(s.uid)?.amount ?? 0), 0);
-    const activeStudents  = students.filter(s => s.status === "active");
+    const activeStudents  = students.filter(s => s.rosterActive);
     const activeCount     = activeStudents.length;
     const paidActiveCount = activeStudents.filter(s => paidMap.has(s.uid)).length;
     const collectionPct   = activeCount > 0 ? Math.round((paidActiveCount / activeCount) * 100) : 0;
@@ -593,6 +610,45 @@ function FinanceContent() {
     }
   }
 
+  // ── School of Music: inline monthly fee (Amount column) ─────────────────────
+  // Wing 2's model is always monthly, so this writes monthlyFee (+ feeCycle
+  // "monthly" for records imported without one). Wing 1 never reaches here.
+  async function saveInlineMonthlyFee(student: StudentFeeRow) {
+    if (!feeEdit || feeEdit.uid !== student.uid) return;
+    const newFee = Math.round(Number(feeEdit.value));
+    if (!Number.isFinite(newFee) || newFee <= 0) { toast("Enter a monthly fee above ₹0", "error"); return; }
+    if (newFee === student.monthlyFee && student.feeCycle === "monthly") { setFeeEdit(null); return; }
+    setFeeEditSaving(true);
+    try {
+      await updateDoc(doc(db, "users", student.uid), {
+        monthlyFee: newFee, feeCycle: "monthly", updatedAt: new Date().toISOString(),
+      });
+      logAction({
+        action: "MONTHLY_FEE_SET", initiatorId: user?.uid ?? "", initiatorRole: (user?.role ?? ROLES.ADMIN) as Role,
+        approverId: null, approverRole: null, reason: null,
+        metadata: { studentUid: student.uid, from: student.monthlyFee, to: newFee },
+      });
+      setFeeEdit(null);
+      await fetchAll(selectedMonth);
+      toast(`Monthly fee for ${student.name} set to ${fmtINR(newFee)} / mo`, "success");
+    } catch (err) {
+      console.error("Inline fee update failed:", err);
+      toast("Couldn't update the fee. Try again.", "error");
+    } finally {
+      setFeeEditSaving(false);
+    }
+  }
+
+  /** Roster "⚠️ Mark Fee Due": raises this month's fee due without opening the Payment panel. */
+  async function quickMarkFeeDue(student: StudentFeeRow) {
+    setMarkingDueUid(student.uid);
+    try {
+      await generateFeeDue(student, selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`);
+    } finally {
+      setMarkingDueUid(null);
+    }
+  }
+
   // ── Submit: prepay advance deposit ──────────────────────────────────────────
   async function submitDeposit(student: StudentFeeRow) {
     const amt = Number(depositAmount);
@@ -631,8 +687,9 @@ function FinanceContent() {
   }
 
   // ── Generate fee due record ──────────────────────────────────────────────────
-  async function generateFeeDue(student: StudentFeeRow) {
-    const fee = student.feeCycle === "monthly" ? student.monthlyFee : student.estimatedFee;
+  async function generateFeeDue(student: StudentFeeRow, dueDate?: string) {
+    // School of Music is always billed monthly (some imported records carry no feeCycle).
+    const fee = isSom || student.feeCycle === "monthly" ? student.monthlyFee : student.estimatedFee;
     if (!fee || fee <= 0) {
       toast(
         student.feeCycle === "per_class"
@@ -651,7 +708,7 @@ function FinanceContent() {
         type:         "fee_due",
         method:       "manual",
         billingMonth: selectedMonth,
-        date:         feeDueDate || (selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`),
+        date:         dueDate || feeDueDate || (selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`),
         status:       "due",
         createdAt:    serverTimestamp(),
         receivedBy:   user?.displayName ?? user?.email ?? "admin",
@@ -660,8 +717,13 @@ function FinanceContent() {
         currentBalance: increment(fee),
         updatedAt:      new Date().toISOString(),
       });
+      logAction({
+        action: "FEE_DUE_MARKED", initiatorId: user?.uid ?? "", initiatorRole: (user?.role ?? ROLES.ADMIN) as Role,
+        approverId: null, approverRole: null, reason: null,
+        metadata: { studentUid: student.uid, amount: fee, billingMonth: selectedMonth },
+      });
       await fetchAll(selectedMonth);
-      toast(`Fee due of ${fmtINR(fee)} generated for ${student.name}`, "success");
+      toast(`Fee due of ${fmtINR(fee)} marked for ${student.name} — ${fmtMonth(selectedMonth)}`, "success");
     } catch (err) {
       console.error("Generate fee due failed:", err);
       toast("Failed to generate fee due. Try again.", "error");
@@ -801,7 +863,7 @@ function FinanceContent() {
     const known = new Set(centers.map(c => c.id));
     const tabs = centers.map(c => ({ id: c.id, name: c.name, count: stats.get(c.id)?.count ?? 0, overdue: stats.get(c.id)?.overdue ?? 0 }));
     stats.forEach((v, k) => {
-      if (!known.has(k)) tabs.push({ id: k, name: k === UNASSIGNED ? "Unassigned" : (v.name || "Other centre"), count: v.count, overdue: v.overdue });
+      if (!known.has(k)) tabs.push({ id: k, name: k === UNASSIGNED ? "No centre · dues pending" : (v.name || "Other centre"), count: v.count, overdue: v.overdue });
     });
     return tabs.sort((a, b) =>
       Number(a.id === UNASSIGNED) - Number(b.id === UNASSIGNED) || a.name.localeCompare(b.name));
@@ -838,6 +900,25 @@ function FinanceContent() {
     // from the dashboard layout's <main>, so none is added here.
     <div className="mx-auto w-full max-w-6xl">
       <ToastContainer toasts={toasts} onRemove={remove} />
+      {feeEdit && (() => {
+        const row = students.find(x => x.uid === feeEdit.uid);
+        if (!row) return null;
+        const due = feeDueMap.get(row.uid);
+        return (
+          <FeeDetailsModal
+            student={row}
+            month={selectedMonth}
+            value={feeEdit.value}
+            saving={feeEditSaving}
+            paidThisMonth={paidMap.has(row.uid) ? (paidAmountMap.get(row.uid) ?? 0) : null}
+            dueThisMonth={due ? due.amount : null}
+            transactions={transactions.filter(t => t.studentUid === row.uid)}
+            onChange={v => setFeeEdit({ uid: row.uid, value: v })}
+            onSave={() => saveInlineMonthlyFee(row)}
+            onCancel={() => setFeeEdit(null)}
+          />
+        );
+      })()}
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div style={st.header}>
@@ -1113,7 +1194,7 @@ function FinanceContent() {
                           <tr key={`hdr-${groupKey}`}>
                             <td colSpan={isMobile ? 2 : 5} style={st.groupHeader}>
                               <button onClick={() => setFilterCenter(groupKey)} style={st.groupHeaderBtn} title="Show only this centre">
-                                {groupKey === UNASSIGNED ? "Unassigned" : s.centerName || "—"} →
+                                {groupKey === UNASSIGNED ? "No centre · dues pending" : s.centerName} →
                               </button>
                               <span style={st.groupHeaderMeta}>
                                 {g?.count ?? 0} student{g?.count === 1 ? "" : "s"}
@@ -1134,7 +1215,15 @@ function FinanceContent() {
                         >
                           {/* Student */}
                           <td style={{ ...st.td, minWidth: isMobile ? 180 : 160 }}>
-                            <div style={{ fontWeight: 600 }}>{s.name}</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {s.name}
+                              {!s.rosterActive && (
+                                <span title="Not on an active roster — kept on Finance until the balance is settled"
+                                  style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" as const }}>
+                                  Inactive — dues pending
+                                </span>
+                              )}
+                            </div>
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
                               {isMobile ? `${s.centerName} · ${s.studentID}` : s.studentID}
                             </div>
@@ -1154,7 +1243,8 @@ function FinanceContent() {
                             {isMobile && (
                               <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 4 }}>
                                 {isSom
-                                  ? `Monthly ${fmtINR(s.monthlyFee)}`
+                                  ? <MonthlyFeeCell compact fee={s.monthlyFee}
+                                      onOpen={() => setFeeEdit({ uid: s.uid, value: s.monthlyFee > 0 ? String(s.monthlyFee) : "" })} />
                                   : `${s.classType === "personal" ? "Personal" : "Group"} · ${s.feeCycle === "monthly" ? "Monthly" : "Per Class"}`}
                                 {paidMap.has(s.uid) ? (
                                   <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
@@ -1170,7 +1260,11 @@ function FinanceContent() {
 
                           {/* Center — desktop only (folded into the Student cell on mobile) */}
                           {!isMobile && (
-                            <td style={st.td}>{s.centerName}</td>
+                            <td style={st.td}>
+                              {s.centerId
+                                ? <span style={{ fontWeight: 500, color: "#111827" }}>{s.centerName}</span>
+                                : <span style={{ color: "#9ca3af", fontStyle: "italic" }}>No centre assigned</span>}
+                            </td>
                           )}
 
                           {/* Type — desktop only */}
@@ -1178,9 +1272,8 @@ function FinanceContent() {
                             <td style={st.td}>
                               {isSom ? (
                                 <>
-                                  <div style={{ fontSize: 13, color: "var(--color-text-primary)" }}>
-                                    {fmtINR(s.monthlyFee)}<span style={{ fontSize: 11, color: "var(--color-text-secondary)" }}> / mo</span>
-                                  </div>
+                                  <MonthlyFeeCell fee={s.monthlyFee}
+                                    onOpen={() => setFeeEdit({ uid: s.uid, value: s.monthlyFee > 0 ? String(s.monthlyFee) : "" })} />
                                   <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>Prepaid</div>
                                 </>
                               ) : (
@@ -1225,6 +1318,24 @@ function FinanceContent() {
                               >
                                 💳 Payment
                               </button>
+                              {isSom && (() => {
+                                const paid     = paidMap.has(s.uid);
+                                const isDue    = feeDueMap.has(s.uid);
+                                const noFee    = s.monthlyFee <= 0;
+                                const busy     = markingDueUid === s.uid;
+                                const disabled = paid || isDue || noFee || busy || feeDueSubmitting;
+                                const why = paid ? `Already paid for ${fmtMonth(selectedMonth)}`
+                                  : isDue ? `Fee already marked due for ${fmtMonth(selectedMonth)}`
+                                  : noFee ? "Set the monthly fee first (click the amount)"
+                                  : `Mark ${fmtINR(s.monthlyFee)} due for ${fmtMonth(selectedMonth)}`;
+                                return (
+                                  <button onClick={() => quickMarkFeeDue(s)} disabled={disabled} title={why}
+                                    style={{ ...st.actionBtn, background: "#fff1f2", color: "#be123c", border: "1px solid #fecdd3",
+                                             opacity: disabled ? 0.45 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
+                                    {busy ? "Marking…" : isDue ? "✓ Due" : "⚠️ Mark Fee Due"}
+                                  </button>
+                                );
+                              })()}
                               <RowActionsMenu
                                 onAdjust={() => openPanel(s.uid, "adjust", s)}
                                 onDeposit={() => openPanel(s.uid, "deposit", s)}
@@ -1292,7 +1403,7 @@ function FinanceContent() {
                                         disabled={feeDueSubmitting || !feeDueDate}
                                         style={{ ...st.confirmBtn, background: "#f59e0b", opacity: (feeDueSubmitting || !feeDueDate) ? 0.6 : 1, cursor: (feeDueSubmitting || !feeDueDate) ? "not-allowed" : "pointer" }}
                                       >
-                                        {feeDueSubmitting ? "Generating…" : `Generate Fee Due — ${fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.estimatedFee)}`}
+                                        {feeDueSubmitting ? "Generating…" : `Generate Fee Due — ${fmtINR(isSom || s.feeCycle === "monthly" ? s.monthlyFee : s.estimatedFee)}`}
                                       </button>
                                     </div>
                                   ) : (
@@ -1829,6 +1940,130 @@ function FinanceContent() {
 }
 
 // ─── Row actions menu ─────────────────────────────────────────────────────────
+// School of Music roster: the monthly fee as a clickable badge on the row
+// ("outside"); clicking opens FeeDetailsModal ("inside") to view and adjust it.
+function MonthlyFeeCell({ fee, compact, onOpen }: { fee: number; compact?: boolean; onOpen: () => void }) {
+  const [hover, setHover] = useState(false);
+  const unset = fee <= 0;
+  return (
+    <button type="button" onClick={e => { e.stopPropagation(); onOpen(); }}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      title={unset ? "No monthly fee set — click to set it" : "View fee details / change the monthly fee"}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer", transition: "all 0.15s",
+        fontSize: compact ? 11 : 12.5, fontWeight: 700, borderRadius: 8, padding: compact ? "1px 7px" : "4px 10px",
+        color: unset ? "#b91c1c" : "var(--color-text-primary)",
+        background: unset ? (hover ? "#fee2e2" : "#fef2f2") : (hover ? "var(--color-surface-2)" : "var(--color-surface)"),
+        border: `1px solid ${unset ? "#fecaca" : hover ? "#9ca3af" : "var(--color-border)"}`,
+      }}>
+      {unset
+        ? <>⚙️ Set Fee</>
+        : <>{fmtINR(fee)}<span style={{ fontSize: 11, color: "var(--color-text-secondary)", fontWeight: 500 }}>/mo</span></>}
+      <span aria-hidden style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>✎</span>
+    </button>
+  );
+}
+
+interface FeeChange { from: number; to: number; at: string }
+
+/** Fee details for one School of Music student: breakdown, history, and the monthly fee editor. */
+function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThisMonth, transactions, onChange, onSave, onCancel }: {
+  student: StudentFeeRow; month: string; value: string; saving: boolean;
+  paidThisMonth: number | null; dueThisMonth: number | null; transactions: Transaction[];
+  onChange: (v: string) => void; onSave: () => void; onCancel: () => void;
+}) {
+  const [changes, setChanges] = useState<FeeChange[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getDocs(query(collection(db, "audit_logs"), where("action", "==", "MONTHLY_FEE_SET"), where("metadata.studentUid", "==", student.uid)))
+      .then(snap => {
+        if (cancelled) return;
+        setChanges(snap.docs.map(d => {
+          const x = d.data(); const m = (x.metadata ?? {}) as { from?: number; to?: number };
+          const ts = x.timestamp as { toDate?: () => Date } | string | undefined;
+          const at = typeof ts === "string" ? ts : ts?.toDate?.().toISOString() ?? "";
+          return { from: Number(m.from ?? 0), to: Number(m.to ?? 0), at };
+        }).sort((p, q) => q.at.localeCompare(p.at)).slice(0, 5));
+      })
+      .catch(() => { if (!cancelled) setChanges([]); });
+    return () => { cancelled = true; };
+  }, [student.uid]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !saving) onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, saving]);
+
+  const n = Math.round(Number(value));
+  const valid = Number.isFinite(n) && n > 0;
+  const recent = transactions.filter(t => t.type === "fee_due" || isSettlingPayment(t)).slice(0, 6);
+  const discounts = transactions.filter(t => Number(t.discountAmt) > 0).slice(0, 5);
+  const fmtD = (iso: string) => { const d = new Date(iso); return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); };
+  const row = (k: string, v: React.ReactNode) => (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5 }}>
+      <span style={{ color: "var(--color-text-secondary)" }}>{k}</span><span style={{ fontWeight: 600, color: "var(--color-text-primary)", textAlign: "right" }}>{v}</span>
+    </div>
+  );
+  const sub: React.CSSProperties = { fontSize: 11, fontWeight: 800, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginTop: 4 };
+
+  return (
+    // Closes only via Cancel / ✕ / Esc — never a backdrop click (avoids losing a half-typed fee).
+    <div style={{ position: "fixed", inset: 0, zIndex: 700, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div role="dialog" aria-modal="true" aria-label={`Fee details — ${student.name}`}
+        style={{ width: "100%", maxWidth: 360, maxHeight: "90vh", overflowY: "auto", background: "var(--color-surface)", borderRadius: 14, boxShadow: "0 20px 50px rgba(0,0,0,0.25)", padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: "var(--color-text-primary)" }}>Monthly Fee</div>
+            <div style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>{student.name} · {student.centerName}</div>
+          </div>
+          <button onClick={onCancel} disabled={saving} aria-label="Close" style={{ border: "none", background: "none", fontSize: 16, color: "#9ca3af", cursor: "pointer" }}>✕</button>
+        </div>
+
+        <label style={{ fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)" }}>
+          Base monthly fee (₹)
+          <input autoFocus type="number" min={1} inputMode="numeric" value={value} disabled={saving} placeholder="e.g. 2500"
+            onChange={e => onChange(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && valid) onSave(); }}
+            style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4, padding: "8px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 14, color: "var(--color-text-primary)", background: "var(--color-surface)" }} />
+        </label>
+        <div style={{ fontSize: 11.5, color: "var(--color-text-secondary)", marginTop: -4 }}>
+          Group · prepaid · billed monthly. New fee dues use this amount; dues already raised keep theirs.
+        </div>
+
+        <div style={sub}>{fmtMonth(month)}</div>
+        {row("Fee", student.monthlyFee > 0 ? `${fmtINR(student.monthlyFee)} / mo` : <span style={{ color: "#b91c1c" }}>Not set</span>)}
+        {row("Status", paidThisMonth !== null
+          ? <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidThisMonth)}</span>
+          : dueThisMonth !== null ? <span style={{ color: "#dc2626" }}>Due {fmtINR(dueThisMonth)}</span>
+          : <span style={{ color: "#9ca3af" }}>Not raised yet</span>)}
+        {row("Current balance", student.balance > 0
+          ? <span style={{ color: "#dc2626" }}>{fmtINR(student.balance)} owed</span>
+          : student.balance < 0 ? <span style={{ color: "#16a34a" }}>{fmtINR(-student.balance)} credit</span> : "Settled")}
+
+        <div style={sub}>Fee changes</div>
+        {changes === null ? <div style={{ fontSize: 12, color: "#9ca3af" }}>Loading…</div>
+          : changes.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>No changes recorded yet.</div>
+          : changes.map((c, i) => <Fragment key={i}>{row(fmtD(c.at), `${c.from > 0 ? fmtINR(c.from) : "—"} → ${fmtINR(c.to)}`)}</Fragment>)}
+
+        <div style={sub}>Discounts given</div>
+        {discounts.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None.</div>
+          : discounts.map(t => <Fragment key={t.id}>{row(fmtD(t.date), `−${fmtINR(Number(t.discountAmt))} on ${fmtINR(Number(t.rawAmount ?? t.amount))}`)}</Fragment>)}
+
+        <div style={sub}>Recent dues &amp; payments</div>
+        {recent.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>Nothing yet.</div>
+          : recent.map(t => <Fragment key={t.id}>{row(`${fmtD(t.date)} · ${t.type === "fee_due" ? "Fee due" : "Payment"}`,
+              <span style={{ color: t.type === "fee_due" ? "#dc2626" : "#16a34a" }}>{t.type === "fee_due" ? "+" : "−"}{fmtINR(t.amount)}</span>)}</Fragment>)}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+          <button onClick={onCancel} disabled={saving} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={onSave} disabled={saving || !valid} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#d97706", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: saving || !valid ? "not-allowed" : "pointer", opacity: saving || !valid ? 0.55 : 1 }}>
+            {saving ? "Saving…" : "Save Fee"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Keeps "Payment" as the single obvious action on each row and tucks the rarely
 // used money operations behind ⋮, rather than showing four buttons per student.
 
