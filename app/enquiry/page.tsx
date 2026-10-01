@@ -2,10 +2,12 @@
 
 // Public enquiry page — no login. Parents reach it by scanning the QR code on
 // /dashboard/admissions (Enquiries tab). `?wing=` picks the wing the lead is
-// filed under; defaults to Rol's School of Music.
+// filed under; defaults to Rol's School of Music. After a School of Music
+// enquiry, parents see the school overview (components/enquiry/SchoolInfoView).
 
 import { useEffect, useState } from "react";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
+import SchoolInfoView from "@/components/enquiry/SchoolInfoView";
 import { WINGS, WING_LABELS } from "@/config/constants";
 
 export default function PublicEnquiryPage() {
@@ -15,6 +17,8 @@ export default function PublicEnquiryPage() {
   useEffect(() => {
     const w = new URLSearchParams(window.location.search).get("wing");
     if (w && (Object.values(WINGS) as string[]).includes(w)) setWing(w);
+    // Leaders' "Preview" link from Admissions → School Info.
+    if (new URLSearchParams(window.location.search).get("preview") === "info") setDone(true);
   }, []);
 
   return (
@@ -23,11 +27,14 @@ export default function PublicEnquiryPage() {
         <div style={{ textAlign: "center", marginBottom: 22 }}>
           <div style={{ fontSize: 40 }}>🎼</div>
           <div style={{ fontSize: 22, fontWeight: 900, color: "#78350f", marginTop: 6 }}>{WING_LABELS[wing]}</div>
-          <div style={{ fontSize: 14, color: "#92400e", marginTop: 4 }}>
+          {!done && <div style={{ fontSize: 14, color: "#92400e", marginTop: 4 }}>
             Interested in music classes? Leave your details and we&apos;ll call you back.
-          </div>
+          </div>}
         </div>
 
+        {done && wing === WINGS.SCHOOL_OF_MUSIC ? (
+          <SchoolInfoView wing={wing} onAnother={() => setDone(false)} />
+        ) : (
         <div style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.07)", borderRadius: 18, padding: 22, boxShadow: "0 4px 14px rgba(0,0,0,0.05)" }}>
           {done ? (
             <div style={{ textAlign: "center", padding: "24px 8px" }}>
@@ -44,9 +51,10 @@ export default function PublicEnquiryPage() {
               </button>
             </div>
           ) : (
-            <EnquiryForm wing={wing} source="qr" submitLabel="Send enquiry" onCreated={() => setDone(true)} />
+            <EnquiryForm wing={wing} source="qr" submitLabel="Send enquiry" onCreated={() => { setDone(true); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
           )}
         </div>
+        )}
       </div>
     </div>
   );

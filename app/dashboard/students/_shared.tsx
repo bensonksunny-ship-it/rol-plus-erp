@@ -34,6 +34,7 @@ import { batchIdToStore, batchSchedule, effectiveBatches, explicitBatches, isDef
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import { safeCompare } from "@/lib/sortKey";
+import { hasAdmissionNo, isActiveStudentStatus } from "@/lib/activeStudents";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -171,6 +172,12 @@ export function isInactiveStatus(status: string): boolean {
   return /^(inactive|cancelled|canceled)$/i.test((status || "").trim());
 }
 
+/** List rows show "-" for a missing value — an edit form should open that field blank. */
+function blankIfDash(v: string | null | undefined): string {
+  const t = (v ?? "").trim();
+  return t === "-" || t === "—" ? "" : t;
+}
+
 /** Firestore auto-IDs are long base62 strings ("41IW9G1vBvPxQKJG55Hz") — never
  *  a human centre name. Used so a failed name lookup never leaks a raw id into
  *  a group header or table cell; it falls back to a plain placeholder instead. */
@@ -229,6 +236,8 @@ function StudentsContent() {
   // instantly instead of a blank loading state — fetchData() below still
   // always re-fetches to stay fresh.
   const [students, setStudents]         = useState<StudentRow[]>(() => getCached(`students:${wing}:students`) ?? []);
+  // Active centres of this wing — a student is Active only when on one of them.
+  const [activeCenterIds, setActiveCenterIds] = useState<Set<string>>(() => getCached(`students:${wing}:activeCenterIds`) ?? new Set());
   const [transactions, setTransactions] = useState<Transaction[]>(() => getCached(`students:${wing}:transactions`) ?? []);
   const [centerMap, setCenterMap]       = useState<Map<string, string>>(() => getCached(`students:${wing}:centerMap`) ?? new Map());
   const [centerOptions, setCenterOpts]  = useState<CenterOption[]>(() => getCached(`students:${wing}:centerOptions`) ?? []);
@@ -308,6 +317,7 @@ function StudentsContent() {
       setCenterOpts(getCached(`students:${wing}:centerOptions`) ?? []);
       setTeacherOpts(getCached(`students:${wing}:teacherOptions`) ?? []);
       setTeacherMap(getCached(`students:${wing}:teacherMap`) ?? new Map());
+      setActiveCenterIds(getCached(`students:${wing}:activeCenterIds`) ?? new Set());
     }
     try {
       const [studentSnap, centerSnap, teacherSnap, txSnap] = await Promise.all([
@@ -349,6 +359,11 @@ function StudentsContent() {
       });
       setCenterMap(cMap);
       setCached(`students:${wing}:centerMap`, cMap);
+      const activeIds = new Set(centerSnap.docs
+        .filter(d => inWing(d.data(), wing) && d.data().status === "active")
+        .map(d => d.id));
+      setActiveCenterIds(activeIds);
+      setCached(`students:${wing}:activeCenterIds`, activeIds);
       // Teachers: show only their assigned centres in the filter dropdown
       const filteredCenterOpts = filterCentres(cOptsAll);
       setCenterOpts(filteredCenterOpts);
@@ -401,7 +416,7 @@ function StudentsContent() {
           feePerClass: Number(s.feePerClass ?? 0),
           monthlyFee:  Number(s.monthlyFee ?? 0),
           balance:     balanceMap.get(d.id) ?? 0,
-          status:      (s.status ?? s.studentStatus ?? "active") as string,
+          status:      (s.status ?? s.studentStatus ?? "") as string,
           createdAt:   toISODate(s.createdAt),
           deactivationRequestedBy: (s.deactivationRequestedBy ?? null) as string | null,
           deactivationRequestedAt: (s.deactivationRequestedAt ?? null) as string | null,
@@ -454,9 +469,13 @@ function StudentsContent() {
   const requestStudents      = students.filter(s => s.status === "deactivation_requested");
   const breakRequestStudents = students.filter(s => s.status === "break_requested");
   const onBreakStudents      = students.filter(s => s.status === "on_break");
-  const activeStudents       = students.filter(s =>
-    isActiveStatus(s.status) || s.status === "deactivation_requested" || s.status === "break_requested");
-  const inactiveStudents     = students.filter(s => isInactiveStatus(s.status) || s.status === "on_break");
+  // Active = the same rule as centre rosters and dashboards: active status (incl.
+  // pending requests) + admission no. + an active centre in this wing. Everyone
+  // else — inactive, on break, no status, no adm. no., unassigned — is under Inactive.
+  const isRosterActive = (s: StudentRow) =>
+    isActiveStudentStatus(s.status) && hasAdmissionNo(s.admissionNo) && activeCenterIds.has(s.centerId);
+  const activeStudents       = students.filter(isRosterActive);
+  const inactiveStudents     = students.filter(s => !isRosterActive(s) && s.status !== "deleted");
 
   const baseList = tab === "active" ? activeStudents : inactiveStudents;
 
@@ -619,10 +638,10 @@ function StudentsContent() {
         <div>
           <h1 style={p.heading}>Students</h1>
           <div style={p.subheading}>
-            {students.length} total · {activeStudents.length} active
+            {activeStudents.length} active
             {!isSom && <>
-              {" "}· {students.filter(s => s.classType === "group").length} group ·{" "}
-              {students.filter(s => s.classType === "personal").length} personal
+              {" "}· {activeStudents.filter(s => s.classType === "group").length} group ·{" "}
+              {activeStudents.filter(s => s.classType === "personal").length} personal
             </>}
           </div>
         </div>
@@ -653,6 +672,7 @@ function StudentsContent() {
       {/* ── Insights ── */}
       <InsightsPanel
         students={students}
+        activeIds={new Set(activeStudents.map(s => s.id))}
         centerOptions={centerOptions}
         open={insightsOpen}
         onToggle={toggleInsights}
@@ -989,7 +1009,7 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, showStatus, expande
       {showStatus && (
         <td style={p.td}>
           <span style={{ ...p.badge, ...ellipsis, maxWidth: 90, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
-            {s.status.replace(/_/g, " ")}
+            {s.status ? s.status.replace(/_/g, " ") : "no status"}
           </span>
         </td>
       )}
@@ -1448,14 +1468,14 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
 }) {
   const isSom = isSchoolOfMusic(student.wing);
   const [form, setForm]     = useState<EditForm>({
-    name:               student.name,
-    email:              student.email,
-    admissionNo:        student.admissionNo,
-    phone:              student.phone,
-    centerId:           student.centerId,
+    name:               blankIfDash(student.name),
+    email:              blankIfDash(student.email),
+    admissionNo:        blankIfDash(student.admissionNo),
+    phone:              blankIfDash(student.phone),
+    centerId:           blankIfDash(student.centerId),
     batchId:            student.batchId ?? "",
-    instrument:         student.instrument,
-    course:             student.course,
+    instrument:         blankIfDash(student.instrument),
+    course:             blankIfDash(student.course),
     classType:          isSom ? "group"  : (student.classType || "group"),
     billingMode:        isSom ? "prepay" : (student.billingMode || "postpay"),
     assignedTeacherUid: student.assignedTeacherUid ?? "",
@@ -1477,10 +1497,18 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
     e.preventDefault();
     setError("");
 
-    if (!form.name.trim())  { setError("Name is required."); return; }
-    if (!form.email.trim()) { setError("Email is required."); return; }
-    if (!/\S+@\S+\.\S+/.test(form.email)) { setError("Invalid email format."); return; }
-    if (isSom && Number(form.monthlyFee) <= 0) { setError("Monthly fee is required."); return; }
+    // Only Full Name, Phone and Admission No. are required — everything else is optional.
+    const missing = [
+      !form.name.trim()        && "Full Name",
+      !form.phone.trim()       && "Phone",
+      !form.admissionNo.trim() && "Admission No.",
+    ].filter(Boolean);
+    if (missing.length) { setError(`${missing.join(", ")} ${missing.length > 1 ? "are" : "is"} required.`); return; }
+    // Optional fields are only checked when filled in.
+    if (form.email.trim() && !/\S+@\S+\.\S+/.test(form.email.trim())) { setError("Invalid email format."); return; }
+    if (isSom && form.monthlyFee.trim() !== "" && !(Number(form.monthlyFee) >= 0)) { setError("Monthly fee must be a number."); return; }
+    // Blank optional fields are saved as "" (text) or null (fee / batch / time).
+    const monthlyFeeValue = form.monthlyFee.trim() === "" ? null : Number(form.monthlyFee);
 
     setSaving(true);
     try {
@@ -1502,7 +1530,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         classTime:          !isSom && form.classType === "personal" ? (form.classTime || null) : null,
         feeCycle:           isSom ? "monthly" : form.feeCycle,
         feePerClass:        !isSom && form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
-        ...(isSom ? { monthlyFee: Number(form.monthlyFee) } : {}),
+        ...(isSom ? { monthlyFee: monthlyFeeValue } : {}),
         status:             form.status,
         studentStatus:      form.status,   // mirror for type-system compatibility
         updatedAt:          serverTimestamp(),
@@ -1543,7 +1571,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         classTime:           !isSom && form.classType === "personal" ? (form.classTime || null) : null,
         feeCycle:            isSom ? "monthly" : form.feeCycle,
         feePerClass:         !isSom && form.feeCycle === "per_class" ? Number(form.feePerClass) : 0,
-        monthlyFee:          isSom ? Number(form.monthlyFee) : student.monthlyFee,
+        monthlyFee:          isSom ? (monthlyFeeValue ?? 0) : student.monthlyFee,
         status:              form.status,
       });
     } catch (err) {
@@ -1578,17 +1606,17 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
               <Field label="Email">
                 <input name="email" type="email" value={form.email} onChange={f} style={p.input} />
               </Field>
-              <Field label="Admission No.">
-                <input name="admissionNo" value={form.admissionNo} onChange={f} style={p.input} />
+              <Field label="Admission No. *">
+                <input name="admissionNo" value={form.admissionNo} onChange={f} required style={p.input} />
               </Field>
-              <Field label="Phone">
-                <input name="phone" value={form.phone} onChange={f} placeholder="+91 98765 43210" style={p.input} />
+              <Field label="Phone *">
+                <input name="phone" value={form.phone} onChange={f} required placeholder="+91 98765 43210" style={p.input} />
               </Field>
             </div>
 
             <div style={modal.sectionLabel}>Academic Info</div>
             <div style={modal.grid}>
-              <Field label="Center *">
+              <Field label="Center">
                 <select
                   name="centerId"
                   value={form.centerId}
@@ -1602,8 +1630,8 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                       monthlyFee: isSom && !prev.monthlyFee && centerFee ? String(centerFee) : prev.monthlyFee,
                     }));
                   }}
-                  required style={p.input}>
-                  <option value="">— Select center —</option>
+                  style={p.input}>
+                  <option value="">— No center —</option>
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </Field>
@@ -1617,8 +1645,8 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                 </Field>
               )}
               {isSom && (
-                <Field label="Monthly Fee (₹) *">
-                  <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee} onChange={f} required style={p.input} />
+                <Field label="Monthly Fee (₹)">
+                  <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee} onChange={f} style={p.input} />
                 </Field>
               )}
               {!isSom && (
@@ -1946,7 +1974,7 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
             {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
           </span>
         )}
-        <span style={{ ...p.badge, ...statusStyle }}>{s.status.replace(/_/g, " ")}</span>
+        <span style={{ ...p.badge, ...statusStyle }}>{s.status ? s.status.replace(/_/g, " ") : "no status"}</span>
       </div>
       <div style={{ flex: "0 0 96px", textAlign: "right" as const }}>
         {isDue ? (
@@ -2028,7 +2056,9 @@ function MiniMonthBars({ data }: { data: { label: string; value: number }[] }) {
 
 type AttAgg = { overallPct: number; byCourse: BarDatum[]; byCenter: BarDatum[] };
 
-function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }: {
+function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onPickStatus }: {
+  /** Students who count as Active (strict rule, computed by the page). */
+  activeIds: Set<string>;
   students: StudentRow[];
   centerOptions: CenterOption[];
   open: boolean;
@@ -2097,7 +2127,7 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
 
   const stats = useMemo(() => {
     const total = students.length;
-    const active = students.filter(s => isActiveStatus(s.status)).length;
+    const active = students.filter(s => activeIds.has(s.id)).length;
     const owing = students.filter(s => s.balance > 0);
     const dues = owing.reduce((a, s) => a + s.balance, 0);
     const ym = new Date().toISOString().slice(0, 7);
@@ -2143,7 +2173,7 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
       courseGroups: tally(s => s.course).length,
       statusRows, months,
     };
-  }, [students]);
+  }, [students, activeIds]);
 
   return (
     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.05)", overflow: "hidden" }}>
@@ -2154,7 +2184,7 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
         <span style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 700, color: "#111827", flexWrap: "wrap" as const }}>
           📊 Insights
           <span style={{ fontSize: 12, fontWeight: 400, color: "#9ca3af" }}>
-            {stats.total} students · {stats.courseGroups} courses · {fmtINR(stats.dues)} outstanding
+            {stats.active} active · {stats.courseGroups} courses · {fmtINR(stats.dues)} outstanding
           </span>
         </span>
         <span style={{ fontSize: 12, color: "#6b7280", flexShrink: 0 }}>{open ? "▲ Hide" : "▼ Show"}</span>
@@ -2163,8 +2193,7 @@ function InsightsPanel({ students, centerOptions, open, onToggle, onPickStatus }
       {open && (
         <div style={{ padding: "2px 18px 20px", borderTop: "1px solid #f1f5f9" }}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, margin: "14px 0" }}>
-            <StatTile label="Total" value={String(stats.total)} />
-            <StatTile label="Active" value={String(stats.active)} tone="#16a34a" sub={`${stats.total - stats.active} not active`} />
+            <StatTile label="Active" value={String(stats.active)} tone="#16a34a" sub="in active centres" />
             <StatTile label="Outstanding dues" value={fmtINR(stats.dues)} tone={stats.dues > 0 ? "#d97706" : "#16a34a"} sub={`${stats.owingCount} owing`} />
             <StatTile label="New this month" value={String(stats.newThisMonth)} tone="#4f46e5" />
           </div>

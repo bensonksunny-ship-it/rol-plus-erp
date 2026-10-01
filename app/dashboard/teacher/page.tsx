@@ -707,7 +707,7 @@ function TeacherDashboardContent() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 16 }}>
         {[
           {
-            label: "Total Students",
+            label: "Active Students",
             value: statsLoading ? "…" : overviewStats ? String(overviewStats.totalStudents) : "—",
             icon: "👥", color: "#4f46e5", bg: "#ede9fe",
             hint: "See your active students", onClick: () => setStatModal("students"),

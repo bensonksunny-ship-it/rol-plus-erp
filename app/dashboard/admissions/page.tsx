@@ -31,6 +31,7 @@ import { AdmissionsList } from "../screening/admissions-list";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
 import { EnquiriesDrawer } from "./enquiries";
 import { ScreeningQuestionsModal } from "@/components/screening/ScreeningQuestionsModal";
+import { SchoolInfoEditor } from "@/components/admissions/SchoolInfoEditor";
 import { useAuth } from "@/hooks/useAuth";
 import { canLeadWing } from "@/lib/elevatedAccount";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
@@ -137,6 +138,7 @@ function AdmissionsWizard() {
   // Screening rubric editor — a pop-up from the ⚙ header icon (wing leaders only).
   const { user: me } = useAuth();
   const canEditQuestions = canLeadWing(me, WING);
+  const [showSchoolInfo, setShowSchoolInfo] = useState(false);
   const [showQuestions, setShowQuestions] = useState(false);
   // Deep links: ?tab=enquiries opens the Enquiries drawer; ?tab=questions opens
   // the rubric editor (both were tabs once).
@@ -209,6 +211,13 @@ function AdmissionsWizard() {
                 </svg>
               </button>
             )}
+            {canEditQuestions && WING === WINGS.SCHOOL_OF_MUSIC && (
+              <button type="button" onClick={() => setShowSchoolInfo(true)}
+                title="School Info shown to parents after an enquiry"
+                style={{ ...btn, background: "#fff", color: "#4f46e5", border: "1.5px solid #c7d2fe", padding: "9px 14px" }}>
+                <span aria-hidden>ℹ️</span> School Info
+              </button>
+            )}
             <button onClick={() => setShowEnquiries(true)} title="Open enquiries — add a lead, follow up, convert"
               style={{ ...btn, background: ACCENT, color: "#fff", padding: "9px 16px", position: "relative" }}>
               <span aria-hidden style={{ fontSize: 15 }}>📇</span> Enquiries
@@ -233,6 +242,7 @@ function AdmissionsWizard() {
             onShowQr={() => { setQrTarget("enquiry"); setShowQr(true); }}
           />
         )}
+        {showSchoolInfo && <SchoolInfoEditor wing={WING} onClose={() => setShowSchoolInfo(false)} />}
         {showQuestions && (
           <ScreeningQuestionsModal wing={WING} onClose={() => {
             setShowQuestions(false);

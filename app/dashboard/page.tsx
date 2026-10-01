@@ -12,7 +12,7 @@ import { getClassesByCenter } from "@/services/attendance/attendance.service";
 import { getAllTeacherQuality } from "@/services/quality/quality.service";
 import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic } from "@/lib/wing";
-import { countActiveStudents } from "@/lib/activeStudents";
+import { activeStudentUids, countActiveStudents } from "@/lib/activeStudents";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center, Wing } from "@/types";
@@ -289,13 +289,18 @@ function CommandCenter() {
   const transactions = data?.transactions ?? [];
   const quality      = data?.quality      ?? [];
 
-  // KPI: students — headline is the current active headcount (active status +
-  // admission no. + assigned to an active centre); the register total is context only.
-  const registeredStudents = students.length;
+  // KPI: operational headcount only — active status + admission no. + an active
+  // centre in this wing. No registry totals. Sub-line: how many of them attend today.
   const activeCenterIds = useMemo(() => new Set(centers.filter(c => c.status === "active").map(c => c.id)), [centers]);
   const activeStudents  = useMemo(
     () => countActiveStudents(students as unknown as Record<string, unknown>[], activeCenterIds),
     [students, activeCenterIds]);
+  const attendingToday  = useMemo(() => {
+    const activeIds = activeStudentUids(students as unknown as Record<string, unknown>[], activeCenterIds);
+    return new Set(attendance
+      .filter(a => a.date === today && a.status === "present" && activeIds.has(a.studentUid))
+      .map(a => a.studentUid)).size;
+  }, [students, activeCenterIds, attendance, today]);
   const groupStudents   = students.filter(s => s.classType === "group").length;
   const personalStudents = students.filter(s => s.classType === "personal").length;
 
@@ -500,7 +505,7 @@ function CommandCenter() {
 
       {/* ── 2. KPI ROW ── */}
       <div style={s.kpiStrip}>
-        <KpiCard label="Total Students"   value={String(activeStudents)}   sub={`${registeredStudents} total registered`} color="#4f46e5"
+        <KpiCard label="Active Students"  value={String(activeStudents)}   sub={`${attendingToday} attending today`} color="#4f46e5"
           onClick={() => router.push("/dashboard/students")} />
         <KpiCard label="Active Centres"   value={String(centers.filter(c=>c.status==="active").length)} sub={`of ${centers.length} total`} color="#0891b2"
           onClick={() => router.push("/dashboard/centers")} />
@@ -955,18 +960,32 @@ function GaugeChart({ value, goal }: { value:number; goal:number }) {
 // each scheduled centre's attendance status for that specific day.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// "scheduled" = the class's day/time hasn't fully elapsed yet (whether that's
-// later today or some future date) — its badge shows the actual time slot
-// instead of a static label. "pending" = the day/time has passed with no
-// attendance recorded.
+// Card colour + badge by attendance state (both wings):
+//   blue  "Scheduled"            — the class hasn't ended yet (later today / a future date)
+//   red   "⚠️ Attendance Pending" — the class has ENDED with no attendance (never while it's running)
+//   amber "◐ Partly Marked"      — attendance taken for some of the centre's active students
+//   green "✓ Marked"             — attendance taken for every active student
 type ClassDayStatus = "scheduled" | "pending" | "recorded" | "completed";
 
-const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string | null }> = {
-  scheduled: { bg: "var(--color-info-dim)",    border: "var(--color-info)",           fg: "var(--color-info)",    label: null },
-  pending:   { bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)",  fg: "var(--color-danger)",  label: "! Pending" },
-  recorded:  { bg: "var(--color-warning-dim)", border: "var(--color-warning-border)", fg: "var(--color-warning)", label: "◐ Recorded" },
-  completed: { bg: "var(--color-success-dim)", border: "var(--color-success-border)", fg: "var(--color-success)", label: "✓ Completed" },
+const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string }> = {
+  scheduled: { bg: "var(--color-info-dim)",    border: "var(--color-info)",           fg: "var(--color-info)",    label: "Scheduled" },
+  pending:   { bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)",  fg: "var(--color-danger)",  label: "⚠️ Attendance Pending" },
+  recorded:  { bg: "var(--color-warning-dim)", border: "var(--color-warning-border)", fg: "var(--color-warning)", label: "◐ Partly Marked" },
+  completed: { bg: "var(--color-success-dim)", border: "var(--color-success-border)", fg: "var(--color-success)", label: "✓ Marked" },
 };
+
+/** Hover hint for a class card's status badge. */
+function classStatusHint(status: ClassDayStatus, isToday: boolean, marked: number, expected: number): string {
+  const session = isToday ? "today's session" : "this session";
+  switch (status) {
+    case "scheduled": return isToday
+      ? "Class hasn't finished yet today — it turns red if attendance still isn't recorded after it ends."
+      : "Upcoming class — attendance is marked on the day.";
+    case "pending":   return `Attendance not yet recorded for ${session} — the class has ended.`;
+    case "recorded":  return `Attendance recorded for ${marked} of ${expected} active student${expected !== 1 ? "s" : ""} — finish marking the rest.`;
+    case "completed": return `Attendance submitted for ${session} — all ${expected} active student${expected !== 1 ? "s" : ""} marked.`;
+  }
+}
 
 function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle }: {
   sectionStyle: React.CSSProperties;
@@ -1107,11 +1126,20 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
           <button style={navBtn} onClick={() => setSelectedDate(d => addDaysISO(d, 1))}>Next ›</button>
         </div>
       </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: -6, marginBottom: 10, fontSize: 11, color: "var(--color-text-secondary)" }}>
+        {(["scheduled", "pending", "recorded", "completed"] as ClassDayStatus[]).map(k => (
+          <span key={k} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span style={{ width: 9, height: 9, borderRadius: 3, background: CLASS_STATUS_STYLE[k].bg, border: `1px solid ${CLASS_STATUS_STYLE[k].border}` }} />
+            {{ scheduled: "Scheduled", pending: "Ended, not marked", recorded: "Partly marked", completed: "Marked" }[k]}
+          </span>
+        ))}
+      </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {dateCentres.map(c => {
           const status = statusFor(c.id, c.timeSlot ?? "");
           const st = CLASS_STATUS_STYLE[status];
-          const badgeText = st.label ?? fmtTimeSlotRange(c.timeSlot ?? "");
+          const slot = fmtTimeSlotRange(c.timeSlot ?? "");
+          const hint = classStatusHint(status, isToday, (attByCenter.get(c.id) ?? []).length, activeCountByCenter[c.id] ?? 0);
           return (
             <button
               key={c.id}
@@ -1124,8 +1152,13 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
                 display: "flex", flexDirection: "column", gap: 5, minWidth: 130,
               }}
             >
-              <div style={{ fontSize: 11, fontWeight: 700, color: st.fg }}>{badgeText}</div>
+              <span title={hint} aria-label={`${st.label}: ${hint}`}
+                style={{ alignSelf: "flex-start", fontSize: 10.5, fontWeight: 800, color: st.fg, border: `1px solid ${st.border}`,
+                         borderRadius: 99, padding: "1px 8px", background: "var(--color-surface)", cursor: "help", whiteSpace: "nowrap" }}>
+                {st.label}
+              </span>
               <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
+              {slot && <div style={{ fontSize: 11.5, fontWeight: 600, color: st.fg }}>{slot}</div>}
             </button>
           );
         })}
@@ -1521,6 +1554,7 @@ function AdminDashboard() {
   const [students,  setStudents]  = useState<AdminStudentDoc[]>([]);
   // Current active headcount — same rule as the Center Suite and centre cards.
   const [activeHeadcount, setActiveHeadcount] = useState(0);
+  const [activeUids, setActiveUids] = useState<Set<string>>(new Set());
   const [teachers,  setTeachers]  = useState<AdminTeacherDoc[]>([]);
   const [centers,   setCenters]   = useState<Center[]>([]);
   const [txList,    setTxList]    = useState<{ month: string; amount: number; studentUid: string; status: string; type: string; method: string; billingMonth: string }[]>([]);
@@ -1559,7 +1593,9 @@ function AdminDashboard() {
         }));
         setStudents(studs);
         const activeIds = new Set(centersData.filter(c => c.status === "active").map(c => c.id));
-        setActiveHeadcount(countActiveStudents(studSnap.docs.filter(d => inWing(d.data(), wing)).map(d => d.data()), activeIds));
+        const wingDocs = studSnap.docs.filter(d => inWing(d.data(), wing)).map(d => ({ ...d.data(), uid: d.id }));
+        setActiveHeadcount(countActiveStudents(wingDocs, activeIds));
+        setActiveUids(activeStudentUids(wingDocs, activeIds));
 
         setTeachers(teachSnap.docs
           .filter(d => inWing(d.data(), wing))
@@ -1664,8 +1700,9 @@ function AdminDashboard() {
   }
 
   // ── Derived stats ────────────────────────────────────────────────────────
-  const groupStudents   = students.filter(s => s.classType === "group").length;
-  const personalStudents = students.filter(s => s.classType === "personal").length;
+  // Group / personal split of the active headcount only.
+  const groupStudents   = students.filter(s => activeUids.has(s.uid) && s.classType === "group").length;
+  const personalStudents = students.filter(s => activeUids.has(s.uid) && s.classType === "personal").length;
   const feeDueMap = useMemo(() => {
     const m = new Map<string, number>();
     txList.forEach(tx => {
@@ -1968,7 +2005,7 @@ function AdminDashboard() {
 
       {/* ── KPI STRIP ── */}
       <div style={adm.kpiStrip}>
-        <KpiTile label="Students" value={loading ? "…" : String(activeHeadcount)} sub={loading ? "" : isSchoolOfMusic(wing) ? `${students.length} total registered` : `${students.length} total registered · ${groupStudents} group · ${personalStudents} personal`} />
+        <KpiTile label="Active Students" value={loading ? "…" : String(activeHeadcount)} sub={loading ? "" : isSchoolOfMusic(wing) ? "in active centres" : `${groupStudents} group · ${personalStudents} personal`} />
         <div style={adm.kpiDiv} />
         <KpiTile label="Centres" value={loading ? "…" : String(centers.length)} sub={`${centers.filter(c => c.status === "active").length} active`} />
         <div style={adm.kpiDiv} />

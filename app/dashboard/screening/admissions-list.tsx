@@ -498,40 +498,60 @@ const GRADE_COLORS: Record<string, { fg: string; bg: string }> = {
   Low:    { fg: "#991b1b", bg: "#fee2e2" },
 };
 
-function ApplicantScreening({ rec, wing, onOpen }: {
-  rec: Record<string, unknown>;
-  wing: string;
-  /** Opens the screening in the wizard (summary + Edit Assessment, or a new one). */
-  onOpen: () => void;
-}) {
-  const [sc, setSc]           = useState<Record<string, unknown> | null>(null);
-  const [loading, setLoading] = useState(true);
-  const screeningId = typeof rec.screeningId === "string" ? rec.screeningId : "";
-  const fullName    = typeof rec.fullName === "string" ? rec.fullName : "";
+/** A screening counts only when it holds actual marks — a link alone isn't enough. */
+export function hasScreeningData(sc: Record<string, unknown> | null | undefined): boolean {
+  if (!sc) return false;
+  const r = readScreeningMarks(sc);
+  return r.total !== null || r.marks.some(m => m !== null);
+}
+
+type LoadedScreening = { sc: (Record<string, unknown> & { id: string }) | null; loading: boolean; missingLink: boolean };
+
+/**
+ * Loads the screening behind an application: the linked `screeningId`, else
+ * (screened before that link existed) the latest one under the child's name.
+ * `missingLink` — the application points at a screening that no longer exists.
+ */
+function useApplicantScreening(rec: Record<string, unknown> | null, wing: string, enabled: boolean): LoadedScreening {
+  const [state, setState] = useState<LoadedScreening>({ sc: null, loading: false, missingLink: false });
+  const recId       = rec && typeof rec.id === "string" ? rec.id : "";
+  const screeningId = rec && typeof rec.screeningId === "string" ? rec.screeningId : "";
+  const fullName    = rec && typeof rec.fullName === "string" ? rec.fullName : "";
 
   useEffect(() => {
+    if (!enabled || !recId) { setState({ sc: null, loading: false, missingLink: false }); return; }
     let live = true;
-    setLoading(true);
+    setState({ sc: null, loading: true, missingLink: false });
     (async () => {
       try {
-        let data: Record<string, unknown> | null = null;
+        let data: (Record<string, unknown> & { id: string }) | null = null;
+        let missingLink = false;
         if (screeningId) {
           const snap = await getDoc(doc(db, "screenings", screeningId));
-          data = snap.exists() ? (snap.data() as Record<string, unknown>) : null;
+          if (snap.exists()) data = { ...(snap.data() as Record<string, unknown>), id: snap.id };
+          else missingLink = true;
         } else if (fullName) {
-          data = (await findFastTrackScreeningByName(fullName, wing)) as unknown as Record<string, unknown> | null;
+          const found = await findFastTrackScreeningByName(fullName, wing);
+          data = found ? ({ ...(found as unknown as Record<string, unknown>), id: found.id }) : null;
         }
-        if (live) setSc(data);
+        if (live) setState({ sc: data, loading: false, missingLink });
       } catch (err) {
         console.error("[ApplicantScreening] load error:", err);
-        if (live) setSc(null);
-      } finally {
-        if (live) setLoading(false);
+        if (live) setState({ sc: null, loading: false, missingLink: false });
       }
     })();
     return () => { live = false; };
-  }, [screeningId, fullName, wing]);
+  }, [enabled, recId, screeningId, fullName, wing]);
 
+  return state;
+}
+
+function ApplicantScreening({ sc, loading, onOpen }: {
+  sc: Record<string, unknown> | null;
+  loading: boolean;
+  /** Opens the screening in the wizard (summary + Edit Assessment, or a new one). */
+  onOpen: () => void;
+}) {
   const heading = (
     <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 10 }}>
       Screening
@@ -541,12 +561,12 @@ function ApplicantScreening({ rec, wing, onOpen }: {
 
   if (loading) return <div style={box}>{heading}<div style={{ fontSize: 13, color: "#9ca3af" }}>Loading screening…</div></div>;
 
-  if (!sc) {
+  if (!sc || !hasScreeningData(sc)) {
     return (
       <div style={box}>
         {heading}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const, background: "#f9fafb", border: "1px dashed #e5e7eb", borderRadius: 10, padding: "12px 14px" }}>
-          <span style={{ fontSize: 13, color: "#6b7280" }}>Not screened yet.</span>
+          <span style={{ fontSize: 13, color: "#6b7280" }}>Not screened yet — click &lsquo;Conduct Screening&rsquo; to record the evaluation.</span>
           <button onClick={onOpen} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1e40af", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
             🎹 Conduct Screening
           </button>
@@ -566,7 +586,7 @@ function ApplicantScreening({ rec, wing, onOpen }: {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" as const }}>
         {heading}
         <button onClick={onOpen} style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid #a5b4fc", background: "#fff", color: "#3730a3", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 10 }}>
-          Open / Edit Assessment →
+          View / Edit Screening →
         </button>
       </div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
@@ -663,6 +683,41 @@ export function AdmissionsList({
   const [deleteId,     setDeleteId]     = useState<string | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [movingId,     setMovingId]     = useState<string | null>(null);
+  // Detail-panel action icons stay hidden until the header is hovered/focused,
+  // or pinned open with the ••• button (touch screens have no hover).
+  const [actionsOpen,  setActionsOpen]  = useState(false);
+  useEffect(() => { setActionsOpen(false); }, [selected]);
+  // Detail panel: the screening record is the single source of truth for
+  // "screened" — the stepper, stage button and Screening section all read it.
+  const screening = useApplicantScreening(selected, wing, !!onResume);
+  const selectedEff = useMemo(() => {
+    if (!selected || !onResume || screening.loading) return selected;
+    return screening.sc && hasScreeningData(screening.sc)
+      ? { ...selected, screeningId: str(selected.screeningId) || screening.sc.id }
+      : { ...selected, screeningId: "" };
+  }, [selected, onResume, screening]);
+  // Screened before the link existed → record the link so cards and ranks agree.
+  // A link to a screening that no longer exists is cleared.
+  useEffect(() => {
+    if (!selected || !onResume || screening.loading) return;
+    const id = str(selected.id);
+    const linked = str(selected.screeningId);
+    let patch: Record<string, unknown> | null = null;
+    if (!linked && screening.sc && hasScreeningData(screening.sc)) {
+      patch = { screeningId: screening.sc.id, screenedAt: str(screening.sc.screenedAt) };
+    } else if (linked && screening.missingLink) {
+      patch = { screeningId: "", screenedAt: "" };
+    }
+    if (!id || !patch) return;
+    const p = patch;
+    updateAdmission(id, p)
+      .then(() => {
+        setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, ...p } : a));
+        setSelected(prev => prev && str(prev.id) === id ? { ...prev, ...p } : prev);
+      })
+      .catch(err => console.error("[admissions] sync screening link:", err));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screening]);
   // Application whose candidate photo is being captured (QR submissions arrive without one).
   const [photoFor,     setPhotoFor]     = useState<Record<string, unknown> | null>(null);
   // School of Music: enrolled applications stay on record (status Enrolled)
@@ -1307,15 +1362,16 @@ export function AdmissionsList({
           padding: "24px", marginBottom: 20, position: "relative" as const,
           boxShadow: "0 4px 24px rgba(0,0,0,0.07)",
         }}>
-          {!manualAdmissionNo(selected) && getApplicationStage(selected).key !== "enrolled" && (
+          {!manualAdmissionNo(selected) && getApplicationStage(selectedEff!).key !== "enrolled" && (
             <div style={{ marginBottom: 14 }}>
-              <AdmissionFinalPhase rec={selected} admNo="" onAssign={() => setEditing(selected)} />
+              <AdmissionFinalPhase rec={selectedEff!} admNo="" onAssign={() => setEditing(selected)} />
             </div>
           )}
-          {/* Action row */}
-          <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" as const, alignItems: "center" }}>
+          {/* Action row — hovering it (or focusing inside) reveals the icon actions */}
+          <div className="group -mx-2 rounded-xl px-2 py-1 transition-colors duration-200 hover:bg-slate-50/50"
+            style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" as const, alignItems: "center" }}>
             {onResume ? (() => {
-              const stage = getApplicationStage(selected);
+              const stage = getApplicationStage(selectedEff!);
               return (
                 <>
                   <StageBadge stage={stage} />
@@ -1377,6 +1433,18 @@ export function AdmissionsList({
               background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 999,
               padding: "3px 5px", boxShadow: "0 1px 2px rgba(79,70,229,0.08)",
             }}>
+              {/* Hint shown while the actions are hidden; tap/click pins them open. */}
+              <button type="button" onClick={() => setActionsOpen(o => !o)}
+                aria-label={actionsOpen ? "Hide actions" : "Show actions"} aria-expanded={actionsOpen}
+                title={actionsOpen ? "Hide actions" : "More actions"}
+                className={`inline-flex items-center justify-center rounded-full px-2 py-1 text-indigo-400 transition-colors hover:bg-white hover:text-indigo-700 ${actionsOpen ? "" : "group-hover:hidden"}`}
+                style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 14, fontWeight: 800, letterSpacing: 1, lineHeight: 1 }}>
+                {actionsOpen ? "›" : "•••"}
+              </button>
+              {/* Collapsed (not display:none) so the icons stay tabbable — focusing one reveals the set. */}
+              <div className={`flex items-center gap-0.5 overflow-hidden transition-all duration-200 ease-in-out ${actionsOpen
+                ? "max-w-[240px] opacity-100"
+                : "pointer-events-none max-w-0 opacity-0 group-hover:pointer-events-auto group-hover:max-w-[240px] group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:max-w-[240px] group-focus-within:opacity-100"}`}>
               <IconButton label="Edit application" onClick={() => setEditing(selected)}>
                 <IconPencil />
               </IconButton>
@@ -1393,6 +1461,7 @@ export function AdmissionsList({
               <IconButton label="Delete application" onClick={() => setDeleteId(id)} danger>
                 <IconTrash />
               </IconButton>
+              </div>
               <span aria-hidden style={{ width: 1, height: 20, background: "#c7d2fe", margin: "0 3px" }} />
               <button
                 type="button"
@@ -1546,10 +1615,9 @@ export function AdmissionsList({
           {/* Screening (School of Music) */}
           {onResume && (
             <ApplicantScreening
-              key={str(selected.id)}
-              rec={selected}
-              wing={wing}
-              onOpen={() => onResume(selected, "screen")}
+              sc={screening.sc}
+              loading={screening.loading}
+              onOpen={() => onResume(selectedEff!, "screen")}
             />
           )}
         </div>

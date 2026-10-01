@@ -835,9 +835,9 @@ function StudentMetricCard({
       <div style={{ ...s.metricAccent, background: "#4f46e5" }} />
       <div style={s.metricBody}>
         <div style={s.metricIcon}>👥</div>
-        <div style={s.metricLabel}>Total Students</div>
+        <div style={s.metricLabel}>Active Students</div>
         <div style={{ ...s.metricValue, color: "#4f46e5" }}>{activeStudents}</div>
-        <div style={s.metricSub}>{totalStudents} total registered · {inactiveStudents} inactive</div>
+        <div style={s.metricSub}>in active centres</div>
         {trendLabel !== "—" && (
           <div style={{ fontSize: 11, fontWeight: 600, color: trendColor, marginTop: 4 }}>
             {trendLabel}

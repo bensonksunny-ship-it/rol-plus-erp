@@ -27,6 +27,16 @@ export function isCurrentlyActiveStudent(st: StudentLike, activeCenterIds?: Set<
   return activeCenterIds ? activeCenterIds.has(cid) : true;
 }
 
+/** Ids of every currently active student record (duplicates included — use for lookups). */
+export function activeStudentUids(students: (StudentLike & { uid?: string; id?: string })[], activeCenterIds?: Set<string>): Set<string> {
+  const out = new Set<string>();
+  for (const st of students) {
+    const id = typeof st.uid === "string" ? st.uid : typeof st.id === "string" ? st.id : "";
+    if (id && isCurrentlyActiveStudent(st, activeCenterIds)) out.add(id);
+  }
+  return out;
+}
+
 /**
  * Headcount of currently active students: active status + admission number +
  * assigned to one of `activeCenterIds`. Duplicate records of one person (same

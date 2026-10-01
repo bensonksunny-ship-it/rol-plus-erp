@@ -23,7 +23,8 @@ import { getCached, setCached } from "@/lib/dataCache";
 import { normName, normPhone } from "@/lib/dedup";
 import MergeDuplicatesModal from "@/components/dedup/MergeDuplicatesModal";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
-import { COURSE_LEVELS } from "@/lib/course";
+import { COURSE_LEVELS, instrumentOfCourse, isCourseLevel, levelHistoryText, levelOfCourse, nextCourseLevel, type CourseLevel, type LevelHistoryEntry } from "@/lib/course";
+import { levelChangePatch, logLevelChange, setStudentCourseLevel, type LevelChangeBy } from "@/services/student/courseLevel.service";
 
 // The register shows the wing currently selected (ROL+ or School of Music) —
 // same system for both, each wing's students kept separate.
@@ -44,6 +45,9 @@ interface Entry {
   batchId:     string;
   email:       string;
   courseRaw:   string;   // stored `course` only — no instrument fallback
+  courseLevel: CourseLevel | "";   // stored `courseLevel`, else parsed from the course title
+  instrument:  string;   // instrument part of the course ("Intermediate to Drums" → "Drums")
+  levelHistory: LevelHistoryEntry[];
   addedAt:     number;   // ms when the record was imported/created — newest sorts first
 }
 
@@ -175,11 +179,6 @@ const REGISTRY_COLUMNS = [
   "name", "dateofadmission", "centre",
   "phonenumber", "admissionno", "course", "status", "screeninggrade",
 ];
-/** Course Level from a course title — "Introduction to Keyboard" → "Introduction"; "" when none. */
-function courseLevelOf(course: string): string {
-  const c = course.trim().toLowerCase();
-  return COURSE_LEVELS.find(l => c.startsWith(`${l.toLowerCase()} `)) ?? "";
-}
 
 const HEADER_WORDS = /name|centre|center|admission|phone|mobile|course|instrument|status|date|screening|grade/i;
 
@@ -345,6 +344,11 @@ export default function RegistryPage() {
 
 function RegistryContent() {
   const { user, role, can, isChiefTeacher, isDirector, isFounder } = useAuth();
+  // Who a Course Level change is recorded against (levelHistory + audit log).
+  const levelBy = useMemo<LevelChangeBy>(() => {
+    const u = user as { uid?: string; role?: string; displayName?: string; name?: string } | null;
+    return { uid: u?.uid ?? "unknown", name: String(u?.displayName ?? u?.name ?? ""), role: u?.role ?? ROLES.FOUNDER };
+  }, [user]);
   const { wing: WING } = useWing();
   const canImport = can(CAPABILITIES.STUDENTS_MANAGE);
   // Reactivating a student (Cancelled/Inactive/Hold → Confirm) is restricted
@@ -526,6 +530,9 @@ function RegistryContent() {
                   batchId:     String(s.batchId ?? ""),
                   email:       String(s.email ?? "").trim(),
                   courseRaw:   typeof s.course === "string" ? s.course : "",
+                  courseLevel: levelOfCourse(s.courseLevel, s.course),
+                  instrument:  instrumentOfCourse(course === "—" ? "" : course),
+                  levelHistory: Array.isArray(s.levelHistory) ? (s.levelHistory as LevelHistoryEntry[]) : [],
                   // Imports back-date `createdAt` to the admission date, so the
                   // upload time lives in `importedAt`; other records use createdAt.
                   addedAt:     toMillis(s.importedAt) || toMillis(s.createdAt),
@@ -589,7 +596,7 @@ function RegistryContent() {
     const needle = q.trim().toLowerCase();
     return entries.filter(e => {
       if (statusFilter !== "all" && filterStatus(e) !== statusFilter) return false;
-      if (levelFilter !== "all" && courseLevelOf(e.course) !== (levelFilter === "none" ? "" : levelFilter)) return false;
+      if (levelFilter !== "all" && e.courseLevel !== (levelFilter === "none" ? "" : levelFilter)) return false;
       if (!needle) return true;
       return (
         e.name.toLowerCase().includes(needle) ||
@@ -885,9 +892,18 @@ function RegistryContent() {
                           <DetailField label="Phone Number" value={e.phone} />
                           <DetailField label="Admission Number" value={e.admissionNo} emphasize />
                           <DetailField label="Course" value={e.course} />
+                          <CourseLevelControl entry={e} canEdit={canImport} by={levelBy} />
                           <DetailField label="Screening Grade" value={e.screening} />
                           {e.email && <DetailField label="Email" value={e.email} />}
                         </div>
+                        {e.levelHistory.length > 0 && (
+                          <div style={{ padding: "0 20px 12px", fontSize: 12, color: "var(--color-text-secondary)" }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--color-text-muted)", marginBottom: 4 }}>Level history</div>
+                            {[...e.levelHistory].sort((a, b) => b.at.localeCompare(a.at)).map((h, i) => (
+                              <div key={i}>• {levelHistoryText(h)}</div>
+                            ))}
+                          </div>
+                        )}
                         {canImport && (
                           <div style={{ padding: "0 20px 14px" }}>
                             <button onClick={() => setEditing(e)} style={{ ...s.printBtn, fontSize: 12, padding: "6px 12px" }}>
@@ -968,6 +984,7 @@ function RegistryContent() {
           canReactivate={canReactivate}
           initiatorId={user?.uid ?? "unknown"}
           initiatorRole={user?.role ?? ROLES.FOUNDER}
+          levelBy={levelBy}
           onClose={() => setEditing(null)}
         />
       )}
@@ -1030,7 +1047,8 @@ function isoToDateInput(iso: string): string {
 
 const blankDash = (v: string) => (v === "—" ? "" : v);
 
-function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initiatorId, initiatorRole, onClose }: {
+function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initiatorId, initiatorRole, levelBy, onClose }: {
+  levelBy:        LevelChangeBy;
   entry:          Entry;
   centres:        RegistryCentre[];
   existingAdmNos: Set<string>;
@@ -1046,7 +1064,8 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
     email:       entry.email,
     centerId:    entry.centerId,
     batchId:     entry.batchId,
-    course:      entry.courseRaw || blankDash(entry.course),
+    courseLevel: entry.courseLevel as string,
+    instrument:  entry.courseRaw ? instrumentOfCourse(entry.courseRaw) : blankDash(entry.instrument),
     admittedOn:  isoToDateInput(entry.admittedOn),
     status:      toRegistryStatus(entry.status),
   }), [entry]);
@@ -1107,7 +1126,16 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
       Object.assign(patch, { batchId: b ? b.id : null, batch: b ? b.name : null });
       if (f.batchId !== initial.batchId) changed.push("batch");
     }
-    if (f.course.trim() !== initial.course) { patch.course = f.course.trim(); changed.push("course"); }
+    // Course = Level + Instrument. A level change goes through levelChangePatch
+    // (courseLevel + composite course + levelHistory entry).
+    const levelChanged = f.courseLevel !== initial.courseLevel && isCourseLevel(f.courseLevel);
+    if (levelChanged) {
+      Object.assign(patch, levelChangePatch(initial.courseLevel, f.courseLevel as CourseLevel, f.instrument.trim(), levelBy));
+      changed.push("courseLevel");
+    } else if (f.instrument.trim() !== initial.instrument) {
+      patch.course = isCourseLevel(f.courseLevel) ? `${f.courseLevel} to ${f.instrument.trim()}` : f.instrument.trim();
+      changed.push("course");
+    }
     if (f.admittedOn !== initial.admittedOn) {
       patch.dateOfAdmission = f.admittedOn ? new Date(`${f.admittedOn}T00:00:00`).toISOString() : null;
       changed.push("dateOfAdmission");
@@ -1132,6 +1160,7 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
         approverId: null, approverRole: null, reason: null,
         metadata: { uid: entry.uid, fields: changed },
       });
+      if (levelChanged) logLevelChange(entry.uid, initial.courseLevel, f.courseLevel, levelBy);
       // The registry's live student subscription refreshes the table.
       onClose();
     } catch (err) {
@@ -1197,8 +1226,14 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
               </select>
             )}
           </label>
-          <label style={label}>Instrument / Course
-            <input style={input} list="registry-course-options" value={f.course} onChange={e => set("course", e.target.value)} />
+          <label style={label}>Course Level
+            <select style={input} value={f.courseLevel} onChange={e => set("courseLevel", e.target.value)}>
+              {!isCourseLevel(initial.courseLevel) && <option value="">— Not set —</option>}
+              {COURSE_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
+            </select>
+          </label>
+          <label style={label}>Instrument
+            <input style={input} list="registry-course-options" value={f.instrument} onChange={e => set("instrument", e.target.value)} />
             <datalist id="registry-course-options">
               {Object.values(SYLLABUS_INSTRUMENT_LABELS).map(l => <option key={l} value={l} />)}
             </datalist>
@@ -1260,6 +1295,63 @@ function DetailField({ label, value, emphasize }: { label: string; value: string
       <div style={{ fontSize: 13, color: "var(--color-text-primary)", fontWeight: emphasize ? 700 : 400 }}>
         {value || "—"}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Course Level badge + quick progression (expanded registry row). Promote moves
+ * one tier up; the dropdown sets any level (corrections). The live registry
+ * subscription picks up the new `course`, as do rosters and the student profile.
+ */
+function CourseLevelControl({ entry, canEdit, by }: { entry: Entry; canEdit: boolean; by: LevelChangeBy }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+  const level = entry.courseLevel;
+  const next  = nextCourseLevel(level);
+  const hasInstrument = !!entry.instrument && entry.instrument !== "—";
+
+  async function apply(to: CourseLevel) {
+    if (to === level) return;
+    setBusy(true); setErr("");
+    try {
+      await setStudentCourseLevel(entry.uid, level, to, hasInstrument ? entry.instrument : "", by);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to update level.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const badge: React.CSSProperties = {
+    display: "inline-block", fontSize: 11.5, fontWeight: 700, borderRadius: 999, padding: "2px 10px",
+    background: level ? "#eef2ff" : "var(--color-surface-2)", color: level ? "#3730a3" : "var(--color-text-muted)",
+    border: `1px solid ${level ? "#c7d2fe" : "var(--color-border)"}`,
+  };
+  return (
+    <div onClick={ev => ev.stopPropagation()}>
+      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)", marginBottom: 4 }}>
+        Course Level
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <span style={badge}>{level || "Not set"}</span>
+        {canEdit && next && (
+          <button type="button" disabled={busy} onClick={() => apply(next)}
+            title={hasInstrument ? `Course becomes "${next} to ${entry.instrument}"` : undefined}
+            style={{ fontSize: 11.5, fontWeight: 700, borderRadius: 6, padding: "3px 9px", cursor: busy ? "default" : "pointer",
+              border: "1px solid #86efac", background: "#f0fdf4", color: "#15803d", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Saving…" : level ? `⬆ Promote to ${next}` : `Set ${next}`}
+          </button>
+        )}
+        {canEdit && (
+          <select value={level} disabled={busy} aria-label="Set course level" onChange={ev => isCourseLevel(ev.target.value) && apply(ev.target.value)}
+            style={{ fontSize: 11.5, borderRadius: 6, padding: "2px 4px", border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-secondary)" }}>
+            {!level && <option value="">Set level…</option>}
+            {COURSE_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
+          </select>
+        )}
+      </div>
+      {err && <div style={{ fontSize: 11.5, color: "#dc2626", marginTop: 4 }}>{err}</div>}
     </div>
   );
 }
