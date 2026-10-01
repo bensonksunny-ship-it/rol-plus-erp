@@ -13,7 +13,8 @@ import { getClassesByCenter } from "@/services/attendance/attendance.service";
 import { getAllTeacherQuality } from "@/services/quality/quality.service";
 import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic } from "@/lib/wing";
-import { activeStudentUids, countActiveStudents } from "@/lib/activeStudents";
+import { activeStudentUids, countActiveStudents, isCurrentlyActiveStudent } from "@/lib/activeStudents";
+import { classMarkState } from "@/lib/attendanceStatus";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center, Wing } from "@/types";
@@ -297,14 +298,6 @@ function CommandCenter() {
   const activeStudents  = useMemo(
     () => countActiveStudents(students as unknown as Record<string, unknown>[], activeCenterIds),
     [students, activeCenterIds]);
-  const attendingToday  = useMemo(() => {
-    const activeIds = activeStudentUids(students as unknown as Record<string, unknown>[], activeCenterIds);
-    return new Set(attendance
-      .filter(a => a.date === today && a.status === "present" && activeIds.has(a.studentUid))
-      .map(a => a.studentUid)).size;
-  }, [students, activeCenterIds, attendance, today]);
-  const groupStudents   = students.filter(s => s.classType === "group").length;
-  const personalStudents = students.filter(s => s.classType === "personal").length;
 
   // KPI: attendance today
   const todayAtt     = attendance.filter(a => a.date === today);
@@ -507,62 +500,73 @@ function CommandCenter() {
 
       {/* ── 2. KPI ROW ── */}
       <div style={s.kpiStrip}>
-        <KpiCard label="Active Students"  value={String(activeStudents)}   sub={`${attendingToday} attending today`} color="#4f46e5"
+        <KpiCard label="Active Students"  value={String(activeStudents)} color="#4f46e5"
           onClick={() => router.push("/dashboard/students")} />
         <KpiCard label="Active Centres"   value={String(centers.filter(c=>c.status==="active").length)} sub={`of ${centers.length} total`} color="#0891b2"
           onClick={() => router.push("/dashboard/centers")} />
         <KpiCard label="Revenue · Month"  value={`₹${(revThisMonth/1000).toFixed(1)}k`}
-          sub={revGrowthPct!==null ? `${revGrowthPct>=0?"▲":"▼"} ${Math.abs(revGrowthPct)}% vs last` : "no prior data"}
           color={revGrowthPct===null?"#6b7280":revGrowthPct>=0?"#16a34a":"#dc2626"}
           onClick={() => router.push("/dashboard/finance")} />
         <KpiCard label="Pending Fees"     value={totalPendingFees===0?"All Clear":`₹${(totalPendingFees/1000).toFixed(1)}k`}
-          sub={totalPendingFees===0?"Collected":`${pendingFeeStudents} students`}
           color={totalPendingFees===0?"#16a34a":"#f59e0b"}
           onClick={() => router.push("/dashboard/finance?tab=students&filter=pending")} />
       </div>
 
-      {/* ── MONTH-OVER-MONTH COMPARISON (Super Admin only) ── */}
-      <MonthComparisonWidget attendance={attendance} completedTx={completedTx} />
+      {/* ════ DAILY & WEEKLY OPERATIONS ════════════════════════════════════════ */}
+      <SectionDivider title="Daily & Weekly Operations" />
 
       {/* ── CLASSES FOR [DATE] ── */}
       <ClassesForDateWidget sectionStyle={s.section} headerStyle={s.sectionHeader} titleStyle={s.sectionTitle} subStyle={s.sectionSub} />
 
-      {/* ── MONTHLY ATTENDANCE TOTALS ── */}
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "18px 20px", marginBottom: 16 }}>
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Attendance This Month</div>
-          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{monthLabel(thisMonth)} · all student records</div>
-        </div>
-        {monthlyTotals.total === 0 && (
-          <div style={{ fontSize: 12.5, color: "#9ca3af", marginBottom: 12 }}>No attendance recorded for this month yet.</div>
-        )}
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
-          {[
-            { label: "Present",   value: monthlyTotals.present,   color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
-            { label: "Absent",    value: monthlyTotals.absent,     color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
-            { label: "Break",     value: monthlyTotals.break,      color: "#d97706", bg: "#fffbeb", border: "#fde68a" },
-            { label: "Cancelled", value: monthlyTotals.cancelled,  color: "#6b7280", bg: "#f9fafb", border: "#e5e7eb" },
-            { label: "Total",     value: monthlyTotals.total,      color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
-          ].map(({ label, value, color, bg, border }) => (
-            <div key={label} style={{ background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "12px 20px", minWidth: 100, textAlign: "center" as const }}>
-              <div style={{ fontSize: 22, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
-              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginTop: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* ── WEEKLY ATTENDANCE BREAKDOWN (Class-1 vs Class-2) ── */}
       <WeeklyClassBreakdown />
 
-      {/* ── 3. TRENDS ROW ── */}
-      <div style={s.twoCol}>
-        <ChartCard title="Revenue Trend" sub="6 months">
-          <LineChart data={revMonthlyTrend.map(d=>({ label:d.label, value:d.amt }))} color="#4f46e5" formatValue={v=>`₹${(v/1000).toFixed(1)}k`} />
-        </ChartCard>
+      <div style={{ marginBottom: 16 }}>
         <ChartCard title="Attendance Trend" sub="7 days">
           <LineChart data={attWeeklyTrend.map(d=>({ label:d.label, value:d.pct??0 }))} color="#16a34a" formatValue={v=>`${v}%`} />
         </ChartCard>
+      </div>
+
+      {/* ════ MONTHLY ANALYTICS & TRENDS ═══════════════════════════════════════ */}
+      <SectionDivider title="Monthly Analytics & Trends" />
+
+      {/* ── MONTH-OVER-MONTH COMPARISON (Super Admin only) ── */}
+      <MonthComparisonWidget attendance={attendance} completedTx={completedTx} />
+
+      {/* Attendance this month (1/3) beside the 6-month revenue trend (2/3) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4" style={{ marginBottom: 16 }}>
+        <div className="lg:col-span-1">
+        {/* ── MONTHLY ATTENDANCE TOTALS ── */}
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "18px 20px", height: "100%", boxSizing: "border-box" as const }}>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Attendance This Month</div>
+            <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{monthLabel(thisMonth)} · all student records</div>
+          </div>
+          {monthlyTotals.total === 0 && (
+            <div style={{ fontSize: 12.5, color: "#9ca3af", marginBottom: 12 }}>No attendance recorded for this month yet.</div>
+          )}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const }}>
+            {[
+              { label: "Present",   value: monthlyTotals.present,   color: "#16a34a", bg: "#f0fdf4", border: "#bbf7d0" },
+              { label: "Absent",    value: monthlyTotals.absent,     color: "#dc2626", bg: "#fef2f2", border: "#fecaca" },
+              { label: "Break",     value: monthlyTotals.break,      color: "#d97706", bg: "#fffbeb", border: "#fde68a" },
+              { label: "Cancelled", value: monthlyTotals.cancelled,  color: "#6b7280", bg: "#f9fafb", border: "#e5e7eb" },
+              { label: "Total",     value: monthlyTotals.total,      color: "#1d4ed8", bg: "#eff6ff", border: "#bfdbfe" },
+            ].map(({ label, value, color, bg, border }) => (
+              <div key={label} style={{ background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "12px 20px", minWidth: 100, textAlign: "center" as const }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color, lineHeight: 1 }}>{value}</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginTop: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        </div>
+        <div className="lg:col-span-2">
+          <ChartCard title="Revenue Trend" sub="6 months">
+            <LineChart data={revMonthlyTrend.map(d=>({ label:d.label, value:d.amt }))} color="#4f46e5" formatValue={v=>`₹${(v/1000).toFixed(1)}k`} />
+          </ChartCard>
+        </div>
       </div>
 
       {/* ── 4. TOP CENTRES ── */}
@@ -660,7 +664,7 @@ function MonthComparisonWidget({ attendance, completedTx }: {
           currentLabel={monthLabel(currentYm)} previousLabel={monthLabel(previousYm)}
           currentValue={`₹${revCurrent.toLocaleString("en-IN")}`}
           previousValue={`₹${revPrevious.toLocaleString("en-IN")}`}
-          deltaText={revDeltaPct !== null ? `${revDeltaPct >= 0 ? "▲" : "▼"} ${Math.abs(revDeltaPct)}%` : "no prior data"}
+          deltaText={revDeltaPct !== null ? `${revDeltaPct >= 0 ? "+" : "−"}${Math.abs(revDeltaPct)}%` : "—"}
           deltaColor={revDeltaPct === null ? "var(--color-text-muted)" : revDeltaPct >= 0 ? "var(--color-success)" : "var(--color-danger)"}
         />
         <MomCard
@@ -668,7 +672,7 @@ function MonthComparisonWidget({ attendance, completedTx }: {
           currentLabel={monthLabel(currentYm)} previousLabel={monthLabel(previousYm)}
           currentValue={attCurrent !== null ? `${attCurrent}%` : "—"}
           previousValue={attPrevious !== null ? `${attPrevious}%` : "—"}
-          deltaText={attDeltaPts !== null ? `${attDeltaPts >= 0 ? "▲" : "▼"} ${Math.abs(attDeltaPts)} pts` : "no prior data"}
+          deltaText={attDeltaPts !== null ? `${attDeltaPts >= 0 ? "+" : "−"}${Math.abs(attDeltaPts)} pts` : "—"}
           deltaColor={attDeltaPts === null ? "var(--color-text-muted)" : attDeltaPts >= 0 ? "var(--color-success)" : "var(--color-danger)"}
         />
       </div>
@@ -680,16 +684,16 @@ function MomCard({ label, currentLabel, previousLabel, currentValue, previousVal
   label: string; currentLabel: string; previousLabel: string;
   currentValue: string; previousValue: string; deltaText: string; deltaColor: string;
 }) {
+  // Value + one delta pill; the two months are in the section header and the
+  // previous month's figure is on hover.
   return (
-    <div style={mom.card}>
+    <div style={mom.card} title={`${currentLabel}: ${currentValue} · ${previousLabel}: ${previousValue}`}>
       <div style={mom.cardLabel}>{label}</div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 6 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 6 }}>
         <div style={mom.cardValue}>{currentValue}</div>
-        <div style={{ fontSize: 12, fontWeight: 700, color: deltaColor }}>{deltaText}</div>
-      </div>
-      <div style={mom.compareRow}>
-        <span>{currentLabel}: <b style={mom.compareStrong}>{currentValue}</b></span>
-        <span>{previousLabel}: <b style={mom.compareStrong}>{previousValue}</b></span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: deltaColor, background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6, padding: "1px 8px" }}>
+          {deltaText}
+        </span>
       </div>
     </div>
   );
@@ -702,13 +706,23 @@ const mom: Record<string, React.CSSProperties> = {
   card:     { background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 10, padding: "14px 16px" },
   cardLabel: { fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.05em", color: "var(--color-text-muted)" },
   cardValue: { fontSize: 22, fontWeight: 800, color: "var(--color-text-primary)" },
-  compareRow: { display: "flex", flexDirection: "column" as const, gap: 2, marginTop: 10, fontSize: 11.5, color: "var(--color-text-muted)" },
-  compareStrong: { color: "var(--color-text-primary)" },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHART PRIMITIVES  (pure SVG, no library)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/** Section heading that splits the dashboard into daily/weekly vs monthly. */
+function SectionDivider({ title }: { title: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "22px 0 12px" }}>
+      <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--color-text-muted)", whiteSpace: "nowrap" }}>
+        {title}
+      </span>
+      <span aria-hidden style={{ flex: 1, height: 1, background: "var(--color-border)" }} />
+    </div>
+  );
+}
 
 function ChartCard({ title, sub, children }: { title:string; sub?:string; children:React.ReactNode }) {
   return (
@@ -722,7 +736,7 @@ function ChartCard({ title, sub, children }: { title:string; sub?:string; childr
   );
 }
 
-function KpiCard({ label, value, sub, color, onClick }: { label:string; value:string; sub:string; color:string; onClick?:() => void }) {
+function KpiCard({ label, value, sub, color, onClick }: { label:string; value:string; sub?:string; color:string; onClick?:() => void }) {
   const [hover, setHover] = useState(false);
   return (
     <div
@@ -744,7 +758,7 @@ function KpiCard({ label, value, sub, color, onClick }: { label:string; value:st
     >
       <div style={{ fontSize:11, fontWeight:600, color:"#9ca3af", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:6 }}>{label}</div>
       <div style={{ fontSize:24, fontWeight:800, color, lineHeight:1 }}>{value}</div>
-      <div style={{ fontSize:11, color:"#6b7280", marginTop:4 }}>{sub}</div>
+      {sub && <div style={{ fontSize:11, color:"#6b7280", marginTop:4 }}>{sub}</div>}
     </div>
   );
 }
@@ -971,8 +985,8 @@ type ClassDayStatus = "scheduled" | "pending" | "recorded" | "completed";
 
 const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string }> = {
   scheduled: { bg: "var(--color-info-dim)",    border: "var(--color-info)",           fg: "var(--color-info)",    label: "Scheduled" },
-  pending:   { bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)",  fg: "var(--color-danger)",  label: "⚠️ Attendance Pending" },
-  recorded:  { bg: "var(--color-warning-dim)", border: "var(--color-warning-border)", fg: "var(--color-warning)", label: "◐ Partly Marked" },
+  pending:   { bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)",  fg: "var(--color-danger)",  label: "⚠️ Pending" },
+  recorded:  { bg: "var(--color-warning-dim)", border: "var(--color-warning-border)", fg: "var(--color-warning)", label: "◐ Partly" },
   completed: { bg: "var(--color-success-dim)", border: "var(--color-success-border)", fg: "var(--color-success)", label: "✓ Marked" },
 };
 
@@ -1010,8 +1024,10 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
       : `/dashboard/enrollments?view=centers&centerId=${id}&openModal=true`);
   }
   const [centers, setCenters] = useState<Center[]>([]);
-  const [activeCountByCenter, setActiveCountByCenter] = useState<Record<string, number>>({});
-  const [dateAttRecs, setDateAttRecs] = useState<{ centerId: string; status: string }[]>([]);
+  // Each centre's currently active students (shared rule: "active" or the
+  // Registry's "confirm", with an admission number) — the "Marked" denominator.
+  const [activeUidsByCenter, setActiveUidsByCenter] = useState<Record<string, Set<string>>>({});
+  const [dateAttRecs, setDateAttRecs] = useState<{ centerId: string; studentUid: string; status: string }[]>([]);
   const [staff, setStaff] = useState<FacultyMember[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -1022,7 +1038,9 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
       try {
         const [centersData, studentsSnap, attSnap, staffSnap] = await Promise.all([
           getCenters(wing),
-          getDocs(query(collection(db, "users"), where("role", "==", "student"), where("status", "==", "active"))),
+          // All students — "active" is decided by isCurrentlyActiveStudent (a plain
+          // status == "active" query missed the Registry's "confirm" students).
+          getDocs(query(collection(db, "users"), where("role", "==", "student"))),
           getDocs(query(collection(db, "attendance"), where("date", "==", selectedDate))),
           // Anyone who can be a centre / batch teacher — names for the faculty panel.
           getDocs(query(collection(db, "users"), where("role", "in", [ROLES.TEACHER, ROLES.CHIEF_TEACHER, ROLES.DIRECTOR]))),
@@ -1035,16 +1053,19 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
         }));
         const cidSet = new Set(centersData.map(c => c.id));
         setCenters(centersData);
-        const counts: Record<string, number> = {};
+        const byCentre: Record<string, Set<string>> = {};
         studentsSnap.docs.forEach(d => {
-          const cid = (d.data().centerId ?? "") as string;
-          if (cid && cidSet.has(cid)) counts[cid] = (counts[cid] ?? 0) + 1;
+          const data = d.data();
+          if (!isCurrentlyActiveStudent(data, cidSet)) return;
+          const cid = data.centerId as string;
+          (byCentre[cid] ??= new Set()).add(d.id);
         });
-        setActiveCountByCenter(counts);
+        setActiveUidsByCenter(byCentre);
         setDateAttRecs(attSnap.docs
           .map(d => ({
-            centerId: (d.data().centerId ?? "") as string,
-            status:   (d.data().status   ?? "") as string,
+            centerId:   (d.data().centerId   ?? "") as string,
+            studentUid: (d.data().studentUid ?? "") as string,
+            status:     (d.data().status     ?? "") as string,
           }))
           .filter(r => cidSet.has(r.centerId)));
       } catch (err) {
@@ -1079,7 +1100,7 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   }), [dateCentres, dow]);
 
   const attByCenter = useMemo(() => {
-    const m = new Map<string, { centerId: string; status: string }[]>();
+    const m = new Map<string, { centerId: string; studentUid: string; status: string }[]>();
     dateAttRecs.forEach(r => {
       if (!r.centerId) return;
       if (!m.has(r.centerId)) m.set(r.centerId, []);
@@ -1093,17 +1114,17 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   // with no attendance recorded does the badge switch to "Pending". Before
   // that — later today, or any future date — it reads as "scheduled" and
   // shows the actual time slot instead of a generic label.
+  const markFor = (centerId: string) =>
+    classMarkState(attByCenter.get(centerId) ?? [], activeUidsByCenter[centerId] ?? new Set());
+
   function statusFor(centerId: string, timeSlot: string): ClassDayStatus {
-    const recs = attByCenter.get(centerId) ?? [];
-    if (recs.length === 0) {
-      const isPastDay        = selectedDate < todayISO;
-      const isTodayAndEnded  = selectedDate === todayISO && classHasEnded(timeSlot);
-      if (isPastDay || isTodayAndEnded) return "pending";
-      return "scheduled";
-    }
-    const expected = activeCountByCenter[centerId] ?? 0;
-    if (expected > 0 && recs.length >= expected) return "completed";
-    return "recorded";
+    const { state } = markFor(centerId);
+    if (state === "complete") return "completed";
+    if (state === "partial") return "recorded";
+    const isPastDay        = selectedDate < todayISO;
+    const isTodayAndEnded  = selectedDate === todayISO && classHasEnded(timeSlot);
+    if (isPastDay || isTodayAndEnded) return "pending";
+    return "scheduled";
   }
 
   const isToday    = selectedDate === todayISO;
@@ -1114,7 +1135,7 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   const pendingCount = useMemo(
     () => dateCentres.filter(c => statusFor(c.id, c.timeSlot ?? "") === "pending").length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [dateCentres, attByCenter, activeCountByCenter, selectedDate]
+    [dateCentres, attByCenter, activeUidsByCenter, selectedDate]
   );
 
   const navBtn: React.CSSProperties = {
@@ -1125,11 +1146,15 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   return (
     <div style={{ ...sectionStyle, marginBottom: 16 }}>
       <div style={{ ...headerStyle, marginBottom: 14, flexWrap: "wrap" as const, gap: 10 }}>
-        <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }} title={dateLabel}>
           <span style={titleStyle}>{sectionTitle}</span>
-          <div style={{ ...subStyle, marginTop: 2 }}>
-            {dateLabel}{pendingCount > 0 ? ` · ${pendingCount} pending` : ""}{loading ? " · loading…" : ""}
-          </div>
+          {pendingCount > 0 && (
+            <span title={`${pendingCount} class${pendingCount !== 1 ? "es" : ""} ended without attendance`}
+              style={{ fontSize: 11, fontWeight: 800, color: "var(--color-danger)", background: "var(--color-danger-dim)", borderRadius: 99, padding: "1px 8px" }}>
+              ⚠️ {pendingCount}
+            </span>
+          )}
+          {loading && <span style={subStyle}>…</span>}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <button style={navBtn} onClick={() => setSelectedDate(d => addDaysISO(d, -1))}>‹ Prev</button>
@@ -1149,14 +1174,6 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
           <button style={navBtn} onClick={() => setSelectedDate(d => addDaysISO(d, 1))}>Next ›</button>
         </div>
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: -6, marginBottom: 10, fontSize: 11, color: "var(--color-text-secondary)" }}>
-        {(["scheduled", "pending", "recorded", "completed"] as ClassDayStatus[]).map(k => (
-          <span key={k} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <span style={{ width: 9, height: 9, borderRadius: 3, background: CLASS_STATUS_STYLE[k].bg, border: `1px solid ${CLASS_STATUS_STYLE[k].border}` }} />
-            {{ scheduled: "Scheduled", pending: "Ended, not marked", recorded: "Partly marked", completed: "Marked" }[k]}
-          </span>
-        ))}
-      </div>
       {!loading && dateCentres.length === 0 && (
         <div style={{ fontSize: 13, color: "var(--color-text-secondary)", padding: "6px 0 4px" }}>No classes scheduled on this day.</div>
       )}
@@ -1165,7 +1182,8 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
           const status = statusFor(c.id, c.timeSlot ?? "");
           const st = CLASS_STATUS_STYLE[status];
           const slot = fmtTimeSlotRange(c.timeSlot ?? "");
-          const hint = classStatusHint(status, isToday, (attByCenter.get(c.id) ?? []).length, activeCountByCenter[c.id] ?? 0);
+          const mark = markFor(c.id);
+          const hint = classStatusHint(status, isToday, mark.marked, mark.expected);
           return (
             <button
               key={c.id}
@@ -1526,7 +1544,7 @@ function WeeklyClassBreakdown() {
         <div>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#111" }}>Weekly Attendance Breakdown</div>
           <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
-            {weekLabel} · Class-1 vs Class-2 · all active students{loading ? " · loading…" : ""}
+            {weekLabel}{loading ? " · …" : ""}
           </div>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
@@ -1872,9 +1890,6 @@ function AdminDashboard() {
   }
 
   // ── Derived stats ────────────────────────────────────────────────────────
-  // Group / personal split of the active headcount only.
-  const groupStudents   = students.filter(s => activeUids.has(s.uid) && s.classType === "group").length;
-  const personalStudents = students.filter(s => activeUids.has(s.uid) && s.classType === "personal").length;
   const feeDueMap = useMemo(() => {
     const m = new Map<string, number>();
     txList.forEach(tx => {
@@ -2177,7 +2192,7 @@ function AdminDashboard() {
 
       {/* ── KPI STRIP ── */}
       <div style={adm.kpiStrip}>
-        <KpiTile label="Active Students" value={loading ? "…" : String(activeHeadcount)} sub={loading ? "" : isSchoolOfMusic(wing) ? "in active centres" : `${groupStudents} group · ${personalStudents} personal`} />
+        <KpiTile label="Active Students" value={loading ? "…" : String(activeHeadcount)} />
         <div style={adm.kpiDiv} />
         <KpiTile label="Centres" value={loading ? "…" : String(centers.length)} sub={`${centers.filter(c => c.status === "active").length} active`} />
         <div style={adm.kpiDiv} />
@@ -2194,14 +2209,22 @@ function AdminDashboard() {
         <KpiTile
           label="Pending Fees"
           value={loading ? "…" : pendingFeeAmt === 0 ? "All Clear" : `₹${pendingFeeAmt.toLocaleString("en-IN")}`}
-          sub={loading ? "" : pendingFeeAmt === 0 ? "All collected" : `${pendingFeeCount} students due`}
           valueColor={pendingFeeAmt > 0 ? "var(--color-warning)" : "var(--color-success)"}
         />
         </>}
       </div>
 
+      {/* ════ DAILY & WEEKLY OPERATIONS ════ */}
+      <SectionDivider title="Daily & Weekly Operations" />
+
       {/* ── CLASSES FOR [DATE] ── */}
       <ClassesForDateWidget sectionStyle={adm.section} headerStyle={adm.secHeader} titleStyle={adm.secTitle} subStyle={adm.secSub} />
+
+      {/* ── WEEKLY ATTENDANCE BREAKDOWN (Class-1 vs Class-2) ── */}
+      <WeeklyClassBreakdown />
+
+      {/* ════ MONTHLY ANALYTICS & TRENDS ════ */}
+      <SectionDivider title="Monthly Analytics & Trends" />
 
       {/* ── MONTHLY ATTENDANCE TOTALS ── */}
       <div style={adm.section}>
@@ -2227,9 +2250,6 @@ function AdminDashboard() {
           ))}
         </div>
       </div>
-
-      {/* ── WEEKLY ATTENDANCE BREAKDOWN (Class-1 vs Class-2) ── */}
-      <WeeklyClassBreakdown />
 
       {/* ── MONTHLY FINANCE PANEL ── (finance roles only) */}
       {canFinance && (
@@ -2387,12 +2407,12 @@ function AdminDashboard() {
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
-function KpiTile({ label, value, sub, valueColor }: { label: string; value: string; sub: string; valueColor?: string }) {
+function KpiTile({ label, value, sub, valueColor }: { label: string; value: string; sub?: string; valueColor?: string }) {
   return (
     <div style={adm.kpi}>
       <div style={adm.kpiLabel}>{label}</div>
       <div style={{ ...adm.kpiValue, color: valueColor ?? "var(--color-text-primary)" }}>{value}</div>
-      <div style={adm.kpiSub}>{sub}</div>
+      {sub && <div style={adm.kpiSub}>{sub}</div>}
     </div>
   );
 }

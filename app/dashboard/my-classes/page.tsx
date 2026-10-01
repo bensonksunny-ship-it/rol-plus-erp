@@ -11,6 +11,8 @@ import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import { isTeacher } from "@/types";
 import { courseLabel } from "@/lib/course";
+import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
+import { normAdmNo } from "@/lib/dedup";
 import { centreTeacherUids } from "@/services/center/center.service";
 import { useWing } from "@/hooks/useWing";
 import { teachingWings, wingOf, WING_SHORT } from "@/lib/wing";
@@ -119,14 +121,16 @@ function centreSlots(c: Center, uid: string | null): ScheduleSlot[] {
   }));
 }
 
-function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false }: {
+function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false, studentCounts }: {
   centers: Center[]; selectedId: string; onSelect: (id: string) => void; uid: string | null;
+  /** Active students per centre id (lib/activeStudents rule); null while loading. */
+  studentCounts: Record<string, number> | null;
   /** Tag each box with its wing (a teacher teaching in both wings). */
   showWing?: boolean;
 }) {
   const [hover, setHover] = useState<string | null>(null);
   return (
-    <section style={{ marginBottom: 24 }}>
+    <section style={{ marginBottom: 16 }}>
       <div style={s.boxHead}>
         <div>
           <div style={s.boxTitle}>My Centres</div>
@@ -144,15 +148,13 @@ function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false }: {
               onClick={() => onSelect(c.id)}
               onMouseEnter={() => setHover(c.id)} onMouseLeave={() => setHover(h => (h === c.id ? null : h))}
               style={{ ...s.box, ...(active ? s.boxActive : {}), ...(lifted ? s.boxHover : {}) }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
                 <span aria-hidden style={{ ...s.boxIcon, ...(active ? s.boxIconActive : {}) }}>🏫</span>
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ ...s.boxName, color: active ? "#fff" : "#111827" }} title={c.name}>{c.name}</div>
-                  {c.centerCode && (
-                    <span style={{ ...s.boxCode, ...(active ? { background: "rgba(255,255,255,0.18)", color: "#fff" } : {}) }}>
-                      {c.centerCode}
-                    </span>
-                  )}
+                  <span style={{ ...s.boxCount2, ...(active ? { color: "rgba(255,255,255,0.9)" } : {}) }}>
+                    {studentCounts === null ? "…" : (() => { const n = studentCounts[c.id] ?? 0; return `${n} student${n !== 1 ? "s" : ""}`; })()}
+                  </span>
                   {showWing && (
                     <span style={{ ...s.boxCode, marginLeft: 6, ...(active
                       ? { background: "rgba(255,255,255,0.18)", color: "#fff" }
@@ -164,12 +166,12 @@ function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false }: {
                 {active && <span style={s.boxTick}>✓ Selected</span>}
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
                 {slots.length === 0 ? (
-                  <span style={{ fontSize: 13, color: active ? "rgba(255,255,255,0.8)" : "#9ca3af" }}>No schedule set</span>
+                  <span style={{ fontSize: 11, color: active ? "rgba(255,255,255,0.8)" : "#9ca3af" }}>No schedule set</span>
                 ) : slots.map((sl, i) => (
-                  <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-                    {sl.name && <span style={{ fontSize: 12.5, fontWeight: 700, color: active ? "#fff" : "#374151", marginRight: 2 }}>{sl.name}</span>}
+                  <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+                    {sl.name && <span style={{ fontSize: 11.5, fontWeight: 700, color: active ? "#fff" : "#374151", marginRight: 2 }}>{sl.name}</span>}
                     {sl.days && <span style={{ ...s.boxChip, ...(active ? s.boxChipActive : {}) }}>📅 {sl.days}</span>}
                     {sl.time && <span style={{ ...s.boxChip, ...(active ? s.boxChipActive : {}) }}>⏰ {sl.time}</span>}
                   </div>
@@ -200,6 +202,7 @@ function MyClassesContent() {
   const [students,         setStudents]         = useState<StudentRow[]>([]);
   const [centersLoading,   setCentersLoading]   = useState(true);
   const [studentsLoading,  setStudentsLoading]  = useState(false);
+  const [studentsError,    setStudentsError]    = useState<string | null>(null);
 
   // Students view state
   const [view,         setView]         = useState<"students" | "attendance">("students");
@@ -221,6 +224,33 @@ function MyClassesContent() {
   // their centerIds (which can lag behind the centre docs). A teacher sees every
   // wing they teach in (each box tagged); other roles only the active wing.
   const wingsKey = (isTeacherRole ? teachingWings(user, wing) : [wing]).join(",");
+
+  // Active-student count for every card (same rule + de-dup as the roster below).
+  const [studentCounts, setStudentCounts] = useState<Record<string, number> | null>(null);
+  const centreIdsKey = centers.map(c => c.id).sort().join(",");
+  useEffect(() => {
+    const ids = centreIdsKey ? centreIdsKey.split(",") : [];
+    if (ids.length === 0) { setStudentCounts({}); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const chunks: string[][] = [];
+        for (let i = 0; i < ids.length; i += 30) chunks.push(ids.slice(i, i + 30));
+        const snaps = await Promise.all(chunks.map(ch => getDocs(query(collection(db, "users"), where("centerId", "in", ch)))));
+        const seen: Record<string, Set<string>> = {};
+        for (const snap of snaps) for (const d of snap.docs) {
+          const u = d.data();
+          if (u.role !== "student" || !isCurrentlyActiveStudent(u)) continue;
+          (seen[u.centerId] ??= new Set()).add(normAdmNo(u.admissionNo ?? u.admissionNumber));
+        }
+        if (!cancelled) setStudentCounts(Object.fromEntries(ids.map(id => [id, seen[id]?.size ?? 0])));
+      } catch (err) {
+        console.error("Failed to count students:", err);
+        if (!cancelled) setStudentCounts({});
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [centreIdsKey]);
   useEffect(() => {
     if (!user) return;
     setCentersLoading(true);
@@ -276,6 +306,7 @@ function MyClassesContent() {
   // ── Load students when centre changes ────────────────────────────────────────
   useEffect(() => {
     setStudents([]);
+    setStudentsError(null);
     setExpandedUid(null);
     setView("students");
     // No centre in this wing → empty roster, never the previous wing's students.
@@ -290,11 +321,21 @@ function MyClassesContent() {
           where("centerId", "==", selectedCenterId),
         ));
         if (cancelled) return;
+        // Same active rule as the centre roster / Faculty Suite / Attendance
+        // (lib/activeStudents): "active" or the Registry's "confirm", with an
+        // admission number. Was `status === "active"` only, which dropped every
+        // Registry-confirmed student and left whole centres empty.
+        const centreScope = new Set([selectedCenterId]);
+        const seen = new Set<string>();
         setStudents(
           snap.docs
+            .filter(d => isCurrentlyActiveStudent(d.data(), centreScope))
             .filter(d => {
-              const status = (d.data().status ?? d.data().studentStatus ?? "active") as string;
-              return status === "active";
+              // Duplicate records of one person (same adm. no.) list once.
+              const key = normAdmNo(d.data().admissionNo ?? d.data().admissionNumber);
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
             })
             .map(d => {
               const u = d.data();
@@ -302,12 +343,14 @@ function MyClassesContent() {
                 uid:        d.id,
                 name:       (u.displayName ?? u.name ?? "—") as string,
                 instrument: courseLabel(u) || "—",   // course title, else instrument
-                status:     (u.status ?? u.studentStatus ?? "active") as string,
+                status:     (u.status ?? u.studentStatus ?? "") as string,
               };
             })
+            .sort((a, b) => a.name.localeCompare(b.name))
         );
       } catch (err) {
         console.error("Failed to load students:", err);
+        if (!cancelled) setStudentsError(err instanceof Error ? err.message : "Unknown error");
       } finally {
         if (!cancelled) setStudentsLoading(false);
       }
@@ -442,7 +485,7 @@ function MyClassesContent() {
         </div>
       ) : (
         <CentreBoxes centers={centers} selectedId={selectedCenterId} onSelect={selectCentre}
-          uid={isTeacherRole ? (user?.uid ?? null) : null} showWing={wingsKey.includes(",")} />
+          uid={isTeacherRole ? (user?.uid ?? null) : null} showWing={wingsKey.includes(",")} studentCounts={studentCounts} />
       )}
 
       {/* Error banner */}
@@ -456,8 +499,13 @@ function MyClassesContent() {
       {selectedCenterId && (
         studentsLoading ? (
           <div style={s.state}>Loading students…</div>
+        ) : studentsError ? (
+          <div style={s.errBanner} role="alert">
+            Couldn&apos;t load this centre&apos;s students — check your connection or access and try again.
+            <span style={{ display: "block", fontSize: 11, opacity: 0.75, marginTop: 4 }}>{studentsError}</span>
+          </div>
         ) : students.length === 0 ? (
-          <div style={s.emptyState}>No active students in this centre.</div>
+          <div style={s.emptyState}>No active students enrolled in this centre yet.</div>
         ) : (
           <>
             {/* View toggle */}
@@ -733,20 +781,22 @@ const s: Record<string, React.CSSProperties> = {
   state: { padding: "60px 0", textAlign: "center", fontSize: 14, color: "#9ca3af" },
 
   // Centre boxes (see CentreBoxes).
-  boxHead:   { display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" },
-  boxTitle:  { fontSize: 22, fontWeight: 800, color: "#111827", letterSpacing: "-0.01em" },
-  boxSub:    { fontSize: 13, color: "#6b7280", marginTop: 2 },
-  boxCount:  { fontSize: 12.5, fontWeight: 700, color: "#4f46e5", background: "#ede9fe", borderRadius: 999, padding: "5px 12px" },
-  boxGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 290px), 1fr))", gap: 16 },
-  box:       { textAlign: "left", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, padding: "20px 22px", minHeight: 150, cursor: "pointer", fontFamily: "inherit", transition: "transform 0.15s, box-shadow 0.15s, border-color 0.15s", minWidth: 0, boxShadow: "0 1px 3px rgba(17,24,39,0.06)" },
+  // Compact: ~18px title, 14px card names, 32px icons, 12px gaps — more centres per screen.
+  boxHead:   { display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 10, marginBottom: 10, flexWrap: "wrap" },
+  boxTitle:  { fontSize: 18, fontWeight: 800, color: "#111827", letterSpacing: "-0.01em" },
+  boxSub:    { fontSize: 12, color: "#6b7280", marginTop: 1 },
+  boxCount:  { fontSize: 11.5, fontWeight: 700, color: "#4f46e5", background: "#ede9fe", borderRadius: 999, padding: "2px 9px" },
+  boxGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 220px), 1fr))", gap: 12 },
+  box:       { textAlign: "left", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "12px 14px", cursor: "pointer", fontFamily: "inherit", transition: "transform 0.15s, box-shadow 0.15s, border-color 0.15s", minWidth: 0, boxShadow: "0 1px 2px rgba(17,24,39,0.05)" },
   boxHover:  { transform: "translateY(-2px)", borderColor: "#c7d2fe", boxShadow: "0 10px 24px rgba(79,70,229,0.14)" },
   boxActive: { border: "1px solid #4f46e5", background: "#4f46e5", backgroundImage: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)", boxShadow: "0 12px 28px rgba(79,70,229,0.35)", color: "#fff" },
-  boxIcon:   { width: 52, height: 52, borderRadius: 14, background: "#eef2ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, flexShrink: 0 },
+  boxIcon:   { width: 32, height: 32, borderRadius: 9, background: "#eef2ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 },
   boxIconActive: { background: "rgba(255,255,255,0.2)" },
-  boxName:   { fontSize: 18, fontWeight: 800, lineHeight: 1.25, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  boxCode:   { display: "inline-block", marginTop: 5, fontSize: 11.5, fontWeight: 700, background: "#ede9fe", color: "#4f46e5", borderRadius: 6, padding: "2px 8px" },
-  boxTick:   { fontSize: 11.5, fontWeight: 800, color: "#4f46e5", background: "rgba(255,255,255,0.95)", borderRadius: 999, padding: "4px 10px", flexShrink: 0, whiteSpace: "nowrap" },
-  boxChip:   { fontSize: 12.5, fontWeight: 600, color: "#374151", background: "#f3f4f6", borderRadius: 8, padding: "4px 10px" },
+  boxName:   { fontSize: 14, fontWeight: 700, lineHeight: 1.25, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  boxCount2: { display: "inline-block", marginTop: 2, fontSize: 11, fontWeight: 600, color: "#4f46e5" },
+  boxCode:   { display: "inline-block", marginTop: 3, fontSize: 11, fontWeight: 700, background: "#ede9fe", color: "#4f46e5", borderRadius: 5, padding: "1px 6px" },
+  boxTick:   { fontSize: 10.5, fontWeight: 800, color: "#4f46e5", background: "rgba(255,255,255,0.95)", borderRadius: 999, padding: "2px 8px", flexShrink: 0, whiteSpace: "nowrap" },
+  boxChip:   { fontSize: 11, fontWeight: 600, color: "#374151", background: "#f3f4f6", borderRadius: 6, padding: "2px 7px" },
   boxChipActive: { color: "#fff", background: "rgba(255,255,255,0.18)" },
 
   centreHeader:  { display: "flex", alignItems: "center", gap: 12, marginBottom: 20, padding: "16px 20px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12 },

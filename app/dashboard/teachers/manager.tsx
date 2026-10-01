@@ -480,9 +480,6 @@ function CenterCheckboxes({ centers, selected, onToggle }: { centers: Center[]; 
         <label key={c.id} style={s.checkboxLabel}>
           <input type="checkbox" checked={selected.includes(c.id)} onChange={() => onToggle(c.id)} style={{ accentColor: "#4f46e5" }} />
           <span style={{ fontSize: 13, color: "#111" }}>{c.name}</span>
-          {(c as Center & { centerCode?: string }).centerCode && (
-            <span style={s.centerCode}>{(c as Center & { centerCode?: string }).centerCode}</span>
-          )}
         </label>
       ))}
     </div>
@@ -924,7 +921,6 @@ const s: Record<string, React.CSSProperties> = {
 
   checkboxGrid: { display: "flex", flexDirection: "column", gap: 10 },
   checkboxLabel:{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" },
-  centerCode:   { fontFamily: "monospace", fontSize: 11, background: "#ede9fe", color: "#6d28d9", padding: "1px 7px", borderRadius: 4, fontWeight: 600, marginLeft: 4 },
 
   badge:        { display: "inline-block", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 600 },
   centerTags:   { display: "flex", flexWrap: "wrap" as const, gap: 6, minWidth: 0, maxWidth: "100%" },

@@ -31,6 +31,7 @@ interface CentreRow {
   daysOfWeek: string[];   // ["Mon","Wed","Fri"]
   teacherUid: string;
   batches:    CenterBatch[];
+  timeSlot:   string;     // legacy "Tue/Thu 17:00–18:00" (centres saved before daysOfWeek)
 }
 
 interface StudentRow {
@@ -100,11 +101,27 @@ function fmtColDate(iso: string): string {
   return new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { month: "short", day: "2-digit" });
 }
 
+/** Every weekday a centre meets — its own days, every batch's days, and (for old
+ *  centres) the days in its timeSlot text — as "mon"…"sun". Case and spelling
+ *  tolerant: "Thu", "THU", "Thursday", "Tue/Thu", "Thu, Sat" all count. */
+function centreDays(centre: CentreRow): Set<string> {
+  const out = new Set<string>();
+  const add = (raw: string) => {
+    for (const tok of raw.toLowerCase().split(/[^a-z]+/)) {
+      const k = tok.slice(0, 3);
+      if (tok.length >= 3 && ["sun", "mon", "tue", "wed", "thu", "fri", "sat"].includes(k)) out.add(k);
+    }
+  };
+  centre.daysOfWeek.forEach(d => add(String(d)));
+  centre.batches.forEach(b => (b.daysOfWeek ?? []).forEach(d => add(String(d))));
+  if (out.size === 0 && centre.timeSlot) add(centre.timeSlot);
+  return out;
+}
+
 // Is this date a scheduled class for a centre (regular schedule or extra class)?
 function isScheduled(date: string, centre: CentreRow, extraDates: Set<string>): boolean {
   if (extraDates.has(date)) return true;
-  if (centre.daysOfWeek.length === 0) return false;
-  return centre.daysOfWeek.includes(dowOf(date));
+  return centreDays(centre).has(dowOf(date).toLowerCase());
 }
 
 const STATUS_LABEL: Record<AttendanceStatus, string> = {
@@ -643,10 +660,9 @@ function TodayView({
   const dow       = new Date(date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "long" });
   const dateLabel = new Date(date + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
 
-  const todaysCentres = centres.filter(c =>
-    (studentMap.get(c.id)?.length ?? 0) > 0 &&
-    isScheduled(date, c, extraMap.get(c.id) ?? new Set()),
-  );
+  // Every centre with a class that day — also those with no active students, so a
+  // centre never silently drops off the sheet (its card says what to fix).
+  const todaysCentres = centres.filter(c => isScheduled(date, c, extraMap.get(c.id) ?? new Set()));
 
   const savedStatus = (centreId: string, uid: string): AttendanceStatus | null =>
     (attMap.get(centreId) ?? []).find(r => r.studentUid === uid && r.date === date)?.status ?? null;
@@ -752,7 +768,7 @@ function TodayView({
             else a.unmarked++;
             return a;
           }, { present: 0, absent: 0, other: 0, unmarked: 0 });
-          const isExtra = !centre.daysOfWeek.includes(dowOf(date));
+          const isExtra = !centreDays(centre).has(dowOf(date).toLowerCase());
 
           return (
             <div key={centre.id} style={{ ...card, padding: "14px 16px" }}>
@@ -781,6 +797,12 @@ function TodayView({
                   : ` · ${counts.unmarked} unmarked`)}
               </div>
 
+              {students.length === 0 && (
+                <div style={{ fontSize: 12.5, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "9px 12px" }}>
+                  No active students on this centre&apos;s roster. A student shows here once their status is Active / Confirm and they have an admission number —{" "}
+                  <a href={`/dashboard/enrollments?view=centers&centerId=${encodeURIComponent(centre.id)}&openModal=true`} style={{ color: "#4f46e5", fontWeight: 600 }}>open the centre</a>.
+                </div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {students.map(s => {
                   const eff = effective(centre.id, s.uid);
@@ -879,6 +901,7 @@ function AttendanceContent() {
           daysOfWeek: Array.isArray(data.daysOfWeek) ? (data.daysOfWeek as string[]) : [],
           teacherUid: (data.teacherUid as string) || "",
           batches:    Array.isArray(data.batches) ? (data.batches as CenterBatch[]) : [],
+          timeSlot:   (data.timeSlot as string) || "",
         };
       });
       setCentres(filterCentres(all));

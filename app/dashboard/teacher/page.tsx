@@ -45,6 +45,7 @@ import type { Role, ScreeningResult } from "@/types";
 import { getScreeningByStudent } from "@/services/screening/screening.service";
 import { DiagnosticCard } from "@/components/DiagnosticCard";
 import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
+import { classMarkState } from "@/lib/attendanceStatus";
 import { normAdmNo } from "@/lib/dedup";
 
 // ─── Local types ──────────────────────────────────────────────────────────────
@@ -800,9 +801,6 @@ function TeacherDashboardContent() {
                         {WING_SHORT[wingOf(c)]}
                       </span>
                     )}
-                    <span style={{ fontSize: 11, background: "#ede9fe", color: "#4f46e5", borderRadius: 6, padding: "2px 8px", fontWeight: 600 }}>
-                      {c.centerCode}
-                    </span>
                   </span>
                 </div>
                 <div style={{ fontSize: 12, color: "#6b7280" }}>{timeLabel || "—"}</div>
@@ -947,31 +945,30 @@ async function fetchMarkedCentreIds(cIds: string[], today: string): Promise<Set<
   )));
   const [attSnap, ...studentSnaps] = await Promise.all([attPromise, ...studentPromises]);
 
-  // Group student count per centre (active, non-personal only)
-  const groupCountMap: Record<string, number> = {};
+  // Each centre's currently active students — the shared rule (lib/activeStudents:
+  // "active" or the Registry's "confirm", with an admission no.). The old
+  // `status === "active"` check missed "confirm" students, so centres like
+  // Skydale could never show "Attendance Done".
+  const activeByCentre: Record<string, Set<string>> = {};
   studentSnaps.forEach(snap =>
     snap.docs.forEach(d => {
-      const u         = d.data();
-      const status    = (u.status ?? u.studentStatus ?? "active") as string;
-      const classType = (u.classType ?? "group") as string;
-      const cId       = u.centerId as string | undefined;
-      if (status === "active" && classType !== "personal" && cId)
-        groupCountMap[cId] = (groupCountMap[cId] ?? 0) + 1;
+      const u = d.data();
+      if (!isCurrentlyActiveStudent(u)) return;
+      (activeByCentre[u.centerId as string] ??= new Set()).add(d.id);
     })
   );
 
-  // Attendance record count per centre today
-  const attCountMap: Record<string, number> = {};
+  const recsByCentre: Record<string, { studentUid: string; status: string }[]> = {};
   attSnap.docs.forEach(d => {
-    const cId = d.data().centerId as string | undefined;
-    if (cId) attCountMap[cId] = (attCountMap[cId] ?? 0) + 1;
+    const r = d.data();
+    const cId = r.centerId as string | undefined;
+    if (cId) (recsByCentre[cId] ??= []).push({ studentUid: String(r.studentUid ?? ""), status: String(r.status ?? "") });
   });
 
-  // Centre is complete only if every group student has a record
+  // Done = every active student has a saved status (same rule as Center Suite).
   const marked = new Set<string>();
   cIds.forEach(cId => {
-    const expected = groupCountMap[cId] ?? 0;
-    if (expected > 0 && (attCountMap[cId] ?? 0) >= expected) marked.add(cId);
+    if (classMarkState(recsByCentre[cId] ?? [], activeByCentre[cId] ?? new Set()).state === "complete") marked.add(cId);
   });
   return marked;
 }
@@ -1516,7 +1513,7 @@ function StudentsView({ students, teacherUid, onViewProgress }: {
                         🎹 Diagnostic
                       </button>
                     )}
-                    {st.status === "active" && (
+                    {/^(active|confirm|confirmed)$/i.test(st.status) && (
                       <button
                         onClick={() => { setBreakTarget(st); setBreakReason(""); setBreakError(""); }}
                         style={{ background: "#e0f2fe", color: "#0369a1", border: "1px solid #7dd3fc", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
