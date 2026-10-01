@@ -136,6 +136,9 @@ export default function FinancePage() {
 // null = the normal student list.
 type DrillDown = null | "collected" | "overdue" | "prepay";
 
+/** Text colour for anything "due" — calm amber, not red. */
+const DUE_TEXT = "#b45309";
+
 function FinanceContent() {
   const { user, isAdmin, isSuperAdmin }      = useAuth();
   const { wing }                            = useWing();
@@ -1039,7 +1042,8 @@ function FinanceContent() {
           </div>
           {summary.overdueCount > 0 && !loading && (
             <div style={st.overdueAlert}>
-              ⚠ {summary.overdueCount} student{summary.overdueCount !== 1 ? "s" : ""} with outstanding balance
+              <span aria-hidden style={st.dueDot} />
+              {summary.overdueCount} student{summary.overdueCount !== 1 ? "s" : ""} with dues
             </div>
           )}
         </div>
@@ -1076,8 +1080,7 @@ function FinanceContent() {
         <SummaryCard
           label="Overdue"
           value={loading ? "…" : String(summary.overdueCount)}
-          accent="#dc2626" icon="🚨"
-          urgent={summary.overdueCount > 0}
+          accent="#d97706" icon="⏳"
           hint={loading ? undefined : `${fmtINR(summary.pendingBal)} pending`}
           active={drillDown === "overdue"}
           onClick={() => setDrillDown(d => d === "overdue" ? null : "overdue")}
@@ -1178,16 +1181,6 @@ function FinanceContent() {
       {/* ══ STUDENT LIST — the default view ════════════════════════════════════ */}
       {drillDown === null && (
         <div>
-          {summary.overdueCount > 0 && !loading && (
-            <div style={st.overdueBanner}>
-              <span style={{ fontSize: 16 }}>🚨</span>
-              <span>
-                <strong>{summary.overdueCount} student{summary.overdueCount !== 1 ? "s" : ""} </strong>
-                have outstanding balances totalling <strong>{fmtINR(summary.pendingBal)}</strong>.
-              </span>
-            </div>
-          )}
-
           {/* Past month notice */}
           {!isCurrentMonth && !loading && (
             <div style={{
@@ -1235,7 +1228,6 @@ function FinanceContent() {
                     const startsGroup = idx === 0 || centreKey(filteredStudents[idx - 1]) !== groupKey;
                     const g           = groupTotals.get(groupKey);
                     const isPrepay   = s.billingMode === "prepay";
-                    const overdue    = feeDueMap.has(s.uid) && !paidMap.has(s.uid);
                     const hasCredit  = isPrepay && s.balance < 0; // prepay credit remaining
                     const isOpen     = activeUid === s.uid;
                     const month      = selectedMonth;
@@ -1245,9 +1237,7 @@ function FinanceContent() {
 
                     const rowBg = isOpen
                       ? "#fffbeb"
-                      : overdue
-                        ? "#fff7f7"
-                        : hasCredit
+                      : hasCredit
                           ? "#f0fdf4"
                           : "var(--color-surface)";
 
@@ -1273,7 +1263,7 @@ function FinanceContent() {
                                 <span style={st.groupHeaderMeta}>
                                   {g && g.paid > 0 && <span style={{ color: "#16a34a" }}>Collected {fmtINR(g.paid)}</span>}
                                   {g && g.paid > 0 && g.due > 0 && " · "}
-                                  {g && g.due > 0 && <span style={{ color: "#dc2626", fontWeight: 700 }}>Pending {fmtINR(g.due)}</span>}
+                                  {g && g.due > 0 && <span style={{ color: DUE_TEXT, fontWeight: 600 }}>Pending {fmtINR(g.due)}</span>}
                                 </span>
                                 {isSom && groupKey !== UNASSIGNED && (
                                   <button onClick={() => setBulkFee({ centerId: groupKey, name: s.centerName })} style={st.groupHeaderAction}
@@ -1330,7 +1320,7 @@ function FinanceContent() {
                                 {paidMap.has(s.uid) ? (
                                   <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                                 ) : feeDueMap.has(s.uid) ? (
-                                  <span style={{ marginLeft: 6, fontWeight: 600, color: "#dc2626" }}>
+                                  <span style={{ marginLeft: 6, fontWeight: 600, color: DUE_TEXT }}>
                                     · Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
                                     {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partly paid</span>}
                                   </span>
@@ -1382,7 +1372,8 @@ function FinanceContent() {
                               {paidMap.has(s.uid) ? (
                                 <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                               ) : feeDueMap.has(s.uid) ? (
-                                <span style={{ color: "#dc2626" }}>
+                                <span style={st.dueTag}>
+                                  <span aria-hidden className="animate-pulse" style={st.dueDot} />
                                   Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
                                   {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partly paid</span>}
                                 </span>
@@ -1399,7 +1390,6 @@ function FinanceContent() {
                                 onClick={() => openPanel(s.uid, "pay", s)}
                                 style={{
                                   ...st.actionBtn,
-                                  ...(overdue ? { background: "#dc2626", color: "#fff", border: "none" } : {}),
                                   ...(isOpen && activeAction === "pay" ? st.actionBtnActive : {}),
                                 }}
                               >
@@ -1498,8 +1488,8 @@ function FinanceContent() {
                                     <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const }}>
                                       <span style={{
                                         fontSize: 12, padding: "3px 12px", borderRadius: 99, fontWeight: 700,
-                                        background: paidMap.has(s.uid) ? "#dcfce7" : "#fee2e2",
-                                        color:      paidMap.has(s.uid) ? "#16a34a" : "#dc2626",
+                                        background: paidMap.has(s.uid) ? "#dcfce7" : "#fffbeb",
+                                        color:      paidMap.has(s.uid) ? "#16a34a" : DUE_TEXT,
                                       }}>
                                         {paidMap.has(s.uid) ? "✓ Paid" : `Due — ${fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}`}
                                       </span>
@@ -1579,8 +1569,8 @@ function FinanceContent() {
                                               <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>
                                                 {isCurrentMonth ? "Outstanding" : `Balance — ${fmtMonth(selectedMonth)}`}
                                               </span>
-                                              <span style={{ fontSize: 22, fontWeight: 800, color: "#dc2626", lineHeight: 1 }}>{fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
-                                              <span style={{ fontSize: 11, color: "#dc2626" }}>{isCurrentMonth ? "due now" : "as of that month"}</span>
+                                              <span style={{ fontSize: 22, fontWeight: 800, color: DUE_TEXT, lineHeight: 1 }}>{fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
+                                              <span style={{ fontSize: 11, color: DUE_TEXT }}>{isCurrentMonth ? "due now" : "as of that month"}</span>
                                             </div>
                                           </>
                                         )}
@@ -2182,10 +2172,10 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
         {row("Fee", student.monthlyFee > 0 ? `${fmtINR(student.monthlyFee)} / mo` : <span style={{ color: "#b91c1c" }}>Not set</span>)}
         {row("Status", paidThisMonth !== null
           ? <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidThisMonth)}</span>
-          : dueThisMonth !== null ? <span style={{ color: "#dc2626" }}>Due {fmtINR(dueThisMonth)}</span>
+          : dueThisMonth !== null ? <span style={{ color: DUE_TEXT }}>Due {fmtINR(dueThisMonth)}</span>
           : <span style={{ color: "#9ca3af" }}>Not raised yet</span>)}
         {row("Current balance", student.balance > 0
-          ? <span style={{ color: "#dc2626" }}>{fmtINR(student.balance)} owed</span>
+          ? <span style={{ color: DUE_TEXT }}>{fmtINR(student.balance)} owed</span>
           : student.balance < 0 ? <span style={{ color: "#16a34a" }}>{fmtINR(-student.balance)} credit</span> : "Settled")}
 
         <div style={sub}>Fee changes</div>
@@ -2647,7 +2637,10 @@ function DiffRow({ label, before, after }: { label: string; before: string; afte
 const st: Record<string, React.CSSProperties> = {
   header:      { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20, gap: 16 },
   heading:     { fontSize: 22, fontWeight: 600, color: "var(--color-text-primary)", marginBottom: 4 },
-  overdueAlert:{ fontSize: 12, color: "#dc2626", fontWeight: 600, background: "#fee2e2", display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 99 },
+  overdueAlert:{ fontSize: 12, color: "#92400e", fontWeight: 500, background: "#fffbeb", border: "1px solid #fde68a", display: "inline-flex", alignItems: "center", gap: 6, padding: "2px 10px", borderRadius: 99 },
+  // Minimal "due" indicators — amber, never alarm red (failures / deletes keep red).
+  dueTag:      { display: "inline-flex", alignItems: "center", gap: 6, padding: "2px 10px", borderRadius: 99, fontSize: 12, fontWeight: 500, color: "#b45309", background: "#fffbeb", border: "1px solid #fde68a", whiteSpace: "nowrap" },
+  dueDot:      { width: 6, height: 6, borderRadius: "50%", background: "#f59e0b", flexShrink: 0, display: "inline-block" },
 
   cardGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 20 },
   card:       { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, overflow: "hidden", display: "flex", flexDirection: "column" as const, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" },
@@ -2671,7 +2664,7 @@ const st: Record<string, React.CSSProperties> = {
   centreTab:     { display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0, padding: "8px 14px", borderRadius: 999, border: "1.5px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
   centreTabActive: { background: "var(--color-accent)", borderColor: "var(--color-accent)", color: "#fff", boxShadow: "var(--shadow-sm)" },
   centreTabCount:  { fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 999, background: "var(--color-surface-3)", color: "var(--color-text-secondary)" },
-  centreTabDue:    { fontSize: 10.5, fontWeight: 800, padding: "1px 6px", borderRadius: 999, background: "#dc2626", color: "#fff" },
+  centreTabDue:    { fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 999, background: "#fef3c7", color: "#92400e" },
   groupHeader:     { padding: "12px 14px", background: "var(--color-surface-2)", borderTop: "2px solid var(--color-border)", borderBottom: "1px solid var(--color-border)", borderLeft: "4px solid #4f46e5" },
   groupHeaderIcon: { width: 28, height: 28, borderRadius: 8, background: "#eef2ff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 },
   groupHeaderBtn:  { background: "none", border: "none", padding: 0, fontSize: 14.5, fontWeight: 800, color: "var(--color-text-primary)", cursor: "pointer" },
@@ -2680,7 +2673,6 @@ const st: Record<string, React.CSSProperties> = {
   groupHeaderAction: { marginLeft: "auto", background: "#d97706", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
   searchInput:   { padding: "7px 12px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", minWidth: 140, flex: "1 1 140px" },
 
-  overdueBanner: { display: "flex", alignItems: "flex-start", gap: 10, background: "#fff1f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", marginBottom: 12, fontSize: 13, color: "#be123c" },
   overduePill:   { display: "inline-block", fontSize: 9, fontWeight: 800, background: "#fee2e2", color: "#dc2626", padding: "2px 6px", borderRadius: 3, letterSpacing: "0.06em" },
 
   tableWrapper: { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, overflow: "auto" },

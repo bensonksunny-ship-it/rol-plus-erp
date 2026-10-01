@@ -62,6 +62,17 @@ function screeningGradeOf(s: Record<string, unknown>): string {
   return "—";
 }
 
+/** Digits of an admission number ("ROLCC02092025103" → "02092025103"; "—" → ""). */
+function admissionDigits(admissionNo: string | null | undefined): string {
+  return (admissionNo ?? "").replace(/\D/g, "");
+}
+
+/** Register sort key: the admission number's last 3 digits as an integer ("…103" → 103); null when it has none. */
+function admissionSuffix(admissionNo: string | null | undefined): number | null {
+  const digits = admissionDigits(admissionNo);
+  return digits ? parseInt(digits.slice(-3), 10) : null;
+}
+
 /** Rows per register page — about one printed A4 page. */
 const REGISTRY_PAGE_SIZE = 25;
 
@@ -572,15 +583,19 @@ function RegistryContent() {
                 };
               })
               .sort((a, b) => {
-                // Register order = chronological, oldest first: date of admission,
-                // then when the record was added. The SL column is this position
-                // (a plain serial number — deliberately NOT derived from the
-                // admission number). Undated records go last.
-                if (!!a.admittedOn !== !!b.admittedOn) return a.admittedOn ? -1 : 1;
-                const d = (a.admittedOn || "").localeCompare(b.admittedOn || "");
+                // Register order: ascending by the admission number's last 3 digits
+                // (…001, …002, …010, …150). SL is just the position in this order.
+                // No admission number → after every numbered student.
+                const ka = admissionSuffix(a.admissionNo), kb = admissionSuffix(b.admissionNo);
+                if ((ka === null) !== (kb === null)) return ka === null ? 1 : -1;
+                if (ka !== null && kb !== null && ka !== kb) return ka - kb;
+                // Same suffix under different prefixes, or both unnumbered:
+                // full admission number, then date of admission, then when added.
+                const full = admissionDigits(a.admissionNo).localeCompare(admissionDigits(b.admissionNo), undefined, { numeric: true });
+                if (full !== 0) return full;
+                const d = (a.admittedOn || "\uffff").localeCompare(b.admittedOn || "\uffff");
                 if (d !== 0) return d;
-                if (a.addedAt !== b.addedAt) return a.addedAt - b.addedAt;
-                return a.name.localeCompare(b.name);
+                return a.addedAt - b.addedAt || a.name.localeCompare(b.name);
               });
 
             setExistingAdmNos(admNos);
@@ -825,7 +840,7 @@ function RegistryContent() {
                         onChange={toggleAllVisible} style={{ cursor: "pointer" }} />
                     </th>
                   )}
-                  <th style={s.th} title="Serial number — oldest admission = 1. Fixed: it doesn't change with search, filters or page." aria-sort="ascending">
+                  <th style={s.th} title="Serial number — position when sorted by the admission number's last 3 digits. Fixed: it doesn't change with search, filters or page." aria-sort="ascending">
                     SL
                   </th>
                   {["Name", "Status"].map(h => <th key={h} style={s.th}>{h}</th>)}

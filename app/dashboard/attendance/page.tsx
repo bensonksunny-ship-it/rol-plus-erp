@@ -11,6 +11,7 @@ import { useAuthContext } from "@/features/auth/AuthContext";
 import { useCentreAccess } from "@/hooks/useCentreAccess";
 import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic } from "@/lib/wing";
+import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
 import {
   saveCentreAttendance,
   saveExtraClass,
@@ -41,6 +42,8 @@ interface StudentRow {
   classType:      "group" | "personal";
   classDays:      string[];    // personal only
   breakStartDate: string | null;
+  /** On the centre's active roster (lib/activeStudents — same rule as the centre modal). */
+  active:         boolean;
 }
 
 interface AttRec {
@@ -510,7 +513,10 @@ function CentreCard({
                   ...headers,
                   <tr key={st.uid} style={{ background: rowBg }}>
                     <td style={{ ...td, ...stickyCol, background: rowBg, minWidth: 160, whiteSpace: "nowrap" }}>
-                      <div style={{ fontWeight: 600, color: "#111827" }}>{st.name}</div>
+                      <div style={{ fontWeight: 600, color: st.active ? "#111827" : "#9ca3af" }}>
+                        {st.name}
+                        {!st.active && <span title="No longer on the active roster — shown because of attendance this month" style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#9ca3af", border: "1px solid #e5e7eb", borderRadius: 99, padding: "0 6px" }}>not active</span>}
+                      </div>
                       <div style={{ fontSize: 10, color: "#9ca3af" }}>
                         {st.admissionNo || "No adm. no."}
                         {batchFilter === "all" && centre.batches.length > 0 && ` · ${row.batchName}`}
@@ -608,7 +614,7 @@ function shiftDay(iso: string, n: number): string {
 }
 
 function TodayView({
-  date, setDate, centres, studentMap, attMap, extraMap, userUid, onSaved,
+  date, setDate, centres, studentMap: rosterMap, attMap, extraMap, userUid, onSaved,
 }: {
   date:       string;
   setDate:    (d: string) => void;
@@ -619,6 +625,13 @@ function TodayView({
   userUid:    string;
   onSaved:    (centreId: string, changes: { uid: string; date: string; status: AttendanceStatus }[]) => void;
 }) {
+  // Marking is for the active roster only (former students stay in the Monthly Register).
+  const studentMap = useMemo(() => {
+    const m = new Map<string, StudentRow[]>();
+    rosterMap.forEach((list, cid) => m.set(cid, list.filter(s => s.active)));
+    return m;
+  }, [rosterMap]);
+
   // draft: `${centreId}|${uid}` -> status (unsaved picks)
   const [draft, setDraft]     = useState<Map<string, AttendanceStatus>>(new Map());
   const [savingId, setSavingId] = useState<string | null>(null);
@@ -640,6 +653,18 @@ function TodayView({
 
   const effective = (centreId: string, uid: string): AttendanceStatus | null =>
     draft.get(`${centreId}|${uid}`) ?? savedStatus(centreId, uid);
+
+  // Auto-completion (both wings): once anyone in a batch is marked, saving also
+  // records every still-unmarked student — Absent, or Break if they're on an
+  // approved break from this date. Explicit picks (P / A / B / …) are never changed.
+  // Only for today or earlier; future days are never auto-filled.
+  const canAutoFill = date <= todayISO();
+  const batchStarted = (centreId: string) =>
+    (studentMap.get(centreId) ?? []).some(s => effective(centreId, s.uid) !== null);
+  function autoStatus(centreId: string, s: StudentRow): AttendanceStatus | null {
+    if (!canAutoFill || effective(centreId, s.uid) !== null || !batchStarted(centreId)) return null;
+    return s.breakStartDate && date >= s.breakStartDate ? "break" : "absent";
+  }
 
   function pick(centreId: string, uid: string, status: AttendanceStatus) {
     setDraft(prev => {
@@ -663,11 +688,17 @@ function TodayView({
     });
   }
 
-  function pendingFor(centreId: string): { uid: string; status: AttendanceStatus }[] {
+  /** What Save writes: the picks made here plus the auto-filled unmarked students. */
+  function pendingFor(centreId: string): { uid: string; status: AttendanceStatus; auto: boolean }[] {
     const students = studentMap.get(centreId) ?? [];
     return students
-      .map(s => ({ uid: s.uid, status: draft.get(`${centreId}|${s.uid}`) }))
-      .filter((x): x is { uid: string; status: AttendanceStatus } => !!x.status);
+      .map(s => {
+        const picked = draft.get(`${centreId}|${s.uid}`);
+        if (picked) return { uid: s.uid, status: picked, auto: false };
+        const auto = autoStatus(centreId, s);
+        return auto ? { uid: s.uid, status: auto, auto: true } : null;
+      })
+      .filter((x): x is { uid: string; status: AttendanceStatus; auto: boolean } => !!x);
   }
 
   async function save(centreId: string) {
@@ -710,7 +741,9 @@ function TodayView({
       ) : (
         todaysCentres.map(centre => {
           const students = studentMap.get(centre.id) ?? [];
-          const pending  = pendingFor(centre.id).length;
+          const pendingList = pendingFor(centre.id);
+          const pending  = pendingList.length;
+          const autoCount = pendingList.filter(x => x.auto).length;
           const counts   = students.reduce((a, s) => {
             const st = effective(centre.id, s.uid);
             if (st === "present") a.present++;
@@ -743,13 +776,16 @@ function TodayView({
               <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 8 }}>
                 {counts.present} present · {counts.absent} absent
                 {counts.other > 0 && ` · ${counts.other} other`}
-                {counts.unmarked > 0 && ` · ${counts.unmarked} unmarked`}
+                {counts.unmarked > 0 && (autoCount > 0
+                  ? <span style={{ color: "#b45309", fontWeight: 600 }}> · {autoCount} unmarked → saved as Absent{students.some(s => autoStatus(centre.id, s) === "break") ? " / Break (on break)" : ""}</span>
+                  : ` · ${counts.unmarked} unmarked`)}
               </div>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {students.map(s => {
                   const eff = effective(centre.id, s.uid);
-                  const dirty = draft.has(`${centre.id}|${s.uid}`);
+                  const auto = autoStatus(centre.id, s);
+                  const dirty = draft.has(`${centre.id}|${s.uid}`) || !!auto;
                   return (
                     <div key={s.uid} style={{
                       display: "flex", alignItems: "center", gap: 8,
@@ -762,13 +798,16 @@ function TodayView({
                       </span>
                       {QUICK_STATUSES.map(st => {
                         const on = eff === st;
+                        const isAuto = !on && auto === st;   // will be written on Save unless changed
                         const { bg, fg } = STATUS_COLOR[st];
                         return (
-                          <button key={st} onClick={() => pick(centre.id, s.uid, st)} style={{
-                            minWidth: 34, padding: "6px 8px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
-                            border: on ? `2px solid ${fg}` : "1px solid #e5e7eb",
-                            background: on ? bg : "#fff", color: on ? fg : "#9ca3af",
-                          }}>
+                          <button key={st} onClick={() => pick(centre.id, s.uid, st)}
+                            title={isAuto ? `Not marked — saved as ${STATUS_LABEL[st]} unless you pick another` : undefined}
+                            style={{
+                              minWidth: 34, padding: "6px 8px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+                              border: on ? `2px solid ${fg}` : isAuto ? `2px dashed ${fg}` : "1px solid #e5e7eb",
+                              background: on ? bg : "#fff", color: on || isAuto ? fg : "#9ca3af", opacity: isAuto ? 0.75 : 1,
+                            }}>
                             {STATUS_SHORT[st]}
                           </button>
                         );
@@ -884,13 +923,15 @@ function AttendanceContent() {
       const newExtraMap   = new Map<string, Set<string>>();
 
       centreIds.forEach((cid, i) => {
+        // Roster = the centre's ACTIVE students (active / Confirm status + admission
+        // number — the centre modal's rule). The Monthly Register also keeps anyone
+        // with attendance here this month, so history doesn't vanish when a student
+        // is cancelled or leaves mid-month (the Today view shows active only).
+        const markedThisMonth = new Set(attResults[i].docs
+          .filter(d => { const dt = (d.data().date as string) ?? ""; return dt >= mStart && dt <= mEnd; })
+          .map(d => d.data().studentUid as string));
         const students: StudentRow[] = stuResults[i].docs
-          .filter(d => {
-            const st = ((d.data().status ?? d.data().studentStatus ?? "active") as string);
-            // A pending inactivation request keeps attending until a Chief
-            // Teacher / Director approves it (then status → "inactive").
-            return st !== "inactive";
-          })
+          .filter(d => isCurrentlyActiveStudent(d.data()) || markedThisMonth.has(d.id))
           .map(d => {
             const data = d.data() as Record<string, unknown>;
             const st   = ((data.status ?? data.studentStatus ?? "active") as string);
@@ -904,6 +945,7 @@ function AttendanceContent() {
               classDays:      Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
               breakStartDate: (st === "on_break" || st === "break_requested")
                 ? ((data.breakStartDate as string) ?? null) : null,
+              active:         isCurrentlyActiveStudent(data),
             };
           })
           .sort((a, b) => {

@@ -267,8 +267,8 @@ function TeacherDashboardContent() {
         .filter(d => {
           const u = d.data();
           if (u.centerId && u.centerId !== centerId) return false;
-          const status = (u.status ?? u.studentStatus ?? "active") as string;
-          return u.role === "student" && status === "active";
+          // Same "active" as the centre modal (active / Confirm + admission number).
+          return u.role === "student" && isCurrentlyActiveStudent(u);
         })
         .map(d => {
           const u = d.data();
