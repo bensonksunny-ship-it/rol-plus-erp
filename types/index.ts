@@ -234,7 +234,8 @@ export interface AdminUser extends UserBase {
     | typeof ROLES.ADMIN
     | typeof ROLES.FOUNDER
     | typeof ROLES.DIRECTOR
-    | typeof ROLES.CHIEF_TEACHER;
+    | typeof ROLES.CHIEF_TEACHER
+    | typeof ROLES.OFFICE_MANAGER;   // School of Music office (admissions + finance)
   centerId?: never;
   currentBalance?: never;
   studentStatus?: never;

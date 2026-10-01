@@ -132,6 +132,20 @@ const CHIEF_TEACHER_CAPS: Capability[] = [
   C.USERS_MANAGE,
 ];
 
+/**
+ * Office Manager (School of Music) — admissions end to end and finance, plus a
+ * read-only view of every student (Registry) and reports / exports. No centres,
+ * attendance, syllabus, staff or system settings.
+ */
+const OFFICE_MANAGER_CAPS: Capability[] = [
+  C.SCREENING_MANAGE,    // Admissions (applications, screening, enrolment)
+  C.FINANCE_VIEW,
+  C.FINANCE_MANAGE,
+  C.STUDENTS_VIEW_ALL,   // Registry — view only (no STUDENTS_MANAGE / DELETE)
+  C.REPORTS_VIEW,
+  C.EXPORT_DATA,
+];
+
 /** Teacher — assigned students / classes only (centre scope enforced separately). */
 const TEACHER_CAPS: Capability[] = [
   C.STUDENTS_MANAGE,
@@ -145,6 +159,7 @@ export const DEFAULT_ROLE_CAPABILITIES: Record<Role, Capability[]> = {
   [ROLES.ADMIN]: ADMIN_CAPS,
   [ROLES.DIRECTOR]: DIRECTOR_CAPS,
   [ROLES.CHIEF_TEACHER]: CHIEF_TEACHER_CAPS,
+  [ROLES.OFFICE_MANAGER]: OFFICE_MANAGER_CAPS,
   [ROLES.TEACHER]: TEACHER_CAPS,
   [ROLES.STUDENT]: [],
   [ROLES.PARENT]: [C.PARENT_VIEW_CHILD],

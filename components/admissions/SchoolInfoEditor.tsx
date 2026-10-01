@@ -235,7 +235,7 @@ function PhotoManager({ wing, photos, onChange, onUploaded, onRemoved }: {
         setUploading(n => n - 1);
       }
     }));
-    if (errors.length) setErr(errors.join(" "));
+    if (errors.length) setErr([...new Set(errors)].join(" "));   // one message when every upload fails the same way
   }
 
   const move = (i: number, d: -1 | 1) => {

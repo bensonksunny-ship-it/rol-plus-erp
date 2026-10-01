@@ -10,6 +10,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { storageErrorMessage } from "@/lib/storageError";
 import { db, storage } from "@/services/firebase/firebase";
 import { logAction } from "@/services/audit/audit.service";
 import { DEFAULT_WING, ROLES } from "@/config/constants";
@@ -114,8 +115,13 @@ export async function createTeacher(
 export async function uploadTeacherPhoto(uid: string, file: File): Promise<string> {
   const ext = file.name.split(".").pop() ?? "jpg";
   const photoRef = ref(storage, `teacher-photos/${uid}.${ext}`);
-  await uploadBytes(photoRef, file);
-  return getDownloadURL(photoRef);
+  try {
+    await uploadBytes(photoRef, file, { contentType: file.type || "image/jpeg" });
+    return await getDownloadURL(photoRef);
+  } catch (err) {
+    console.error("[teacher] photo upload:", err);
+    throw new Error(storageErrorMessage(err, "Photo upload"));
+  }
 }
 
 // ─── Get all teachers ─────────────────────────────────────────────────────────

@@ -27,7 +27,7 @@ const USERS = "users";
 export async function getStaffUsers(wing: Wing): Promise<User[]> {
   const roles = [
     ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER,
-    ROLES.TEACHER, ROLES.PARENT,
+    ROLES.OFFICE_MANAGER, ROLES.TEACHER, ROLES.PARENT,
   ];
   const snap = await getDocs(
     query(collection(db, USERS), where("role", "in", roles)),

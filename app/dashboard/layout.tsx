@@ -65,6 +65,8 @@ const C = CAPABILITIES;
 
 // Roles that see the operational / leadership dashboard.
 const LEADERSHIP: string[] = [ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER];
+// School of Music Office Manager — Admissions, Finance, Registry (view), Export.
+const OFFICE: string = ROLES.OFFICE_MANAGER;
 
 const NAV_TOP: NavItem[] = [
   // Leadership (Founder / Admin / Director / Chief Teacher)
@@ -94,8 +96,8 @@ const NAV_TOP: NavItem[] = [
   // Admissions page (applications list + Fast-Track wizard, all in one).
   // Same admissions system in both wings (screening lives inside Admissions);
   // the old ROL+ /dashboard/screening hub stays reachable by URL, off the menu.
-  { label: "Admissions", icon: "📝", href: "/dashboard/admissions", roles: [...LEADERSHIP, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/admissions,/dashboard/screening" },
-  { label: "Registry",   icon: "📖", href: "/dashboard/registry",   roles: LEADERSHIP, capability: C.STUDENTS_VIEW_ALL, matchPrefix: "/dashboard/registry" },
+  { label: "Admissions", icon: "📝", href: "/dashboard/admissions", roles: [...LEADERSHIP, OFFICE, ROLES.TEACHER], capability: C.SCREENING_MANAGE, matchPrefix: "/dashboard/admissions,/dashboard/screening" },
+  { label: "Registry",   icon: "📖", href: "/dashboard/registry",   roles: [...LEADERSHIP, OFFICE], capability: C.STUDENTS_VIEW_ALL, matchPrefix: "/dashboard/registry" },
   // Founder + Chief Teacher (lower-level accounts only) — kept last in the sidebar.
   { label: "Users",        icon: "🧑‍💻", href: "/dashboard/users", roles: [ROLES.FOUNDER, ROLES.CHIEF_TEACHER], capability: C.USERS_MANAGE, matchPrefix: "/dashboard/users" },
 ];
@@ -104,7 +106,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Finance", icon: "₹",
     items: [
-      { label: "Finance", icon: "₹", href: "/dashboard/finance", roles: LEADERSHIP, capability: C.FINANCE_VIEW },
+      { label: "Finance", icon: "₹", href: "/dashboard/finance", roles: [...LEADERSHIP, OFFICE], capability: C.FINANCE_VIEW },
     ],
   },
   {
@@ -113,7 +115,8 @@ const NAV_GROUPS: NavGroup[] = [
       { label: "Analytics",    icon: "📊", href: "/dashboard/analytics",      roles: LEADERSHIP, capability: C.ANALYTICS_VIEW },
       { label: "Leaderboards", icon: "🏆", href: "/dashboard/leaderboards",   roles: LEADERSHIP, capability: C.LEADERBOARDS_VIEW },
       { label: "My Score",     icon: "⭐", href: "/dashboard/teacher-score",  roles: LEADERSHIP, capability: C.TEACHER_SCORE_VIEW_ALL },
-      { label: "Export",       icon: "⬇", href: "/dashboard/export",          roles: LEADERSHIP, capability: C.EXPORT_DATA },
+      { label: "Reports",      icon: "📄", href: "/dashboard/reports",         roles: [OFFICE], capability: C.REPORTS_VIEW },
+      { label: "Export",       icon: "⬇", href: "/dashboard/export",          roles: [...LEADERSHIP, OFFICE], capability: C.EXPORT_DATA },
     ],
   },
   {
@@ -282,6 +285,7 @@ const ROLE_LABEL: Record<string, string> = {
   [ROLES.STUDENT]: "Student",
   [ROLES.PARENT]: "Parent",
   [ROLES.MEMBER]: "Member",
+  [ROLES.OFFICE_MANAGER]: "Office Manager",
 };
 
 function RoleHubSwitcher({ role, roles, onChange }: { role: string; roles: string[]; onChange: (r: string) => void }) {
@@ -341,6 +345,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     }
     if (user.role === ROLES.MEMBER && pathname === "/dashboard") {
       router.replace("/dashboard/account");
+    }
+    if (user.role === ROLES.OFFICE_MANAGER && pathname === "/dashboard") {
+      router.replace("/dashboard/admissions");
     }
   }, [loading, user, pathname, router]);
 

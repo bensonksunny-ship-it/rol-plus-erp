@@ -3,6 +3,7 @@
 
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { auth, storage } from "@/services/firebase/firebase";
+import { storageErrorMessage } from "@/lib/storageError";
 import { DEFAULT_SCHOOL_INFO, sanitizeSchoolInfo, type SchoolInfo, type SchoolPhoto } from "@/lib/schoolInfo";
 
 export async function loadSchoolInfo(wing: string): Promise<SchoolInfo> {
@@ -54,8 +55,14 @@ export async function uploadSchoolPhoto(wing: string, file: File): Promise<Schoo
   const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
   const path = `school-info/${wing}/${id}.jpg`;
   const r = ref(storage, path);
-  await uploadBytes(r, await shrinkImage(file), { contentType: "image/jpeg", cacheControl: "public, max-age=31536000" });
-  return { id, path, url: await getDownloadURL(r), caption: "" };
+  const blob = await shrinkImage(file);
+  try {
+    await uploadBytes(r, blob, { contentType: "image/jpeg", cacheControl: "public, max-age=31536000" });
+    return { id, path, url: await getDownloadURL(r), caption: "" };
+  } catch (err) {
+    console.error("[schoolInfo] photo upload:", err);
+    throw new Error(storageErrorMessage(err, "Photo upload"));
+  }
 }
 
 /** Best-effort: a missing file is fine. */

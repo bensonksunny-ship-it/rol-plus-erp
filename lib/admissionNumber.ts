@@ -11,7 +11,7 @@ import { ROLES, WINGS } from "@/config/constants";
 // ─── Manual entry (admissions flow) ───────────────────────────────────────────
 // Admission numbers for new applications are typed in by leadership — never
 // generated. Only these roles may enter or change one.
-export const ADMISSION_NO_ROLES: readonly string[] = [ROLES.FOUNDER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER];
+export const ADMISSION_NO_ROLES: readonly string[] = [ROLES.FOUNDER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.OFFICE_MANAGER];
 /** ROL+ Music Academy (Wing 1) is run by its Admin instead of a Chief Teacher / Director. */
 export const ROL_PLUS_ADMISSION_NO_ROLES: readonly string[] = [ROLES.FOUNDER, ROLES.ADMIN];
 

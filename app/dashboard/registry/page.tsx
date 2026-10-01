@@ -62,11 +62,39 @@ function screeningGradeOf(s: Record<string, unknown>): string {
   return "—";
 }
 
-/** Sort key: the last 3 digits of an admission number, as a number.
- *  "ROLCC02092025103" → 103 · "—" / no digits → Infinity (sorts last). */
-function admTail(admissionNo: string): number {
-  const digits = (admissionNo || "").replace(/\D/g, "");
-  return digits ? parseInt(digits.slice(-3), 10) : Number.POSITIVE_INFINITY;
+/** Rows per register page — about one printed A4 page. */
+const REGISTRY_PAGE_SIZE = 25;
+
+/** Bottom page controls: « First (oldest) · ‹ Prev · numbers · Next › · Last (latest) ». */
+function RegistryPager({ page, totalPages, total, from, to, onPage }: {
+  page: number; totalPages: number; total: number; from: number; to: number; onPage: (n: number) => void;
+}) {
+  const btn = (on = false, disabled = false): React.CSSProperties => ({
+    padding: "6px 11px", borderRadius: 8, fontSize: 12, fontWeight: on ? 800 : 600, whiteSpace: "nowrap",
+    border: on ? "1px solid #d97706" : "1px solid var(--color-border)",
+    background: on ? "#d97706" : "var(--color-surface-2)", color: on ? "#fff" : "var(--color-text-primary)",
+    cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1,
+  });
+  const nums: number[] = [];
+  for (let n = Math.max(1, page - 2); n <= Math.min(totalPages, page + 2); n++) nums.push(n);
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
+                  borderTop: "1px solid var(--color-border)", padding: "12px 4px 2px", marginTop: 8 }}>
+      <span style={{ fontSize: 12.5, color: "var(--color-text-secondary)" }}>
+        Page <b style={{ color: "var(--color-text-primary)" }}>{page}</b> of <b style={{ color: "var(--color-text-primary)" }}>{totalPages}</b>
+        {" "}· rows {from}–{to} of {total}{page === totalPages ? " · latest admissions" : ""}
+      </span>
+      <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => onPage(1)} disabled={page === 1} style={btn(false, page === 1)}>« First (oldest)</button>
+        <button type="button" onClick={() => onPage(page - 1)} disabled={page === 1} style={btn(false, page === 1)}>‹ Prev</button>
+        {nums.map(n => (
+          <button key={n} type="button" onClick={() => onPage(n)} aria-current={n === page ? "page" : undefined} style={btn(n === page)}>{n}</button>
+        ))}
+        <button type="button" onClick={() => onPage(page + 1)} disabled={page === totalPages} style={btn(false, page === totalPages)}>Next ›</button>
+        <button type="button" onClick={() => onPage(totalPages)} disabled={page === totalPages} style={btn(false, page === totalPages)}>Last (latest) »</button>
+      </div>
+    </div>
+  );
 }
 
 // Editable status choices shown in the registry Status dropdown.
@@ -334,7 +362,7 @@ function PasteFormatGuide({ pasted }: { pasted?: string }) {
 export default function RegistryPage() {
   return (
     <ProtectedRoute
-      allowedRoles={[ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.TEACHER]}
+      allowedRoles={[ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.OFFICE_MANAGER, ROLES.TEACHER]}
       requiredCapability={CAPABILITIES.STUDENTS_VIEW_ALL}
     >
       <RegistryContent />
@@ -377,6 +405,10 @@ function RegistryContent() {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [levelFilter,  setLevelFilter]  = useState("all");   // Course Level: Introduction / Intermediate / Advanced / "none"
+  // A4-style pages of REGISTRY_PAGE_SIZE rows. null = "the last page" (latest
+  // admissions) and follows new rows as they arrive; a number = a page the user picked.
+  const [page, setPage] = useState<number | null>(null);
+  useEffect(() => { setPage(null); }, [q, statusFilter, levelFilter]);
   const [showImport, setShowImport] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
   const [pastedText, setPastedText] = useState("");
@@ -399,8 +431,8 @@ function RegistryContent() {
 
   // ── Bulk delete ──────────────────────────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirmDelete, setConfirmDelete] = useState<null | "selected" | "all">(null);
-  const [confirmText, setConfirmText] = useState("");
+  // Only selected rows can be deleted — there is deliberately no "delete all".
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   // Post-import feedback: once the import modal closes, jump to the top of the
@@ -420,6 +452,7 @@ function RegistryContent() {
     if (justImported.current.length === 0) return;
     setNewUids(new Set(justImported.current));
     justImported.current = [];
+    setPage(null);   // latest page; imported rows are tinted wherever their admission date puts them
     scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -539,13 +572,15 @@ function RegistryContent() {
                 };
               })
               .sort((a, b) => {
-                // Ascending by the last 3 digits of the admission number
-                // (…005, …210, …346, …347, …348); rows with no admission number
-                // fall to the bottom. Ties: newest upload first, then by date.
-                const ka = admTail(a.admissionNo), kb = admTail(b.admissionNo);
-                if (ka !== kb) return ka - kb;
-                if (a.addedAt !== b.addedAt) return b.addedAt - a.addedAt;
-                return (a.admittedOn || "9999").localeCompare(b.admittedOn || "9999");
+                // Register order = chronological, oldest first: date of admission,
+                // then when the record was added. The SL column is this position
+                // (a plain serial number — deliberately NOT derived from the
+                // admission number). Undated records go last.
+                if (!!a.admittedOn !== !!b.admittedOn) return a.admittedOn ? -1 : 1;
+                const d = (a.admittedOn || "").localeCompare(b.admittedOn || "");
+                if (d !== 0) return d;
+                if (a.addedAt !== b.addedAt) return a.addedAt - b.addedAt;
+                return a.name.localeCompare(b.name);
               });
 
             setExistingAdmNos(admNos);
@@ -619,7 +654,20 @@ function RegistryContent() {
     });
   }, [entries]);
 
-  const visibleUids  = useMemo(() => rows.map(r => r.uid), [rows]);
+  // Fixed serial number: position in the whole wing register (oldest = 1), so it
+  // never changes with search, filters or the page being viewed.
+  const slOf = useMemo(() => new Map(entries.map((e, i) => [e.uid, i + 1])), [entries]);
+  const totalPages  = Math.max(1, Math.ceil(rows.length / REGISTRY_PAGE_SIZE));
+  const currentPage = page === null ? totalPages : Math.min(Math.max(1, page), totalPages);
+  const pageRows    = useMemo(
+    () => rows.slice((currentPage - 1) * REGISTRY_PAGE_SIZE, currentPage * REGISTRY_PAGE_SIZE),
+    [rows, currentPage]);
+  function goToPage(n: number) {
+    setPage(n >= totalPages ? null : n);
+    scrollRef.current?.scrollTo({ top: 0 });
+  }
+
+  const visibleUids  = useMemo(() => pageRows.map(r => r.uid), [pageRows]);
   const allVisibleSelected = visibleUids.length > 0 && visibleUids.every(uid => selected.has(uid));
 
   function toggleRow(uid: string) {
@@ -690,8 +738,7 @@ function RegistryContent() {
         metadata: { count: uids.length, all: uids.length === entries.length },
       });
       setSelected(new Set());
-      setConfirmDelete(null);
-      setConfirmText("");
+      setConfirmDelete(false);
       // The live student subscription picks up the deletions automatically.
     } catch (err) {
       console.error("Registry bulk delete failed:", err);
@@ -733,14 +780,6 @@ function RegistryContent() {
               🔍 Scan &amp; Merge Duplicates
             </button>
           )}
-          {canImport && entries.length > 0 && (
-            <button
-              style={{ ...s.printBtn, color: "#b91c1c", borderColor: "#fecaca", background: "#fef2f2" }}
-              onClick={() => { setConfirmText(""); setConfirmDelete("all"); }}
-            >
-              🗑 Delete all
-            </button>
-          )}
           <button style={s.printBtn} onClick={() => window.print()}>🖨 Print</button>
         </div>
       </div>
@@ -752,7 +791,7 @@ function RegistryContent() {
         }}>
           <span style={{ fontSize: 13, fontWeight: 600, color: "#991b1b" }}>{selected.size} selected</span>
           <button
-            onClick={() => setConfirmDelete("selected")}
+            onClick={() => setConfirmDelete(true)}
             style={{ ...s.printBtn, color: "#fff", background: "#dc2626", border: "none" }}
           >
             🗑 Delete {selected.size}
@@ -765,7 +804,7 @@ function RegistryContent() {
         {loading ? (
           <div style={s.empty}>Loading…</div>
         ) : (
-          <div ref={scrollRef} className="registry-scroll" style={{ overflow: "auto", maxHeight: "calc(100vh - 210px)" }}>
+          <div ref={scrollRef} className="registry-scroll" style={s.paper}>
             <style>{`
               .registry-scroll { scrollbar-width: auto; scrollbar-color: #9ca3af var(--color-bg); }
               .registry-scroll::-webkit-scrollbar { width: 18px; height: 18px; }
@@ -786,7 +825,10 @@ function RegistryContent() {
                         onChange={toggleAllVisible} style={{ cursor: "pointer" }} />
                     </th>
                   )}
-                  {["SL", "Name", "Status"].map(h => <th key={h} style={s.th}>{h}</th>)}
+                  <th style={s.th} title="Serial number — oldest admission = 1. Fixed: it doesn't change with search, filters or page." aria-sort="ascending">
+                    SL
+                  </th>
+                  {["Name", "Status"].map(h => <th key={h} style={s.th}>{h}</th>)}
                   <th style={{ ...s.th, width: canImport ? 72 : 34 }} />
                 </tr>
               </thead>
@@ -796,7 +838,7 @@ function RegistryContent() {
                     {entries.length === 0 ? "No students on the register yet." : "No matches."}
                   </td></tr>
                 )}
-                {rows.map((e, i) => {
+                {pageRows.map(e => {
                   const open = expandedRows.has(e.uid);
                   return (
                   <Fragment key={e.uid}>
@@ -812,7 +854,7 @@ function RegistryContent() {
                           onChange={() => toggleRow(e.uid)} style={{ cursor: "pointer" }} />
                       </td>
                     )}
-                    <td style={{ ...s.td, color: "var(--color-text-muted)" }}>{i + 1}</td>
+                    <td style={{ ...s.td, color: "var(--color-text-muted)", fontVariantNumeric: "tabular-nums" }}>{slOf.get(e.uid) ?? ""}</td>
                     <td style={{ ...s.td, color: "var(--color-text-primary)", fontWeight: 500 }}>
                       {e.name}
                       {multiBatchCentres.has(e.centerId) && e.batch && e.batch !== "—" && (
@@ -951,6 +993,12 @@ function RegistryContent() {
                 )}
               </tbody>
             </table>
+            {rows.length > 0 && (
+              <RegistryPager page={currentPage} totalPages={totalPages} total={rows.length}
+                from={(currentPage - 1) * REGISTRY_PAGE_SIZE + 1}
+                to={Math.min(currentPage * REGISTRY_PAGE_SIZE, rows.length)}
+                onPage={goToPage} />
+            )}
           </div>
         )}
       </div>
@@ -990,36 +1038,23 @@ function RegistryContent() {
       )}
 
       {confirmDelete && (() => {
-        const isAll  = confirmDelete === "all";
-        const target = isAll ? entries.map(e => e.uid) : Array.from(selected);
-        const ready  = !isAll || confirmText.trim().toUpperCase() === "DELETE";
+        const target = Array.from(selected);
         return (
-          <div style={dm.overlay} onClick={e => { if (e.target === e.currentTarget && !deleting) { setConfirmDelete(null); setConfirmText(""); } }}>
+          <div style={dm.overlay} onClick={e => { if (e.target === e.currentTarget && !deleting) setConfirmDelete(false); }}>
             <div style={dm.box}>
               <div style={{ fontSize: 34, marginBottom: 8 }}>🗑️</div>
               <div style={{ fontSize: 17, fontWeight: 800, color: "#111", marginBottom: 6 }}>
-                {isAll ? `Delete the entire register?` : `Delete ${target.length} student${target.length !== 1 ? "s" : ""}?`}
+                {`Delete ${target.length} student${target.length !== 1 ? "s" : ""}?`}
               </div>
               <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 18, lineHeight: 1.5 }}>
-                {isAll
-                  ? `This permanently removes all ${target.length} students from the ${WING_LABELS[WING]} register. It cannot be undone.`
-                  : `This permanently removes the selected records from the register. It cannot be undone.`}
+                This permanently removes the selected records from the register. It cannot be undone.
               </div>
-              {isAll && (
-                <input
-                  autoFocus
-                  value={confirmText}
-                  onChange={e => setConfirmText(e.target.value)}
-                  placeholder="Type DELETE to confirm"
-                  style={{ ...s.search, minWidth: 0, width: "100%", boxSizing: "border-box", marginBottom: 16 }}
-                />
-              )}
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button onClick={() => { setConfirmDelete(null); setConfirmText(""); }} disabled={deleting}
+                <button onClick={() => setConfirmDelete(false)} disabled={deleting}
                   style={{ ...s.printBtn }}>Cancel</button>
-                <button onClick={() => runDelete(target)} disabled={deleting || !ready || target.length === 0}
-                  style={{ ...s.printBtn, background: "#dc2626", border: "none", color: "#fff", opacity: deleting || !ready ? 0.5 : 1 }}>
-                  {deleting ? "Deleting…" : isAll ? `Delete all ${target.length}` : `Delete ${target.length}`}
+                <button onClick={() => runDelete(target)} disabled={deleting || target.length === 0}
+                  style={{ ...s.printBtn, background: "#dc2626", border: "none", color: "#fff", opacity: deleting ? 0.5 : 1 }}>
+                  {deleting ? "Deleting…" : `Delete ${target.length}`}
                 </button>
               </div>
             </div>
@@ -1864,6 +1899,10 @@ const s: Record<string, React.CSSProperties> = {
   select: { background: "var(--color-bg)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "8px 10px", fontSize: 13, color: "var(--color-text-primary)", cursor: "pointer" },
   importBtn: { background: "var(--color-accent)", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: "#fff", cursor: "pointer" },
   iconBtn: { background: "none", border: "1px solid var(--color-border)", borderRadius: 6, padding: "2px 7px", marginRight: 8, fontSize: 12, color: "var(--color-text-secondary)", cursor: "pointer" },
+  paper: {
+    overflowX: "auto", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12,
+    boxShadow: "0 2px 10px rgba(0,0,0,0.06)", padding: "14px 16px", maxWidth: 960, margin: "0 auto",
+  },
   printBtn: { background: "var(--color-surface-2)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: "var(--color-text-secondary)", cursor: "pointer" },
   card: { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 12, padding: 20 },
   table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },

@@ -57,7 +57,7 @@ const btn: React.CSSProperties = {
 export default function AdmissionsPage() {
   return (
     <ProtectedRoute
-      allowedRoles={[ROLES.FOUNDER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.TEACHER]}
+      allowedRoles={[ROLES.FOUNDER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.OFFICE_MANAGER, ROLES.TEACHER]}
       requiredCapability={CAPABILITIES.SCREENING_MANAGE}
     >
       <AdmissionsWizard />

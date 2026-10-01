@@ -200,7 +200,7 @@ function fmtTimeSlotRange(timeSlot: string): string {
 
 export default function DashboardPage() {
   return (
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.PARENT, ROLES.MEMBER]}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.TEACHER, ROLES.STUDENT, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.PARENT, ROLES.MEMBER, ROLES.OFFICE_MANAGER]}>
       <DashboardContent />
     </ProtectedRoute>
   );
@@ -215,10 +215,11 @@ function DashboardContent() {
     if (user?.role === ROLES.STUDENT) router.replace("/dashboard/student");
     if (user?.role === ROLES.PARENT) router.replace("/dashboard/parent");
     if (user?.role === ROLES.MEMBER) router.replace("/dashboard/account");
+    if (user?.role === ROLES.OFFICE_MANAGER) router.replace("/dashboard/admissions");
   }, [authLoading, user, router]);
 
   if (authLoading || !user) return null;
-  if (user.role === ROLES.STUDENT || user.role === ROLES.PARENT || user.role === ROLES.MEMBER) return null;
+  if (user.role === ROLES.STUDENT || user.role === ROLES.PARENT || user.role === ROLES.MEMBER || user.role === ROLES.OFFICE_MANAGER) return null;
   // Approvers see pending student-inactivation requests above their dashboard.
   const requests = <InactivationRequestsPanel />;   // renders only for this wing's approvers, and only with requests
   if (user.role === ROLES.FOUNDER) return <>{requests}<CommandCenter /></>;

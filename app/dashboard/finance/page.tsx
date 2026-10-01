@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
   query, where, doc, serverTimestamp,
-  increment,
+  increment, writeBatch,
 } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import { useAuth } from "@/hooks/useAuth";
@@ -59,7 +59,12 @@ interface StudentFeeRow {
   estimatedFee:    number;
 }
 
-interface CenterOption { id: string; name: string; centerCode: string; }
+interface CenterOption { id: string; name: string; centerCode: string; monthlyFee: number; }
+
+/** School of Music: a student's fee counts as custom when it differs from their centre's default. */
+function isCustomFee(studentFee: number, centreDefault: number): boolean {
+  return centreDefault > 0 && studentFee > 0 && studentFee !== centreDefault;
+}
 
 /** Finance is organised by centre. Only students who still owe money can lack one
  *  (inactive / unassigned) — they're grouped under this key until settled. */
@@ -119,7 +124,7 @@ function minMonth(): string {
 export default function FinancePage() {
   return (
     // Chief Teachers have no Finance access — a direct URL redirects to the dashboard.
-    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR]} requiredCapability={CAPABILITIES.FINANCE_VIEW}>
+    <ProtectedRoute allowedRoles={[ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.OFFICE_MANAGER]} requiredCapability={CAPABILITIES.FINANCE_VIEW}>
       <Suspense fallback={null}>
         <FinanceContent />
       </Suspense>
@@ -178,6 +183,10 @@ function FinanceContent() {
   const [feeEdit,       setFeeEdit]       = useState<{ uid: string; value: string } | null>(null);
   const [feeEditSaving, setFeeEditSaving] = useState(false);
   const [markingDueUid, setMarkingDueUid] = useState<string | null>(null);
+  // School of Music centre heading → "⚙️ Set Fee for All".
+  const [bulkFee,       setBulkFee]       = useState<{ centerId: string; name: string } | null>(null);
+  const [bulkSaving,    setBulkSaving]    = useState(false);
+  const centreDefaultFee = (centerId: string) => centers.find(c => c.id === centerId)?.monthlyFee ?? 0;
   const adjustInputRef                       = useRef<HTMLInputElement>(null);
 
 
@@ -238,6 +247,7 @@ function FinanceContent() {
         id: d.id,
         name:       (d.data().name       as string) ?? d.id,
         centerCode: (d.data().centerCode as string) ?? "—",
+        monthlyFee: Number(d.data().monthlyFee ?? 0) || 0,
       })));
 
       // Store transactions for this wing (month filtering happens in useMemo/render).
@@ -639,6 +649,48 @@ function FinanceContent() {
     }
   }
 
+  /**
+   * Centre heading "Set Fee for All": sets the centre's default monthly fee and
+   * copies it to its students — optionally skipping students on a custom rate.
+   */
+  async function saveCentreFee(centerId: string, fee: number, overwriteCustom: boolean) {
+    const prevDefault = centreDefaultFee(centerId);
+    const inCentre = students.filter(st => st.centerId === centerId);
+    const targets = inCentre.filter(st => overwriteCustom || !isCustomFee(st.monthlyFee, prevDefault));
+    setBulkSaving(true);
+    try {
+      for (let i = 0; i < targets.length; i += 400) {
+        const b = writeBatch(db);
+        targets.slice(i, i + 400).forEach(st => b.update(doc(db, "users", st.uid), {
+          monthlyFee: fee, feeCycle: "monthly", updatedAt: new Date().toISOString(),
+        }));
+        await b.commit();
+      }
+      await updateDoc(doc(db, "centers", centerId), { monthlyFee: fee, updatedAt: serverTimestamp() });
+      logAction({
+        action: "CENTRE_FEE_SET", initiatorId: user?.uid ?? "", initiatorRole: (user?.role ?? ROLES.ADMIN) as Role,
+        approverId: null, approverRole: null, reason: null,
+        metadata: { centerId, from: prevDefault, to: fee, updated: targets.length, skipped: inCentre.length - targets.length },
+      });
+      targets.forEach(st => {
+        if (st.monthlyFee !== fee) logAction({
+          action: "MONTHLY_FEE_SET", initiatorId: user?.uid ?? "", initiatorRole: (user?.role ?? ROLES.ADMIN) as Role,
+          approverId: null, approverRole: null, reason: "centre fee",
+          metadata: { studentUid: st.uid, from: st.monthlyFee, to: fee },
+        });
+      });
+      setBulkFee(null);
+      await fetchAll(selectedMonth);
+      const skipped = inCentre.length - targets.length;
+      toast(`${fmtINR(fee)} / mo set for ${targets.length} student${targets.length !== 1 ? "s" : ""}${skipped ? ` · ${skipped} custom fee${skipped !== 1 ? "s" : ""} kept` : ""}`, "success");
+    } catch (err) {
+      console.error("Centre fee update failed:", err);
+      toast("Couldn't update the centre fee. Try again — some students may already have the new fee.", "error");
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
   /** Roster "⚠️ Mark Fee Due": raises this month's fee due without opening the Payment panel. */
   async function quickMarkFeeDue(student: StudentFeeRow) {
     setMarkingDueUid(student.uid);
@@ -900,6 +952,21 @@ function FinanceContent() {
     // from the dashboard layout's <main>, so none is added here.
     <div className="mx-auto w-full max-w-6xl">
       <ToastContainer toasts={toasts} onRemove={remove} />
+      {bulkFee && (() => {
+        const inCentre = students.filter(st => st.centerId === bulkFee.centerId);
+        const def = centreDefaultFee(bulkFee.centerId);
+        return (
+          <CentreFeeModal
+            centreName={bulkFee.name}
+            defaultFee={def}
+            total={inCentre.length}
+            customCount={inCentre.filter(st => isCustomFee(st.monthlyFee, def)).length}
+            saving={bulkSaving}
+            onSave={(fee, overwrite) => saveCentreFee(bulkFee.centerId, fee, overwrite)}
+            onCancel={() => setBulkFee(null)}
+          />
+        );
+      })()}
       {feeEdit && (() => {
         const row = students.find(x => x.uid === feeEdit.uid);
         if (!row) return null;
@@ -1165,7 +1232,7 @@ function FinanceContent() {
                 <tbody>
                   {filteredStudents.map((s, idx) => {
                     const groupKey    = centreKey(s);
-                    const startsGroup = filterCenter === "all" && (idx === 0 || centreKey(filteredStudents[idx - 1]) !== groupKey);
+                    const startsGroup = idx === 0 || centreKey(filteredStudents[idx - 1]) !== groupKey;
                     const g           = groupTotals.get(groupKey);
                     const isPrepay   = s.billingMode === "prepay";
                     const overdue    = feeDueMap.has(s.uid) && !paidMap.has(s.uid);
@@ -1193,14 +1260,28 @@ function FinanceContent() {
                         {startsGroup && (
                           <tr key={`hdr-${groupKey}`}>
                             <td colSpan={isMobile ? 2 : 5} style={st.groupHeader}>
-                              <button onClick={() => setFilterCenter(groupKey)} style={st.groupHeaderBtn} title="Show only this centre">
-                                {groupKey === UNASSIGNED ? "No centre · dues pending" : s.centerName} →
-                              </button>
-                              <span style={st.groupHeaderMeta}>
-                                {g?.count ?? 0} student{g?.count === 1 ? "" : "s"}
-                                {g && g.paid > 0 && <> · <span style={{ color: "#16a34a" }}>Collected {fmtINR(g.paid)}</span></>}
-                                {g && g.due > 0 && <> · <span style={{ color: "#dc2626" }}>Due {fmtINR(g.due)}</span></>}
-                              </span>
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const }}>
+                                <span aria-hidden style={st.groupHeaderIcon}>🏫</span>
+                                <button onClick={() => setFilterCenter(groupKey)} style={st.groupHeaderBtn}
+                                  title={filterCenter === "all" ? "Show only this centre" : undefined}>
+                                  {groupKey === UNASSIGNED ? "No centre · dues pending" : s.centerName}{filterCenter === "all" ? " →" : ""}
+                                </button>
+                                <span style={st.groupHeaderPill}>{g?.count ?? 0} student{g?.count === 1 ? "" : "s"}</span>
+                                {isSom && groupKey !== UNASSIGNED && centreDefaultFee(groupKey) > 0 && (
+                                  <span style={st.groupHeaderPill} title="Centre default monthly fee">Default {fmtINR(centreDefaultFee(groupKey))}/mo</span>
+                                )}
+                                <span style={st.groupHeaderMeta}>
+                                  {g && g.paid > 0 && <span style={{ color: "#16a34a" }}>Collected {fmtINR(g.paid)}</span>}
+                                  {g && g.paid > 0 && g.due > 0 && " · "}
+                                  {g && g.due > 0 && <span style={{ color: "#dc2626", fontWeight: 700 }}>Pending {fmtINR(g.due)}</span>}
+                                </span>
+                                {isSom && groupKey !== UNASSIGNED && (
+                                  <button onClick={() => setBulkFee({ centerId: groupKey, name: s.centerName })} style={st.groupHeaderAction}
+                                    title="Set the monthly fee for every student in this centre">
+                                    ⚙️ Set Fee for All
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         )}
@@ -1274,6 +1355,12 @@ function FinanceContent() {
                                 <>
                                   <MonthlyFeeCell fee={s.monthlyFee}
                                     onOpen={() => setFeeEdit({ uid: s.uid, value: s.monthlyFee > 0 ? String(s.monthlyFee) : "" })} />
+                                  {isCustomFee(s.monthlyFee, centreDefaultFee(s.centerId)) && (
+                                    <span title={`Differs from the centre default (${fmtINR(centreDefaultFee(s.centerId))}/mo) — kept when you set the fee for the whole centre`}
+                                      style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#7c3aed", background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 99, padding: "1px 7px", whiteSpace: "nowrap" as const }}>
+                                      Custom Fee
+                                    </span>
+                                  )}
                                   <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>Prepaid</div>
                                 </>
                               ) : (
@@ -1940,6 +2027,68 @@ function FinanceContent() {
 }
 
 // ─── Row actions menu ─────────────────────────────────────────────────────────
+/** "Set Fee for All" for one School of Music centre. Closes only via Cancel / ✕ / Esc. */
+function CentreFeeModal({ centreName, defaultFee, total, customCount, saving, onSave, onCancel }: {
+  centreName: string; defaultFee: number; total: number; customCount: number; saving: boolean;
+  onSave: (fee: number, overwriteCustom: boolean) => void; onCancel: () => void;
+}) {
+  const [value, setValue] = useState(defaultFee > 0 ? String(defaultFee) : "");
+  const [overwrite, setOverwrite] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !saving) onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, saving]);
+  const n = Math.round(Number(value));
+  const valid = Number.isFinite(n) && n > 0;
+  const affected = overwrite ? total : total - customCount;
+  const opt = (on: boolean): React.CSSProperties => ({
+    display: "flex", gap: 8, alignItems: "flex-start", padding: "9px 11px", borderRadius: 9, cursor: "pointer", fontSize: 12.5,
+    border: `1px solid ${on ? "#a5b4fc" : "var(--color-border)"}`, background: on ? "#eef2ff" : "var(--color-surface)", color: "var(--color-text-primary)",
+  });
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 700, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div role="dialog" aria-modal="true" aria-label={`Set fee for ${centreName}`}
+        style={{ width: "100%", maxWidth: 380, background: "var(--color-surface)", borderRadius: 14, boxShadow: "0 20px 50px rgba(0,0,0,0.25)", padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <div style={{ fontSize: 14.5, fontWeight: 800, color: "var(--color-text-primary)" }}>
+            Set base monthly fee for all {total} student{total !== 1 ? "s" : ""} in {centreName}
+          </div>
+          <button onClick={onCancel} disabled={saving} aria-label="Close" style={{ border: "none", background: "none", fontSize: 16, color: "#9ca3af", cursor: "pointer" }}>✕</button>
+        </div>
+        <label style={{ fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)" }}>
+          Monthly fee (₹)
+          <input autoFocus type="number" min={1} inputMode="numeric" value={value} disabled={saving} placeholder="e.g. 2500"
+            onChange={e => setValue(e.target.value)}
+            style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4, padding: "8px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 14, color: "var(--color-text-primary)", background: "var(--color-surface)" }} />
+        </label>
+        {customCount > 0 && (
+          <div style={{ display: "grid", gap: 6 }}>
+            <label style={opt(!overwrite)}>
+              <input type="radio" checked={!overwrite} onChange={() => setOverwrite(false)} style={{ marginTop: 2 }} />
+              <span>Skip the {customCount} student{customCount !== 1 ? "s" : ""} with a <b>Custom Fee</b> (keep their rate)</span>
+            </label>
+            <label style={opt(overwrite)}>
+              <input type="radio" checked={overwrite} onChange={() => setOverwrite(true)} style={{ marginTop: 2 }} />
+              <span>Apply to all {total}, replacing custom fees</span>
+            </label>
+          </div>
+        )}
+        <div style={{ fontSize: 11.5, color: "var(--color-text-secondary)" }}>
+          Also becomes the centre&apos;s default for new students. Fee dues already raised keep their amount.
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button onClick={onCancel} disabled={saving} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button onClick={() => onSave(n, overwrite)} disabled={saving || !valid}
+            style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#d97706", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: saving || !valid ? "not-allowed" : "pointer", opacity: saving || !valid ? 0.55 : 1 }}>
+            {saving ? "Saving…" : `Set ${valid ? fmtINR(n) : "fee"} for ${affected}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // School of Music roster: the monthly fee as a clickable badge on the row
 // ("outside"); clicking opens FeeDetailsModal ("inside") to view and adjust it.
 function MonthlyFeeCell({ fee, compact, onOpen }: { fee: number; compact?: boolean; onOpen: () => void }) {
@@ -2523,9 +2672,12 @@ const st: Record<string, React.CSSProperties> = {
   centreTabActive: { background: "var(--color-accent)", borderColor: "var(--color-accent)", color: "#fff", boxShadow: "var(--shadow-sm)" },
   centreTabCount:  { fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 999, background: "var(--color-surface-3)", color: "var(--color-text-secondary)" },
   centreTabDue:    { fontSize: 10.5, fontWeight: 800, padding: "1px 6px", borderRadius: 999, background: "#dc2626", color: "#fff" },
-  groupHeader:     { padding: "10px 12px", background: "var(--color-surface-2)", borderTop: "2px solid var(--color-border)", borderBottom: "1px solid var(--color-border)" },
-  groupHeaderBtn:  { background: "none", border: "none", padding: 0, fontSize: 13.5, fontWeight: 800, color: "var(--color-text-primary)", cursor: "pointer", marginRight: 12 },
+  groupHeader:     { padding: "12px 14px", background: "var(--color-surface-2)", borderTop: "2px solid var(--color-border)", borderBottom: "1px solid var(--color-border)", borderLeft: "4px solid #4f46e5" },
+  groupHeaderIcon: { width: 28, height: 28, borderRadius: 8, background: "#eef2ff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 },
+  groupHeaderBtn:  { background: "none", border: "none", padding: 0, fontSize: 14.5, fontWeight: 800, color: "var(--color-text-primary)", cursor: "pointer" },
+  groupHeaderPill: { fontSize: 11.5, fontWeight: 700, color: "var(--color-text-secondary)", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 99, padding: "2px 9px", whiteSpace: "nowrap" },
   groupHeaderMeta: { fontSize: 12, color: "var(--color-text-secondary)" },
+  groupHeaderAction: { marginLeft: "auto", background: "#d97706", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
   searchInput:   { padding: "7px 12px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", minWidth: 140, flex: "1 1 140px" },
 
   overdueBanner: { display: "flex", alignItems: "flex-start", gap: 10, background: "#fff1f2", border: "1px solid #fca5a5", borderRadius: 8, padding: "10px 14px", marginBottom: 12, fontSize: 13, color: "#be123c" },

@@ -20,8 +20,10 @@ import { isElevatedAccount } from "@/lib/elevatedAccount";
 import type { Role, User, Wing } from "@/types";
 
 const ASSIGNABLE_ROLES: Role[] = [
-  ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.TEACHER, ROLES.PARENT, ROLES.MEMBER,
+  ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.OFFICE_MANAGER, ROLES.TEACHER, ROLES.PARENT, ROLES.MEMBER,
 ];
+/** Roles that exist in one wing only (offered only in that wing's picker). */
+const WING_ONLY_ROLES: Partial<Record<Role, Wing>> = { [ROLES.OFFICE_MANAGER]: WINGS.SCHOOL_OF_MUSIC };
 
 interface StudentOpt { uid: string; wing: Wing; label: string }
 
@@ -39,6 +41,7 @@ const ROLE_LABEL: Record<string, string> = {
   [ROLES.ADMIN]: "Admin",
   [ROLES.DIRECTOR]: "Director",
   [ROLES.CHIEF_TEACHER]: "Chief Teacher",
+  [ROLES.OFFICE_MANAGER]: "Office Manager",
   [ROLES.TEACHER]: "Teacher",
   [ROLES.STUDENT]: "Student",
   [ROLES.PARENT]: "Parent",
@@ -117,7 +120,7 @@ function isActiveUser(u: { status?: unknown }): boolean {
 
 // Display order for the unified Staff table — leadership first, then teaching staff.
 const STAFF_ROLE_ORDER = [
-  ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.TEACHER, ROLES.MEMBER, ROLES.PARENT,
+  ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.OFFICE_MANAGER, ROLES.TEACHER, ROLES.MEMBER, ROLES.PARENT,
 ];
 
 export default function UsersPage() {
@@ -731,13 +734,13 @@ function Row({ sl, u, group, wingFilter, expanded, onToggleExpand, onToggle, onM
 // one at a time. Shared by the "Add User" form and the "Manage roles" modal.
 
 /** Toggle-chip multi-select — the same checked style as ChildPicker below. */
-function RoleCheckboxGroup({ value, onChange }: { value: Role[]; onChange: (roles: Role[]) => void }) {
+function RoleCheckboxGroup({ value, onChange, wing }: { value: Role[]; onChange: (roles: Role[]) => void; wing?: Wing }) {
   function toggle(role: Role) {
     onChange(sortRoles(value.includes(role) ? value.filter(r => r !== role) : [...value, role]));
   }
   return (
     <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 6 }}>
-      {ASSIGNABLE_ROLES.map(r => {
+      {ASSIGNABLE_ROLES.filter(r => !WING_ONLY_ROLES[r] || !wing || WING_ONLY_ROLES[r] === wing || value.includes(r)).map(r => {
         const on = value.includes(r);
         return (
           <button
@@ -785,7 +788,7 @@ function WingRolePicker({ pairs, onChange }: {
         <div key={wing} style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" as const }}>
           <span style={{ ...s.roleChip, minWidth: 130, textAlign: "center" as const, marginTop: 3 }}>{WING_LABELS[wing]}</span>
           <div style={{ flex: 1, minWidth: 180 }}>
-            <RoleCheckboxGroup value={rolesFor(wing)} onChange={roles => updateRoles(wing, roles)} />
+            <RoleCheckboxGroup wing={wing} value={rolesFor(wing)} onChange={roles => updateRoles(wing, roles)} />
             {rolesFor(wing).length === 0 && (
               <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 4 }}>
                 No roles checked — no access in this wing.

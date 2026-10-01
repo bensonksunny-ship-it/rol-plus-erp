@@ -14,6 +14,9 @@ export const ROLES = {
   // Rol's School of Music (wing "school_of_music") leadership.
   DIRECTOR: "director",
   CHIEF_TEACHER: "chief_teacher",
+  // Rol's School of Music office: runs Admissions + Finance (read-only Registry,
+  // reports & export). Wing 2 only — assigned on the Founder's Users page.
+  OFFICE_MANAGER: "office_manager",
   // Present in both wings.
   TEACHER: "teacher",
   STUDENT: "student",
@@ -105,6 +108,7 @@ export const ROLE_ROUTES: Record<string, string> = {
   [ROLES.ADMIN]: "/dashboard",
   [ROLES.DIRECTOR]: "/dashboard",
   [ROLES.CHIEF_TEACHER]: "/dashboard",
+  [ROLES.OFFICE_MANAGER]: "/dashboard/admissions",
   [ROLES.TEACHER]: "/dashboard",
   [ROLES.STUDENT]: "/dashboard",
   [ROLES.PARENT]: "/dashboard/parent",

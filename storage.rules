@@ -1,9 +1,26 @@
 rules_version = '2';
 
+// Firebase Storage — the only client-side upload paths in the app:
+//   school-info/{wing}/{id}.jpg   School Info gallery (Admissions → ℹ School Info)
+//   teacher-photos/{uid}.{ext}    teacher profile pictures
+// Anyone may read (parents see the gallery without logging in); only signed-in
+// staff may upload or delete, images only, up to 5 MB. Every other path is closed.
 service firebase.storage {
   match /b/{bucket}/o {
-    match /{allPaths=**} {
-      allow read, write: if true;
+    function isImageUpload() {
+      return request.resource == null    // delete
+        || (request.resource.contentType.matches('image/.*')
+            && request.resource.size < 5 * 1024 * 1024);
+    }
+
+    match /school-info/{wing}/{file} {
+      allow read: if true;
+      allow write: if request.auth != null && isImageUpload();
+    }
+
+    match /teacher-photos/{file} {
+      allow read: if true;
+      allow write: if request.auth != null && isImageUpload();
     }
   }
 }
