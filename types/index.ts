@@ -298,6 +298,15 @@ export interface Center {
   id: string;
   centerCode: string;            // auto-generated: CTR001, CTR002… — never user-entered
   name: string;
+  /** Optional short identifier shown as the card badge, e.g. "Main Branch", "Keyboard Division". */
+  subtitle?: string;
+  /**
+   * classType — ROL+ (wing 1) centre LABEL only: "group" (default) or "personal"
+   * (a 1-on-1 class set up as its own centre). Shown on centre cards. It does NOT
+   * set or change any student's classType, fees or billing — that per-student
+   * setup is protected. Absent = group. School of Music centres are always group.
+   */
+  classType?: "group" | "personal";
   location: string;
   timeSlot: string;              // e.g. "Mon/Wed/Fri 17:00–18:30"
   teacherUid: string;            // exactly one teacher per center

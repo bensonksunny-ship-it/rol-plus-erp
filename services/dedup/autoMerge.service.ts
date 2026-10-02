@@ -23,7 +23,7 @@ import { logAction } from "@/services/audit/audit.service";
 import { isWing } from "@/lib/wing";
 import {
   isAutoMergePair, isSameNameDifferentAdmission, keepSeparate, mergeStudents, scanStudentDuplicates, suggestPrimary,
-  type StudentRecord,
+  type DuplicatePair, type StudentRecord,
 } from "@/services/dedup/dedup.service";
 
 const JOB = () => doc(db, "system_jobs", "dedup_auto_merge");
@@ -98,6 +98,33 @@ async function alignWing(uid: string): Promise<boolean> {
 }
 
 /**
+ * Merge exact-duplicate pairs fast: group them once (A~B~C → one student), keep
+ * the record with the most attendance + payments, fold the rest in, then move
+ * the kept record to its centre's wing. No rescans between merges. Used by the
+ * automatic run and by the window's "Merge all exact duplicates".
+ */
+export async function mergeExactGroups(
+  pairs: DuplicatePair[], by: string, onProgress?: (done: number, total: number) => void,
+): Promise<{ merged: number; failed: number; wingMoved: number }> {
+  const groups = groupPairs(pairs);
+  const total = groups.reduce((n, g) => n + g.length - 1, 0);
+  const out = { merged: 0, failed: 0, wingMoved: 0 };
+  onProgress?.(0, total);
+  for (const group of groups) {
+    const master = await pickMaster(group);
+    for (const r of group) {
+      if (r.id === master.id) continue;
+      try { await mergeStudents(master.id, r.id, by); out.merged++; }
+      catch (e) { console.warn("[merge] ", e); out.failed++; }
+      onProgress?.(out.merged + out.failed, total);
+    }
+    try { if (await alignWing(master.id)) out.wingMoved++; }
+    catch (e) { console.warn("[merge] wing:", e); }
+  }
+  return out;
+}
+
+/**
  * Run the automatic merge if it's due (and nobody else is running it).
  * Returns null when it didn't run.
  */
@@ -112,16 +139,8 @@ export async function runAutoMerge(by: string, opts: { force?: boolean } = {}): 
       catch (e) { console.warn("[autoMerge] keep separate:", e); }
     }
 
-    for (const group of groupPairs(pairs.filter(isAutoMergePair))) {
-      const master = await pickMaster(group);
-      for (const r of group) {
-        if (r.id === master.id) continue;
-        try { await mergeStudents(master.id, r.id, by); res.merged++; }
-        catch (e) { console.warn("[autoMerge] merge:", e); res.failed++; }
-      }
-      try { if (await alignWing(master.id)) res.wingMoved++; }
-      catch (e) { console.warn("[autoMerge] wing:", e); }
-    }
+    const m = await mergeExactGroups(pairs.filter(isAutoMergePair), by);
+    res.merged = m.merged; res.failed = m.failed; res.wingMoved = m.wingMoved;
 
     if (res.merged || res.keptSeparate || res.failed) {
       logAction({

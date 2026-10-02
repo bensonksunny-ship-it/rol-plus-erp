@@ -1,5 +1,6 @@
 "use client";
 
+import { claimAdmissionNo, releaseAdmissionNo } from "@/services/student/admissionLock.service";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { getDoc, getDocs, collection, query, where, doc, updateDoc, writeBatch, serverTimestamp, arrayUnion, arrayRemove } from "firebase/firestore";
@@ -10,11 +11,13 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import type { Center, CenterBatch, Wing } from "@/types";
 import { DEFAULT_BATCH_NAME, effectiveBatches, explicitBatches } from "@/lib/batches";
+import { cancelClass, undoCancelClass, canCancelClass } from "@/services/attendance/attendance.service";
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import { courseLabel } from "@/lib/course";
 import { normAdmNo } from "@/lib/dedup";
 import { hasAdmissionNo, isActiveStudentStatus } from "@/lib/activeStudents";
+import { enforceSingleActiveCentre } from "@/services/student/singleCentre.service";
 import MergeDuplicatesModal from "@/components/dedup/MergeDuplicatesModal";
 import type { TeacherUser } from "@/types";
 import { ToastContainer } from "@/components/ui/Toast";
@@ -50,6 +53,9 @@ const EMPTY_FORM = {
   batches:     [] as CenterBatch[],
   demoClassDate:  "",
   firstClassDate: "",
+  subtitle:       "",
+  // ROL+ centre label only (Group / Personal) — never touches students' classType or fees.
+  classType:      "group" as "group" | "personal",
 };
 
 function newBatchId(): string {
@@ -353,8 +359,11 @@ function BatchesEditor({ batches, onChange, teachers, base, lockedIds }: {
  */
 async function syncStudentsToBatches(centerId: string, prev: CenterBatch[], next: CenterBatch[]): Promise<number> {
   const becameBatched = prev.length === 0 && next.length > 0;
+  // No batches left → the centre is one class again: clear leftover batch
+  // fields from its students (also tidies centres whose batches were removed earlier).
+  const unbatched = next.length === 0;
   const renamed = next.filter(b => { const old = prev.find(p => p.id === b.id); return old && old.name !== b.name; });
-  if (!becameBatched && renamed.length === 0) return 0;
+  if (!becameBatched && !unbatched && renamed.length === 0) return 0;
   const snap = await getDocs(query(collection(db, "users"), where("role", "==", "student"), where("centerId", "==", centerId)));
   const ids = new Set(next.map(b => b.id));
   const wb = writeBatch(db);
@@ -362,6 +371,10 @@ async function syncStudentsToBatches(centerId: string, prev: CenterBatch[], next
   snap.docs.forEach(d => {
     const st = d.data();
     const cur = typeof st.batchId === "string" ? st.batchId : "";
+    if (unbatched) {
+      if (cur || (typeof st.batch === "string" && st.batch)) { wb.update(d.ref, { batchId: null, batch: null, updatedAt: serverTimestamp() }); n++; }
+      return;
+    }
     if (becameBatched && (!cur || !ids.has(cur))) {
       wb.update(d.ref, { batchId: next[0].id, batch: next[0].name, updatedAt: serverTimestamp() }); n++; return;
     }
@@ -465,9 +478,21 @@ function canAssignAdmissionNo(role: string | null | undefined, wing: string | nu
  * batch, then the most attendance, then the oldest. The hidden copies are
  * returned so staff can merge them for real (MergeDuplicatesModal).
  */
-function dedupeRoster(list: CenterStudentRec[], attCount: Map<string, number>): { unique: CenterStudentRec[]; hidden: CenterStudentRec[] } {
-  const score = (r: CenterStudentRec) =>
+/**
+ * Which of one person's duplicate records the roster keeps — used by BOTH the
+ * centre modal (dedupeRoster) and the centre/batch grid cards, so a student with
+ * two records in different batches is counted in the same batch everywhere:
+ * active → in a batch → most attendance at this centre → oldest.
+ */
+function byRosterPreference(attCount: Map<string, number>) {
+  const score = (r: { uid: string; status: string; batchId?: string | null }) =>
     (isActiveStudentStatus(r.status) ? 1_000_000 : 0) + (r.batchId ? 100_000 : 0) + (attCount.get(r.uid) ?? 0);
+  return (a: { uid: string; status: string; batchId?: string | null; createdAt: string },
+          b: { uid: string; status: string; batchId?: string | null; createdAt: string }) =>
+    score(b) - score(a) || safeCompare(a.createdAt, b.createdAt);
+}
+
+function dedupeRoster(list: CenterStudentRec[], attCount: Map<string, number>): { unique: CenterStudentRec[]; hidden: CenterStudentRec[] } {
   const groups = new Map<string, CenterStudentRec[]>();
   for (const r of list) {
     const k = normAdmNo(r.admissionNo) || `uid:${r.uid}`;
@@ -476,7 +501,7 @@ function dedupeRoster(list: CenterStudentRec[], attCount: Map<string, number>): 
   }
   const unique: CenterStudentRec[] = [], hidden: CenterStudentRec[] = [];
   for (const g of groups.values()) {
-    g.sort((a, b) => score(b) - score(a) || safeCompare(a.createdAt, b.createdAt));
+    g.sort(byRosterPreference(attCount));
     unique.push(g[0]);
     hidden.push(...g.slice(1));
   }
@@ -501,10 +526,12 @@ function isManualPayment(t: CenterTxRec): boolean {
 
 type ViewTab = "attendance" | "students" | "insights";
 
-function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCount }: {
+function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCount, initialBatch = "all" }: {
   center: Center; onClose: () => void; teachers: TeacherUser[]; onSaved?: (updated: Center, rename: CenterRenameResult | null) => void;
-  /** Live active-student count after roster changes (deactivate / undo / restore / add). */
-  onActiveCount?: (centerId: string, count: number) => void;
+  /** Live active-student counts after roster changes — centre total + per batch id. */
+  onActiveCount?: (centerId: string, count: number, perBatch: Map<string, number>) => void;
+  /** Opened from a batch card → the roster starts filtered to that batch ("all" | batch id | "none"). */
+  initialBatch?: string;
 }) {
   // Local copy so a saved edit reflects immediately without waiting on the
   // parent's list to refetch — onSaved still fires so the grid stays in sync.
@@ -533,6 +560,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
       batches:    center.batches ?? [],
       demoClassDate:  center.demoClassDate  ?? "",
       firstClassDate: center.firstClassDate ?? "",
+      subtitle:       center.subtitle ?? "",
+      classType:      (center.classType === "personal" ? "personal" : "group") as "group" | "personal",
     });
     setEditDayError("");
     setEditErr("");
@@ -552,6 +581,21 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
   }
 
   const [confirmDeactivate, setConfirmDeactivate] = useState(false);
+
+  // Built at render time (needs the roster below).
+  function getBatchGridItems(): BatchGridItem[] {
+    return (center.batches ?? []).length > 0
+    ? (center.batches ?? []).map(b => ({
+        id: b.id, name: b.name, teacherUid: b.teacherUid || "",
+        days: b.daysOfWeek ?? [], startTime: b.startTime, endTime: b.endTime,
+        students: students.filter(st => st.batchId === b.id && countsAsActive(st)).length,
+      }))
+    : [{
+        id: null, name: DEFAULT_BATCH_NAME, teacherUid: center.teacherUid || "",
+        days: raw.daysOfWeek ?? [], startTime: raw.startTime ?? "", endTime: raw.endTime ?? "",
+        students: students.filter(countsAsActive).length,
+      }];
+  }
 
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
@@ -573,6 +617,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
         batches:    editForm.batches,
         demoClassDate:  editForm.demoClassDate,
         firstClassDate: editForm.firstClassDate,
+        subtitle:       editForm.subtitle.trim(),
+        classType:      editForm.wing === WINGS.ROL_PLUS ? editForm.classType : "group",
       });
       // Extra scheduling fields aren't in updateCenter's canonical whitelist —
       // patched directly, same as the page-level edit form does.
@@ -604,6 +650,8 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
         batches:    editForm.batches,
         demoClassDate:  editForm.demoClassDate,
         firstClassDate: editForm.firstClassDate,
+        subtitle:       editForm.subtitle.trim(),
+        classType:      editForm.wing === WINGS.ROL_PLUS ? editForm.classType : "group",
         daysOfWeek: editForm.daysOfWeek,
         startTime:  editForm.startTime,
         endTime:    editForm.endTime,
@@ -620,20 +668,84 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
   }
 
   const [tab, setTab] = useState<ViewTab>("students");
+  // Selected batch — shared by the batch cards and the roster's batch pills.
+  // "all" | batch id | "none" (students whose batch no longer exists).
+  const [batchFilter, setBatchFilter] = useState<string>(() => {
+    const bs = centerProp.batches ?? [];
+    return initialBatch === "all" && bs.length >= 2 ? bs[0].id : initialBatch;
+  });
   const [attRecs,  setAttRecs]  = useState<CenterAttRec[]>([]);
   const [students, setStudents] = useState<CenterStudentRec[]>([]);
   // Duplicate records (same admission no.) collapsed out of the roster.
   const [hiddenDups, setHiddenDups] = useState<CenterStudentRec[]>([]);
   const [showMerge, setShowMerge]   = useState(false);
-  const { role: viewerRole } = useAuth();
+  const { role: viewerRole, user: viewer } = useAuth();
   const canMergeDuplicates = !!viewerRole && ([ROLES.FOUNDER, ROLES.ADMIN, ROLES.DIRECTOR] as string[]).includes(viewerRole);
+
+  // ── Cancel today's class (Chief Teacher / Director / Admin / Founder) ──────
+  // Same action as Attendance → "🚫 Cancel class": every active student's mark
+  // for today becomes Cancelled (Teacher), Break stays. Offered only on a day
+  // this centre (or one of its batches) has class.
+  const todayLocal = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
+  const classToday = (() => {
+    const dow = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][new Date().getDay()];
+    const days = [...(raw.daysOfWeek ?? []), ...(center.batches ?? []).flatMap(b => b.daysOfWeek ?? [])].map(d => String(d).slice(0, 3).toLowerCase());
+    return days.includes(dow);
+  })();
+  const [cancelledToday, setCancelledToday] = useState(false);
+  const [confirmCancelToday, setConfirmCancelToday] = useState(false);
+  const [cancelTodayReason, setCancelTodayReason] = useState("");
+  const [cancellingToday, setCancellingToday] = useState(false);
+  const [cancelTodayMsg, setCancelTodayMsg] = useState("");
+  useEffect(() => {
+    let off = false;
+    getDoc(doc(db, "class_cancellations", `${center.id}_${todayLocal}`))
+      .then(snap => { if (!off) setCancelledToday(snap.exists()); })
+      .catch(() => {});
+    return () => { off = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [center.id]);
+  async function cancelTodaysClass() {
+    const uids = students.filter(st => countsAsActive(st)).map(st => st.uid);
+    setCancellingToday(true);
+    try {
+      const { cancelled, keptBreak } = await cancelClass({
+        centerId: center.id, date: todayLocal, studentUids: uids, markedBy: viewer?.uid ?? "", reason: cancelTodayReason,
+      });
+      setCancelledToday(true); setConfirmCancelToday(false); setCancelTodayReason("");
+      setCancelTodayMsg(`Today's class cancelled — ${cancelled.length} student${cancelled.length !== 1 ? "s" : ""} marked Cancelled${keptBreak.length ? `, ${keptBreak.length} kept on Break` : ""}.`);
+    } catch (err) {
+      console.error("Cancel today's class failed:", err);
+      setCancelTodayMsg("Couldn't cancel today's class — try again.");
+    } finally {
+      setCancellingToday(false);
+    }
+  }
+  /** Undo: every student's mark from before the cancellation comes back (or none). */
+  async function undoTodaysCancel() {
+    setCancellingToday(true); setCancelTodayMsg("");
+    try {
+      const { restored, cleared } = await undoCancelClass({ centerId: center.id, date: todayLocal, markedBy: viewer?.uid ?? "" });
+      setCancelledToday(false);
+      setCancelTodayMsg(`Cancellation undone — ${restored.length} mark${restored.length !== 1 ? "s" : ""} put back${cleared.length ? `, ${cleared.length} cleared to unmarked` : ""}.`);
+    } catch (err) {
+      console.error("Undo cancel failed:", err);
+      setCancelTodayMsg("Couldn't undo the cancellation — try again.");
+    } finally {
+      setCancellingToday(false);
+    }
+  }
   const [txs,      setTxs]      = useState<CenterTxRec[]>([]);
   const [loading,  setLoading]  = useState(true);
+  // Bumped after the roster is saved (Manage Active Students) → the roster re-reads
+  // Firestore quietly (no spinner), so the list matches what was written without
+  // closing and reopening the modal.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setLoading(true);
+      if (reloadKey === 0) setLoading(true);
       try {
         const [attSnap, stuSnap, txSnap] = await Promise.all([
           getDocs(query(collection(db, "attendance"), where("centerId", "==", center.id))),
@@ -683,7 +795,7 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
       }
     })();
     return () => { cancelled = true; };
-  }, [center.id]);
+  }, [center.id, reloadKey]);
 
   const studentMap = useMemo(() => {
     const m = new Map<string, string>();
@@ -732,13 +844,20 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
   }
 
   // Keep the centre card's "🎓 N" badge in step with this roster.
+  // Batches are independent: each batch card shows only its own active students.
   const activeCount = useMemo(() => students.filter(countsAsActive).length, [students]);
+  const perBatchActive = useMemo(() => {
+    const m = new Map<string, number>();
+    students.filter(countsAsActive).forEach(s => { if (s.batchId) m.set(s.batchId, (m.get(s.batchId) ?? 0) + 1); });
+    return m;
+  }, [students]);
+  const perBatchKey = [...perBatchActive.entries()].sort().map(([b, n]) => `${b}:${n}`).join(",");
   const loadedRef = useRef(false);
   useEffect(() => {
     if (loading) return;
     if (!loadedRef.current) { loadedRef.current = true; return; }   // skip the initial load
-    onActiveCount?.(center.id, activeCount);
-  }, [activeCount, loading]); // eslint-disable-line react-hooks/exhaustive-deps
+    onActiveCount?.(center.id, activeCount, perBatchActive);
+  }, [activeCount, perBatchKey, loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Assigns existing/new students to this centre and marks them Active —
   // updates their `centerId` (the source of truth for centre membership) and
@@ -766,12 +885,24 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
     });
     batch.update(doc(db, "centers", center.id), { studentUids: arrayUnion(...picked.map(p => p.uid)), updatedAt: serverTimestamp() });
     await batch.commit();
+    // One active centre per person: any other record of the same student
+    // (same admission no.) still active elsewhere is marked Inactive.
+    await Promise.all(picked.map(p => enforceSingleActiveCentre({
+      uid: p.uid, admissionNo: p.admissionNo, wing: wingOf(center), targetCenterId: center.id,
+    }).catch(err => console.error("[centre] single-centre check:", err))));
+    // Update the roster right away — students already listed (e.g. inactive here,
+    // or moving batch) get their new status/batch too, not only new arrivals.
+    const pickedById = new Map(picked.map(p => [p.uid, p]));
     setStudents(prev => {
       const existing = new Set(prev.map(s => s.uid));
+      const updated = prev.map(s => {
+        const p = pickedById.get(s.uid);
+        return p ? { ...s, status: "active", batchId: p.batchId ?? null, admissionNo: p.admissionNo || s.admissionNo } : s;
+      });
       const additions = picked
         .filter(p => !existing.has(p.uid))
         .map(p => ({ uid: p.uid, name: p.name, admissionNo: p.admissionNo, status: "active", createdAt: p.createdAt, photo: p.photo, instrument: p.instrument, batchId: p.batchId }));
-      return [...prev, ...additions];
+      return [...updated, ...additions];
     });
   }
 
@@ -800,9 +931,26 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
             <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" as const }}>
               <span style={styles.codeChip}>{(center as Center & { centerCode?: string }).centerCode || "-"}</span>
               <StatusBadge status={center.status} />
+              {cancelledToday && (
+                <span style={{ fontSize: 11, fontWeight: 700, color: "#4b5563", background: "#f3f4f6", border: "1px solid #d1d5db", borderRadius: 99, padding: "2px 9px" }}>🚫 Today&apos;s class cancelled</span>
+              )}
+              {cancelledToday && !editing && canCancelClass(viewerRole) && (
+                <button type="button" onClick={undoTodaysCancel} disabled={cancellingToday}
+                  title="Undo the cancellation — students get back the marks they had before"
+                  style={{ fontSize: 11, fontWeight: 700, color: "#4338ca", background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 99, padding: "2px 10px", cursor: "pointer" }}>
+                  {cancellingToday ? "Undoing…" : "↩ Undo"}
+                </button>
+              )}
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+            {!editing && classToday && !cancelledToday && canCancelClass(viewerRole) && center.status === "active" && (
+              <button onClick={() => { setConfirmCancelToday(true); setCancelTodayMsg(""); }} disabled={cancellingToday}
+                title="Mark today's class as cancelled for every active student"
+                style={{ ...viewStyles.editBtn, color: "#dc2626", borderColor: "#fecaca", background: "#fff" }}>
+                🚫 Cancel Today&apos;s Class
+              </button>
+            )}
             {!editing && (
               <button onClick={openEditMode} title="Edit center" style={viewStyles.editBtn}>✏ Edit</button>
             )}
@@ -810,12 +958,41 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
           </div>
         </div>
 
+        {(confirmCancelToday || cancelTodayMsg) && !editing && (
+          <div style={{ margin: "10px 20px 0", background: confirmCancelToday ? "#fef2f2" : "#f3f4f6", border: `1px solid ${confirmCancelToday ? "#fecaca" : "#e5e7eb"}`, borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column" as const, gap: 8 }}>
+            {confirmCancelToday ? (<>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b" }}>
+                Cancel today&apos;s class for {center.name} ({new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })})?
+              </div>
+              <div style={{ fontSize: 12, color: "#7f1d1d" }}>
+                All {students.filter(st => countsAsActive(st)).length} active students are marked <b>Cancelled (Teacher)</b>; anyone already on Break stays on Break. Teachers can re-mark P / A afterwards.
+              </div>
+              <input value={cancelTodayReason} onChange={e => setCancelTodayReason(e.target.value)} placeholder="Reason (optional) — e.g. teacher unwell, holiday"
+                style={formStyles.input} />
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmCancelToday(false)} disabled={cancellingToday} style={viewStyles.editBtn}>Keep class</button>
+                <button onClick={cancelTodaysClass} disabled={cancellingToday}
+                  style={{ ...viewStyles.editBtn, background: "#dc2626", color: "#fff", borderColor: "#dc2626" }}>
+                  {cancellingToday ? "Cancelling…" : "Yes, cancel class"}
+                </button>
+              </div>
+            </>) : (
+              <div style={{ fontSize: 12.5, color: "#374151" }}>{cancelTodayMsg}</div>
+            )}
+          </div>
+        )}
+
         {editing ? (
           <form onSubmit={handleSaveEdit} style={{ padding: "18px 20px", overflowY: "auto" as const, flex: 1 }}>
             <div style={formStyles.grid}>
               <FormField label="Name" required>
                 <input name="name" value={editForm.name} onChange={handleEditChange} required
                   placeholder="e.g. Koramangala Center" style={formStyles.input} />
+              </FormField>
+              <FormField label="Subtitle / Identifier" fullWidth>
+                <input name="subtitle" value={editForm.subtitle} onChange={handleEditChange} maxLength={40}
+                  placeholder="e.g. Main Branch, Keyboard Division, Offline Campus" style={formStyles.input} />
+                <span style={formStyles.helperText}>Optional — shown as a badge on the centre card to tell centres apart.</span>
               </FormField>
               <FormField label="Assigned Teacher">
                 <select name="teacherUid" value={editForm.teacherUid} onChange={handleEditChange} style={formStyles.input}>
@@ -842,6 +1019,15 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
                   </span>
                 )}
               </FormField>
+              {editForm.wing === WINGS.ROL_PLUS && (
+                <FormField label="Class Type">
+                  <select name="classType" value={editForm.classType} onChange={handleEditChange} style={formStyles.input}>
+                    <option value="group">Group Class</option>
+                    <option value="personal">Personal Class (1-on-1)</option>
+                  </select>
+                  <span style={formStyles.helperText}>Label on the centre card only — students&apos; class type and fees are unchanged.</span>
+                </FormField>
+              )}
               <FormField label="Start Time">
                 <input name="startTime" type="time" value={editForm.startTime} onChange={handleEditChange}
                   style={formStyles.input} />
@@ -889,47 +1075,46 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
             <div style={viewStyles.quickFacts}>
               <QuickFact label="Wing"     value={WING_LABELS[wingOf(center)] ?? "-"} />
               <QuickFact label="Teacher"  value={teacherLabel} />
-              {(center.batches ?? []).length === 0 && <>
-                <QuickFact label="Days"     value={raw.daysOfWeek?.join(", ") || formatTimesIn12h(center.timeSlot) || "-"} />
-                <QuickFact label="Time"     value={formatTimeRange12(raw.startTime, raw.endTime) || "-"} />
-              </>}
               {/* Primary metric = current strength; all-time registrations only as a subtle secondary line. */}
               <QuickFact label="Students" value={String(activeCount)} />
               {center.monthlyFee ? (
                 <QuickFact label="Monthly Fee" value={`₹${center.monthlyFee.toLocaleString("en-IN")}`} />
               ) : null}
-              {(center.batches ?? []).length === 0 && <QuickFact label="Batches" value={`${DEFAULT_BATCH_NAME} (centre schedule)`} />}
             </div>
 
-            {/* One card per batch — name, schedule, teacher, active students */}
-            {(center.batches ?? []).length > 0 && (
-              <div style={{ margin: "0 0 14px" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", letterSpacing: "0.06em", textTransform: "uppercase" as const, marginBottom: 6 }}>
-                  Batches ({(center.batches ?? []).length})
+            {/* Every batch as an equal card — teacher, days, time, students, actions */}
+            {(() => {
+              const all = getBatchGridItems();
+              if (all.length < 2) return null;
+              const tabBtn = (on: boolean): React.CSSProperties => ({
+                padding: "6px 12px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12.5, fontWeight: 700, fontFamily: "inherit",
+                background: on ? "#fff" : "transparent", color: on ? "#4338ca" : "#4b5563", boxShadow: on ? "0 1px 3px rgba(0,0,0,0.12)" : "none",
+              });
+              return (
+                <div role="tablist" aria-label="Batch" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const, marginBottom: 10 }}>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: "#6b7280", textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>Batch view:</span>
+                  <div style={{ display: "inline-flex", flexWrap: "wrap" as const, gap: 4, padding: 3, borderRadius: 10, background: "#f3f4f6" }}>
+                    {all.map(it => (
+                      <button key={it.id ?? "general"} type="button" role="tab" aria-selected={batchFilter === it.id}
+                        onClick={() => { if (it.id) { setBatchFilter(it.id); setTab("students"); } }} style={tabBtn(batchFilter === it.id)}>
+                        {it.name || "Unnamed batch"} ({it.students})
+                      </button>
+                    ))}
+                    <button type="button" role="tab" aria-selected={batchFilter === "all"} onClick={() => setBatchFilter("all")} style={tabBtn(batchFilter === "all")}>
+                      All batches ({activeCount})
+                    </button>
+                  </div>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 8 }}>
-                  {(center.batches ?? []).map((b, bi) => {
-                    const tUid = b.teacherUid || center.teacherUid;
-                    const t = teachers.find(x => x.uid === tUid);
-                    const n = students.filter(st => st.batchId === b.id && countsAsActive(st)).length;
-                    return (
-                      <div key={b.id} style={{ border: "1px solid #e0e7ff", background: "#f8faff", borderRadius: 10, padding: "8px 10px", minWidth: 0 }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                          <span style={{ fontSize: 13, fontWeight: 700, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{b.name || "Unnamed"}</span>
-                          <span style={{ fontSize: 10.5, fontWeight: 700, color: "#6b7280", flexShrink: 0 }}>Batch {bi + 1}</span>
-                        </div>
-                        <div style={{ fontSize: 12, color: "#4b5563", marginTop: 2 }}>
-                          {b.daysOfWeek.join(", ") || "—"}{(b.startTime || b.endTime) ? ` · ${formatTimeRange12(b.startTime, b.endTime)}` : ""}
-                        </div>
-                        <div style={{ fontSize: 11.5, color: "#6b7280", marginTop: 2 }}>
-                          👤 {t ? getTeacherDisplayName(t) : "Unassigned"} · 🎓 {n} active
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+              );
+            })()}
+            <BatchGrid
+              // Single-batch view: only the selected batch's card ("All batches" → every card).
+              items={(() => { const all = getBatchGridItems(); const one = all.filter(it => it.id === batchFilter); return one.length ? one : all; })()}
+              selectedId={batchFilter}
+              onSelect={id => { setBatchFilter(prev => (prev === id ? "all" : id)); setTab("students"); }}
+              teachers={teachers}
+              centreActive={center.status === "active"}
+            />
 
             {/* Sub-navigation tabs */}
             <div style={viewStyles.tabBar}>
@@ -979,9 +1164,12 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
                   onAdmissionNoAssigned={patchStudentAdmissionNo}
                   batches={explicitBatches(center as unknown as Record<string, unknown>)}
                   onAddStudents={addStudentsToCenter}
+                  onRosterSaved={() => setReloadKey(k => k + 1)}
                   wing={center.wing}
                   centerId={center.id}
                   centerName={center.name}
+                  batchFilter={batchFilter}
+                  onBatchFilterChange={setBatchFilter}
                 />
                 </>
               ) : (
@@ -990,6 +1178,108 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Batch grid (centre window) ───────────────────────────────────────────────
+// Every batch as an equal, first-class card: name + status, teacher, days &
+// time, enrolled students. Read-only — teacher, schedule and adding / removing
+// batches are all changed through the window's ✏ Edit button. A centre with no
+// batches shows its General Batch (the centre's own schedule) the same way.
+
+interface BatchGridItem {
+  /** null = the centre's implicit General Batch (no batches defined). */
+  id:        string | null;
+  name:      string;
+  teacherUid: string;
+  days:      string[];
+  startTime: string;
+  endTime:   string;
+  students:  number;
+}
+
+function BatchGrid({ items, selectedId, onSelect, teachers, centreActive }: {
+  items: BatchGridItem[];
+  /** Batch currently filtering the roster ("all" when none). */
+  selectedId?: string;
+  /** Click a card → filter the roster to that batch (again → all batches). */
+  onSelect?: (batchId: string) => void;
+  teachers: TeacherUser[];
+  centreActive: boolean;
+}) {
+  const keyOf = (id: string | null) => id ?? "__general__";
+
+  return (
+    <div style={{ margin: "0 0 14px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 800, color: "#4b5563", letterSpacing: "0.06em", textTransform: "uppercase" as const }}>
+          Batches ({items.length})
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 250px), 1fr))", gap: 10 }}>
+        {items.map((it, i) => {
+          const k = keyOf(it.id);
+          const time = formatTimeRange12(it.startTime, it.endTime);
+          return (
+            <div key={k}
+              // Only real batches filter the roster (the implicit General Batch is the whole centre).
+              onClick={e => {
+                if (!it.id || !onSelect || items.length < 2) return;
+                if ((e.target as HTMLElement).closest("select, button, input, a, label")) return;
+                onSelect(it.id);
+              }}
+              title={it.id && onSelect && items.length >= 2 ? (selectedId === it.id ? "Showing this batch — click to show all batches" : "Show only this batch's students") : undefined}
+              aria-pressed={it.id && items.length >= 2 ? selectedId === it.id : undefined}
+              style={{
+                border: selectedId === it.id ? "2px solid #4f46e5" : "1px solid #e0e7ff",
+                background: selectedId === it.id ? "#f5f7ff" : "#fff",
+                borderRadius: 12, padding: selectedId === it.id ? "11px 13px" : "12px 14px",
+                boxShadow: selectedId === it.id ? "0 0 0 3px rgba(79,70,229,0.15)" : "0 1px 3px rgba(17,24,39,0.05)",
+                cursor: it.id && onSelect && items.length >= 2 ? "pointer" : "default",
+                display: "flex", flexDirection: "column" as const, gap: 8, minWidth: 0,
+              }}>
+              {/* Title row: name · status · students */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, paddingBottom: 8, borderBottom: "1px solid #eef2ff" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 800, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
+                    {it.name || "Unnamed batch"}
+                  </div>
+                  <div style={{ display: "flex", gap: 5, marginTop: 3 }}>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: "#6b7280", background: "#f3f4f6", borderRadius: 99, padding: "1px 7px" }}>Batch {i + 1}</span>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, borderRadius: 99, padding: "1px 7px", ...(centreActive ? { color: "#15803d", background: "#dcfce7" } : { color: "#6b7280", background: "#f3f4f6" }) }}>
+                      {centreActive ? "● Active" : "Inactive"}
+                    </span>
+                  </div>
+                </div>
+                <span style={{ fontSize: 12, fontWeight: 800, color: "#4338ca", background: "#eef2ff", borderRadius: 8, padding: "4px 9px", flexShrink: 0, whiteSpace: "nowrap" as const }}>
+                  🎓 {it.students} student{it.students !== 1 ? "s" : ""}
+                </span>
+              </div>
+
+              {/* Teacher */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+                <span style={{ color: "#9ca3af", fontWeight: 600, width: 54, flexShrink: 0 }}>Teacher</span>
+                <span style={{ fontWeight: 700, color: "#111827" }}>
+                  {(() => { const t = teachers.find(x => x.uid === it.teacherUid); return t ? getTeacherDisplayName(t) : it.id ? "Same as centre teacher" : "Unassigned"; })()}
+                </span>
+              </div>
+
+              {/* Schedule */}
+              <div style={{ display: "flex", gap: 8, fontSize: 12.5 }}>
+                <span style={{ color: "#9ca3af", fontWeight: 600, width: 54, flexShrink: 0 }}>Days</span>
+                <span style={{ fontWeight: 600, color: "#374151" }}>{it.days.join(", ") || "Not set"}</span>
+              </div>
+              <div style={{ display: "flex", gap: 8, fontSize: 12.5 }}>
+                <span style={{ color: "#9ca3af", fontWeight: 600, width: 54, flexShrink: 0 }}>Time</span>
+                <span style={{ fontWeight: 700, color: "#111827" }}>{time || "Not set"}</span>
+              </div>
+
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -1152,7 +1442,10 @@ function CenterAttendanceHistoryTab({ records, studentMap, centerName }: {
 
 /** The centre's Inactive tab only lists students made inactive this recently. */
 
-function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, onAdmissionNoAssigned, onAddStudents, wing, centerId, centerName }: {
+function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, onAdmissionNoAssigned, onAddStudents, onRosterSaved, wing, centerId, centerName, batchFilter, onBatchFilterChange: setBatchFilter }: {
+  /** Selected batch ("all" | batch id | "none") — owned by the modal so the batch cards and pills stay in sync. */
+  batchFilter: string;
+  onBatchFilterChange: (id: string) => void;
   students: CenterStudentRec[];
   /** Persist one student's status (and update the roster). */
   onSetStatus: (uid: string, status: string) => Promise<void>;
@@ -1162,6 +1455,8 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
   /** This centre's named batches — resolves each student's batchId to a name. */
   batches: CenterBatch[];
   onAddStudents: (picked: PickedStudent[]) => Promise<void>;
+  /** Called once a Manage Active Students save has fully finished — the modal re-syncs the roster. */
+  onRosterSaved?: () => void;
   wing: Wing | undefined;
   centerId: string;
   centerName: string;
@@ -1175,7 +1470,6 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
   const [savingRoster, setSavingRoster] = useState(false);
   const [preview, setPreview]   = useState<CenterStudentRec | null>(null);
   // Batch filter — only offered when the centre runs more than one batch.
-  const [batchFilter, setBatchFilter] = useState<string>("all");
   // Teachers can only request an inactivation; leadership inactivates directly.
   const { user: me, role: myRole } = useAuth();
   const canApprove = canApproveDeactivation(myRole, wing);
@@ -1235,6 +1529,7 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
       }
     }
     setShowAdd(false);
+    onRosterSaved?.();   // re-sync the roster from Firestore (quietly)
     const parts = [
       picked.length ? `${picked.length} added as Active` : "",
       deactivate.length ? (canApprove ? `${deactivate.length} moved to Inactive` : `${deactivate.length} sent for inactivation review`) : "",
@@ -1349,7 +1644,7 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
         return (
           <div role="group" aria-label="Filter by batch" style={{ display: "flex", gap: 6, flexWrap: "wrap" as const, marginBottom: 10, alignItems: "center" }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", marginRight: 2 }}>🗂 Batch:</span>
-            <button type="button" onClick={() => setBatchFilter("all")} style={bp(batchFilter === "all")}>All ({listed.length})</button>
+            <button type="button" onClick={() => setBatchFilter("all")} style={bp(batchFilter === "all")}>All Batches ({listed.length})</button>
             {batches.map(b => (
               <button key={b.id} type="button" onClick={() => setBatchFilter(b.id)} style={bp(batchFilter === b.id)}>
                 {b.name || "Unnamed"} ({listed.filter(s => s.batchId === b.id).length})
@@ -1417,7 +1712,13 @@ function CenterStudentsTab({ students, batches, onSetStatus, onStatusChanged, on
             : <>Every active student has an admission number.</>}
         </div>
       ) : filtered.length === 0 ? (
-        <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>No students match.</div>
+        <div style={{ textAlign: "center" as const, padding: "32px 0", color: "#9ca3af", fontSize: 13 }}>
+          {search.trim() || batchFilter === "all"
+            ? "No students match."
+            : batchFilter === "none"
+              ? "No students without a batch."
+              : <>No {view === "needsAdmNo" ? "students needing an admission no." : "active students"} in <b>{batches.find(b => b.id === batchFilter)?.name || "this batch"}</b> yet.{view === "active" && <> Use the <strong>+</strong> button to add some.</>}</>}
+        </div>
       ) : (
         <>
         {view === "needsAdmNo" && (
@@ -1594,6 +1895,7 @@ function StudentPreviewModal({ student, centerName, batchName, wing, onClose, on
     setAdmBusy(true); setAdmErr("");
     try {
       if (await isAdmissionNoTaken(no)) throw new Error(`Admission number ${no} is already in use. Please enter a different one.`);
+      await claimAdmissionNo(String(wing || "rol_plus"), no, student.uid);   // one student per number in the wing
       await updateDoc(doc(db, "users", student.uid), {
         admissionNumber: no, admissionNo: no, studentID: no,
         admissionNoAutoGenerated: false,
@@ -1885,7 +2187,35 @@ function isRegisteredAtCenter(st: Record<string, unknown>, centerId: string, cen
 // see students already registered at this centre.
 const REGISTRY_SEARCH_ROLES: string[] = [ROLES.FOUNDER, ROLES.DIRECTOR, ROLES.CHIEF_TEACHER, ROLES.ADMIN];
 
-type AddCandidate = PickedStudent & { status: string; hereRegistered: boolean; currentCentre: string; activeElsewhere: boolean };
+type AddCandidate = PickedStudent & {
+  status: string; hereRegistered: boolean; currentCentre: string; activeElsewhere: boolean;
+  /** Other records of the same person (same admission no.) folded into this row. */
+  dupCount: number;
+};
+
+/**
+ * One row per person: records sharing an admission number (duplicate student
+ * docs) collapse to the one the roster would keep — registered at this centre
+ * first, then byRosterPreference (active → in a batch → oldest). The folded
+ * copies are never ticked, activated or inactivated from here; merge them in
+ * Registry → Scan & Merge Duplicates.
+ */
+function onePerPerson(list: AddCandidate[]): AddCandidate[] {
+  const groups = new Map<string, AddCandidate[]>();
+  for (const c of list) {
+    const k = normAdmNo(c.admissionNo) || `uid:${c.uid}`;
+    const g = groups.get(k);
+    if (g) g.push(c); else groups.set(k, [c]);
+  }
+  const prefer = byRosterPreference(new Map());
+  const out: AddCandidate[] = [];
+  groups.forEach(g => {
+    const best = g.length === 1 ? g[0]
+      : [...g].sort((a, b) => Number(b.hereRegistered) - Number(a.hereRegistered) || prefer(a, b))[0];
+    out.push({ ...best, dupCount: g.length - 1 });
+  });
+  return out;
+}
 
 function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, canApprove, onClose, onAssign }: {
   wing: Wing | undefined;
@@ -1924,7 +2254,7 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, ca
         ]);
         if (cancelled) return;
         const centreNames = new Map(ctrSnap.docs.map(d => [d.id, String(d.data().name ?? d.id)]));
-        const list = stuSnap.docs
+        const rows: AddCandidate[] = stuSnap.docs
           .filter(d => {
             const st = d.data();
             if (wing && !inWing(st, wing)) return false;
@@ -1951,9 +2281,11 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, ca
               hereRegistered: here,
               currentCentre,
               activeElsewhere: !here && !!currentCentre && isActiveStudentStatus(status),
+              dupCount:     0,
             };
           })
-          .filter(s => !excludeUids.has(s.uid))
+          .filter(s => !excludeUids.has(s.uid));
+        const list = onePerPerson(rows)
           // This centre's active roster first, then its inactive students, then the rest of the register.
           .sort((a, b) =>
             Number(b.hereRegistered && isActiveStudentStatus(b.status)) - Number(a.hereRegistered && isActiveStudentStatus(a.status))
@@ -2067,7 +2399,15 @@ function AddStudentsModal({ wing, centerId, centerName, batches, excludeUids, ca
                       {s.photo ? <img src={s.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initials}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{s.name}</div>
+                      <div style={{ fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>
+                        {s.name}
+                        {s.dupCount > 0 && (
+                          <span title={`This student has ${s.dupCount + 1} records with the same admission number — shown once here. Merge them in Registry → Scan & Merge Duplicates.`}
+                            style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#92400e", background: "#fef3c7", borderRadius: 99, padding: "1px 7px" }}>
+                            {s.dupCount + 1} records
+                          </span>
+                        )}
+                      </div>
                       <div style={{ fontSize: 11, color: "#9ca3af" }}>
                         {blocked
                           ? <span style={{ color: "#b91c1c", fontWeight: 700 }}>⚠ no adm. no. — assign one first</span>
@@ -2320,6 +2660,8 @@ function CentersContent() {
   const [showForm, setShowForm]     = useState(false);
   const [editTarget, setEditTarget] = useState<Center | null>(null);
   const [viewTarget, setViewTarget] = useState<Center | null>(null);
+  // Batch card that opened the modal ("all" for a whole-centre card).
+  const [viewBatch, setViewBatch] = useState<string>("all");
   const [deleteTarget, setDeleteTarget] = useState<Center | null>(null);
   const [showMatrix, setShowMatrix] = useState(false);
 
@@ -2365,6 +2707,8 @@ function CentersContent() {
   }), [centers, earliestAdmissions]);
   const activeCentersList   = useMemo(() => sortedCenters.filter(c => c.status === "active"), [sortedCenters]);
   const inactiveCentersList = useMemo(() => sortedCenters.filter(c => c.status !== "active"), [sortedCenters]);
+  // Inactive centres stay folded away until the header is clicked.
+  const [isInactiveExpanded, setIsInactiveExpanded] = useState(false);
   const pendingFirstClass   = useMemo(() => activeCentersList.filter(needsFirstClassDate), [activeCentersList]);
   const firstClassInputRef  = useRef<HTMLInputElement>(null);
 
@@ -2395,7 +2739,7 @@ function CentersContent() {
       setCached(`centers:${wing}:teachers`, sortedTeachers);
 
       const counts = new Map<string, number>();
-      const counted = new Set<string>();   // centre|admission no. — one count per person (duplicate records ignored)
+      const people = new Map<string, { uid: string; cid: string; status: string; batchId: string | null; createdAt: string }[]>();   // centre|admission no. → that person's active records
       const earliest = new Map<string, string>();
       studentSnap.docs.forEach(d => {
         const st = d.data();
@@ -2409,9 +2753,28 @@ function CentersContent() {
         if (!hasAdmissionNo(st.admissionNo ?? st.admissionNumber)) return;   // held until assigned
         if (st.status === "merged") return;
         const personKey = `${cid}|${normAdmNo(String(st.admissionNo ?? st.admissionNumber ?? ""))}`;
-        if (counted.has(personKey)) return;
-        counted.add(personKey);
-        counts.set(cid, (counts.get(cid) ?? 0) + 1);
+        const rec = { uid: d.id, cid, status: String(st.status ?? st.studentStatus ?? ""), batchId: (st.batchId ?? null) as string | null, createdAt: toISODateLocal(st.createdAt) };
+        const g = people.get(personKey);
+        if (g) g.push(rec); else people.set(personKey, [rec]);
+      });
+      // One count per person. When a person has duplicate records, keep the same
+      // record the centre modal keeps (byRosterPreference) — that needs their
+      // attendance here, fetched only for those few duplicate records.
+      const dupRecs = [...people.values()].filter(g => g.length > 1).flat();
+      const dupAtt = new Map<string, number>();
+      for (let i = 0; i < dupRecs.length; i += 30) {
+        const chunk = dupRecs.slice(i, i + 30);
+        const centreOf = new Map(chunk.map(r => [r.uid, r.cid]));
+        const snap = await getDocs(query(collection(db, "attendance"), where("studentUid", "in", chunk.map(r => r.uid)))).catch(() => null);
+        snap?.docs.forEach(a => {
+          const uid = a.data().studentUid as string;
+          if (a.data().centerId === centreOf.get(uid)) dupAtt.set(uid, (dupAtt.get(uid) ?? 0) + 1);
+        });
+      }
+      people.forEach(g => {
+        const best = g.length > 1 ? [...g].sort(byRosterPreference(dupAtt))[0] : g[0];
+        counts.set(best.cid, (counts.get(best.cid) ?? 0) + 1);
+        if (best.batchId) counts.set(`${best.cid}|${best.batchId}`, (counts.get(`${best.cid}|${best.batchId}`) ?? 0) + 1);
       });
       setActiveCounts(counts);
       setCached(`centers:${wing}:activeCounts`, counts);
@@ -2508,6 +2871,8 @@ function CentersContent() {
       batches:    center.batches ?? [],
       demoClassDate:  center.demoClassDate  ?? "",
       firstClassDate: center.firstClassDate ?? "",
+      subtitle:       center.subtitle ?? "",
+      classType:      (center.classType === "personal" ? "personal" : "group") as "group" | "personal",
     });
     setDayError("");
     setShowForm(true);
@@ -2603,6 +2968,8 @@ function CentersContent() {
           batches:    form.batches,
           demoClassDate:  form.demoClassDate,
           firstClassDate: form.firstClassDate,
+          subtitle:       form.subtitle.trim(),
+          classType:      form.wing === WINGS.ROL_PLUS ? form.classType : "group",
         });
         // patch extra fields directly since updateCenter whitelists known Center fields
         const { doc: fsDoc, updateDoc, serverTimestamp } = await import("firebase/firestore");
@@ -2636,6 +3003,8 @@ function CentersContent() {
           batches:     form.batches,
           demoClassDate:  form.demoClassDate,
           firstClassDate: form.firstClassDate,
+          subtitle:       form.subtitle.trim(),
+          classType:      form.wing === WINGS.ROL_PLUS ? form.classType : "group",
           ...(({ daysOfWeek: form.daysOfWeek, startTime: form.startTime, endTime: form.endTime }) as object),
         } as Parameters<typeof createCenter>[0]);
         toast(
@@ -2665,11 +3034,15 @@ function CentersContent() {
       {viewTarget && (
         <ViewModal
           center={viewTarget}
-          onClose={() => setViewTarget(null)}
+          onClose={() => { setViewTarget(null); setViewBatch("all"); }}
           teachers={teachers}
-          onActiveCount={(cid, n) => setActiveCounts(prev => {
+          initialBatch={viewBatch}
+          onActiveCount={(cid, n, perBatch) => setActiveCounts(prev => {
             const next = new Map(prev);
             next.set(cid, n);
+            // Replace this centre's per-batch counts so each batch card updates on its own.
+            [...next.keys()].forEach(k => { if (k.startsWith(`${cid}|`)) next.delete(k); });
+            perBatch.forEach((c, bid) => next.set(`${cid}|${bid}`, c));
             setCached(`centers:${wing}:activeCounts`, next);
             return next;
           })}
@@ -2821,6 +3194,11 @@ function CentersContent() {
                       ? <span style={formStyles.helperText}>The new name is updated on this centre&apos;s students, admissions and rosters when you save.</span>
                       : null}
               </FormField>
+              <FormField label="Subtitle / Identifier" fullWidth>
+                <input name="subtitle" value={form.subtitle} onChange={handleChange} maxLength={40}
+                  placeholder="e.g. Main Branch, Keyboard Division, Offline Campus" style={formStyles.input} />
+                <span style={formStyles.helperText}>Optional — shown as a badge on the centre card to tell centres apart.</span>
+              </FormField>
               <FormField label="Status">
                 <select name="status" value={form.status} onChange={handleChange} style={formStyles.input}>
                   <option value="active">Active</option>
@@ -2838,6 +3216,15 @@ function CentersContent() {
                   </span>
                 )}
               </FormField>
+              {form.wing === WINGS.ROL_PLUS && (
+                <FormField label="Class Type">
+                  <select name="classType" value={form.classType} onChange={handleChange} style={formStyles.input}>
+                    <option value="group">Group Class</option>
+                    <option value="personal">Personal Class (1-on-1)</option>
+                  </select>
+                  <span style={formStyles.helperText}>Label on the centre card only — students&apos; class type and fees are unchanged.</span>
+                </FormField>
+              )}
             </div>
           </section>
 
@@ -2939,34 +3326,95 @@ function CentersContent() {
         <>
           {activeCentersList.length === 0 ? (
             <div style={styles.stateRow}>No active centers.</div>
-          ) : (
-            <div style={styles.grid}>
-              {activeCentersList.map(center => (
-                <CenterCard key={center.id} center={center}
-                  teachers={teachers}
-                  activeCount={activeCounts.get(center.id) ?? 0}
-                  onView={() => setViewTarget(center)}
-                  onEdit={() => openEdit(center)}
-                  onDelete={() => setDeleteTarget(center)} />
-              ))}
-            </div>
-          )}
+          ) : (() => {
+            const renderCards = (list: Center[]) => list.flatMap(center => {
+                const handlers = {
+                  onView: () => { setViewBatch("all"); setViewTarget(center); },
+                  onEdit: () => openEdit(center),
+                  onDelete: () => setDeleteTarget(center),
+                };
+                // Centre + batch = one operational card when a centre runs 2+ batches
+                // (lib/batchUnits); each shows its own batch, teacher and students.
+                const batches = center.batches ?? [];
+                if (batches.length < 2) {
+                  return [<CenterCard key={center.id} center={center} teachers={teachers}
+                    activeCount={activeCounts.get(center.id) ?? 0} {...handlers} />];
+                }
+                const perBatch = batches.map(b => activeCounts.get(`${center.id}|${b.id}`) ?? 0);
+                const noBatch = Math.max(0, (activeCounts.get(center.id) ?? 0) - perBatch.reduce((a, n) => a + n, 0));
+                return [
+                  ...batches.map((b, i) => (
+                    <CenterCard key={`${center.id}|${b.id}`} center={center} batch={b} teachers={teachers}
+                      activeCount={perBatch[i]} {...handlers}
+                      onView={() => { setViewBatch(b.id); setViewTarget(center); }} />
+                  )),
+                  ...(noBatch > 0 ? [
+                    <CenterCard key={`${center.id}|none`} center={center} batch={{ id: "", name: "No batch", daysOfWeek: [], startTime: "", endTime: "" }}
+                      teachers={teachers} activeCount={noBatch} {...handlers}
+                      onView={() => { setViewBatch("none"); setViewTarget(center); }} />,
+                  ] : []),
+                ];
+              });
+            // ROL+ only: 1-on-1 classes set up as their own centre get their own section
+            // (centre label only — students' class type / fees are never touched).
+            const isPersonal = (c: Center) => wingOf(c) === WINGS.ROL_PLUS && c.classType === "personal";
+            const personal = activeCentersList.filter(isPersonal);
+            const group    = activeCentersList.filter(c => !isPersonal(c));
+            if (personal.length === 0) return <div style={styles.grid}>{renderCards(group)}</div>;
+            const sectionHead = (label: string, n: number, hint: string, tone: { fg: string; bg: string; border: string }) => (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "4px 0 12px" }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: tone.fg, letterSpacing: 0.4, textTransform: "uppercase" as const }}>{label}</span>
+                <span style={{ fontSize: 11.5, fontWeight: 800, color: tone.fg, background: tone.bg, border: `1px solid ${tone.border}`, borderRadius: 999, padding: "1px 9px" }}>{n}</span>
+                <span style={{ fontSize: 12, color: "#9ca3af" }}>{hint}</span>
+                <span aria-hidden style={{ flex: 1, height: 1, background: "#e5e7eb" }} />
+              </div>
+            );
+            return (
+              <>
+                {group.length > 0 && (
+                  <section aria-label="Group classes" style={{ marginBottom: 26 }}>
+                    {sectionHead("Group Classes", group.length, "centres & branches", { fg: "#4338ca", bg: "#eef2ff", border: "#c7d2fe" })}
+                    <div style={styles.grid}>{renderCards(group)}</div>
+                  </section>
+                )}
+                <section aria-label="Personal classes"
+                  style={{ background: "#faf5ff", border: "1px solid #e9d5ff", borderRadius: 14, padding: "14px 14px 16px" }}>
+                  {sectionHead("Personal Classes", personal.length, "1-on-1 sessions", { fg: "#7e22ce", bg: "#f3e8ff", border: "#e9d5ff" })}
+                  <div style={styles.grid}>{renderCards(personal)}</div>
+                </section>
+              </>
+            );
+          })()}
 
           {inactiveCentersList.length > 0 && (
             <div style={{ marginTop: 28 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#6b7280", letterSpacing: 0.5, textTransform: "uppercase" as const, marginBottom: 14, paddingBottom: 6, borderBottom: "2px solid #e5e7eb" }}>
-                Inactive Centers ({inactiveCentersList.length})
-              </div>
-              <div style={styles.grid}>
-                {inactiveCentersList.map(center => (
-                  <CenterCard key={center.id} center={center}
-                    teachers={teachers}
-                    activeCount={activeCounts.get(center.id) ?? 0}
-                    onView={() => setViewTarget(center)}
-                    onEdit={() => openEdit(center)}
-                    onDelete={() => setDeleteTarget(center)} />
-                ))}
-              </div>
+              <button type="button" onClick={() => setIsInactiveExpanded(v => !v)}
+                aria-expanded={isInactiveExpanded} aria-controls="inactive-centres"
+                style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+                  background: isInactiveExpanded ? "#f3f4f6" : "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 10,
+                  cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+                  marginBottom: isInactiveExpanded ? 14 : 0, transition: "background 0.15s" }}
+                onMouseEnter={e => (e.currentTarget.style.background = "#f3f4f6")}
+                onMouseLeave={e => (e.currentTarget.style.background = isInactiveExpanded ? "#f3f4f6" : "#f9fafb")}>
+                <span aria-hidden style={{ fontSize: 11, color: "#6b7280", display: "inline-block",
+                  transform: isInactiveExpanded ? "rotate(90deg)" : "none", transition: "transform 0.2s" }}>▶</span>
+                <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: "#6b7280", letterSpacing: 0.5, textTransform: "uppercase" as const }}>
+                  Inactive Centers ({inactiveCentersList.length})
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#9ca3af" }}>{isInactiveExpanded ? "Hide" : "Show"}</span>
+              </button>
+              {isInactiveExpanded && (
+                <div id="inactive-centres" style={styles.grid}>
+                  {inactiveCentersList.map(center => (
+                    <CenterCard key={center.id} center={center}
+                      teachers={teachers}
+                      activeCount={activeCounts.get(center.id) ?? 0}
+                      onView={() => setViewTarget(center)}
+                      onEdit={() => openEdit(center)}
+                      onDelete={() => setDeleteTarget(center)} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </>
@@ -3009,15 +3457,17 @@ function getCenterHue(name: string): number {
 // Minimal card: name, teacher, wing tag and active-student count. Schedule,
 // batches, demo / first-class dates and the roster live in the detail modal
 // (click the card). Edit / Delete stay behind the ⋮ menu. Both wings.
-function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }: {
+function CenterCard({ center, batch, teachers, activeCount, onView, onEdit, onDelete }: {
   center: Center; teachers: TeacherUser[]; activeCount: number;
+  /** Set for a centre with 2+ batches: this card is that one batch. */
+  batch?: CenterBatch;
   onView: () => void; onEdit: () => void; onDelete: () => void;
 }) {
   const [hover, setHover]     = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   // Centre teacher, else the batch teachers (a centre can be run by batch teachers only).
-  const teacherNames = [...centreTeacherUids(center.teacherUid, center.batches)]
+  const teacherNames = (batch ? [batch.teacherUid || center.teacherUid] : [...centreTeacherUids(center.teacherUid, center.batches)])
     .map(uid => teachers.find(t => t.uid === uid))
     .filter((t): t is TeacherUser => !!t)
     .map(t => getTeacherDisplayName(t));
@@ -3027,6 +3477,17 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
   const batchLabel = cardBatches.length === 0
     ? DEFAULT_BATCH_NAME
     : `${cardBatches[0].name || "Unnamed batch"}${cardBatches.length > 1 ? ` (+${cardBatches.length - 1})` : ""}`;
+  // Every card shows one batch with equal weight: the split batch, the centre's
+  // only batch, or its General Batch (the centre's own schedule). An unsplit
+  // centre with several batches (inactive list) keeps the summary label.
+  const rawC = center as Center & { daysOfWeek?: string[]; startTime?: string; endTime?: string };
+  const shown: { name: string; days: string[]; start: string; end: string; teacherUid: string } | null =
+    batch ? { name: batch.name || "Unnamed batch", days: batch.daysOfWeek ?? [], start: batch.startTime, end: batch.endTime, teacherUid: batch.teacherUid || center.teacherUid }
+    : cardBatches.length === 1 ? { name: cardBatches[0].name || "Unnamed batch", days: cardBatches[0].daysOfWeek ?? [], start: cardBatches[0].startTime, end: cardBatches[0].endTime, teacherUid: cardBatches[0].teacherUid || center.teacherUid }
+    : cardBatches.length === 0 ? { name: DEFAULT_BATCH_NAME, days: rawC.daysOfWeek ?? [], start: rawC.startTime ?? "", end: rawC.endTime ?? "", teacherUid: center.teacherUid }
+    : null;
+  const shownTeacher = shown ? teachers.find(t => t.uid === shown.teacherUid) : undefined;
+  const shownTime = shown ? formatTimeRange12(shown.start, shown.end) : "";
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -3048,7 +3509,15 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
       title="Open centre details"
     >
       <div style={styles.cardHeader}>
-        <div style={{ ...styles.cardName, color: "var(--center-hue)" }}>{center.name}</div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ ...styles.cardName, color: "var(--center-hue)" }}>{center.name}</div>
+          {(batch ? batch.name : center.subtitle?.trim()) && (
+            <span title={batch ? "Batch" : "Centre identifier"}
+              style={{ display: "inline-block", marginTop: 4, fontSize: 11.5, fontWeight: 800, color: "#fff", background: "#4f46e5", borderRadius: 6, padding: "2px 9px" }}>
+              {batch ? batch.name : center.subtitle!.trim()}
+            </span>
+          )}
+        </div>
         <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
             onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
@@ -3070,16 +3539,35 @@ function CenterCard({ center, teachers, activeCount, onView, onEdit, onDelete }:
           )}
         </div>
       </div>
-      <div style={styles.cardMeta} title={cardBatches.map(b => b.name).filter(Boolean).join(", ") || undefined}>
-        {teacherNames.length
-          ? <span style={styles.cardTeacher} title={teacherNames.join(", ")}>
-              {teacherNames[0]}{teacherNames.length > 1 && <span style={{ color: "var(--color-text-secondary)" }}> +{teacherNames.length - 1}</span>}
+      {shown ? (
+        <div style={{ display: "flex", flexDirection: "column" as const, gap: 4, fontSize: 12.5 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600, color: shownTeacher ? "var(--color-text-primary)" : "#9ca3af", minWidth: 0 }}>
+            <span aria-hidden style={{ width: 20, height: 20, borderRadius: "50%", background: "#e0e7ff", color: "#4338ca", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 800, flexShrink: 0 }}>
+              {shownTeacher ? getTeacherDisplayName(shownTeacher).trim().charAt(0).toUpperCase() : "?"}
             </span>
-          : <span style={{ color: "#9ca3af", flexShrink: 0 }}>Unassigned</span>}
-        <span style={{ color: "var(--color-text-secondary)", flexShrink: 0 }}>•</span>
-        <span style={styles.cardBatch}>{batchLabel}</span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{shownTeacher ? getTeacherDisplayName(shownTeacher) : "Unassigned"}</span>
+          </span>
+          <span style={{ color: "var(--color-text-secondary)" }}>
+            📅 {shown.days.join(", ") || "No days set"}{shownTime ? <> · ⏰ {shownTime}</> : null}
+          </span>
+        </div>
+      ) : (
+        <div style={styles.cardMeta} title={cardBatches.map(b => b.name).filter(Boolean).join(", ") || undefined}>
+          {teacherNames.length
+            ? <span style={styles.cardTeacher} title={teacherNames.join(", ")}>
+                {teacherNames[0]}{teacherNames.length > 1 && <span style={{ color: "var(--color-text-secondary)" }}> +{teacherNames.length - 1}</span>}
+              </span>
+            : <span style={{ color: "#9ca3af", flexShrink: 0 }}>Unassigned</span>}
+          <span style={{ color: "var(--color-text-secondary)", flexShrink: 0 }}>•</span>
+          <span style={styles.cardBatch}>{batchLabel}</span>
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const }}>
+        <span style={styles.activeStudentsBadge}>👤 {activeCount} Active</span>
+        {wingOf(center) === WINGS.ROL_PLUS && (center.classType === "personal"
+          ? <span title="Personal Class (1-on-1)" style={{ fontSize: 11, fontWeight: 700, color: "#92400e", background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 99, padding: "2px 9px" }}>Personal</span>
+          : <span title="Group Class" style={{ fontSize: 11, fontWeight: 700, color: "#3730a3", background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 99, padding: "2px 9px" }}>Group</span>)}
       </div>
-      <span style={styles.activeStudentsBadge}>👤 {activeCount} Active</span>
     </div>
   );
 }

@@ -11,6 +11,7 @@ import { useWing } from "@/hooks/useWing";
 import { useRoleHub } from "@/hooks/useRoleHub";
 import { clearPersistedSession, signOut } from "@/services/firebase/auth.service";
 import ThemeToggle from "@/components/layout/ThemeToggle";
+import NotificationBell from "@/components/notifications/NotificationBell";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import { CAPABILITIES, type Capability } from "@/config/permissions";
 import type { Role } from "@/types";
@@ -70,6 +71,7 @@ const OFFICE: string = ROLES.OFFICE_MANAGER;
 
 const NAV_TOP: NavItem[] = [
   // Leadership (Founder / Admin / Director / Chief Teacher)
+  { label: "Founder Suite", icon: "👑", href: "/dashboard/founder",  roles: [ROLES.FOUNDER], matchPrefix: "/dashboard/founder" },
   { label: "Center Suite", icon: "⊞", href: "/dashboard",            roles: LEADERSHIP, capability: C.DASHBOARD_VIEW },
   { label: "Enrollments",  icon: "🏫", href: "/dashboard/enrollments", roles: LEADERSHIP, capability: [C.CENTRES_MANAGE, C.CENTRES_EDIT_SCHEDULE, C.STUDENTS_VIEW_ALL, C.STUDENTS_MANAGE, C.STAFF_VIEW], matchPrefix: "/dashboard/enrollments,/dashboard/centers,/dashboard/students,/dashboard/teachers" },
   { label: "Attendance",   icon: "✓",  href: "/dashboard/attendance", roles: LEADERSHIP, capability: C.ATTENDANCE_VIEW_ALL },
@@ -159,6 +161,8 @@ function NavGroups({
   setOpenGroups,
   alertCount,
   onNavigate,
+  pendingHref,
+  onStartNav,
 }: {
   topNavItems:   ResolvedNavItem[];
   visibleGroups: ResolvedNavGroup[];
@@ -167,28 +171,35 @@ function NavGroups({
   setOpenGroups: (updater: (prev: Set<string>) => Set<string>) => void;
   alertCount:    number;
   onNavigate?:   () => void;
+  /** Item the user just clicked, until its page opens — highlighted at once. */
+  pendingHref:   string | null;
+  onStartNav:    (href: string) => void;
 }) {
+  // While a click is in flight the clicked item is the highlighted one.
+  const shown = (item: ResolvedNavItem) => (pendingHref ? pendingHref === item.resolvedHref : isActive(item));
   return (
     <>
       {topNavItems.map(item => {
-        const active = isActive(item);
+        const active = shown(item);
+        const loading = pendingHref === item.resolvedHref;
         return (
           <Link
             key={item.resolvedHref}
             href={item.resolvedHref}
             prefetch={true}
-            onClick={onNavigate}
+            onClick={() => { onStartNav(item.resolvedHref); onNavigate?.(); }}
+            aria-busy={loading || undefined}
             style={{ ...s.navItem, ...(active ? s.navItemActive : {}), marginBottom: 4 }}
           >
             <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>{item.icon}</span>
             <span style={s.navLabel}>{item.label}</span>
-            {active && <span style={s.navActivePip} />}
+            {loading ? <span className="rl-nav-spin" aria-hidden /> : active && <span style={s.navActivePip} />}
           </Link>
         );
       })}
       {visibleGroups.map((group) => {
         const isOpen    = openGroups.has(group.label);
-        const hasActive = group.visibleItems.some(item => isActive(item));
+        const hasActive = group.visibleItems.some(item => shown(item));
 
         return (
           <div key={group.label} style={s.groupWrap}>
@@ -216,13 +227,15 @@ function NavGroups({
             {isOpen && (
               <div style={s.groupItems}>
                 {group.visibleItems.map(item => {
-                  const active = isActive(item);
+                  const active = shown(item);
+                  const loading = pendingHref === item.resolvedHref;
                   return (
                     <Link
                       key={item.resolvedHref}
                       href={item.resolvedHref}
                       prefetch={true}
-                      onClick={onNavigate}
+                      onClick={() => { onStartNav(item.resolvedHref); onNavigate?.(); }}
+                      aria-busy={loading || undefined}
                       style={{ ...s.navItem, ...s.navItemSub, ...(active ? s.navItemActive : {}) }}
                     >
                       <span style={{ ...s.navIcon, ...(active ? s.navIconActive : {}) }}>
@@ -232,7 +245,7 @@ function NavGroups({
                       {item.label === "Alerts" && alertCount > 0 && (
                         <span style={s.navBadge}>{alertCount}</span>
                       )}
-                      {active && <span style={s.navActivePip} />}
+                      {loading ? <span className="rl-nav-spin" aria-hidden /> : active && <span style={s.navActivePip} />}
                     </Link>
                   );
                 })}
@@ -314,11 +327,39 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const isMobile          = useIsMobile();
   const [drawerOpen,  setDrawerOpen]  = useState(false);
   const [openGroups,  setOpenGroups]  = useState<Set<string>>(new Set());
+  // Instant click feedback: the clicked menu item lights up (with a spinner) and a
+  // progress bar runs along the top until the new page's URL is reached.
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
+  useEffect(() => { setPendingHref(null); }, [pathname]);
+  useEffect(() => {
+    if (!pendingHref) return;
+    const t = setTimeout(() => setPendingHref(null), 30_000);   // never stick if a navigation is abandoned
+    return () => clearTimeout(t);
+  }, [pendingHref]);
+  const startNav = useCallback((href: string) => {
+    if (href.split("?")[0] !== pathname) setPendingHref(href);
+  }, [pathname]);
   const redirectingRef  = useRef(false);
   const hasRestoredRef  = useRef(false);
 
   const canSeeAlerts = capabilities.has(CAPABILITIES.ALERTS_VIEW);
   const alertCount   = useAlertCount(canSeeAlerts);
+
+  // Exact duplicate students (same admission no. + name) merge on their own —
+  // the user asked for it (2026-10-02). Leadership sessions trigger it; the
+  // service's lock keeps it to one run per 6 h across everyone, logs it, and
+  // archives (never deletes) the merged copies.
+  const autoMergeRef = useRef(false);
+  useEffect(() => {
+    const r = user?.role as string | undefined;
+    const lead = r === ROLES.FOUNDER || r === "super_admin" || r === ROLES.ADMIN || r === ROLES.DIRECTOR;
+    if (!user?.uid || !lead || autoMergeRef.current) return;
+    autoMergeRef.current = true;
+    import("@/services/dedup/autoMerge.service")
+      .then(m => m.runAutoMerge(user.uid))
+      .then(res => { if (res) console.info("[autoMerge]", res); })
+      .catch(e => console.warn("[autoMerge]", e));
+  }, [user?.uid, user?.role]);
 
   // Roles that live on the leadership dashboard (never bounced off /dashboard).
   const isLeadershipRole = !!user && LEADERSHIP.includes(user.role);
@@ -500,6 +541,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             <span style={s.mobilePageTitle}>{pageTitle}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <NotificationBell />
             {canSeeAlerts && alertCount > 0 && (
               <Link href="/dashboard/alerts" style={s.alertBubble}>
                 🔔<span style={s.alertBadge}>{alertCount}</span>
@@ -539,6 +581,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               setOpenGroups={setOpenGroups}
               alertCount={alertCount}
               onNavigate={() => setDrawerOpen(false)}
+              pendingHref={pendingHref}
+              onStartNav={startNav}
             />
           </nav>
           <div style={s.drawerFoot}>
@@ -561,16 +605,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         </aside>
 
         <main style={s.mobileMain}>{children}</main>
+        {pendingHref && <div className="rl-nav-progress" role="progressbar" aria-label="Loading page" />}
 
         {bottomNav.length > 0 && (
           <nav className="rl-bn">
             {bottomNav.map(item => {
-              const active = isActive(item);
+              const active = pendingHref ? pendingHref === item.resolvedHref : isActive(item);
               return (
                 <Link
                   key={item.resolvedHref}
                   href={item.resolvedHref}
                   prefetch={true}
+                  onClick={() => startNav(item.resolvedHref)}
                   className={`rl-bn-item${active ? " rl-active" : ""}`}
                 >
                   <span className="rl-bn-icon">{item.icon}</span>
@@ -615,6 +661,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             openGroups={openGroups}
             setOpenGroups={setOpenGroups}
             alertCount={alertCount}
+            pendingHref={pendingHref}
+            onStartNav={startNav}
           />
         </nav>
 
@@ -645,6 +693,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             <span style={s.breadPage}>{pageTitle}</span>
           </div>
           <div style={s.topbarRight}>
+            <NotificationBell />
             {canSeeAlerts && (
               <Link href="/dashboard/alerts" style={s.alertBubble} aria-label={`${alertCount} alerts`}>
                 <svg width="15" height="15" viewBox="0 0 20 20" fill="none">
@@ -664,6 +713,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
         </header>
         <main style={s.main}>{children}</main>
+        {pendingHref && <div className="rl-nav-progress" role="progressbar" aria-label="Loading page" />}
       </div>
     </div>
   );

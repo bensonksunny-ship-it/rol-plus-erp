@@ -74,6 +74,8 @@ export async function createCenter(data: CreateCenterInput): Promise<Center> {
   const ref = await addDoc(collection(db, COLLECTION), {
     centerCode,
     name:        data.name,
+    subtitle:    data.subtitle ?? "",
+    classType:   data.classType === "personal" ? "personal" : "group",   // centre label only
     location:    data.location,
     timeSlot:    data.timeSlot,
     teacherUid:  data.teacherUid,
@@ -215,6 +217,8 @@ export async function updateCenter(id: string, data: UpdateCenterInput): Promise
   const payload: Record<string, unknown> = { updatedAt: serverTimestamp() };
   if (data.name        !== undefined) payload.name        = data.name;
   if (data.location    !== undefined) payload.location    = data.location;
+  if (data.subtitle    !== undefined) payload.subtitle    = data.subtitle;
+  if (data.classType   !== undefined) payload.classType   = data.classType === "personal" ? "personal" : "group";
   if (data.timeSlot    !== undefined) payload.timeSlot    = data.timeSlot;
   if (data.teacherUid  !== undefined) payload.teacherUid  = data.teacherUid;
   if (data.studentUids !== undefined) payload.studentUids = data.studentUids;

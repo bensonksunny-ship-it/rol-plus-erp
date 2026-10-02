@@ -1,5 +1,8 @@
 "use client";
 
+import { centreUnits, studentUnitKey, studentUnitLabel, unitTitle } from "@/lib/batchUnits";
+import type { CenterBatch } from "@/types";
+import { getCached, setCached } from "@/lib/dataCache";
 import { useState, useEffect, useMemo, useRef, useCallback, Fragment, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
@@ -46,6 +49,10 @@ interface StudentFeeRow {
   admissionNo:     string;
   centerName:      string;
   centerId:        string;
+  /** Class key: centre id, or "centreId|batchId" for a batch of a 2+-batch centre (lib/batchUnits). */
+  unitKey:         string;
+  /** "Centre" or "Centre — Batch". */
+  unitName:        string;
   classType:       string;   // "group" | "personal"
   billingMode:     string;   // "postpay" | "prepay"
   feeCycle:        string;
@@ -59,7 +66,7 @@ interface StudentFeeRow {
   estimatedFee:    number;
 }
 
-interface CenterOption { id: string; name: string; centerCode: string; monthlyFee: number; }
+interface CenterOption { id: string; name: string; centerCode: string; monthlyFee: number; batches: CenterBatch[] }
 
 /** School of Music: a student's fee counts as custom when it differs from their centre's default. */
 function isCustomFee(studentFee: number, centreDefault: number): boolean {
@@ -69,7 +76,7 @@ function isCustomFee(studentFee: number, centreDefault: number): boolean {
 /** Finance is organised by centre. Only students who still owe money can lack one
  *  (inactive / unassigned) — they're grouped under this key until settled. */
 const UNASSIGNED = "__unassigned__";
-function centreKey(s: { centerId: string }): string { return s.centerId || UNASSIGNED; }
+function centreKey(s: { centerId: string; unitKey?: string }): string { return s.unitKey || s.centerId || UNASSIGNED; }
 
 type PayMethod      = "UPI" | "Cash" | "Bank";
 type DiscountType   = "fixed" | "percent";
@@ -230,7 +237,14 @@ function FinanceContent() {
   }, []);
 
   // ── Fetch ────────────────────────────────────────────────────────────────────
+  // Cache-then-refresh (lib/dataCache): reopening Finance shows the last data for
+  // this wing + month at once; fetchAll replaces it. `fetchedKey` is which
+  // wing+month the on-screen data belongs to, so a late reply for another
+  // wing/month is never cached under the wrong key.
+  const financeKey = (w: string, m: string) => `finance:${w}:${m}`;
+  const fetchedKey = useRef("");
   async function fetchAll(month: string = selectedMonth) {
+    const key = financeKey(wing, month);
     try {
       const [txData, studentSnap, centerSnap, attSnap] = await Promise.all([
         getTransactions(),
@@ -241,16 +255,19 @@ function FinanceContent() {
 
       const wingCenterDocs = centerSnap.docs.filter(d => inWing(d.data(), wing));
       const wingCenterIds  = new Set(wingCenterDocs.map(d => d.id));
-      const cMap = new Map<string, { name: string; centerCode: string }>();
+      const cMap = new Map<string, { id: string; name: string; centerCode: string; batches: CenterBatch[] }>();
       wingCenterDocs.forEach(d => cMap.set(d.id, {
+        id:         d.id,
         name:       (d.data().name       as string) ?? d.id,
         centerCode: (d.data().centerCode as string) ?? "—",
+        batches:    Array.isArray(d.data().batches) ? (d.data().batches as CenterBatch[]) : [],
       }));
       setCenters(wingCenterDocs.map(d => ({
         id: d.id,
         name:       (d.data().name       as string) ?? d.id,
         centerCode: (d.data().centerCode as string) ?? "—",
         monthlyFee: Number(d.data().monthlyFee ?? 0) || 0,
+        batches:    Array.isArray(d.data().batches) ? (d.data().batches as CenterBatch[]) : [],
       })));
 
       // Store transactions for this wing (month filtering happens in useMemo/render).
@@ -322,6 +339,8 @@ function FinanceContent() {
           admissionNo:     (s.admissionNo ?? s.admissionNumber ?? "—") as string,
           centerName:      c?.name ?? "No centre assigned",
           centerId:        c ? (s.centerId as string) : "",
+          unitKey:         c ? studentUnitKey(c, (s.batchId as string) || null) : "",
+          unitName:        c ? studentUnitLabel(c, (s.batchId as string) || null) : "No centre assigned",
           classType:       ((s.classType   as string) === "personal" ? "personal" : "group"),
           billingMode:     ((s.billingMode as string) === "prepay"   ? "prepay"   : "postpay"),
           feeCycle:        (s.feeCycle   ?? "—") as string,
@@ -334,6 +353,7 @@ function FinanceContent() {
           estimatedFee,
         };
       }));
+      fetchedKey.current = key;
     } catch (err) {
       console.error("Finance fetch failed:", err);
     } finally {
@@ -341,9 +361,23 @@ function FinanceContent() {
     }
   }
 
+  // Remember what's on screen once a fetch for the current wing + month settles.
+  useEffect(() => {
+    if (loading || fetchedKey.current !== financeKey(wing, selectedMonth)) return;
+    setCached(fetchedKey.current, { students, centers, transactions, attDatesMap });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, students, centers, transactions, attDatesMap]);
+
   // Re-fetch whenever selected month changes
   useEffect(() => {
-    setLoading(true);
+    const cached = getCached<{ students: StudentFeeRow[]; centers: CenterOption[]; transactions: Transaction[]; attDatesMap: Map<string, string[]> }>(financeKey(wing, selectedMonth));
+    fetchedKey.current = "";
+    if (cached) {
+      setStudents(cached.students); setCenters(cached.centers); setTransactions(cached.transactions); setAttDatesMap(cached.attDatesMap);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     fetchAll(selectedMonth);
     // Auto-refresh only for current month (historical data is immutable)
     if (selectedMonth !== currentMonth()) return;
@@ -421,14 +455,14 @@ function FinanceContent() {
   const scopeTransactions = useMemo(() => {
     if (filterCenter === "all") return transactions;
     const uids = new Set(scopeStudents.map(s => s.uid));
-    return transactions.filter(t => t.studentUid ? uids.has(t.studentUid) : t.centerId === filterCenter);
+    return transactions.filter(t => t.studentUid ? uids.has(t.studentUid) : t.centerId === filterCenter.split("|")[0]);
   }, [transactions, scopeStudents, filterCenter]);
 
   // Same scope for the drill-down ledgers: by student, so a transaction whose
   // stored centerId is stale (student moved) still lands under the right centre.
   const scopeUidSet = useMemo(() => new Set(scopeStudents.map(s => s.uid)), [scopeStudents]);
   const inScope = useCallback((tx: Transaction) => filterCenter === "all"
-    || (tx.studentUid ? scopeUidSet.has(tx.studentUid) : tx.centerId === filterCenter), [filterCenter, scopeUidSet]);
+    || (tx.studentUid ? scopeUidSet.has(tx.studentUid) : tx.centerId === filterCenter.split("|")[0]), [filterCenter, scopeUidSet]);
 
   const summary = useMemo(() => {
     const students     = scopeStudents;
@@ -897,7 +931,8 @@ function FinanceContent() {
     }
     return [...list].sort((a, b) => {
       // Primary: centre name, direction toggled by the Center header click.
-      const centerCmp = a.centerName.localeCompare(b.centerName) * centerSortDir;
+      // By class ("Centre — Batch"), so a split centre's batches stay grouped.
+      const centerCmp = (a.unitName || a.centerName).localeCompare(b.unitName || b.centerName) * centerSortDir;
       if (centerCmp !== 0) return centerCmp;
       // Secondary: student name, always A→Z within a centre.
       return a.name.localeCompare(b.name);
@@ -910,13 +945,15 @@ function FinanceContent() {
     const stats = new Map<string, { count: number; overdue: number; name: string }>();
     students.forEach(st => {
       const k = centreKey(st);
-      const e = stats.get(k) ?? { count: 0, overdue: 0, name: st.centerName };
+      const e = stats.get(k) ?? { count: 0, overdue: 0, name: st.unitName };
       e.count++;
       if (feeDueMap.has(st.uid) && !paidMap.has(st.uid)) e.overdue++;
       stats.set(k, e);
     });
-    const known = new Set(centers.map(c => c.id));
-    const tabs = centers.map(c => ({ id: c.id, name: c.name, count: stats.get(c.id)?.count ?? 0, overdue: stats.get(c.id)?.overdue ?? 0 }));
+    // One tab per class: a centre, or each batch of a centre with 2+ batches.
+    const classTabs = centers.flatMap(c => centreUnits(c, [] as { batchId?: string | null }[]).map(u => ({ id: u.key, name: unitTitle(u) })));
+    const known = new Set(classTabs.map(t => t.id));
+    const tabs = classTabs.map(t => ({ ...t, count: stats.get(t.id)?.count ?? 0, overdue: stats.get(t.id)?.overdue ?? 0 }));
     stats.forEach((v, k) => {
       if (!known.has(k)) tabs.push({ id: k, name: k === UNASSIGNED ? "No centre · dues pending" : (v.name || "Other centre"), count: v.count, overdue: v.overdue });
     });
@@ -1254,11 +1291,11 @@ function FinanceContent() {
                                 <span aria-hidden style={st.groupHeaderIcon}>🏫</span>
                                 <button onClick={() => setFilterCenter(groupKey)} style={st.groupHeaderBtn}
                                   title={filterCenter === "all" ? "Show only this centre" : undefined}>
-                                  {groupKey === UNASSIGNED ? "No centre · dues pending" : s.centerName}{filterCenter === "all" ? " →" : ""}
+                                  {groupKey === UNASSIGNED ? "No centre · dues pending" : s.unitName}{filterCenter === "all" ? " →" : ""}
                                 </button>
                                 <span style={st.groupHeaderPill}>{g?.count ?? 0} student{g?.count === 1 ? "" : "s"}</span>
-                                {isSom && groupKey !== UNASSIGNED && centreDefaultFee(groupKey) > 0 && (
-                                  <span style={st.groupHeaderPill} title="Centre default monthly fee">Default {fmtINR(centreDefaultFee(groupKey))}/mo</span>
+                                {isSom && groupKey !== UNASSIGNED && centreDefaultFee(s.centerId) > 0 && (
+                                  <span style={st.groupHeaderPill} title="Centre default monthly fee">Default {fmtINR(centreDefaultFee(s.centerId))}/mo</span>
                                 )}
                                 <span style={st.groupHeaderMeta}>
                                   {g && g.paid > 0 && <span style={{ color: "#16a34a" }}>Collected {fmtINR(g.paid)}</span>}
@@ -1266,7 +1303,7 @@ function FinanceContent() {
                                   {g && g.due > 0 && <span style={{ color: DUE_TEXT, fontWeight: 600 }}>Pending {fmtINR(g.due)}</span>}
                                 </span>
                                 {isSom && groupKey !== UNASSIGNED && (
-                                  <button onClick={() => setBulkFee({ centerId: groupKey, name: s.centerName })} style={st.groupHeaderAction}
+                                  <button onClick={() => setBulkFee({ centerId: s.centerId, name: s.centerName })} style={st.groupHeaderAction}
                                     title="Set the monthly fee for every student in this centre">
                                     ⚙️ Set Fee for All
                                   </button>

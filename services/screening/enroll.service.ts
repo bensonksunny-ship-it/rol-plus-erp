@@ -15,6 +15,8 @@
 // findEnrolmentMatch + mergeIntoStudent. One student id across every module.
 // =============================================================================
 
+import { claimAdmissionNo } from "@/services/student/admissionLock.service";
+import { setDoc } from "firebase/firestore";
 import {
   addDoc, arrayRemove, arrayUnion, collection, doc, getDoc, serverTimestamp, updateDoc,
 } from "firebase/firestore";
@@ -194,7 +196,11 @@ export async function enrollApplicant(i: EnrollInput): Promise<EnrollResult> {
     await mergeIntoStudent(match, studentDoc, { admissionId: i.admissionId, enrolledBy: i.enrolledBy });
     uid = match.id;
   } else {
-    uid = (await addDoc(collection(db, "users"), studentDoc)).id;
+    // New student: reserve the admission number in this wing first (one student per number).
+    const ref = doc(collection(db, "users"));
+    await claimAdmissionNo(wing, finalAdmNo, ref.id);
+    await setDoc(ref, { ...studentDoc, uid: ref.id });
+    uid = ref.id;
   }
 
   // The admission-fee receipt was saved before the student existed — attach

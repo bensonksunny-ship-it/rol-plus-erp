@@ -11,10 +11,11 @@
 import { useEffect, useState } from "react";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import {
-  choosePrimary, isAutoMergePair, isConflictingNames, isSameNameDifferentAdmission,
+  isAutoMergePair, isConflictingNames, isSameNameDifferentAdmission,
   keepSeparate, mergeStudents, scanStudentDuplicates, suggestPrimary,
   type DuplicatePair, type StudentRecord,
 } from "@/services/dedup/dedup.service";
+import { mergeExactGroups } from "@/services/dedup/autoMerge.service";
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const LEVEL: Record<string, { label: string; fg: string; bg: string }> = {
@@ -63,7 +64,10 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
   const [done, setDone] = useState<Record<string, string>>({});   // pair key → outcome text
   const [showFamily, setShowFamily] = useState(false);
 
-  const [bulk, setBulk] = useState<{ done: number; total: number } | null>(null);
+  const [bulk, setBulk] = useState<{ done: number; total: number; label: string } | null>(null);
+  // Multi-select: pairs ticked for "Merge selected".
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const togglePick = (key: string) => setPicked(prev => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n; });
   const [confirmBulk, setConfirmBulk] = useState(false);
 
   // Re-scan after merges: a student imported 3× shows up as overlapping pairs,
@@ -94,29 +98,42 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
       try { await keepSeparate(p.a.id, p.b.id, user?.uid ?? ""); keptSeparate++; }
       catch (e) { console.warn("[MergeDuplicates] keep separate:", e); }
     }
-    let current = (pairs ?? []).filter(p => isExact(p) && !done[p.key]);
-    const total = current.length;
-    let merged = 0, failed = 0;
-    setBulk({ done: 0, total });
-    // Merge pair by pair, re-scanning so chains (A~B~C) resolve to one record.
-    while (current.length) {
-      const p = current[0];
-      // Master = the record carrying the attendance / fee history.
-      const primary = await choosePrimary(p);
-      const secondary = primary === p.a.id ? p.b.id : p.a.id;
-      try { await mergeStudents(primary, secondary, user?.uid ?? ""); merged++; }
-      catch (e) { console.warn("[MergeDuplicates] bulk merge:", e); failed++; }
-      setBulk({ done: merged + failed, total });
-      const list = await scanStudentDuplicates();
-      setPairs(list);
-      current = list.filter(isExact);
-      if (merged + failed > total + 5) break;   // safety stop
-    }
+    // One pass: copies grouped per student (A~B~C → one), the record with the
+    // most attendance + payments kept — no rescans between merges.
+    const exact = (pairs ?? []).filter(p => isExact(p) && !done[p.key]);
+    const { merged, failed } = await mergeExactGroups(exact, user?.uid ?? "",
+      (d, t) => setBulk({ done: d, total: t, label: "Merging exact duplicates" }));
     setBulk(null);
+    setPicked(new Set());
     setErr(failed ? `${failed} pair${failed !== 1 ? "s" : ""} could not be merged — review them below.` : "");
     setDone(d => ({ ...d, __bulk:
       `✓ Successfully auto-merged ${merged} duplicate student record${merged !== 1 ? "s" : ""} (matching Name + Admission No). `
       + `${keptSeparate} distinct record${keptSeparate !== 1 ? "s" : ""} with identical names ${keptSeparate !== 1 ? "were" : "was"} kept separate.` }));
+    await rescan();
+  }
+
+  /** Merge every ticked pair into the record marked KEEP on it; pairs already gone are skipped. */
+  async function mergeSelected() {
+    const list = (pairs ?? []).filter(p => picked.has(p.key) && !done[p.key]);
+    if (list.length === 0) return;
+    setErr("");
+    const retired = new Set<string>();
+    let merged = 0, skipped = 0, failed = 0;
+    setBulk({ done: 0, total: list.length, label: "Merging selected pairs" });
+    for (const p of list) {
+      const primary = keepId[p.key] ?? suggestPrimary(p);
+      const secondary = primary === p.a.id ? p.b.id : p.a.id;
+      if (retired.has(primary) || retired.has(secondary)) { skipped++; }
+      else {
+        try { await mergeStudents(primary, secondary, user?.uid ?? ""); merged++; retired.add(secondary); }
+        catch (e) { console.warn("[MergeDuplicates] selected merge:", e); failed++; }
+      }
+      setBulk({ done: merged + skipped + failed, total: list.length, label: "Merging selected pairs" });
+    }
+    setBulk(null);
+    setPicked(new Set());
+    setDone(d => ({ ...d, __bulk: `✓ Merged ${merged} selected pair${merged !== 1 ? "s" : ""}${skipped ? ` · ${skipped} skipped (already merged in this run — rescan shows what's left)` : ""}.` }));
+    setErr(failed ? `${failed} pair${failed !== 1 ? "s" : ""} could not be merged — review them below.` : "");
     await rescan();
   }
 
@@ -165,6 +182,10 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
     return (
       <div key={p.key} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: outcome ? "#f9fafb" : "#fff", opacity: outcome ? 0.75 : 1 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          {!outcome && (
+            <input type="checkbox" checked={picked.has(p.key)} onChange={() => togglePick(p.key)} disabled={!!bulk}
+              aria-label="Select this pair" style={{ width: 16, height: 16, cursor: "pointer" }} />
+          )}
           <span style={{ fontSize: 11, fontWeight: 800, color: lv.fg, background: lv.bg, borderRadius: 99, padding: "2px 9px" }}>{lv.label}</span>
           <span style={{ fontSize: 12, color: "#6b7280" }}>Matched on {p.reasons.join(", ")}</span>
         </div>
@@ -233,8 +254,15 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
               const conflictCount = all.filter(p => isConflictingNames(p) && !done[p.key]).length;
               const distinctCount = (pairs ?? []).filter(p => isSameNameDifferentAdmission(p) && !done[p.key]).length;
               if (bulk) return (
-                <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#3730a3", fontWeight: 700 }}>
-                  Merging… {bulk.done} / {bulk.total}
+                <div role="progressbar" aria-valuemin={0} aria-valuemax={bulk.total} aria-valuenow={bulk.done}
+                  style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#3730a3", fontWeight: 700 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span>{bulk.label}…</span><span>{bulk.done} / {bulk.total}</span>
+                  </div>
+                  <div style={{ height: 8, borderRadius: 99, background: "#c7d2fe", overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${bulk.total ? Math.round((bulk.done / bulk.total) * 100) : 100}%`, background: "#4f46e5", transition: "width 0.2s" }} />
+                  </div>
+                  <div style={{ fontSize: 11.5, fontWeight: 500, marginTop: 6 }}>Keep this window open until it finishes.</div>
                 </div>
               );
               if (exact.length === 0 && distinctCount === 0) return null;
@@ -255,6 +283,17 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
                   )}
                 </div>
               );
+            })()}
+            {(() => {
+              const selectable = all.filter(p => !done[p.key] && (p.level !== "family" || showFamily));
+              const allOn = selectable.length > 0 && selectable.every(p => picked.has(p.key));
+              return selectable.length > 0 && !bulk ? (
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 700, color: "#374151", cursor: "pointer", alignSelf: "flex-start" }}>
+                  <input type="checkbox" checked={allOn} style={{ width: 16, height: 16 }}
+                    onChange={() => setPicked(allOn ? new Set() : new Set(selectable.map(p => p.key)))} />
+                  Select all ({selectable.length})
+                </label>
+              ) : null;
             })()}
             {exactPairs.length > 0 && (
               <>
@@ -285,6 +324,16 @@ export default function MergeDuplicatesModal({ onClose, centreName }: {
                 </button>
                 {showFamily && family.map(renderPair)}
               </>
+            )}
+            {picked.size > 0 && !bulk && (
+              <div style={{ position: "sticky", bottom: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
+                background: "#111827", color: "#fff", borderRadius: 12, padding: "10px 14px", marginTop: 8, boxShadow: "0 -6px 20px rgba(0,0,0,0.18)" }}>
+                <span style={{ fontSize: 13, fontWeight: 700 }}>{picked.size} pair{picked.size !== 1 ? "s" : ""} selected · each merges into the record marked KEEP</span>
+                <span style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setPicked(new Set())} style={btn("transparent", "#e5e7eb", "#4b5563")}>Clear</button>
+                  <button onClick={mergeSelected} disabled={!!busy} style={btn("#4f46e5", "#fff", "#4f46e5")}>Merge selected ({picked.size} pair{picked.size !== 1 ? "s" : ""})</button>
+                </span>
+              </div>
             )}
           </div>
         )}

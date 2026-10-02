@@ -4,10 +4,14 @@
 // of every School-of-Music student, newest uploads first. Per-student Edit
 // Details modal, inline status changes, and an Excel/CSV bulk import.
 
+import { claimAdmissionNo, releaseAdmissionNo } from "@/services/student/admissionLock.service";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
-  collection, getDocs, onSnapshot, query, where, writeBatch, doc, updateDoc, serverTimestamp, Timestamp,
+  collection, getDocs, onSnapshot, query, where, writeBatch, doc, updateDoc, serverTimestamp, Timestamp, arrayUnion,
 } from "firebase/firestore";
+import { enforceSingleActiveCentre } from "@/services/student/singleCentre.service";
+import { isActiveStudentStatus } from "@/lib/activeStudents";
+import { NO_BATCH } from "@/lib/batchUnits";
 import { db } from "@/services/firebase/firebase";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
@@ -415,6 +419,8 @@ function RegistryContent() {
   const [loading, setLoading] = useState(() => !getCached<Entry[]>(`registry:${WING}:entries`));
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  // Centre filter: a centre, or one batch of a centre with 2+ batches ("centreId|batchId").
+  const [centreFilter, setCentreFilter] = useState("all");
   const [levelFilter,  setLevelFilter]  = useState("all");   // Course Level: Introduction / Intermediate / Advanced / "none"
   // A4-style pages of REGISTRY_PAGE_SIZE rows. null = "the last page" (latest
   // admissions) and follows new rows as they arrive; a number = a page the user picked.
@@ -636,6 +642,23 @@ function RegistryContent() {
     [centres],
   );
 
+  /** An entry's class: centre id, or "centreId|batchId" in a 2+-batch centre (lib/batchUnits). */
+  const classOf = (e: { centerId: string; batchId: string }) => {
+    if (!e.centerId || !multiBatchCentres.has(e.centerId)) return e.centerId;
+    const c = centres.find(x => x.id === e.centerId);
+    return c?.batches?.some(b => b.id === e.batchId) ? `${e.centerId}|${e.batchId}` : `${e.centerId}|${NO_BATCH}`;
+  };
+  /** "Centre" or "Centre — Batch" for the detail view. */
+  const classLabel = (e: Entry) =>
+    multiBatchCentres.has(e.centerId) ? `${e.centre} — ${e.batch && e.batch !== "—" ? e.batch : "No batch"}` : e.centre;
+  // Filter options: this wing's centres, each batch separately for a 2+-batch centre.
+  const classOptions = useMemo(() => centres
+    .filter(c => c.wing === undefined || c.wing === WING)
+    .flatMap(c => (c.batches?.length ?? 0) >= 2
+      ? (c.batches ?? []).map(b => ({ key: `${c.id}|${b.id}`, label: `${c.name} — ${b.name}` }))
+      : [{ key: c.id, label: c.name }])
+    .sort((a, b) => a.label.localeCompare(b.label)), [centres, WING]);
+
   const statuses = useMemo(() => {
     const found = new Set(entries.map(filterStatus));
     const others = Array.from(found).filter(s => !STATUS_OPTIONS.includes(s as typeof STATUS_OPTIONS[number])).sort();
@@ -647,6 +670,7 @@ function RegistryContent() {
     return entries.filter(e => {
       if (statusFilter !== "all" && filterStatus(e) !== statusFilter) return false;
       if (levelFilter !== "all" && e.courseLevel !== (levelFilter === "none" ? "" : levelFilter)) return false;
+      if (centreFilter !== "all" && classOf(e) !== centreFilter) return false;
       if (!needle) return true;
       return (
         e.name.toLowerCase().includes(needle) ||
@@ -658,7 +682,8 @@ function RegistryContent() {
         e.screening.toLowerCase().includes(needle)
       );
     });
-  }, [entries, q, statusFilter, levelFilter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, q, statusFilter, levelFilter, centreFilter, centres]);
 
   // Keep the selection in sync with what's actually on the register.
   useEffect(() => {
@@ -780,6 +805,12 @@ function RegistryContent() {
             <select style={s.select} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
               <option value="all">All statuses</option>
               {statuses.map(st => <option key={st} value={st}>{st}</option>)}
+            </select>
+          )}
+          {classOptions.length > 1 && (
+            <select style={s.select} value={centreFilter} onChange={e => setCentreFilter(e.target.value)} aria-label="Centre">
+              <option value="all">All centres</option>
+              {classOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
             </select>
           )}
           <select style={s.select} value={levelFilter} onChange={e => setLevelFilter(e.target.value)} aria-label="Course level">
@@ -944,7 +975,7 @@ function RegistryContent() {
                           gap: "10px 24px", padding: "14px 20px",
                         }}>
                           <DetailField label="Date of Admission" value={fmtDate(e.admittedOn)} />
-                          <DetailField label="Centre" value={e.centre} />
+                          <DetailField label="Centre" value={classLabel(e)} />
                           <DetailField label="Batch" value={e.batch} />
                           <DetailField label="Phone Number" value={e.phone} />
                           <DetailField label="Admission Number" value={e.admissionNo} emphasize />
@@ -1048,6 +1079,7 @@ function RegistryContent() {
           initiatorId={user?.uid ?? "unknown"}
           initiatorRole={user?.role ?? ROLES.FOUNDER}
           levelBy={levelBy}
+          wing={WING}
           onClose={() => setEditing(null)}
         />
       )}
@@ -1097,8 +1129,10 @@ function isoToDateInput(iso: string): string {
 
 const blankDash = (v: string) => (v === "—" ? "" : v);
 
-function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initiatorId, initiatorRole, levelBy, onClose }: {
+function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initiatorId, initiatorRole, levelBy, wing, onClose }: {
   levelBy:        LevelChangeBy;
+  /** The register's wing — the duplicate check stays inside it. */
+  wing:           string;
   entry:          Entry;
   centres:        RegistryCentre[];
   existingAdmNos: Set<string>;
@@ -1203,7 +1237,21 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
     setSaving(true);
     setError("");
     try {
+      // New admission number → reserve it in this wing first (one student per number).
+      if (changed.includes("admissionNumber") && admNo) await claimAdmissionNo(wing, admNo, entry.uid);
       await updateDoc(doc(db, "users", entry.uid), { ...patch, updatedAt: serverTimestamp() });
+      if (changed.includes("admissionNumber") && initial.admissionNo) void releaseAdmissionNo(wing, initial.admissionNo, entry.uid);
+      // Centre changed → the student moves: onto the new centre's roster, off the
+      // old one, and any other active record of them elsewhere goes Inactive.
+      if (changed.includes("centre")) {
+        await updateDoc(doc(db, "centers", f.centerId), { studentUids: arrayUnion(entry.uid) })
+          .catch(err => console.warn("[registry] roster mirror not updated:", err));
+        await enforceSingleActiveCentre({
+          uid: entry.uid, admissionNo: admNo, wing,
+          targetCenterId: f.centerId, prevCenterId: initial.centerId || null,
+          active: isActiveStudentStatus(fromRegistryStatus(f.status)),
+        }).catch(err => console.error("[registry] single-centre check:", err));
+      }
       logAction({
         action: "REGISTRY_STUDENT_EDIT",
         initiatorId, initiatorRole: initiatorRole as Parameters<typeof logAction>[0]["initiatorRole"],
@@ -1263,6 +1311,11 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
                 );
               })}
             </select>
+            {f.centerId && f.centerId !== initial.centerId && (initial.centerId || freeTextCentre) && (
+              <span role="status" style={{ fontWeight: 400, fontSize: 12, lineHeight: 1.45, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "7px 10px" }}>
+                This student is currently in <b>{entry.centre}</b>. Assigning to <b>{centre?.name}</b> will move them to the new centre — a student can be active in only one centre.
+              </span>
+            )}
           </label>
           <label style={label}>Batch
             {centreBatches.length > 0 ? (
@@ -1606,14 +1659,25 @@ function ImportModal({
     const newIds: string[] = [];
     try {
       for (let i = 0; i < importable.length; i += 400) {
-        const chunk = importable.slice(i, i + 400);
+        const all400 = importable.slice(i, i + 400);
+        // Reserve each admission number in this wing (one student per number);
+        // a row whose number is already taken is skipped, not imported twice.
+        const ids = new Map<typeof all400[number], string>();
+        const chunk: typeof all400 = [];
+        for (let j = 0; j < all400.length; j += 20) {
+          await Promise.all(all400.slice(j, j + 20).map(async r => {
+            const id = doc(collection(db, "users")).id;
+            try { await claimAdmissionNo(WING, r.admissionNo, id); ids.set(r, id); chunk.push(r); }
+            catch (e) { console.warn("[import] admission no. taken:", r.admissionNo, e); failed++; }
+          }));
+        }
         const batch = writeBatch(db);
         const chunkIds: string[] = [];
         for (const r of chunk) {
           const admNo = r.admissionNo;
           const pickedBatch = r.centreId ? centreById.get(r.centreId)?.batches?.find(b => b.id === r.batchId) : undefined;
           const [first, ...rest] = r.name.trim().split(/\s+/);
-          const ref = doc(collection(db, "users"));
+          const ref = doc(db, "users", ids.get(r)!);
           chunkIds.push(ref.id);
           batch.set(ref, {
             uid:            ref.id,

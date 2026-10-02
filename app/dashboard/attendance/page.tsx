@@ -1,5 +1,6 @@
 "use client";
 
+import { getCached, setCached } from "@/lib/dataCache";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   collection, getDocs, query, where,
@@ -14,12 +15,17 @@ import { inWing, isSchoolOfMusic } from "@/lib/wing";
 import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
 import {
   saveCentreAttendance,
+  cancelClass,
+  undoCancelClass,
+  canCancelClass,
   saveExtraClass,
   getExtraClassesByCentre,
 } from "@/services/attendance/attendance.service";
 import type { AttendanceStatus } from "@/services/attendance/attendance.service";
 import type { CenterBatch } from "@/types";
 import { buildMatrix, studentDays, type BatchFilter } from "./matrix";
+import { centreUnits, meetsOn, unitTitle, type BatchUnit } from "@/lib/batchUnits";
+import { getTeacherDisplayName } from "@/lib/teacherName";
 import { exportMonthlyCsv, exportMonthlyPdf, type ReportSection } from "./export";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -45,6 +51,13 @@ interface StudentRow {
   breakStartDate: string | null;
   /** On the centre's active roster (lib/activeStudents — same rule as the centre modal). */
   active:         boolean;
+}
+
+/** Cached result of loadAll (lib/dataCache), keyed by month + centre list. */
+interface AttendanceSnapshot {
+  studentMap: Map<string, StudentRow[]>;
+  attMap:     Map<string, AttRec[]>;
+  extraMap:   Map<string, Set<string>>;
 }
 
 interface AttRec {
@@ -400,6 +413,7 @@ function CentreCard({
   onCellClick,
   onQuickSet,
   onAddExtra,
+  teacherName,
 }: {
   centre:      CentreRow;
   students:    StudentRow[];
@@ -411,6 +425,8 @@ function CentreCard({
   onCellClick: (m: ModalState) => void;
   onQuickSet:  (centreId: string, studentUid: string, date: string, status: AttendanceStatus) => void;
   onAddExtra:  () => void;
+  /** Teacher of this centre / batch, shown in the header. */
+  teacherName?: string;
 }) {
   const { dates: scheduledDates, rows } = useMemo(
     () => buildMatrix(centre, students, attendance, extraDates, month, today, batchFilter),
@@ -448,8 +464,10 @@ function CentreCard({
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div>
           <span style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>
-            {centre.name}{batchLabel && <span style={{ color: "#6b7280", fontWeight: 600 }}> · {batchLabel}</span>}
+            {centre.name}
           </span>
+          {batchLabel && <span style={batchBadge}>{batchLabel}</span>}
+          {teacherName && <TeacherChip name={teacherName} />}
           {centre.daysOfWeek.length > 0 && (
             <span style={{ marginLeft: 10, fontSize: 11, color: "#6b7280", background: "#f3f4f6", padding: "2px 8px", borderRadius: 99 }}>
               {centre.daysOfWeek.join(" · ")}
@@ -631,7 +649,7 @@ function shiftDay(iso: string, n: number): string {
 }
 
 function TodayView({
-  date, setDate, centres, studentMap: rosterMap, attMap, extraMap, userUid, onSaved,
+  date, setDate, centres, studentMap: rosterMap, attMap, extraMap, userUid, onSaved, onCleared, canCancel, teacherName,
 }: {
   date:       string;
   setDate:    (d: string) => void;
@@ -641,6 +659,11 @@ function TodayView({
   extraMap:   Map<string, Set<string>>;
   userUid:    string;
   onSaved:    (centreId: string, changes: { uid: string; date: string; status: AttendanceStatus }[]) => void;
+  /** Marks removed (Undo cancel for students who had no mark before). */
+  onCleared:  (centreId: string, uids: string[], date: string) => void;
+  /** Chief Teacher / Director / Admin / Founder may cancel a whole class. */
+  canCancel:  boolean;
+  teacherName: (uid: string) => string;
 }) {
   // Marking is for the active roster only (former students stay in the Monthly Register).
   const studentMap = useMemo(() => {
@@ -652,6 +675,12 @@ function TodayView({
   // draft: `${centreId}|${uid}` -> status (unsaved picks)
   const [draft, setDraft]     = useState<Map<string, AttendanceStatus>>(new Map());
   const [savingId, setSavingId] = useState<string | null>(null);
+  // "Cancel class": inline confirm per class card (no browser dialog), optional reason.
+  const [confirmCancel, setConfirmCancel] = useState<string | null>(null);
+  const [cancelReason,  setCancelReason]  = useState("");
+  const [cancellingId,  setCancellingId]  = useState<string | null>(null);
+  const [cancelMsg,     setCancelMsg]     = useState<{ id: string; text: string } | null>(null);
+  useEffect(() => { setConfirmCancel(null); setCancelMsg(null); }, [date]);
 
   // Reset drafts whenever the day changes.
   useEffect(() => { setDraft(new Map()); }, [date]);
@@ -660,9 +689,19 @@ function TodayView({
   const dow       = new Date(date + "T00:00:00").toLocaleDateString("en-IN", { weekday: "long" });
   const dateLabel = new Date(date + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
 
-  // Every centre with a class that day — also those with no active students, so a
-  // centre never silently drops off the sheet (its card says what to fix).
-  const todaysCentres = centres.filter(c => isScheduled(date, c, extraMap.get(c.id) ?? new Set()));
+  // One card per class that day: a centre with 2+ batches gives one card per
+  // batch meeting that day (lib/batchUnits), each with its own students and
+  // teacher. Centres with no active students still get a card, so a centre never
+  // silently drops off the sheet (its card says what to fix).
+  type Unit = BatchUnit<StudentRow> & { centre: CentreRow };
+  const units: Unit[] = centres
+    .filter(c => isScheduled(date, c, extraMap.get(c.id) ?? new Set()))
+    .flatMap(c => {
+      const extra = (extraMap.get(c.id) ?? new Set()).has(date);
+      return centreUnits(c, studentMap.get(c.id) ?? [])
+        .filter(u => !u.split || extra || u.batchId === null || meetsOn(u.days, date))
+        .map(u => ({ ...u, centre: c }));
+    });
 
   const savedStatus = (centreId: string, uid: string): AttendanceStatus | null =>
     (attMap.get(centreId) ?? []).find(r => r.studentUid === uid && r.date === date)?.status ?? null;
@@ -675,10 +714,9 @@ function TodayView({
   // approved break from this date. Explicit picks (P / A / B / …) are never changed.
   // Only for today or earlier; future days are never auto-filled.
   const canAutoFill = date <= todayISO();
-  const batchStarted = (centreId: string) =>
-    (studentMap.get(centreId) ?? []).some(s => effective(centreId, s.uid) !== null);
-  function autoStatus(centreId: string, s: StudentRow): AttendanceStatus | null {
-    if (!canAutoFill || effective(centreId, s.uid) !== null || !batchStarted(centreId)) return null;
+  const batchStarted = (u: Unit) => u.students.some(s => effective(u.centreId, s.uid) !== null);
+  function autoStatus(u: Unit, s: StudentRow): AttendanceStatus | null {
+    if (!canAutoFill || effective(u.centreId, s.uid) !== null || !batchStarted(u)) return null;
     return s.breakStartDate && date >= s.breakStartDate ? "break" : "absent";
   }
 
@@ -692,47 +730,84 @@ function TodayView({
     });
   }
 
-  function markAllPresent(centreId: string) {
-    const students = studentMap.get(centreId) ?? [];
+  function markAllPresent(u: Unit) {
     setDraft(prev => {
       const next = new Map(prev);
-      for (const s of students) {
-        if (savedStatus(centreId, s.uid) === "present") next.delete(`${centreId}|${s.uid}`);
-        else next.set(`${centreId}|${s.uid}`, "present");
+      for (const s of u.students) {
+        if (savedStatus(u.centreId, s.uid) === "present") next.delete(`${u.centreId}|${s.uid}`);
+        else next.set(`${u.centreId}|${s.uid}`, "present");
       }
       return next;
     });
   }
 
   /** What Save writes: the picks made here plus the auto-filled unmarked students. */
-  function pendingFor(centreId: string): { uid: string; status: AttendanceStatus; auto: boolean }[] {
-    const students = studentMap.get(centreId) ?? [];
-    return students
+  function pendingFor(u: Unit): { uid: string; status: AttendanceStatus; auto: boolean }[] {
+    return u.students
       .map(s => {
-        const picked = draft.get(`${centreId}|${s.uid}`);
+        const picked = draft.get(`${u.centreId}|${s.uid}`);
         if (picked) return { uid: s.uid, status: picked, auto: false };
-        const auto = autoStatus(centreId, s);
+        const auto = autoStatus(u, s);
         return auto ? { uid: s.uid, status: auto, auto: true } : null;
       })
       .filter((x): x is { uid: string; status: AttendanceStatus; auto: boolean } => !!x);
   }
 
-  async function save(centreId: string) {
-    const pending = pendingFor(centreId);
+  async function save(u: Unit) {
+    const pending = pendingFor(u);
     if (pending.length === 0) return;
-    setSavingId(centreId);
+    setSavingId(u.key);
     try {
       await Promise.all(pending.map(p =>
-        saveCentreAttendance({ studentUid: p.uid, centerId: centreId, date, status: p.status, markedBy: userUid }),
+        saveCentreAttendance({ studentUid: p.uid, centerId: u.centreId, date, status: p.status, markedBy: userUid }),
       ));
-      onSaved(centreId, pending.map(p => ({ uid: p.uid, date, status: p.status })));
+      onSaved(u.centreId, pending.map(p => ({ uid: p.uid, date, status: p.status })));
       setDraft(prev => {
         const next = new Map(prev);
-        for (const p of pending) next.delete(`${centreId}|${p.uid}`);
+        for (const p of pending) next.delete(`${u.centreId}|${p.uid}`);
         return next;
       });
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function doCancelClass(u: Unit) {
+    setCancellingId(u.key);
+    try {
+      const { cancelled, keptBreak } = await cancelClass({
+        centerId: u.centreId, date, studentUids: u.students.map(st => st.uid), markedBy: userUid, reason: cancelReason,
+      });
+      onSaved(u.centreId, cancelled.map(uid => ({ uid, date, status: "cancelled_teacher" as AttendanceStatus })));
+      setDraft(prev => {   // drop unsaved picks for this class — it is cancelled
+        const next = new Map(prev);
+        for (const st of u.students) next.delete(`${u.centreId}|${st.uid}`);
+        return next;
+      });
+      setConfirmCancel(null); setCancelReason("");
+      setCancelMsg({ id: u.key, text: `Class cancelled — ${cancelled.length} student${cancelled.length !== 1 ? "s" : ""} marked Cancelled${keptBreak.length ? `, ${keptBreak.length} kept on Break` : ""}.` });
+    } catch (err) {
+      console.error("Cancel class failed:", err);
+      setCancelMsg({ id: u.key, text: "Couldn't cancel the class — try again." });
+    } finally {
+      setCancellingId(null);
+    }
+  }
+
+  async function undoCancel(u: Unit) {
+    setCancellingId(u.key);
+    try {
+      const { restored, cleared } = await undoCancelClass({
+        centerId: u.centreId, date, markedBy: userUid, studentUids: u.students.map(st => st.uid),
+      });
+      onSaved(u.centreId, restored.map(r => ({ uid: r.uid, date, status: r.status })));
+      onCleared(u.centreId, cleared, date);
+      setCancelMsg({ id: u.key, text: `Cancellation undone — ${restored.length} mark${restored.length !== 1 ? "s" : ""} put back${cleared.length ? `, ${cleared.length} back to unmarked` : ""}.` });
+    } catch (err) {
+      console.error("Undo cancel failed:", err);
+      setCancelMsg({ id: u.key, text: "Couldn't undo the cancellation — try again." });
+    } finally {
+      setCancellingId(null);
     }
   }
 
@@ -748,66 +823,108 @@ function TodayView({
         <span style={{ fontSize: 13, color: "#6b7280" }}>{dow}, {dateLabel}</span>
       </div>
 
-      {todaysCentres.length === 0 ? (
+      {units.length === 0 ? (
         <div style={{ textAlign: "center", padding: "56px 0", color: "#6b7280" }}>
           <div style={{ fontSize: 34, marginBottom: 8 }}>🎵</div>
           <p style={{ fontSize: 14, margin: 0 }}>No batches have a class on {dow}.</p>
           <p style={{ fontSize: 12, color: "#9ca3af", marginTop: 4 }}>Pick another day, or check the batch class-days in Centres.</p>
         </div>
       ) : (
-        todaysCentres.map(centre => {
-          const students = studentMap.get(centre.id) ?? [];
-          const pendingList = pendingFor(centre.id);
+        units.map(u => {
+          const centre = u.centre;
+          const students = u.students;
+          const pendingList = pendingFor(u);
           const pending  = pendingList.length;
           const autoCount = pendingList.filter(x => x.auto).length;
           const counts   = students.reduce((a, s) => {
-            const st = effective(centre.id, s.uid);
+            const st = effective(u.centreId, s.uid);
             if (st === "present") a.present++;
             else if (st === "absent") a.absent++;
             else if (st) a.other++;
             else a.unmarked++;
             return a;
           }, { present: 0, absent: 0, other: 0, unmarked: 0 });
-          const isExtra = !centreDays(centre).has(dowOf(date).toLowerCase());
+          const isExtra = u.split
+            ? (u.batchId !== null && !meetsOn(u.days, date))
+            : !centreDays(centre).has(dowOf(date).toLowerCase());
+          // Cancelled = everyone's mark for the day is Cancelled (Teacher) or Break, at least one Cancelled.
+          const dayMarks = students.map(st => effective(u.centreId, st.uid));
+          const classCancelled = dayMarks.some(m => m === "cancelled_teacher") && dayMarks.every(m => m === "cancelled_teacher" || m === "break");
+          const tName = u.teacherUid ? teacherName(u.teacherUid) : "";
 
           return (
-            <div key={centre.id} style={{ ...card, padding: "14px 16px" }}>
+            <div key={u.key} style={{ ...card, padding: "14px 16px" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
                 <div>
                   <span style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{centre.name}</span>
+                  {u.split && <span style={batchBadge}>{u.batchName}</span>}
                   <span style={{ marginLeft: 8, fontSize: 11, color: "#6b7280", background: "#f3f4f6", padding: "2px 8px", borderRadius: 99 }}>
-                    {centre.daysOfWeek.join(" · ") || "no days"}
+                    {(u.split ? u.days : centre.daysOfWeek).join(" · ") || "no days"}{u.split && u.time ? ` · ${u.time}` : ""}
                   </span>
                   {isExtra && <span style={{ marginLeft: 6, fontSize: 11, color: "#166534", background: "#dcfce7", padding: "2px 8px", borderRadius: 99 }}>extra class</span>}
+                  {classCancelled && <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, color: "#4b5563", background: "#f3f4f6", border: "1px solid #d1d5db", padding: "2px 8px", borderRadius: 99 }}>🚫 Cancelled</span>}
+                  {classCancelled && canCancel && (
+                    <button type="button" onClick={() => undoCancel(u)} disabled={cancellingId === u.key}
+                      title="Undo the cancellation — students get back the marks they had before"
+                      style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, color: "#4338ca", background: "#eef2ff", border: "1px solid #c7d2fe", padding: "2px 9px", borderRadius: 99, cursor: "pointer" }}>
+                      {cancellingId === u.key ? "Undoing…" : "↩ Undo"}
+                    </button>
+                  )}
+                  {tName && <TeacherChip name={tName} />}
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <button onClick={() => markAllPresent(centre.id)} style={btnSmall}>All present</button>
-                  <button onClick={() => save(centre.id)} disabled={pending === 0 || savingId === centre.id}
+                  {canCancel && students.length > 0 && !classCancelled && (
+                    <button onClick={() => { setConfirmCancel(u.key); setCancelReason(""); }} disabled={cancellingId === u.key}
+                      style={{ ...btnSmall, color: "#dc2626", borderColor: "#fecaca", background: "#fff" }}>
+                      🚫 Cancel class
+                    </button>
+                  )}
+                  <button onClick={() => markAllPresent(u)} style={btnSmall}>All present</button>
+                  <button onClick={() => save(u)} disabled={pending === 0 || savingId === u.key}
                     style={{ ...btnPrimary, flex: "none", padding: "7px 16px", opacity: pending === 0 ? 0.5 : 1, cursor: pending === 0 ? "not-allowed" : "pointer" }}>
-                    {savingId === centre.id ? "Saving…" : pending > 0 ? `Save ${pending}` : "Saved"}
+                    {savingId === u.key ? "Saving…" : pending > 0 ? `Save ${pending}` : "Saved"}
                   </button>
                 </div>
               </div>
+
+              {confirmCancel === u.key && (
+                <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px", marginBottom: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b" }}>Cancel class for {unitTitle(u)} on {dow}, {dateLabel}?</div>
+                  <div style={{ fontSize: 12, color: "#7f1d1d" }}>All {students.length} student{students.length !== 1 ? "s" : ""} are marked <b>Cancelled (Teacher)</b>; anyone already on Break stays on Break. You can re-mark P / A afterwards.</div>
+                  <input value={cancelReason} onChange={e => setCancelReason(e.target.value)} placeholder="Reason (optional) — e.g. teacher unwell, holiday"
+                    style={{ ...inputStyle, fontSize: 13 }} />
+                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                    <button onClick={() => setConfirmCancel(null)} disabled={cancellingId === u.key} style={btnSmall}>Keep class</button>
+                    <button onClick={() => doCancelClass(u)} disabled={cancellingId === u.key}
+                      style={{ ...btnSmall, background: "#dc2626", color: "#fff", borderColor: "#dc2626" }}>
+                      {cancellingId === u.key ? "Cancelling…" : "Yes, cancel class"}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {cancelMsg?.id === u.key && (
+                <div style={{ fontSize: 12, color: "#374151", background: "#f3f4f6", borderRadius: 8, padding: "6px 10px", marginBottom: 8 }}>{cancelMsg.text}</div>
+              )}
 
               <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 8 }}>
                 {counts.present} present · {counts.absent} absent
                 {counts.other > 0 && ` · ${counts.other} other`}
                 {counts.unmarked > 0 && (autoCount > 0
-                  ? <span style={{ color: "#b45309", fontWeight: 600 }}> · {autoCount} unmarked → saved as Absent{students.some(s => autoStatus(centre.id, s) === "break") ? " / Break (on break)" : ""}</span>
+                  ? <span style={{ color: "#b45309", fontWeight: 600 }}> · {autoCount} unmarked → saved as Absent{students.some(s => autoStatus(u, s) === "break") ? " / Break (on break)" : ""}</span>
                   : ` · ${counts.unmarked} unmarked`)}
               </div>
 
               {students.length === 0 && (
                 <div style={{ fontSize: 12.5, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "9px 12px" }}>
-                  No active students on this centre&apos;s roster. A student shows here once their status is Active / Confirm and they have an admission number —{" "}
+                  No active students on {u.split ? "this batch" : "this centre"}&apos;s roster. A student shows here once their status is Active / Confirm and they have an admission number{u.split ? " and are in this batch" : ""} —{" "}
                   <a href={`/dashboard/enrollments?view=centers&centerId=${encodeURIComponent(centre.id)}&openModal=true`} style={{ color: "#4f46e5", fontWeight: 600 }}>open the centre</a>.
                 </div>
               )}
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {students.map(s => {
-                  const eff = effective(centre.id, s.uid);
-                  const auto = autoStatus(centre.id, s);
-                  const dirty = draft.has(`${centre.id}|${s.uid}`) || !!auto;
+                  const eff = effective(u.centreId, s.uid);
+                  const auto = autoStatus(u, s);
+                  const dirty = draft.has(`${u.centreId}|${s.uid}`) || !!auto;
                   return (
                     <div key={s.uid} style={{
                       display: "flex", alignItems: "center", gap: 8,
@@ -817,13 +934,14 @@ function TodayView({
                       <span style={{ flex: 1, fontSize: 13, color: "#111827", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {s.name}
                         {s.instrument && <span style={{ color: "#9ca3af", fontSize: 11 }}> · {s.instrument}</span>}
+                        {eff === "cancelled_teacher" && <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, color: "#4b5563", background: "#f3f4f6", padding: "1px 7px", borderRadius: 99 }}>Cancelled</span>}
                       </span>
                       {QUICK_STATUSES.map(st => {
                         const on = eff === st;
                         const isAuto = !on && auto === st;   // will be written on Save unless changed
                         const { bg, fg } = STATUS_COLOR[st];
                         return (
-                          <button key={st} onClick={() => pick(centre.id, s.uid, st)}
+                          <button key={st} onClick={() => pick(u.centreId, s.uid, st)}
                             title={isAuto ? `Not marked — saved as ${STATUS_LABEL[st]} unless you pick another` : undefined}
                             style={{
                               minWidth: 34, padding: "6px 8px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
@@ -843,6 +961,22 @@ function TodayView({
         })
       )}
     </div>
+  );
+}
+
+/** Batch name badge — high contrast so split batches read as separate classes. */
+const batchBadge: React.CSSProperties = {
+  marginLeft: 8, fontSize: 11.5, fontWeight: 800, color: "#fff", background: "#4f46e5", padding: "2px 9px", borderRadius: 6,
+};
+
+function TeacherChip({ name }: { name: string }) {
+  return (
+    <span title="Teacher" style={{ marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: "#374151" }}>
+      <span aria-hidden style={{ width: 20, height: 20, borderRadius: "50%", background: "#e0e7ff", color: "#4338ca", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 800 }}>
+        {name.trim().charAt(0).toUpperCase()}
+      </span>
+      {name}
+    </span>
   );
 }
 
@@ -911,10 +1045,32 @@ function AttendanceContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, user, wing]);
 
+  // Teacher names for the class cards (centre teacher, or each batch's own).
+  const [teacherNames, setTeacherNames] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (authLoading || !user) return;
+    getDocs(query(collection(db, "users"), where("role", "in", [ROLES.TEACHER, ROLES.CHIEF_TEACHER, ROLES.DIRECTOR, ROLES.ADMIN, ROLES.FOUNDER])))
+      .then(snap => setTeacherNames(new Map(snap.docs.map(d =>
+        [d.id, getTeacherDisplayName({ ...d.data(), uid: d.id } as unknown as Parameters<typeof getTeacherDisplayName>[0]) || String(d.data().displayName ?? "")]))))
+      .catch(() => {});
+  }, [authLoading, user]);
+  const teacherName = useCallback((uid: string) => teacherNames.get(uid) ?? "", [teacherNames]);
+
   // ── Load students + attendance for all centres when month changes ─────────
+  // Cache-then-refresh (lib/dataCache): reopening Attendance shows the last
+  // rosters + marks for this month and centre list at once; loadAll refreshes.
+  const shownKey = useRef("");
   const loadAll = useCallback(async (centreList: CentreRow[], m: string) => {
     if (!centreList.length) return;
-    setLoading(true);
+    const key = `attendance:${m}:${centreList.map(c => c.id).sort().join(",")}`;
+    const cached = getCached<AttendanceSnapshot>(key);
+    if (cached) {
+      setStudentMap(cached.studentMap); setAttMap(cached.attMap); setExtraMap(cached.extraMap);
+      shownKey.current = key;
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
       const [yr, mo] = m.split("-").map(Number);
       const daysInM  = new Date(yr, mo, 0).getDate();
@@ -998,10 +1154,18 @@ function AttendanceContent() {
       setStudentMap(newStudentMap);
       setAttMap(newAttMap);
       setExtraMap(newExtraMap);
+      shownKey.current = key;
+      setCached<AttendanceSnapshot>(key, { studentMap: newStudentMap, attMap: newAttMap, extraMap: newExtraMap });
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // Marks saved on this page update the cache too, so coming back never shows stale marks.
+  useEffect(() => {
+    if (loading || !shownKey.current) return;
+    setCached<AttendanceSnapshot>(shownKey.current, { studentMap, attMap, extraMap });
+  }, [loading, studentMap, attMap, extraMap]);
 
   useEffect(() => {
     if (!centresLoaded) return;
@@ -1197,6 +1361,16 @@ function AttendanceContent() {
           attMap={attMap}
           extraMap={extraMap}
           userUid={user?.uid ?? ""}
+          canCancel={canCancelClass(user?.role)}
+          onCleared={(centreId, uids, d) => {
+            const gone = new Set(uids);
+            setAttMap(prev => {
+              const next = new Map(prev);
+              next.set(centreId, (next.get(centreId) ?? []).filter(r => !(r.date === d && gone.has(r.studentUid))));
+              return next;
+            });
+          }}
+          teacherName={teacherName}
           onSaved={(centreId, changes) => {
             setAttMap(prev => {
               const next = new Map(prev);
@@ -1260,21 +1434,36 @@ function AttendanceContent() {
               {quickErr}
             </div>
           )}
-          {visibleCentres.map(centre => (
-            <CentreCard
-              key={centre.id}
-              centre={centre}
-              students={studentMap.get(centre.id) ?? []}
-              attendance={attMap.get(centre.id) ?? []}
-              extraDates={extraMap.get(centre.id) ?? new Set()}
-              month={month}
-              today={today}
-              batchFilter={effectiveBatch}
-              onCellClick={setModal}
-              onQuickSet={quickSet}
-              onAddExtra={() => setExtraTarget(centre.id)}
-            />
-          ))}
+          {visibleCentres.flatMap(centre => {
+            // A centre with 2+ batches shows one card per batch (lib/batchUnits),
+            // unless a single batch is already picked in the Batch filter.
+            const units = effectiveBatch === "all"
+              ? centreUnits(centre, studentMap.get(centre.id) ?? [])
+              : [null];
+            return units.map(u => {
+              const bf: BatchFilter = u && u.split ? (u.batchId ?? "general") : effectiveBatch;
+              const tUid = u ? u.teacherUid
+                : effectiveBatch !== "all" && effectiveBatch !== "general"
+                  ? (centre.batches.find(b => b.id === effectiveBatch)?.teacherUid || centre.teacherUid)
+                  : centre.teacherUid;
+              return (
+                <CentreCard
+                  key={u?.key ?? centre.id}
+                  centre={centre}
+                  students={studentMap.get(centre.id) ?? []}
+                  attendance={attMap.get(centre.id) ?? []}
+                  extraDates={extraMap.get(centre.id) ?? new Set()}
+                  month={month}
+                  today={today}
+                  batchFilter={bf}
+                  teacherName={tUid ? teacherName(tUid) : ""}
+                  onCellClick={setModal}
+                  onQuickSet={quickSet}
+                  onAddExtra={() => setExtraTarget(centre.id)}
+                />
+              );
+            });
+          })}
         </>
       )}
 

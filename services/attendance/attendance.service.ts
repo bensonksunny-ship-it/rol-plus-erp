@@ -8,6 +8,10 @@ import {
   query,
   where,
   serverTimestamp,
+  setDoc,
+  getDoc,
+  deleteDoc,
+  deleteField,
 } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
 import type { User, StudentUser } from "@/types";
@@ -444,4 +448,91 @@ export async function checkGhostClass(classId: string): Promise<boolean> {
   });
 
   return true;
+}
+
+// ─── Cancel a class ──────────────────────────────────────────────────────────
+// Chief Teacher / Director / Admin / Founder (both wings): marks one centre's
+// class on one date as cancelled. Every listed student's mark for that day
+// becomes "cancelled_teacher" (shown as "Cancelled (Teacher)") — except students
+// already marked Break, whose break is real and stays. The dashboard's Today's
+// Classes / Faculty Availability then read the class as Cancelled, and the
+// weekly breakdown counts it under Cancelled instead of Pending. Re-marking P/A
+// afterwards overwrites it as usual. The reason is kept in class_cancellations.
+
+/** Roles allowed to cancel a whole class. */
+export function canCancelClass(role: string | null | undefined): boolean {
+  return ["founder", "super_admin", "admin", "director", "chief_teacher"].includes(String(role ?? ""));
+}
+
+export async function cancelClass(input: {
+  centerId: string; date: string; studentUids: string[]; markedBy: string; reason?: string;
+}): Promise<{ cancelled: string[]; keptBreak: string[] }> {
+  const existing = await getAttendanceByCentreDate(input.centerId, input.date);
+  const onBreak = new Set(existing.filter(r => (r.status as string) === "break").map(r => r.studentUid));
+  const cancelled = input.studentUids.filter(uid => !onBreak.has(uid));
+  const keptBreak = input.studentUids.filter(uid => onBreak.has(uid));
+  // Each student's mark before cancelling ("" = none) — so Undo can put it back.
+  const previous: Record<string, string> = {};
+  cancelled.forEach(uid => {
+    const prev = existing.find(r => r.studentUid === uid)?.status as string | undefined;
+    previous[uid] = prev && prev !== "cancelled_teacher" ? prev : "";
+  });
+  await Promise.all(cancelled.map(uid => saveCentreAttendance({
+    studentUid: uid, centerId: input.centerId, date: input.date, status: "cancelled_teacher", markedBy: input.markedBy,
+  })));
+  // Merged, so two batches of one centre cancelled the same day both keep their marks.
+  await setDoc(doc(db, "class_cancellations", `${input.centerId}_${input.date}`), {
+    centerId: input.centerId, date: input.date, reason: input.reason?.trim() || null,
+    cancelledBy: input.markedBy, cancelledAt: new Date().toISOString(), students: cancelled.length,
+    previous,
+  }, { merge: true }).catch(err => console.warn("[attendance] class_cancellations write:", err));
+  logAction({
+    action: "CLASS_CANCELLED", initiatorId: input.markedBy, initiatorRole: "admin",
+    approverId: null, approverRole: null, reason: input.reason?.trim() || null,
+    metadata: { centerId: input.centerId, date: input.date, cancelled: cancelled.length, keptBreak: keptBreak.length },
+  });
+  return { cancelled, keptBreak };
+}
+
+/**
+ * Undo "Cancel class": every student marked Cancelled (Teacher) for this centre
+ * and date gets their mark from before the cancellation back — or no mark, if
+ * they had none (also for classes cancelled before previous marks were kept).
+ * `studentUids` limits it to one batch's students; omitted = the whole centre.
+ */
+export async function undoCancelClass(input: {
+  centerId: string; date: string; markedBy: string; studentUids?: string[];
+}): Promise<{ restored: { uid: string; status: AttendanceStatus }[]; cleared: string[] }> {
+  const ref = doc(db, "class_cancellations", `${input.centerId}_${input.date}`);
+  const snap = await getDoc(ref).catch(() => null);
+  const previous = (snap?.exists() ? (snap.data().previous as Record<string, string> | undefined) : undefined) ?? {};
+  const only = input.studentUids ? new Set(input.studentUids) : null;
+
+  const recs = (await getAttendanceByCentreDate(input.centerId, input.date))
+    .filter(r => (r.status as string) === "cancelled_teacher" && (!only || only.has(r.studentUid)));
+  const restored: { uid: string; status: AttendanceStatus }[] = [];
+  const cleared: string[] = [];
+  await Promise.all(recs.map(async r => {
+    const prev = previous[r.studentUid];
+    if (prev) {
+      await updateDoc(doc(db, ATTENDANCE, r.id), { status: prev, markedAt: new Date().toISOString(), markedBy: input.markedBy });
+      restored.push({ uid: r.studentUid, status: prev as AttendanceStatus });
+    } else {
+      await deleteDoc(doc(db, ATTENDANCE, r.id));
+      cleared.push(r.studentUid);
+    }
+  }));
+
+  // Drop the cancellation note (or just these students from it).
+  if (snap?.exists()) {
+    const left = Object.keys(previous).filter(uid => only && !only.has(uid));
+    if (!only || left.length === 0) await deleteDoc(ref).catch(() => {});
+    else await updateDoc(ref, Object.fromEntries([...only].map(uid => [`previous.${uid}`, deleteField()]))).catch(() => {});
+  }
+  logAction({
+    action: "CLASS_CANCEL_UNDONE", initiatorId: input.markedBy, initiatorRole: "admin",
+    approverId: null, approverRole: null, reason: null,
+    metadata: { centerId: input.centerId, date: input.date, restored: restored.length, cleared: cleared.length },
+  });
+  return { restored, cleared };
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { getCached, setCached } from "@/lib/dataCache";
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { collection, getDocs, query, where, orderBy, limit, doc, setDoc, getDoc, serverTimestamp, onSnapshot } from "firebase/firestore";
@@ -15,6 +16,9 @@ import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic } from "@/lib/wing";
 import { activeStudentUids, countActiveStudents, isCurrentlyActiveStudent } from "@/lib/activeStudents";
 import { classMarkState } from "@/lib/attendanceStatus";
+import { centreUnits, meetsOn, studentUnitKey, unitTitle, NO_BATCH } from "@/lib/batchUnits";
+import { normAdmNo } from "@/lib/dedup";
+import { studentDays } from "@/app/dashboard/attendance/matrix";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center, Wing } from "@/types";
@@ -106,9 +110,11 @@ interface SystemData {
 
 function isoToday(): string { return new Date().toISOString().slice(0, 10); }
 function isoDaysAgo(n: number): string { return new Date(Date.now() - n * 86400000).toISOString().slice(0, 10); }
+/** "YYYY-MM", `offset` months back, in LOCAL time (toISOString is UTC and gave
+ *  the previous month on the 1st before 05:30 IST). */
 function isoMonthStart(offset = 0): string {
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - offset);
-  return d.toISOString().slice(0, 7);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
 // Month-over-month widget (Super Admin only, see MonthComparisonWidget below):
@@ -254,6 +260,11 @@ function CommandCenter() {
   const momFetchFloor = useMemo(() => isoMonthStart(MOM_MONTHS_BACK), []);
 
   useEffect(() => {
+    // Last visit's data shows at once (per wing); fresh data replaces it below.
+    const cacheKey = `dashboard:${wing}:system`;
+    const cached = getCached<SystemData>(cacheKey);
+    if (cached) { setData(cached); setLoading(false); }
+    let cancelled = false;
     async function load() {
       try {
         const [studentsSnap, teachersSnap, centersSnap, attSnap, txSnap, quality] = await Promise.all([
@@ -264,22 +275,26 @@ function CommandCenter() {
           getDocs(collection(db, "transactions")),
           getAllTeacherQuality(),
         ]);
+        if (cancelled) return;
         const centerIds = new Set(centersSnap.map(c => c.id));
-        setData({
+        const fresh: SystemData = {
           students:     studentsSnap.docs.filter(d => inWing(d.data(), wing)).map(d => ({ uid: d.id, ...d.data() } as StudentDoc)),
           teachers:     teachersSnap.docs.filter(d => inWing(d.data(), wing)).map(d => ({ uid: d.id, ...d.data() } as TeacherDoc)),
           centers:      centersSnap,
           attendance:   scopeToWing(attSnap.docs.map(d => d.data() as AttendanceDoc), centerIds),
           transactions: scopeToWing(txSnap.docs.map(d => d.data() as TransactionDoc), centerIds),
           quality,
-        });
+        };
+        setData(fresh);
+        setCached(cacheKey, fresh);
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load.");
+        if (!cancelled && !cached) setError(e instanceof Error ? e.message : "Failed to load.");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
     load();
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wing]);
 
@@ -395,22 +410,32 @@ function CommandCenter() {
   }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1)), [teachers, quality]);
 
   // Monthly revenue trend (last 6 months)
-  const revMonthlyTrend = useMemo(() => Array.from({ length: 6 }, (_, i) => {
-    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - (5 - i));
-    const ym  = d.toISOString().slice(0, 7);
-    const amt = completedTx.filter(t => t.date?.startsWith(ym)).reduce((s, t) => s + t.amount, 0);
-    const label = d.toLocaleDateString("en-IN", { month: "short" });
-    return { ym, label, amt };
-  }), [completedTx]);
+  // Last 6 months, but never before the wing's first month with a payment — no
+  // run of empty months before the school started. ≤ 1 month → single-bar view.
+  const revMonthlyTrend = useMemo(() => {
+    const firstYm = completedTx.reduce((min, t) => (t.date && t.date.slice(0, 7) < min ? t.date.slice(0, 7) : min), "9999-99");
+    return Array.from({ length: 6 }, (_, i) => {
+      const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - (5 - i));
+      const ym  = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const amt = completedTx.filter(t => t.date?.startsWith(ym)).reduce((s, t) => s + t.amount, 0);
+      const label = d.toLocaleDateString("en-IN", { month: "short" });
+      return { ym, label, amt };
+    }).filter(m => m.ym >= firstYm || m.ym === isoMonthStart(0));
+  }, [completedTx]);
 
-  // Weekly attendance trend (last 7 days)
+  // Weekly attendance trend (last 7 days). Same % as everywhere else:
+  // Present ÷ (Present + Absent) — Break / Cancelled / Not Assigned don't count
+  // against it. A day with no classes marked has no point (was plotted as 0%).
   const attWeeklyTrend = useMemo(() => Array.from({ length: 7 }, (_, i) => {
-    const date  = isoDaysAgo(6 - i);
-    const recs  = attendance.filter(a => a.date === date);
-    const pct   = recs.length > 0 ? Math.round((recs.filter(a => a.status === "present").length / recs.length) * 100) : null;
-    const label = new Date(date + "T12:00:00").toLocaleDateString("en-IN", { weekday: "short" });
+    const date    = isoDaysAgo(6 - i);
+    const recs    = attendance.filter(a => a.date === date);
+    const present = recs.filter(a => a.status === "present").length;
+    const absent  = recs.filter(a => a.status === "absent").length;
+    const pct     = present + absent > 0 ? Math.round((present / (present + absent)) * 100) : null;
+    const label   = new Date(date + "T12:00:00").toLocaleDateString("en-IN", { weekday: "short" });
     return { date, label, pct };
   }), [attendance]);
+  const attTrendPoints = attWeeklyTrend.filter(d => d.pct !== null).map(d => ({ label: d.label, value: d.pct as number }));
 
   // Top 5 centres by revenue + students
   const top5Rev      = [...centreRows].sort((a,b) => b.revenue30d - a.revenue30d).slice(0,5);
@@ -523,7 +548,9 @@ function CommandCenter() {
 
       <div style={{ marginBottom: 16 }}>
         <ChartCard title="Attendance Trend" sub="7 days">
-          <LineChart data={attWeeklyTrend.map(d=>({ label:d.label, value:d.pct??0 }))} color="#16a34a" formatValue={v=>`${v}%`} />
+          {attTrendPoints.length > 0
+            ? <LineChart data={attTrendPoints} color="#16a34a" formatValue={v=>`${v}%`} />
+            : <div style={{ fontSize: 12.5, color: "#9ca3af", padding: "18px 0" }}>No classes marked in the last 7 days.</div>}
         </ChartCard>
       </div>
 
@@ -563,8 +590,17 @@ function CommandCenter() {
 
         </div>
         <div className="lg:col-span-2">
-          <ChartCard title="Revenue Trend" sub="6 months">
-            <LineChart data={revMonthlyTrend.map(d=>({ label:d.label, value:d.amt }))} color="#4f46e5" formatValue={v=>`₹${(v/1000).toFixed(1)}k`} />
+          <ChartCard title="Revenue Trend" sub={revMonthlyTrend.length > 1 ? `${revMonthlyTrend.length} months` : "this month"}>
+            {revMonthlyTrend.length > 1 ? (
+              <LineChart data={revMonthlyTrend.map(d=>({ label:d.label, value:d.amt }))} color="#4f46e5" formatValue={v=>`₹${(v/1000).toFixed(1)}k`} />
+            ) : (
+              <>
+                <BarChart data={revMonthlyTrend.map(d=>({ label:d.label, value:d.amt }))} color="#4f46e5" formatValue={v=>`₹${(v/1000).toFixed(1)}k`} />
+                <div style={{ marginTop: 10, fontSize: 12, color: "var(--color-text-secondary)", background: "var(--color-surface-2)", borderRadius: 8, padding: "8px 10px" }}>
+                  Initial month active — trend graphs will populate automatically as historical data accumulates.
+                </div>
+              </>
+            )}
           </ChartCard>
         </div>
       </div>
@@ -617,18 +653,32 @@ function MonthComparisonWidget({ attendance, completedTx }: {
   const currentYm  = isoMonthStart(offset);
   const previousYm = isoMonthStart(offset + 1);
 
+  // The month in progress is compared like-for-like: 1st → today against the same
+  // days of the previous month (1–2 Oct vs 1–2 Sep), never a partial month vs a
+  // whole one — that showed a false −100% early in every month. Past months
+  // compare full month vs full month.
+  const inProgress = offset === 0;
+  const dayCap = inProgress ? new Date().getDate() : 31;
+  const inWindow = (date: string | undefined, ym: string) =>
+    !!date && date.startsWith(ym) && Number(date.slice(8, 10)) <= dayCap;
+
   const revenueFor = (ym: string) =>
-    completedTx.filter(t => t.date?.startsWith(ym)).reduce((sum, t) => sum + t.amount, 0);
+    completedTx.filter(t => inWindow(t.date, ym)).reduce((sum, t) => sum + t.amount, 0);
 
   const attendanceRateFor = (ym: string): number | null => {
-    const recs = attendance.filter(a => a.date?.startsWith(ym));
+    const recs = attendance.filter(a => inWindow(a.date, ym));
     if (recs.length === 0) return null;
     return Math.round((recs.filter(a => a.status === "present").length / recs.length) * 100);
   };
 
   const revCurrent  = revenueFor(currentYm);
   const revPrevious = revenueFor(previousYm);
+  // Previous ₹0: no % (nothing to divide by) — "New" if this period has revenue.
   const revDeltaPct = revPrevious > 0 ? Math.round(((revCurrent - revPrevious) / revPrevious) * 100) : null;
+  const revIsNew    = revPrevious === 0 && revCurrent > 0;
+  const periodLabel = (ym: string) => inProgress
+    ? `1–${dayCap} ${new Date(ym + "-01T00:00:00").toLocaleDateString("en-IN", { month: "short" })}`
+    : monthLabel(ym);
 
   const attCurrent  = attendanceRateFor(currentYm);
   const attPrevious = attendanceRateFor(previousYm);
@@ -639,7 +689,9 @@ function MonthComparisonWidget({ attendance, completedTx }: {
       <div style={mom.header}>
         <div>
           <div style={s.sectionTitle}>Month-over-Month Comparison</div>
-          <div style={s.sectionSub}>{monthLabel(currentYm)} vs {monthLabel(previousYm)}</div>
+          <div style={s.sectionSub}>
+            {periodLabel(currentYm)} vs {periodLabel(previousYm)}{inProgress ? " · month to date (same days)" : ""}
+          </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button
@@ -661,15 +713,15 @@ function MonthComparisonWidget({ attendance, completedTx }: {
       <div style={mom.grid}>
         <MomCard
           label="Revenue"
-          currentLabel={monthLabel(currentYm)} previousLabel={monthLabel(previousYm)}
+          currentLabel={periodLabel(currentYm)} previousLabel={periodLabel(previousYm)}
           currentValue={`₹${revCurrent.toLocaleString("en-IN")}`}
           previousValue={`₹${revPrevious.toLocaleString("en-IN")}`}
-          deltaText={revDeltaPct !== null ? `${revDeltaPct >= 0 ? "+" : "−"}${Math.abs(revDeltaPct)}%` : "—"}
-          deltaColor={revDeltaPct === null ? "var(--color-text-muted)" : revDeltaPct >= 0 ? "var(--color-success)" : "var(--color-danger)"}
+          deltaText={revDeltaPct !== null ? `${revDeltaPct >= 0 ? "+" : "−"}${Math.abs(revDeltaPct)}%` : revIsNew ? "New" : "—"}
+          deltaColor={revDeltaPct === null ? (revIsNew ? "var(--color-success)" : "var(--color-text-muted)") : revDeltaPct >= 0 ? "var(--color-success)" : "var(--color-danger)"}
         />
         <MomCard
           label="Attendance Rate"
-          currentLabel={monthLabel(currentYm)} previousLabel={monthLabel(previousYm)}
+          currentLabel={periodLabel(currentYm)} previousLabel={periodLabel(previousYm)}
           currentValue={attCurrent !== null ? `${attCurrent}%` : "—"}
           previousValue={attPrevious !== null ? `${attPrevious}%` : "—"}
           deltaText={attDeltaPts !== null ? `${attDeltaPts >= 0 ? "+" : "−"}${Math.abs(attDeltaPts)} pts` : "—"}
@@ -981,13 +1033,16 @@ function GaugeChart({ value, goal }: { value:number; goal:number }) {
 //   red   "⚠️ Attendance Pending" — the class has ENDED with no attendance (never while it's running)
 //   amber "◐ Partly Marked"      — attendance taken for some of the centre's active students
 //   green "✓ Marked"             — attendance taken for every active student
-type ClassDayStatus = "scheduled" | "pending" | "recorded" | "completed";
+// "cancelled" = the class was cancelled for the day (Attendance / centre modal →
+// Cancel class): every mark is Cancelled (Teacher) or Break, at least one Cancelled.
+type ClassDayStatus = "scheduled" | "pending" | "recorded" | "completed" | "cancelled";
 
 const CLASS_STATUS_STYLE: Record<ClassDayStatus, { bg: string; border: string; fg: string; label: string }> = {
   scheduled: { bg: "var(--color-info-dim)",    border: "var(--color-info)",           fg: "var(--color-info)",    label: "Scheduled" },
   pending:   { bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)",  fg: "var(--color-danger)",  label: "⚠️ Pending" },
   recorded:  { bg: "var(--color-warning-dim)", border: "var(--color-warning-border)", fg: "var(--color-warning)", label: "◐ Partly" },
   completed: { bg: "var(--color-success-dim)", border: "var(--color-success-border)", fg: "var(--color-success)", label: "✓ Marked" },
+  cancelled: { bg: "var(--color-surface-2)",   border: "var(--color-border)",         fg: "var(--color-text-secondary)", label: "🚫 Cancelled" },
 };
 
 /** Hover hint for a class card's status badge. */
@@ -1000,6 +1055,7 @@ function classStatusHint(status: ClassDayStatus, isToday: boolean, marked: numbe
     case "pending":   return `Attendance not yet recorded for ${session} — the class has ended.`;
     case "recorded":  return `Attendance recorded for ${marked} of ${expected} active student${expected !== 1 ? "s" : ""} — finish marking the rest.`;
     case "completed": return `Attendance submitted for ${session} — all ${expected} active student${expected !== 1 ? "s" : ""} marked.`;
+    case "cancelled": return `Class cancelled for ${session} — students are marked Cancelled (Teacher).`;
   }
 }
 
@@ -1028,6 +1084,9 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   // Registry's "confirm", with an admission number) — the "Marked" denominator.
   const [activeUidsByCenter, setActiveUidsByCenter] = useState<Record<string, Set<string>>>({});
   const [dateAttRecs, setDateAttRecs] = useState<{ centerId: string; studentUid: string; status: string }[]>([]);
+  // Centres whose class was cancelled on this date ("Cancel class" note) — counts
+  // even when there were no students to mark Cancelled (e.g. an empty roster).
+  const [cancelledCentres, setCancelledCentres] = useState<Set<string>>(new Set());
   const [staff, setStaff] = useState<FacultyMember[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -1046,6 +1105,9 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
           getDocs(query(collection(db, "users"), where("role", "in", [ROLES.TEACHER, ROLES.CHIEF_TEACHER, ROLES.DIRECTOR]))),
         ]);
         if (cancelled) return;
+        const cancelSnap = await getDocs(query(collection(db, "class_cancellations"), where("date", "==", selectedDate))).catch(() => null);
+        if (cancelled) return;
+        setCancelledCentres(new Set((cancelSnap?.docs ?? []).map(d => String(d.data().centerId ?? ""))));
         setStaff(staffSnap.docs.map(d => {
           const t = d.data();
           return { uid: d.id, name: getTeacherDisplayName({ ...t, uid: d.id } as Parameters<typeof getTeacherDisplayName>[0]) || "Unnamed",
@@ -1054,11 +1116,15 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
         const cidSet = new Set(centersData.map(c => c.id));
         setCenters(centersData);
         const byCentre: Record<string, Set<string>> = {};
+        const centreById = new Map(centersData.map(c => [c.id, c]));
         studentsSnap.docs.forEach(d => {
           const data = d.data();
           if (!isCurrentlyActiveStudent(data, cidSet)) return;
           const cid = data.centerId as string;
           (byCentre[cid] ??= new Set()).add(d.id);
+          // A batch of a 2+-batch centre is its own class (lib/batchUnits).
+          const uk = studentUnitKey(centreById.get(cid)!, (data.batchId as string) || null);
+          if (uk !== cid) (byCentre[uk] ??= new Set()).add(d.id);
         });
         setActiveUidsByCenter(byCentre);
         setDateAttRecs(attSnap.docs
@@ -1087,14 +1153,27 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
     [centers, dow]
   );
 
-  // Every class taught on this date: one per batch meeting that day (batch
-  // teacher, else the centre teacher), or the centre itself when it has no batches.
+  // Classes on this date: a centre, or — for a centre with 2+ batches — each
+  // batch meeting that day as its own class (lib/batchUnits). Students without
+  // a valid batch there form a "No batch" class when there are any.
+  const dateUnits = useMemo(() => dateCentres.flatMap(c => {
+    const units = centreUnits(c, [] as { batchId?: string | null }[]);
+    const out = units.filter(u => !u.split || meetsOn(u.days, selectedDate));
+    if (units[0]?.split && (activeUidsByCenter[`${c.id}|${NO_BATCH}`]?.size ?? 0) > 0) {
+      out.push({ ...units[0], key: `${c.id}|${NO_BATCH}`, batchId: null, batchName: "No batch", teacherUid: c.teacherUid ?? "", days: [], time: c.timeSlot ?? "" });
+    }
+    return out.map(u => ({ ...u, centre: c, slot: u.split ? u.time : (c.timeSlot ?? "") }));
+  }), [dateCentres, selectedDate, activeUidsByCenter]);
+
+  // Every class taught on this date, with its teacher (batch teacher, else the
+  // centre teacher). A single-batch centre still names its batch teacher.
   const sessions = useMemo<FacultySession[]>(() => dateCentres.flatMap(c => {
     const batches = c.batches ?? [];
-    if (batches.length === 0) return [{ teacherUid: c.teacherUid ?? "", centreId: c.id, centreName: c.name, batchName: "", time: c.timeSlot ?? "" }];
+    const split = batches.length >= 2;
+    if (batches.length === 0) return [{ teacherUid: c.teacherUid ?? "", centreId: c.id, unitKey: c.id, centreName: c.name, batchName: "", time: c.timeSlot ?? "" }];
     return batches.filter(b => (b.daysOfWeek ?? []).includes(dow)).map(b => ({
-      teacherUid: b.teacherUid || c.teacherUid || "", centreId: c.id, centreName: c.name,
-      batchName: batches.length > 1 ? b.name : "",
+      teacherUid: b.teacherUid || c.teacherUid || "", centreId: c.id, unitKey: split ? `${c.id}|${b.id}` : c.id, centreName: c.name,
+      batchName: split ? b.name : "",
       time: b.startTime && b.endTime ? `${b.startTime}–${b.endTime}` : (c.timeSlot ?? ""),
     }));
   }), [dateCentres, dow]);
@@ -1114,13 +1193,29 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   // with no attendance recorded does the badge switch to "Pending". Before
   // that — later today, or any future date — it reads as "scheduled" and
   // shows the actual time slot instead of a generic label.
-  const markFor = (centerId: string) =>
-    classMarkState(attByCenter.get(centerId) ?? [], activeUidsByCenter[centerId] ?? new Set());
+  /** `key` = a centre id, or "centreId|batchId" for one batch of a split centre. */
+  const unitRecs = (key: string) => {
+    const cid = key.split("|")[0];
+    const recs = attByCenter.get(cid) ?? [];
+    if (key === cid) return recs;
+    const roster = activeUidsByCenter[key] ?? new Set<string>();
+    return recs.filter(r => roster.has(r.studentUid));
+  };
+  const markFor = (key: string) =>
+    classMarkState(unitRecs(key), activeUidsByCenter[key] ?? new Set());
 
-  function statusFor(centerId: string, timeSlot: string): ClassDayStatus {
-    const { state } = markFor(centerId);
+  function statusFor(key: string, timeSlot: string): ClassDayStatus {
+    // Cancelled from the centre / Attendance — whole centre, or a batch with no one to mark.
+    const cid = key.split("|")[0];
+    if (cancelledCentres.has(cid) && (key === cid || (activeUidsByCenter[key]?.size ?? 0) === 0)) return "cancelled";
+    const recs = unitRecs(key).filter(r => !!r.status);
+    if (recs.some(r => r.status === "cancelled_teacher") && recs.every(r => r.status.startsWith("cancelled") || r.status === "break")) {
+      return "cancelled";
+    }
+    const { state, expected } = markFor(key);
     if (state === "complete") return "completed";
     if (state === "partial") return "recorded";
+    if (expected === 0) return "scheduled";   // no students in this class — nothing to chase
     const isPastDay        = selectedDate < todayISO;
     const isTodayAndEnded  = selectedDate === todayISO && classHasEnded(timeSlot);
     if (isPastDay || isTodayAndEnded) return "pending";
@@ -1133,9 +1228,9 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
   const sectionTitle = isToday ? "Today's Classes" : `Classes for ${dateObj.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`;
 
   const pendingCount = useMemo(
-    () => dateCentres.filter(c => statusFor(c.id, c.timeSlot ?? "") === "pending").length,
+    () => dateUnits.filter(u => statusFor(u.key, u.slot) === "pending").length,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [dateCentres, attByCenter, activeUidsByCenter, selectedDate]
+    [dateUnits, attByCenter, activeUidsByCenter, selectedDate]
   );
 
   const navBtn: React.CSSProperties = {
@@ -1178,17 +1273,18 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
         <div style={{ fontSize: 13, color: "var(--color-text-secondary)", padding: "6px 0 4px" }}>No classes scheduled on this day.</div>
       )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-        {dateCentres.map(c => {
-          const status = statusFor(c.id, c.timeSlot ?? "");
+        {dateUnits.map(u => {
+          const c = u.centre;
+          const status = statusFor(u.key, u.slot);
           const st = CLASS_STATUS_STYLE[status];
-          const slot = fmtTimeSlotRange(c.timeSlot ?? "");
-          const mark = markFor(c.id);
+          const slot = fmtTimeSlotRange(u.slot);
+          const mark = markFor(u.key);
           const hint = classStatusHint(status, isToday, mark.marked, mark.expected);
           return (
             <button
-              key={c.id}
+              key={u.key}
               onClick={() => openCentre(c.id)}
-              title={`Open ${c.name}`}
+              title={`Open ${unitTitle(u)}`}
               style={{
                 background: st.bg, border: `1px solid ${st.border}`,
                 borderRadius: 10, padding: "12px 16px",
@@ -1201,7 +1297,10 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
                          borderRadius: 99, padding: "1px 8px", background: "var(--color-surface)", cursor: "help", whiteSpace: "nowrap" }}>
                 {st.label}
               </span>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>{c.name}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--color-text-primary)", lineHeight: 1.3 }}>
+                {c.name}
+                {u.split && <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 800, color: "#fff", background: "#4f46e5", borderRadius: 5, padding: "1px 6px" }}>{u.batchName}</span>}
+              </div>
               {slot && <div style={{ fontSize: 11.5, fontWeight: 600, color: st.fg }}>{slot}</div>}
             </button>
           );
@@ -1226,13 +1325,14 @@ function ClassesForDateWidget({ sectionStyle, headerStyle, titleStyle, subStyle 
 // batch's own teacher); Off = active teachers of this wing with no class.
 
 interface FacultyMember { uid: string; name: string; role: string; active: boolean; inWing: boolean }
-interface FacultySession { teacherUid: string; centreId: string; centreName: string; batchName: string; time: string }
+interface FacultySession { teacherUid: string; centreId: string; unitKey: string; centreName: string; batchName: string; time: string }
 
 const FACULTY_STATUS: Record<ClassDayStatus, { label: string; fg: string; bg: string; border: string }> = {
   completed: { label: "✓ Marked",   fg: "var(--color-success)", bg: "var(--color-success-dim)", border: "var(--color-success-border)" },
   recorded:  { label: "◐ Partly",   fg: "var(--color-warning)", bg: "var(--color-warning-dim)", border: "var(--color-warning-border)" },
   pending:   { label: "⚠️ Pending",  fg: "var(--color-danger)",  bg: "var(--color-danger-dim)",  border: "var(--color-danger-border)" },
   scheduled: { label: "Upcoming",   fg: "var(--color-info)",    bg: "var(--color-info-dim)",    border: "var(--color-info)" },
+  cancelled: { label: "🚫 Cancelled", fg: "var(--color-text-secondary)", bg: "var(--color-surface-2)", border: "var(--color-border)" },
 };
 
 function FacultyAvailability({ isToday, dateLabel, sessions, staff, statusFor }: {
@@ -1303,7 +1403,7 @@ function FacultyAvailability({ isToday, dateLabel, sessions, staff, statusFor }:
                 </div>
                 <div style={{ display: "grid", gap: 6 }}>
                   {list.map((s, k) => {
-                    const st = FACULTY_STATUS[statusFor(s.centreId, s.time)];
+                    const st = FACULTY_STATUS[statusFor(s.unitKey, s.time)];
                     return (
                       <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
                         <div style={{ flex: 1, minWidth: 0, color: "var(--color-text-primary)" }}>
@@ -1361,12 +1461,13 @@ function FacultyAvailability({ isToday, dateLabel, sessions, staff, statusFor }:
 // ═══════════════════════════════════════════════════════════════════════════════
 
 interface WeeklyStudentDoc {
-  uid:       string;
-  name:      string;
-  centerId:  string;
-  status:    string;
-  classType: string;
-  classDays: string[];
+  uid:         string;
+  name:        string;
+  centerId:    string;
+  admissionNo: string;
+  classType:   "group" | "personal";
+  classDays:   string[];
+  batchId:     string | null;
 }
 
 interface WeeklyAttendanceDoc {
@@ -1434,19 +1535,31 @@ function WeeklyClassBreakdown() {
           getDocs(query(collection(db, "attendance"), where("date", ">=", weekStart), where("date", "<=", weekEnd))),
         ]);
         if (cancelled) return;
-        const cidSet = new Set(centersData.map(c => c.id));
+        // Only currently active students of ACTIVE centres (shared rule: "active"
+        // or the Registry's "confirm", with an admission no.) — the old
+        // "not inactive" test let in every "Cancelled" / status-less record and
+        // inflated Pending. Duplicate records of one person count once.
+        const activeCids = new Set(centersData.filter(c => c.status === "active").map(c => c.id));
         setCenters(centersData);
+        const seenAdm = new Set<string>();
         setStudents(studentsSnap.docs
-          .filter(d => { const cid = (d.data().centerId ?? "") as string; return cid && cidSet.has(cid); })
+          .filter(d => isCurrentlyActiveStudent(d.data(), activeCids))
+          .filter(d => {
+            const key = `${d.data().centerId}|${normAdmNo(d.data().admissionNo ?? d.data().admissionNumber)}`;
+            if (seenAdm.has(key)) return false;
+            seenAdm.add(key);
+            return true;
+          })
           .map(d => {
           const data = d.data();
           return {
-            uid:       d.id,
-            name:      (data.displayName ?? data.name ?? "—") as string,
-            centerId:  (data.centerId ?? "") as string,
-            status:    (data.status ?? data.studentStatus ?? "active") as string,
-            classType: (data.classType ?? "group") as string,
-            classDays: Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
+            uid:         d.id,
+            name:        (data.displayName ?? data.name ?? "—") as string,
+            centerId:    (data.centerId ?? "") as string,
+            admissionNo: String(data.admissionNumber || data.admissionNo || ""),
+            classType:   ((data.classType as string) === "personal" ? "personal" : "group") as "group" | "personal",
+            classDays:   Array.isArray(data.classDays) ? (data.classDays as string[]) : [],
+            batchId:     (data.batchId as string) || null,
           };
         }));
         setRecords(attSnap.docs.map(d => {
@@ -1467,11 +1580,11 @@ function WeeklyClassBreakdown() {
     return () => { cancelled = true; };
   }, [weekStart, weekEnd, wing]);
 
-  const centerDaysMap = useMemo(() => {
-    const m = new Map<string, string[]>();
-    centers.forEach(c => m.set(c.id, ((c as Center & { daysOfWeek?: string[] }).daysOfWeek) ?? []));
-    return m;
-  }, [centers]);
+  const centreById = useMemo(() => new Map(centers.map(c => [c.id, {
+    id: c.id, name: c.name,
+    daysOfWeek: ((c as Center & { daysOfWeek?: string[] }).daysOfWeek) ?? [],
+    batches: c.batches ?? [],
+  }])), [centers]);
 
   const centerNameMap = useMemo(() => {
     const m = new Map<string, string>();
@@ -1490,15 +1603,18 @@ function WeeklyClassBreakdown() {
     const class2 = emptyBucket();
     const entries: WeeklyEntry[] = [];
 
-    const activeStudents = students.filter(s => s.status !== "inactive" && s.status !== "deactivation_requested");
-
-    activeStudents.forEach(st => {
-      const scheduleDays = st.classType === "personal" && st.classDays.length > 0
-        ? st.classDays
-        : (centerDaysMap.get(st.centerId) ?? []);
+    const today = isoToday();
+    students.forEach(st => {
+      const centre = centreById.get(st.centerId);
+      if (!centre) return;
+      // The student's own class days: batch → personal days → centre schedule
+      // (same rule as the Attendance page's Monthly Register).
+      const scheduleDays = studentDays(centre, st);
       if (scheduleDays.length === 0) return;
 
-      const scheduledDates = weekDates.filter(d => scheduleDays.includes(DAY_ABBR[new Date(d + "T00:00:00").getDay()]));
+      // Only classes that have happened (up to today) — later ones aren't "pending".
+      const scheduledDates = weekDates.filter(d =>
+        d <= today && scheduleDays.includes(DAY_ABBR[new Date(d + "T00:00:00").getDay()]));
 
       scheduledDates.slice(0, 2).forEach((date, idx) => {
         const classSlot: 1 | 2 = idx === 0 ? 1 : 2;
@@ -1524,7 +1640,7 @@ function WeeklyClassBreakdown() {
     });
 
     return { class1, class2, entries };
-  }, [students, centerDaysMap, centerNameMap, attMap, weekDates]);
+  }, [students, centreById, centerNameMap, attMap, weekDates]);
 
   const weekLabel = `${new Date(weekStart + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })} – ${new Date(weekEnd + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`;
   const isCurrentWeek = weekOffset === 0;
@@ -1728,6 +1844,13 @@ interface BillingMonthStatus {
 }
 
 // ── Admin Dashboard Component ──────────────────────────────────────────────────
+/** Cached result of AdminDashboard's load (lib/dataCache), restored on the next visit. */
+interface AdminDashSnapshot {
+  students: AdminStudentDoc[]; activeHeadcount: number; activeUids: Set<string>; teachers: AdminTeacherDoc[];
+  centers: Center[]; txList: { month: string; amount: number; studentUid: string; status: string; type: string; method: string; billingMonth: string }[];
+  billing: Record<string, BillingMonthStatus>;
+}
+
 function AdminDashboard() {
   const { user, capabilities } = useAuthContext();
   // Finance (fees, billing, collections) only for roles holding finance.view —
@@ -1758,6 +1881,15 @@ function AdminDashboard() {
   // ── Load ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!user) return;
+    // Last visit's data shows at once (per wing); fresh data replaces it below.
+    const cacheKey = `dashboard:${wing}:admin`;
+    const cached = getCached<AdminDashSnapshot>(cacheKey);
+    if (cached) {
+      setStudents(cached.students); setActiveHeadcount(cached.activeHeadcount); setActiveUids(cached.activeUids);
+      setTeachers(cached.teachers); setCenters(cached.centers); setTxList(cached.txList); setBilling(cached.billing);
+      setLoading(false);
+    }
+    let cancelled = false;
     async function load() {
       try {
         const [studSnap, teachSnap, centersData, txSnap, ...billingSnaps] = await Promise.all([
@@ -1768,6 +1900,7 @@ function AdminDashboard() {
           ...months3.map(m => getDoc(doc(db, "billing_months", m))),
         ]);
 
+        if (cancelled) return;
         const wingCenterIds = new Set(centersData.map(c => c.id));
 
         const studs: AdminStudentDoc[] = studSnap.docs
@@ -1784,17 +1917,20 @@ function AdminDashboard() {
         setStudents(studs);
         const activeIds = new Set(centersData.filter(c => c.status === "active").map(c => c.id));
         const wingDocs = studSnap.docs.filter(d => inWing(d.data(), wing)).map(d => ({ ...d.data(), uid: d.id }));
-        setActiveHeadcount(countActiveStudents(wingDocs, activeIds));
-        setActiveUids(activeStudentUids(wingDocs, activeIds));
+        const headcount = countActiveStudents(wingDocs, activeIds);
+        const actUids   = activeStudentUids(wingDocs, activeIds);
+        setActiveHeadcount(headcount);
+        setActiveUids(actUids);
 
-        setTeachers(teachSnap.docs
+        const teacherRows: AdminTeacherDoc[] = teachSnap.docs
           .filter(d => inWing(d.data(), wing))
           .map(d => ({
             uid:         d.id,
             displayName: getTeacherDisplayName(d.data()) || "—",
             centerIds:   (d.data().centerIds   ?? []) as string[],
             status:      (d.data().status      ?? "active") as string,
-          })));
+          }));
+        setTeachers(teacherRows);
 
         setCenters(centersData);
 
@@ -1835,13 +1971,18 @@ function AdminDashboard() {
           };
         });
         setBilling(bMap);
+        setCached<AdminDashSnapshot>(cacheKey, {
+          students: studs, activeHeadcount: headcount, activeUids: actUids, teachers: teacherRows,
+          centers: centersData, txList: txs, billing: bMap,
+        });
       } catch (err) {
         console.error("[AdminDashboard] load error:", err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
     load();
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, today, wing]);
 

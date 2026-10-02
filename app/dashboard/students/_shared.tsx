@@ -4,8 +4,9 @@ import { useState, useEffect, useRef, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   collection, getDocs, setDoc, updateDoc, doc, getDoc,
-  query, where, serverTimestamp, addDoc, increment,
+  query, where, serverTimestamp, addDoc, increment, arrayUnion,
 } from "firebase/firestore";
+import { enforceSingleActiveCentre } from "@/services/student/singleCentre.service";
 import { db } from "@/config/firebase";
 import { updateEmail } from "firebase/auth";
 import ProtectedRoute from "@/components/layout/ProtectedRoute";
@@ -72,6 +73,14 @@ export interface StudentRow {
   breakReason: string | null;
   createdAt: string;   // ISO date — joining date, "" if unknown
 }
+
+/** A student's class: centre id, or "centreId|batchId" in a 2+-batch centre (batchName set). */
+function classKeyOf(st: { centerId: string; batchId: string | null; batchName?: string }): string {
+  if (!st.batchName) return st.centerId;
+  return `${st.centerId}|${st.batchName === "No batch" ? "none" : st.batchId ?? "none"}`;
+}
+const classNameOf = (st: { centerName: string; batchName?: string }) =>
+  st.batchName ? `${st.centerName} — ${st.batchName}` : st.centerName;
 
 export interface CenterOption {
   id: string;
@@ -489,7 +498,7 @@ function StudentsContent() {
       if (q && !s.name.toLowerCase().includes(q) && !s.email.toLowerCase().includes(q)
            && !s.studentID.toLowerCase().includes(q) && !s.admissionNo.toLowerCase().includes(q))
         return false;
-      if (filterCenter !== "all" && s.centerId !== filterCenter) return false;
+      if (filterCenter !== "all" && (filterCenter.includes("|") ? classKeyOf(s) !== filterCenter : s.centerId !== filterCenter)) return false;
       if (filterCourse && s.course !== filterCourse) return false;
       if (filterInstrument && s.instrument !== filterInstrument) return false;
       if (filterFeeStatus === "pending" && s.balance <= 0) return false;
@@ -508,10 +517,12 @@ function StudentsContent() {
   const filteredRest    = tab === "inactive" ? filtered.filter(s => s.status !== "on_break") : filtered;
 
   function buildCenterGroups(students: StudentRow[]) {
-    const map = new Map<string, { centerId: string; centerName: string; students: StudentRow[] }>();
+    // One group per class — each batch of a 2+-batch centre is its own group.
+    const map = new Map<string, { key: string; centerId: string; centerName: string; students: StudentRow[] }>();
     students.forEach(s => {
-      if (!map.has(s.centerId)) map.set(s.centerId, { centerId: s.centerId, centerName: s.centerName, students: [] });
-      map.get(s.centerId)!.students.push(s);
+      const k = classKeyOf(s);
+      if (!map.has(k)) map.set(k, { key: k, centerId: s.centerId, centerName: classNameOf(s), students: [] });
+      map.get(k)!.students.push(s);
     });
     return Array.from(map.values()).sort((a, b) => safeCompare(a.centerName, b.centerName));
   }
@@ -696,7 +707,12 @@ function StudentsContent() {
         ) : (
           <select value={filterCenter} onChange={e => setFilterCenter(e.target.value)} style={p.filterSelect}>
             <option value="all">All Centers</option>
-            {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            {centerOptions.flatMap(c => (c.batches?.length ?? 0) >= 2
+              ? [
+                  <option key={c.id} value={c.id}>{c.name} (all batches)</option>,
+                  ...c.batches.map(b => <option key={`${c.id}|${b.id}`} value={`${c.id}|${b.id}`}>{c.name} — {b.name}</option>),
+                ]
+              : [<option key={c.id} value={c.id}>{c.name}</option>])}
           </select>
         )}
         <select value={filterCourse} onChange={e => setFilterCourse(e.target.value)} style={p.filterSelect}>
@@ -798,7 +814,7 @@ function StudentsContent() {
                 </div>
               )}
               {groupedByCenter.group.map(group => (
-                <div key={group.centerId} style={{ marginBottom: 28 }}>
+                <div key={group.key} style={{ marginBottom: 28 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid #e5e7eb" }}>
                     <span style={{ fontSize: 16 }}>🏫</span>
                     <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{group.centerName}</span>
@@ -823,7 +839,7 @@ function StudentsContent() {
                 👤 Individual Classes
               </div>
               {groupedByCenter.personal.map(group => (
-                <div key={group.centerId} style={{ marginBottom: 28 }}>
+                <div key={group.key} style={{ marginBottom: 28 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid #e5e7eb" }}>
                     <span style={{ fontSize: 16 }}>🏫</span>
                     <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{group.centerName}</span>
@@ -1488,6 +1504,11 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
   });
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState("");
+  // One active centre per student — changing the centre moves them.
+  const prevCentreId   = blankIfDash(student.centerId);
+  const centreMoving   = form.centerId !== prevCentreId;
+  const prevCentreName = prevCentreId ? (centerOptions.find(c => c.id === prevCentreId)?.name ?? student.centerName) : "";
+  const newCentreName  = centerOptions.find(c => c.id === form.centerId)?.name ?? "";
 
   function f(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
     setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
@@ -1537,6 +1558,20 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
       };
 
       await updateDoc(doc(db, "users", student.id), payload);
+
+      // Centre changed → the student moves: off the old centre's roster, onto the
+      // new one, and any other active record of them elsewhere goes Inactive.
+      if (centreMoving) {
+        if (form.centerId) {
+          await updateDoc(doc(db, "centers", form.centerId), { studentUids: arrayUnion(student.id) })
+            .catch(err => console.warn("[students] roster mirror not updated:", err));
+        }
+        await enforceSingleActiveCentre({
+          uid: student.id, admissionNo: form.admissionNo.trim(), wing: student.wing,
+          targetCenterId: form.centerId, prevCenterId: prevCentreId || null,
+          active: isActiveStudentStatus(form.status),
+        }).catch(err => console.error("[students] single-centre check:", err));
+      }
 
       // If email changed, update Firebase Auth via admin SDK pattern
       // (We can only do this if we have a secondary app or the Admin SDK)
@@ -1634,6 +1669,11 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                   <option value="">— No center —</option>
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
+                {centreMoving && prevCentreId && form.centerId && (
+                  <div role="status" style={{ marginTop: 6, fontSize: 12, lineHeight: 1.45, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "7px 10px" }}>
+                    This student is currently in <b>{prevCentreName}</b>. Assigning to <b>{newCentreName}</b> will move them to the new centre — a student can be active in only one centre.
+                  </div>
+                )}
               </Field>
               {form.centerId && (
                 <Field label="Batch">

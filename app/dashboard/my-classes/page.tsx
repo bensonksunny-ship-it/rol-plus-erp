@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, Suspense } from "react";
+import { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { collection, getDocs, onSnapshot, query, where } from "firebase/firestore";
@@ -14,6 +14,8 @@ import { courseLabel } from "@/lib/course";
 import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
 import { normAdmNo } from "@/lib/dedup";
 import { centreTeacherUids } from "@/services/center/center.service";
+import { centreUnits, unitTitle, type BatchUnit } from "@/lib/batchUnits";
+import { getTeacherDisplayName } from "@/lib/teacherName";
 import { useWing } from "@/hooks/useWing";
 import { teachingWings, wingOf, WING_SHORT } from "@/lib/wing";
 import {
@@ -68,6 +70,11 @@ function scheduledDatesForCentre(centre: Center, weeksBack = 5): string[] {
   return dates; // most recent first
 }
 
+/** A class card's own schedule (batch days for a batch card) in centre shape. */
+function unitScheduleCentre(u: { split: boolean; days: string[]; centre: Center }): Center {
+  return u.split ? ({ ...u.centre, timeSlot: "", daysOfWeek: u.days } as Center) : u.centre;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface StudentRow {
@@ -100,33 +107,40 @@ export default function MyClassesPage() {
 }
 
 // ─── Centre boxes ─────────────────────────────────────────────────────────────
-// Every assigned centre as a card (name, code, schedule) — the look of the old
-// Faculty Suite "My Centres" grid. Tapping one selects it; its roster and
-// attendance load below.
+// Every class the user takes as a card — one per centre, or one per batch for a
+// centre with 2+ batches (lib/batchUnits). Tapping one selects it; its roster
+// and attendance load below.
 
 const DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+type ClassUnit = BatchUnit<{ batchId?: string | null }> & { centre: Center };
+
 interface ScheduleSlot { name: string; days: string; time: string }
 
-/** The centre's weekly schedule — a teacher sees only their own batches (if any). */
-function centreSlots(c: Center, uid: string | null): ScheduleSlot[] {
+const sortDays = (days: string[]) =>
+  [...days].sort((x, y) => DAY_ABBR.indexOf(x.slice(0, 3)) - DAY_ABBR.indexOf(y.slice(0, 3))).join(" · ");
+
+/** A card's weekly schedule: the batch's own (split), else the centre's batches / time slot. */
+function unitSlots(u: ClassUnit, uid: string | null): ScheduleSlot[] {
+  if (u.split) return [{ name: "", days: sortDays(u.days), time: u.time.replace("–", " – ") }];
+  const c = u.centre;
   const batches = c.batches ?? [];
   if (batches.length === 0) return c.timeSlot ? [{ name: "", days: "", time: c.timeSlot }] : [];
   const mine = uid ? batches.filter(b => (b.teacherUid || c.teacherUid) === uid) : [];
   return (mine.length > 0 ? mine : batches).map(b => ({
-    name: batches.length > 1 ? b.name : "",
-    days: [...(b.daysOfWeek ?? [])]
-      .sort((x, y) => DAY_ABBR.indexOf(x.slice(0, 3)) - DAY_ABBR.indexOf(y.slice(0, 3))).join(" · "),
+    name: "",
+    days: sortDays(b.daysOfWeek ?? []),
     time: b.startTime && b.endTime ? `${b.startTime} – ${b.endTime}` : "",
   }));
 }
 
-function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false, studentCounts }: {
-  centers: Center[]; selectedId: string; onSelect: (id: string) => void; uid: string | null;
-  /** Active students per centre id (lib/activeStudents rule); null while loading. */
+function CentreBoxes({ units, selectedKey, onSelect, uid, showWing = false, studentCounts, teacherName }: {
+  units: ClassUnit[]; selectedKey: string; onSelect: (key: string) => void; uid: string | null;
+  /** Active students per unit key (lib/activeStudents rule); null while loading. */
   studentCounts: Record<string, number> | null;
   /** Tag each box with its wing (a teacher teaching in both wings). */
   showWing?: boolean;
+  teacherName: (uid: string) => string;
 }) {
   const [hover, setHover] = useState<string | null>(null);
   return (
@@ -134,26 +148,34 @@ function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false, stu
       <div style={s.boxHead}>
         <div>
           <div style={s.boxTitle}>My Centres</div>
-          <div style={s.boxSub}>Pick a centre to see its students and attendance below.</div>
+          <div style={s.boxSub}>Pick a class to see its students and attendance below.</div>
         </div>
-        <span style={s.boxCount}>{centers.length} centre{centers.length !== 1 ? "s" : ""}</span>
+        <span style={s.boxCount}>{units.length} class{units.length !== 1 ? "es" : ""}</span>
       </div>
-      <div role="tablist" aria-label="Centres" style={s.boxGrid}>
-        {centers.map(c => {
-          const active = c.id === selectedId;
-          const lifted = !active && hover === c.id;
-          const slots  = centreSlots(c, uid);
+      <div role="tablist" aria-label="Classes" style={s.boxGrid}>
+        {units.map(u => {
+          const c = u.centre;
+          const active = u.key === selectedKey;
+          const lifted = !active && hover === u.key;
+          const slots  = unitSlots(u, uid);
+          const tName  = u.split && u.teacherUid ? teacherName(u.teacherUid) : "";
           return (
-            <button key={c.id} type="button" role="tab" aria-selected={active}
-              onClick={() => onSelect(c.id)}
-              onMouseEnter={() => setHover(c.id)} onMouseLeave={() => setHover(h => (h === c.id ? null : h))}
+            <button key={u.key} type="button" role="tab" aria-selected={active}
+              onClick={() => onSelect(u.key)}
+              onMouseEnter={() => setHover(u.key)} onMouseLeave={() => setHover(h => (h === u.key ? null : h))}
               style={{ ...s.box, ...(active ? s.boxActive : {}), ...(lifted ? s.boxHover : {}) }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
                 <span aria-hidden style={{ ...s.boxIcon, ...(active ? s.boxIconActive : {}) }}>🏫</span>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ ...s.boxName, color: active ? "#fff" : "#111827" }} title={c.name}>{c.name}</div>
+                  <div style={{ ...s.boxName, color: active ? "#fff" : "#111827" }} title={unitTitle(u)}>{c.name}</div>
+                  {u.split && (
+                    <span style={{ display: "inline-block", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "1px 7px", marginRight: 6,
+                      ...(active ? { background: "#fff", color: "#4f46e5" } : { background: "#4f46e5", color: "#fff" }) }}>
+                      {u.batchName}
+                    </span>
+                  )}
                   <span style={{ ...s.boxCount2, ...(active ? { color: "rgba(255,255,255,0.9)" } : {}) }}>
-                    {studentCounts === null ? "…" : (() => { const n = studentCounts[c.id] ?? 0; return `${n} student${n !== 1 ? "s" : ""}`; })()}
+                    {studentCounts === null ? "…" : (() => { const n = studentCounts[u.key] ?? 0; return `${n} student${n !== 1 ? "s" : ""}`; })()}
                   </span>
                   {showWing && (
                     <span style={{ ...s.boxCode, marginLeft: 6, ...(active
@@ -176,6 +198,9 @@ function CentreBoxes({ centers, selectedId, onSelect, uid, showWing = false, stu
                     {sl.time && <span style={{ ...s.boxChip, ...(active ? s.boxChipActive : {}) }}>⏰ {sl.time}</span>}
                   </div>
                 ))}
+                {tName && (
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: active ? "rgba(255,255,255,0.9)" : "#4b5563" }}>👤 {tName}</span>
+                )}
               </div>
             </button>
           );
@@ -198,7 +223,7 @@ function MyClassesContent() {
   const centreParam  = searchParams.get("centerId") ?? "";
 
   const [centers,          setCenters]          = useState<Center[]>([]);
-  const [selectedCenterId, setSelectedCenterId] = useState<string>("");
+  const [selectedKey, setSelectedKey] = useState<string>("");
   const [students,         setStudents]         = useState<StudentRow[]>([]);
   const [centersLoading,   setCentersLoading]   = useState(true);
   const [studentsLoading,  setStudentsLoading]  = useState(false);
@@ -241,9 +266,11 @@ function MyClassesContent() {
         for (const snap of snaps) for (const d of snap.docs) {
           const u = d.data();
           if (u.role !== "student" || !isCurrentlyActiveStudent(u)) continue;
-          (seen[u.centerId] ??= new Set()).add(normAdmNo(u.admissionNo ?? u.admissionNumber));
+          const adm = normAdmNo(u.admissionNo ?? u.admissionNumber);
+          (seen[u.centerId] ??= new Set()).add(adm);
+          if (u.batchId) (seen[`${u.centerId}|${u.batchId}`] ??= new Set()).add(adm);
         }
-        if (!cancelled) setStudentCounts(Object.fromEntries(ids.map(id => [id, seen[id]?.size ?? 0])));
+        if (!cancelled) setStudentCounts(Object.fromEntries(Object.entries(seen).map(([k, v]) => [k, v.size])));
       } catch (err) {
         console.error("Failed to count students:", err);
         if (!cancelled) setStudentCounts({});
@@ -267,11 +294,6 @@ function MyClassesContent() {
         : active;
       list.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
       setCenters(list);
-      setSelectedCenterId(prev => {
-        if (list.some(c => c.id === prev)) return prev;
-        const fromUrl = new URLSearchParams(window.location.search).get("centerId");
-        return list.some(c => c.id === fromUrl) ? fromUrl! : list[0]?.id ?? "";
-      });
       setCentersLoading(false);
     }, err => {
       console.error("Failed to load centres:", err);
@@ -281,27 +303,70 @@ function MyClassesContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, centerIds.join(","), isTeacherRole, wingsKey]);
 
-  // ── Keep the selected centre in the URL (?centerId=…) ───────────────────────
-  // Back/forward or a shared link changes the param → follow it.
+  // ── Classes = centre + batch units ─────────────────────────────────────────
+  // A centre with 2+ batches is one card per batch (lib/batchUnits); a teacher
+  // sees only the batches they teach there (batch teacher, else centre teacher).
+  const units = useMemo<ClassUnit[]>(() => centers.flatMap(c =>
+    centreUnits(c, [] as { batchId?: string | null }[])
+      .filter(u => !isTeacherRole || !u.split || u.teacherUid === user?.uid)
+      .map(u => ({ ...u, centre: c }))), [centers, isTeacherRole, user?.uid]);
+  const selUnit     = units.find(u => u.key === selectedKey) ?? null;
+  const selCentreId = selUnit?.centreId ?? "";
+  const selBatchId  = selUnit?.split ? (selUnit.batchId ?? "") : "";
+
+  /** ?centerId=…&batchId=… → unit key; a bare centerId picks that centre's first class. */
+  const keyFromParams = useCallback((params: URLSearchParams): string | null => {
+    const c = params.get("centerId") ?? "", bId = params.get("batchId") ?? "";
+    if (!c) return null;
+    return units.find(u => u.key === (bId ? `${c}|${bId}` : c))?.key
+      ?? units.find(u => u.centreId === c)?.key ?? null;
+  }, [units]);
+  const urlFor = (key: string) => {
+    const u = units.find(x => x.key === key);
+    if (!u) return "/dashboard/my-classes";
+    return `/dashboard/my-classes?centerId=${encodeURIComponent(u.centreId)}${u.split && u.batchId ? `&batchId=${encodeURIComponent(u.batchId)}` : ""}`;
+  };
+
+  // Default / keep the selection valid as the class list changes.
   useEffect(() => {
-    if (centreParam && centreParam !== selectedCenterId && centers.some(c => c.id === centreParam)) {
-      setSelectedCenterId(centreParam);
-    }
+    if (centersLoading) return;
+    setSelectedKey(prev => {
+      if (units.some(u => u.key === prev)) return prev;
+      return keyFromParams(new URLSearchParams(window.location.search)) ?? units[0]?.key ?? "";
+    });
+  }, [units, centersLoading, keyFromParams]);
+
+  const [teacherNames, setTeacherNames] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!user) return;
+    getDocs(query(collection(db, "users"), where("role", "in", [ROLES.TEACHER, ROLES.CHIEF_TEACHER, ROLES.DIRECTOR, ROLES.ADMIN, ROLES.FOUNDER])))
+      .then(snap => setTeacherNames(new Map(snap.docs.map(d =>
+        [d.id, getTeacherDisplayName({ ...d.data(), uid: d.id } as unknown as Parameters<typeof getTeacherDisplayName>[0]) || String(d.data().displayName ?? "")]))))
+      .catch(() => {});
+  }, [user]);
+  const teacherName = useCallback((uid: string) => teacherNames.get(uid) ?? "", [teacherNames]);
+
+  // ── Keep the selected class in the URL (?centerId=…&batchId=…) ─────────────
+  // Back/forward or a shared link changes the param → follow it.
+  const batchParam = searchParams.get("batchId") ?? "";
+  useEffect(() => {
+    const k = keyFromParams(new URLSearchParams(`centerId=${encodeURIComponent(centreParam)}&batchId=${encodeURIComponent(batchParam)}`));
+    if (k && k !== selectedKey) setSelectedKey(k);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centreParam]);
+  }, [centreParam, batchParam]);
 
   // A ?centerId= from another wing (e.g. after switching wings) is out of scope —
   // point the URL at the centre actually shown for this wing.
   useEffect(() => {
     if (centersLoading || !centreParam || centers.some(c => c.id === centreParam)) return;
-    router.replace(selectedCenterId ? `/dashboard/my-classes?centerId=${selectedCenterId}` : "/dashboard/my-classes", { scroll: false });
+    router.replace(selectedKey ? urlFor(selectedKey) : "/dashboard/my-classes", { scroll: false });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centersLoading, centreParam, centers, selectedCenterId]);
+  }, [centersLoading, centreParam, centers, selectedKey]);
 
-  const selectCentre = useCallback((id: string) => {
-    setSelectedCenterId(id);
-    router.replace(`/dashboard/my-classes?centerId=${id}`, { scroll: false });
-  }, [router]);
+  const selectCentre = (key: string) => {
+    setSelectedKey(key);
+    router.replace(urlFor(key), { scroll: false });
+  };
 
   // ── Load students when centre changes ────────────────────────────────────────
   useEffect(() => {
@@ -310,7 +375,7 @@ function MyClassesContent() {
     setExpandedUid(null);
     setView("students");
     // No centre in this wing → empty roster, never the previous wing's students.
-    if (!selectedCenterId) { setStudentsLoading(false); return; }
+    if (!selCentreId) { setStudentsLoading(false); return; }
     let cancelled = false;
     setStudentsLoading(true);
     (async () => {
@@ -318,18 +383,20 @@ function MyClassesContent() {
         const snap = await getDocs(query(
           collection(db, "users"),
           where("role",     "==", "student"),
-          where("centerId", "==", selectedCenterId),
+          where("centerId", "==", selCentreId),
         ));
         if (cancelled) return;
         // Same active rule as the centre roster / Faculty Suite / Attendance
         // (lib/activeStudents): "active" or the Registry's "confirm", with an
         // admission number. Was `status === "active"` only, which dropped every
         // Registry-confirmed student and left whole centres empty.
-        const centreScope = new Set([selectedCenterId]);
+        const centreScope = new Set([selCentreId]);
         const seen = new Set<string>();
         setStudents(
           snap.docs
             .filter(d => isCurrentlyActiveStudent(d.data(), centreScope))
+            // A batch card lists only that batch's students.
+            .filter(d => !selBatchId || d.data().batchId === selBatchId)
             .filter(d => {
               // Duplicate records of one person (same adm. no.) list once.
               const key = normAdmNo(d.data().admissionNo ?? d.data().admissionNumber);
@@ -356,18 +423,18 @@ function MyClassesContent() {
       }
     })();
     return () => { cancelled = true; };
-  }, [selectedCenterId]);
+  }, [selCentreId, selBatchId]);
 
   // ── Load attendance when view/centre/date changes ────────────────────────────
   useEffect(() => {
-    if (view !== "attendance" || !selectedCenterId) return;
+    if (view !== "attendance" || !selCentreId) return;
     setAttMap({});
     setAttPickerUid(null);
     setAttLoading(true);
     let cancelled = false;
     (async () => {
       try {
-        const recs = await getAttendanceByCentreDate(selectedCenterId, attDate);
+        const recs = await getAttendanceByCentreDate(selCentreId, attDate);
         if (cancelled) return;
         const map: Record<string, AttendanceStatus> = {};
         recs.forEach(r => { if (r.studentUid) map[r.studentUid] = r.status as AttendanceStatus; });
@@ -380,13 +447,12 @@ function MyClassesContent() {
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, selectedCenterId, attDate]);
+  }, [view, selCentreId, attDate]);
 
   // ── Switch to attendance view, default to most recent class date ─────────────
   function openAttendance() {
-    const centre = centers.find(c => c.id === selectedCenterId);
-    if (centre) {
-      const dates = scheduledDatesForCentre(centre);
+    if (selUnit) {
+      const dates = scheduledDatesForCentre(unitScheduleCentre(selUnit));
       setAttDate(dates[0] ?? todayStr);
     }
     setView("attendance");
@@ -454,7 +520,7 @@ function MyClassesContent() {
   async function handleSetAttendance(studentUid: string, status: AttendanceStatus) {
     setSavingAtt(studentUid);
     try {
-      await saveCentreAttendance({ studentUid, centerId: selectedCenterId, date: attDate, status, markedBy: user?.uid ?? "" });
+      await saveCentreAttendance({ studentUid, centerId: selCentreId, date: attDate, status, markedBy: user?.uid ?? "" });
       setAttMap(prev => ({ ...prev, [studentUid]: status }));
       setAttPickerUid(null);
     } catch (err) {
@@ -465,26 +531,26 @@ function MyClassesContent() {
   // ── Derived ──────────────────────────────────────────────────────────────────
   if (centersLoading) return <div style={s.state}>Loading…</div>;
 
-  const selectedCentre  = centers.find(c => c.id === selectedCenterId);
-  const scheduledDates  = selectedCentre ? scheduledDatesForCentre(selectedCentre) : [];
+  const selectedCentre  = selUnit?.centre;
+  const scheduledDates  = selUnit ? scheduledDatesForCentre(unitScheduleCentre(selUnit)) : [];
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
     <div style={s.page}>
 
       {/* Centre selector */}
-      {centers.length === 0 ? (
+      {units.length === 0 ? (
         <div style={s.emptyState}>No centres assigned. Contact your administrator.</div>
-      ) : centers.length === 1 ? (
+      ) : units.length === 1 ? (
         <div style={s.centreHeader}>
           <div style={s.centreAvatar}>🏫</div>
           <div>
-            <div style={s.centreName}>{centers[0].name}</div>
-            {centers[0].timeSlot && <div style={s.centreSlot}>{centers[0].timeSlot}</div>}
+            <div style={s.centreName}>{unitTitle(units[0])}</div>
+            {(units[0].split ? units[0].time : units[0].centre.timeSlot) && <div style={s.centreSlot}>{units[0].split ? `${units[0].days.join("/")} ${units[0].time}` : units[0].centre.timeSlot}</div>}
           </div>
         </div>
       ) : (
-        <CentreBoxes centers={centers} selectedId={selectedCenterId} onSelect={selectCentre}
+        <CentreBoxes units={units} selectedKey={selectedKey} onSelect={selectCentre} teacherName={teacherName}
           uid={isTeacherRole ? (user?.uid ?? null) : null} showWing={wingsKey.includes(",")} studentCounts={studentCounts} />
       )}
 
@@ -496,7 +562,7 @@ function MyClassesContent() {
         </div>
       )}
 
-      {selectedCenterId && (
+      {selectedKey && (
         studentsLoading ? (
           <div style={s.state}>Loading students…</div>
         ) : studentsError ? (

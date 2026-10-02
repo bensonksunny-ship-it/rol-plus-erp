@@ -414,3 +414,26 @@ tbody tr.row-admin {
   :root[data-theme="light"] .center-hue-6{ --center-hue: #0d9488; }
   :root[data-theme="light"] .center-hue-7{ --center-hue: #7c3aed; }
 
+
+/* ── Sidebar navigation feedback (app/dashboard/layout.tsx) ───────────────────
+   Thin indeterminate bar along the top + a spinner on the clicked menu item,
+   shown from the click until the new page's URL is reached. */
+.rl-nav-progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 2000;
+  overflow: hidden; background: rgba(79, 70, 229, 0.15); pointer-events: none;
+}
+.rl-nav-progress::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: -40%; width: 40%;
+  background: #4f46e5; border-radius: 3px; animation: rl-nav-slide 1s ease-in-out infinite;
+}
+@keyframes rl-nav-slide { from { left: -40%; } to { left: 100%; } }
+.rl-nav-spin {
+  margin-left: auto; width: 12px; height: 12px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent; opacity: 0.7;
+  animation: rl-nav-spin 0.7s linear infinite;
+}
+@keyframes rl-nav-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .rl-nav-progress::after { animation-duration: 2.5s; }
+  .rl-nav-spin { animation-duration: 1.6s; }
+}

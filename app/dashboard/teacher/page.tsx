@@ -46,6 +46,8 @@ import { getScreeningByStudent } from "@/services/screening/screening.service";
 import { DiagnosticCard } from "@/components/DiagnosticCard";
 import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
 import { classMarkState } from "@/lib/attendanceStatus";
+import { isSplitCentre, studentUnitKey } from "@/lib/batchUnits";
+import { NotificationList, useMyNotifications } from "@/components/notifications/NotificationBell";
 import { normAdmNo } from "@/lib/dedup";
 
 // ─── Local types ──────────────────────────────────────────────────────────────
@@ -149,6 +151,8 @@ function TeacherDashboardContent() {
   // Panel toggles
   const [showPending,       setShowPending]       = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  // Follow-ups from the Founder Suite (e.g. "attendance not marked").
+  const myNotifications = useMyNotifications();
 
   // Overview stats
   interface OverviewStats {
@@ -227,28 +231,54 @@ function TeacherDashboardContent() {
     let cancelled = false;
     (async () => {
       try {
-        const marked = await fetchMarkedCentreIds(cIds, today);
+        const marked = await fetchMarkedCentreIds(cIds, today, myCentres);
         if (!cancelled) setMarkedCentreIds(marked);
       } catch (err) {
         console.error("Failed to load today attendance:", err);
       }
     })();
     return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assignedIdsKey, today]);
 
   // Today's Classes: assigned centres with a class (the teacher's own batches,
   // or the centre schedule) on today's weekday. Every other centre is reached
   // through My Classes (/dashboard/my-classes).
   const slotUid = isTeacherRole ? (user?.uid ?? null) : null;
-  const todayCentres = useMemo(() => {
+  // A centre with 2+ batches gives one class per batch (lib/batchUnits) — the
+  // teacher's own batches there, else all of them.
+  type TodayClass = { key: string; centre: Center; batchId: string | null; batchName: string; times: string[] };
+  const todayCentres = useMemo<TodayClass[]>(() => {
     const dayNum = new Date().getDay();
-    return myCentres.flatMap(c => {
+    return myCentres.flatMap((c): TodayClass[] => {
+      if (isSplitCentre(c)) {
+        const batches = c.batches ?? [];
+        const mine = slotUid ? batches.filter(b => (b.teacherUid || c.teacherUid) === slotUid) : [];
+        return (mine.length > 0 ? mine : batches)
+          .filter(b => (b.daysOfWeek ?? []).some(d => DAY_MAP[d.toLowerCase().slice(0, 3)] === dayNum))
+          .map(b => ({ key: `${c.id}|${b.id}`, centre: c, batchId: b.id, batchName: b.name,
+            times: b.startTime && b.endTime ? [`${b.startTime}–${b.endTime}`] : [] }));
+      }
       const times = classSlots(c, slotUid).filter(sl => sl.days.includes(dayNum)).map(sl => sl.time);
-      return times.length > 0 ? [{ centre: c, times: times.filter(Boolean) }] : [];
+      return times.length > 0 ? [{ key: c.id, centre: c, batchId: null, batchName: "", times: times.filter(Boolean) }] : [];
     });
   }, [myCentres, slotUid]);
-  const isTodayPending = (t: { centre: Center; times: string[] }) =>
-    !markedCentreIds.has(t.centre.id) && classHasEnded(t.times[t.times.length - 1] ?? t.centre.timeSlot ?? "");
+  // Centres whose class today was cancelled ("Cancel class" note) — not pending.
+  const [cancelledToday, setCancelledToday] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let off = false;
+    getDocs(query(collection(db, "class_cancellations"), where("date", "==", today)))
+      .then(snap => { if (!off) setCancelledToday(new Set(snap.docs.map(d => String(d.data().centerId ?? "")))); })
+      .catch(() => {});
+    return () => { off = true; };
+  }, [today, assignedIdsKey]);
+  const isTodayPending = (t: TodayClass) =>
+    !cancelledToday.has(t.centre.id) && !markedCentreIds.has(t.key) && classHasEnded(t.times[t.times.length - 1] ?? t.centre.timeSlot ?? "");
+  /** A batch class opens in My Classes (its own roster); a whole centre opens its workspace. */
+  const openClass = (t: TodayClass, tab: "attendance" | "students" | "progress" = "attendance") => {
+    if (t.batchId) router.push(`/dashboard/my-classes?centerId=${encodeURIComponent(t.centre.id)}&batchId=${encodeURIComponent(t.batchId)}`);
+    else goToCentre(t.centre.id, tab);
+  };
 
   // ── Load centre workspace data when centreIdParam changes ────────────────
   const loadCenterData = useCallback(async (centerId: string) => {
@@ -363,12 +393,12 @@ function TeacherDashboardContent() {
 
   // Re-fetch markedCentreIds when navigating back to the overview
   useEffect(() => {
-    if (centreIdParam || centers.length === 0) return;
-    const cIds = centers.map(c => c.id).filter(Boolean);
+    if (centreIdParam || myCentres.length === 0) return;
+    const cIds = myCentres.map(c => c.id).filter(Boolean);
     if (cIds.length === 0) return;
     (async () => {
       try {
-        setMarkedCentreIds(await fetchMarkedCentreIds(cIds, today));
+        setMarkedCentreIds(await fetchMarkedCentreIds(cIds, today, myCentres));
       } catch (err) {
         console.error("Failed to refresh today attendance:", err);
       }
@@ -629,6 +659,11 @@ function TeacherDashboardContent() {
                   display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0,
                 }}>
                 🔔
+                {myNotifications.some(n => !n.read) && (
+                  <span aria-label="unread" style={{ position: "absolute", top: -2, right: -2, minWidth: 16, height: 16, padding: "0 4px", boxSizing: "border-box", borderRadius: 99, background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                    {myNotifications.filter(n => !n.read).length}
+                  </span>
+                )}
               </button>
               {/* Pending */}
               <button
@@ -667,9 +702,7 @@ function TeacherDashboardContent() {
             <span style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>🔔 Notifications</span>
             <button onClick={() => setShowNotifications(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 16 }}>✕</button>
           </div>
-          <div style={{ padding: "32px 20px", textAlign: "center", fontSize: 13, color: "#9ca3af" }}>
-            No new notifications
-          </div>
+          <NotificationList list={myNotifications} onNavigate={() => setShowNotifications(false)} />
         </div>
       )}
 
@@ -691,19 +724,19 @@ function TeacherDashboardContent() {
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", padding: "12px 0 6px" }}>
                   Attendance not marked today
                 </div>
-                {unmarked.map(({ centre: c, times }, i) => (
-                  <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 0", borderTop: i === 0 ? "none" : "1px solid #f3f4f6" }}>
+                {unmarked.map((t, i) => { const { centre: c, times } = t; return (
+                  <div key={t.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 0", borderTop: i === 0 ? "none" : "1px solid #f3f4f6" }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{c.name}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>{c.name}{t.batchName ? ` — ${t.batchName}` : ""}</div>
                       {(times.join(", ") || c.timeSlot) && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{times.join(", ") || c.timeSlot}</div>}
                     </div>
                     <button
-                      onClick={() => { setShowPending(false); goToCentre(c.id, "attendance"); }}
+                      onClick={() => { setShowPending(false); openClass(t, "attendance"); }}
                       style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 7, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>
                       Mark Now →
                     </button>
                   </div>
-                ))}
+                ); })}
               </div>
             )}
           </div>
@@ -782,9 +815,9 @@ function TeacherDashboardContent() {
           {(() => {
             const sectionTitle = { fontSize: 13, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: 12 };
             const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 };
-            const card = (c: Center, timeLabel: string) => (
-              <div key={c.id}
-                onClick={() => goToCentre(c.id, "attendance")}
+            const card = (t: TodayClass, timeLabel: string) => { const c = t.centre; return (
+              <div key={t.key}
+                onClick={() => openClass(t, "attendance")}
                 style={{
                   background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12,
                   padding: "18px 20px", cursor: "pointer", transition: "box-shadow 0.15s",
@@ -794,7 +827,10 @@ function TeacherDashboardContent() {
                 onMouseLeave={e => (e.currentTarget.style.boxShadow = "none")}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: "#111" }}>{c.name}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: "#111" }}>
+                    {c.name}
+                    {t.batchName && <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 800, color: "#fff", background: "#4f46e5", borderRadius: 6, padding: "1px 7px", verticalAlign: "middle" }}>{t.batchName}</span>}
+                  </div>
                   <span style={{ display: "flex", gap: 4, flexShrink: 0 }}>
                     {multiWing && (
                       <span title="Wing" style={{ fontSize: 11, background: wingOf(c) === "school_of_music" ? "#fef3c7" : "#e0f2fe", color: wingOf(c) === "school_of_music" ? "#92400e" : "#0369a1", borderRadius: 6, padding: "2px 8px", fontWeight: 700 }}>
@@ -805,7 +841,12 @@ function TeacherDashboardContent() {
                 </div>
                 <div style={{ fontSize: 12, color: "#6b7280" }}>{timeLabel || "—"}</div>
                 {(() => {
-                  const done = markedCentreIds.has(c.id);
+                  const done = markedCentreIds.has(t.key);
+                  if (cancelledToday.has(c.id) && !done) return (
+                    <div style={{ borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 600, textAlign: "center", background: "#f3f4f6", color: "#4b5563" }}>
+                      🚫 Class cancelled
+                    </div>
+                  );
                   return (
                     <div style={{
                       borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 600,
@@ -820,7 +861,7 @@ function TeacherDashboardContent() {
                 <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                   {(["attendance","students","progress"] as const).map(tab => (
                     <button key={tab}
-                      onClick={e => { e.stopPropagation(); goToCentre(c.id, tab); }}
+                      onClick={e => { e.stopPropagation(); openClass(t, tab); }}
                       style={{ flex: 1, padding: "6px 4px", borderRadius: 7, border: "1px solid #e5e7eb",
                                background: "#f9fafb", color: "#374151", fontSize: 11, fontWeight: 600,
                                cursor: "pointer" }}>
@@ -829,7 +870,7 @@ function TeacherDashboardContent() {
                   ))}
                 </div>
               </div>
-            );
+            ); };
             return (
               <>
                 <div style={sectionTitle}>Today&apos;s Classes</div>
@@ -842,7 +883,7 @@ function TeacherDashboardContent() {
                   </div>
                 ) : (
                   <div style={grid}>
-                    {todayCentres.map(t => card(t.centre, t.times.join(", ") || t.centre.timeSlot))}
+                    {todayCentres.map(t => card(t, t.times.join(", ") || t.centre.timeSlot))}
                   </div>
                 )}
               </>
@@ -929,7 +970,7 @@ function classHasEnded(timeSlot: string): boolean {
  * in that centre has a record for today (any status). Personal/individual students
  * are excluded from this count.
  */
-async function fetchMarkedCentreIds(cIds: string[], today: string): Promise<Set<string>> {
+async function fetchMarkedCentreIds(cIds: string[], today: string, centres: Center[] = []): Promise<Set<string>> {
   if (cIds.length === 0) return new Set();
 
   // Fetch today's attendance + group student counts in parallel
@@ -955,6 +996,9 @@ async function fetchMarkedCentreIds(cIds: string[], today: string): Promise<Set<
       const u = d.data();
       if (!isCurrentlyActiveStudent(u)) return;
       (activeByCentre[u.centerId as string] ??= new Set()).add(d.id);
+      // One batch of a 2+-batch centre is its own class.
+      const c = centres.find(x => x.id === u.centerId);
+      if (c && isSplitCentre(c)) (activeByCentre[studentUnitKey(c, (u.batchId as string) || null)] ??= new Set()).add(d.id);
     })
   );
 
@@ -969,6 +1013,14 @@ async function fetchMarkedCentreIds(cIds: string[], today: string): Promise<Set<
   const marked = new Set<string>();
   cIds.forEach(cId => {
     if (classMarkState(recsByCentre[cId] ?? [], activeByCentre[cId] ?? new Set()).state === "complete") marked.add(cId);
+    const c = centres.find(x => x.id === cId);
+    if (c && isSplitCentre(c)) {
+      for (const b of c.batches ?? []) {
+        const key = `${cId}|${b.id}`, roster = activeByCentre[key] ?? new Set<string>();
+        const recs = (recsByCentre[cId] ?? []).filter(r => roster.has(r.studentUid));
+        if (roster.size > 0 && classMarkState(recs, roster).state === "complete") marked.add(key);
+      }
+    }
   });
   return marked;
 }
