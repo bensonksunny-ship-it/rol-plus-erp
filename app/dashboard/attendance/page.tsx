@@ -1,5 +1,6 @@
 "use client";
 
+import { CancelClassMenu, CancelClassDialog } from "@/components/attendance/CancelClassControls";
 import { getCached, setCached } from "@/lib/dataCache";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
@@ -675,9 +676,8 @@ function TodayView({
   // draft: `${centreId}|${uid}` -> status (unsaved picks)
   const [draft, setDraft]     = useState<Map<string, AttendanceStatus>>(new Map());
   const [savingId, setSavingId] = useState<string | null>(null);
-  // "Cancel class": inline confirm per class card (no browser dialog), optional reason.
+  // "Cancel class": tucked in each class card's ⋮ menu; the confirm dialog requires a reason.
   const [confirmCancel, setConfirmCancel] = useState<string | null>(null);
-  const [cancelReason,  setCancelReason]  = useState("");
   const [cancellingId,  setCancellingId]  = useState<string | null>(null);
   const [cancelMsg,     setCancelMsg]     = useState<{ id: string; text: string } | null>(null);
   useEffect(() => { setConfirmCancel(null); setCancelMsg(null); }, [date]);
@@ -772,7 +772,7 @@ function TodayView({
     }
   }
 
-  async function doCancelClass(u: Unit) {
+  async function doCancelClass(u: Unit, cancelReason: string) {
     setCancellingId(u.key);
     try {
       const { cancelled, keptBreak } = await cancelClass({
@@ -784,7 +784,7 @@ function TodayView({
         for (const st of u.students) next.delete(`${u.centreId}|${st.uid}`);
         return next;
       });
-      setConfirmCancel(null); setCancelReason("");
+      setConfirmCancel(null);
       setCancelMsg({ id: u.key, text: `Class cancelled — ${cancelled.length} student${cancelled.length !== 1 ? "s" : ""} marked Cancelled${keptBreak.length ? `, ${keptBreak.length} kept on Break` : ""}.` });
     } catch (err) {
       console.error("Cancel class failed:", err);
@@ -873,34 +873,25 @@ function TodayView({
                   {tName && <TeacherChip name={tName} />}
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  {canCancel && students.length > 0 && !classCancelled && (
-                    <button onClick={() => { setConfirmCancel(u.key); setCancelReason(""); }} disabled={cancellingId === u.key}
-                      style={{ ...btnSmall, color: "#dc2626", borderColor: "#fecaca", background: "#fff" }}>
-                      🚫 Cancel class
-                    </button>
-                  )}
                   <button onClick={() => markAllPresent(u)} style={btnSmall}>All present</button>
                   <button onClick={() => save(u)} disabled={pending === 0 || savingId === u.key}
                     style={{ ...btnPrimary, flex: "none", padding: "7px 16px", opacity: pending === 0 ? 0.5 : 1, cursor: pending === 0 ? "not-allowed" : "pointer" }}>
                     {savingId === u.key ? "Saving…" : pending > 0 ? `Save ${pending}` : "Saved"}
                   </button>
+                  {canCancel && students.length > 0 && !classCancelled && (
+                    <CancelClassMenu onChoose={() => setConfirmCancel(u.key)} disabled={cancellingId === u.key} />
+                  )}
                 </div>
               </div>
 
               {confirmCancel === u.key && (
-                <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 12px", marginBottom: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b" }}>Cancel class for {unitTitle(u)} on {dow}, {dateLabel}?</div>
-                  <div style={{ fontSize: 12, color: "#7f1d1d" }}>All {students.length} student{students.length !== 1 ? "s" : ""} are marked <b>Cancelled (Teacher)</b>; anyone already on Break stays on Break. You can re-mark P / A afterwards.</div>
-                  <input value={cancelReason} onChange={e => setCancelReason(e.target.value)} placeholder="Reason (optional) — e.g. teacher unwell, holiday"
-                    style={{ ...inputStyle, fontSize: 13 }} />
-                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                    <button onClick={() => setConfirmCancel(null)} disabled={cancellingId === u.key} style={btnSmall}>Keep class</button>
-                    <button onClick={() => doCancelClass(u)} disabled={cancellingId === u.key}
-                      style={{ ...btnSmall, background: "#dc2626", color: "#fff", borderColor: "#dc2626" }}>
-                      {cancellingId === u.key ? "Cancelling…" : "Yes, cancel class"}
-                    </button>
-                  </div>
-                </div>
+                <CancelClassDialog
+                  title={`Cancel class — ${unitTitle(u)}`}
+                  detail={<>Are you sure you want to cancel the class on <b>{dow}, {dateLabel}</b>? All {students.length} student{students.length !== 1 ? "s" : ""} are marked <b>Cancelled (Teacher)</b>; anyone already on Break stays on Break. You can undo it afterwards.</>}
+                  busy={cancellingId === u.key}
+                  onConfirm={reason => doCancelClass(u, reason)}
+                  onClose={() => setConfirmCancel(null)}
+                />
               )}
               {cancelMsg?.id === u.key && (
                 <div style={{ fontSize: 12, color: "#374151", background: "#f3f4f6", borderRadius: 8, padding: "6px 10px", marginBottom: 8 }}>{cancelMsg.text}</div>

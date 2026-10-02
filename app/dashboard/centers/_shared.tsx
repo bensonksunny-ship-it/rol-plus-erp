@@ -12,6 +12,7 @@ import { ROLES, WINGS, WING_LABELS } from "@/config/constants";
 import type { Center, CenterBatch, Wing } from "@/types";
 import { DEFAULT_BATCH_NAME, effectiveBatches, explicitBatches } from "@/lib/batches";
 import { cancelClass, undoCancelClass, canCancelClass } from "@/services/attendance/attendance.service";
+import { CancelClassMenu, CancelClassDialog } from "@/components/attendance/CancelClassControls";
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import { courseLabel } from "@/lib/course";
@@ -694,7 +695,6 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
   })();
   const [cancelledToday, setCancelledToday] = useState(false);
   const [confirmCancelToday, setConfirmCancelToday] = useState(false);
-  const [cancelTodayReason, setCancelTodayReason] = useState("");
   const [cancellingToday, setCancellingToday] = useState(false);
   const [cancelTodayMsg, setCancelTodayMsg] = useState("");
   useEffect(() => {
@@ -705,14 +705,14 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
     return () => { off = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [center.id]);
-  async function cancelTodaysClass() {
+  async function cancelTodaysClass(cancelTodayReason: string) {
     const uids = students.filter(st => countsAsActive(st)).map(st => st.uid);
     setCancellingToday(true);
     try {
       const { cancelled, keptBreak } = await cancelClass({
         centerId: center.id, date: todayLocal, studentUids: uids, markedBy: viewer?.uid ?? "", reason: cancelTodayReason,
       });
-      setCancelledToday(true); setConfirmCancelToday(false); setCancelTodayReason("");
+      setCancelledToday(true); setConfirmCancelToday(false);
       setCancelTodayMsg(`Today's class cancelled — ${cancelled.length} student${cancelled.length !== 1 ? "s" : ""} marked Cancelled${keptBreak.length ? `, ${keptBreak.length} kept on Break` : ""}.`);
     } catch (err) {
       console.error("Cancel today's class failed:", err);
@@ -944,41 +944,29 @@ function ViewModal({ center: centerProp, onClose, teachers, onSaved, onActiveCou
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
-            {!editing && classToday && !cancelledToday && canCancelClass(viewerRole) && center.status === "active" && (
-              <button onClick={() => { setConfirmCancelToday(true); setCancelTodayMsg(""); }} disabled={cancellingToday}
-                title="Mark today's class as cancelled for every active student"
-                style={{ ...viewStyles.editBtn, color: "#dc2626", borderColor: "#fecaca", background: "#fff" }}>
-                🚫 Cancel Today&apos;s Class
-              </button>
-            )}
             {!editing && (
               <button onClick={openEditMode} title="Edit center" style={viewStyles.editBtn}>✏ Edit</button>
+            )}
+            {!editing && classToday && !cancelledToday && canCancelClass(viewerRole) && center.status === "active" && (
+              <CancelClassMenu label="Cancel today's class…" disabled={cancellingToday}
+                onChoose={() => { setConfirmCancelToday(true); setCancelTodayMsg(""); }} />
             )}
             <button onClick={onClose} style={modalStyles.closeBtn}>×</button>
           </div>
         </div>
 
-        {(confirmCancelToday || cancelTodayMsg) && !editing && (
-          <div style={{ margin: "10px 20px 0", background: confirmCancelToday ? "#fef2f2" : "#f3f4f6", border: `1px solid ${confirmCancelToday ? "#fecaca" : "#e5e7eb"}`, borderRadius: 10, padding: "10px 12px", display: "flex", flexDirection: "column" as const, gap: 8 }}>
-            {confirmCancelToday ? (<>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b" }}>
-                Cancel today&apos;s class for {center.name} ({new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })})?
-              </div>
-              <div style={{ fontSize: 12, color: "#7f1d1d" }}>
-                All {students.filter(st => countsAsActive(st)).length} active students are marked <b>Cancelled (Teacher)</b>; anyone already on Break stays on Break. Teachers can re-mark P / A afterwards.
-              </div>
-              <input value={cancelTodayReason} onChange={e => setCancelTodayReason(e.target.value)} placeholder="Reason (optional) — e.g. teacher unwell, holiday"
-                style={formStyles.input} />
-              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                <button onClick={() => setConfirmCancelToday(false)} disabled={cancellingToday} style={viewStyles.editBtn}>Keep class</button>
-                <button onClick={cancelTodaysClass} disabled={cancellingToday}
-                  style={{ ...viewStyles.editBtn, background: "#dc2626", color: "#fff", borderColor: "#dc2626" }}>
-                  {cancellingToday ? "Cancelling…" : "Yes, cancel class"}
-                </button>
-              </div>
-            </>) : (
-              <div style={{ fontSize: 12.5, color: "#374151" }}>{cancelTodayMsg}</div>
-            )}
+        {confirmCancelToday && (
+          <CancelClassDialog
+            title={`Cancel today's class — ${center.name}`}
+            detail={<>Are you sure you want to cancel today&apos;s class (<b>{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</b>)? All {students.filter(st => countsAsActive(st)).length} active students are marked <b>Cancelled (Teacher)</b>; anyone already on Break stays on Break.</>}
+            busy={cancellingToday}
+            onConfirm={reason => cancelTodaysClass(reason)}
+            onClose={() => setConfirmCancelToday(false)}
+          />
+        )}
+        {cancelTodayMsg && !editing && (
+          <div style={{ margin: "10px 20px 0", background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 10, padding: "8px 12px", fontSize: 12.5, color: "#374151" }}>
+            {cancelTodayMsg}
           </div>
         )}
 
