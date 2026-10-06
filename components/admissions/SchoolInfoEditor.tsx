@@ -10,7 +10,7 @@
 // unsaved edits, closing asks first.
 
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_SCHOOL_INFO, MAX_SCHOOL_PHOTOS, type SchoolCourse, type SchoolInfo, type SchoolLeader, type SchoolPhoto } from "@/lib/schoolInfo";
+import { defaultSchoolInfo, MAX_SCHOOL_PHOTOS, type SchoolCourse, type SchoolInfo, type SchoolLeader, type SchoolPhoto } from "@/lib/schoolInfo";
 import { SCHOOL_PHOTO_TYPES, deleteSchoolPhoto, loadSchoolInfo, saveSchoolInfo, uploadSchoolPhoto } from "@/services/schoolInfo.service";
 
 const ACCENT = "#4f46e5";
@@ -43,7 +43,7 @@ export function SchoolInfoEditor({ wing, onClose }: { wing: string; onClose: () 
   const [confirmClose, setConfirmClose] = useState(false);
 
   useEffect(() => {
-    loadSchoolInfo(wing).catch(() => DEFAULT_SCHOOL_INFO).then(i => {
+    loadSchoolInfo(wing).catch(() => defaultSchoolInfo(wing)).then(i => {
       setInfo(i); setInstrumentsText(i.instruments.join(", ")); setKitText(i.kit.join("\n"));
       setSavedSnap(snapshot(i, i.instruments.join(", "), i.kit.join("\n")));
     });

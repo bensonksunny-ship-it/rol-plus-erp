@@ -4,12 +4,12 @@
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import { auth, storage } from "@/services/firebase/firebase";
 import { storageErrorMessage } from "@/lib/storageError";
-import { DEFAULT_SCHOOL_INFO, sanitizeSchoolInfo, type SchoolInfo, type SchoolPhoto } from "@/lib/schoolInfo";
+import { defaultSchoolInfo, sanitizeSchoolInfo, type SchoolInfo, type SchoolPhoto } from "@/lib/schoolInfo";
 
 export async function loadSchoolInfo(wing: string): Promise<SchoolInfo> {
   const res = await fetch(`/api/public/school-info?wing=${encodeURIComponent(wing)}`, { cache: "no-store" });
   const data = await res.json().catch(() => ({}));
-  return res.ok ? sanitizeSchoolInfo(data.info) : DEFAULT_SCHOOL_INFO;
+  return res.ok ? sanitizeSchoolInfo(data.info) : defaultSchoolInfo(wing);
 }
 
 export async function saveSchoolInfo(wing: string, info: SchoolInfo): Promise<SchoolInfo> {

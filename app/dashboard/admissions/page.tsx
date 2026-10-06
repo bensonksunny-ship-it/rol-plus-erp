@@ -222,13 +222,11 @@ function AdmissionsWizard() {
                 </svg>
               </button>
             )}
-            {WING === WINGS.SCHOOL_OF_MUSIC && (
-              <button type="button" onClick={() => setShowSchoolInfo(true)}
-                title={canEditSchoolInfo ? "Edit the School Info parents see after an enquiry" : "See the School Info parents see after an enquiry"}
-                style={{ ...btn, background: "#fff", color: "#4f46e5", border: "1.5px solid #c7d2fe", padding: "9px 14px" }}>
-                <span aria-hidden>ℹ️</span> School Info
-              </button>
-            )}
+            <button type="button" onClick={() => setShowSchoolInfo(true)}
+              title={canEditSchoolInfo ? "Edit the School Info parents see after an enquiry" : "See the School Info parents see after an enquiry"}
+              style={{ ...btn, background: "#fff", color: "#4f46e5", border: "1.5px solid #c7d2fe", padding: "9px 14px" }}>
+              <span aria-hidden>ℹ️</span> School Info
+            </button>
             <button onClick={() => setShowEnquiries(true)} title="Open enquiries — add a lead, follow up, convert"
               style={{ ...btn, background: ACCENT, color: "#fff", padding: "9px 16px", position: "relative" }}>
               <span aria-hidden style={{ fontSize: 15 }}>📇</span> Enquiries

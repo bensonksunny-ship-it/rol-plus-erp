@@ -87,5 +87,13 @@ export function sanitizeSchoolInfo(raw: unknown): SchoolInfo {
   };
 }
 
+/**
+ * A wing's starting point before its leaders save anything. The default phone
+ * is School of Music's — other wings start blank so parents never see the
+ * wrong number (the Call Us button hides until one is set).
+ */
+export const defaultSchoolInfo = (wing: string): SchoolInfo =>
+  wing === "school_of_music" ? DEFAULT_SCHOOL_INFO : { ...DEFAULT_SCHOOL_INFO, phone: "" };
+
 /** tel: link for a display number ("+91 99218 74088" → "tel:+919921874088"). */
 export const telHref = (phone: string) => `tel:${phone.replace(/[^\d+]/g, "")}`;

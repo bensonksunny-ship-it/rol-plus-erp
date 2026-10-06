@@ -2,12 +2,12 @@
 
 // Public enquiry page — no login. Parents reach it by scanning the QR code on
 // /dashboard/admissions (Enquiries tab). `?wing=` picks the wing the lead is
-// filed under; defaults to Rol's School of Music. After a School of Music
-// enquiry, parents see the school overview (components/enquiry/SchoolInfoView).
+// filed under; defaults to Rol's School of Music. After an enquiry (either
+// wing), parents see that wing's school overview (components/enquiry/SchoolInfoView).
 
 import { useEffect, useState } from "react";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
-import SchoolInfoView, { EnquiryNextSteps } from "@/components/enquiry/SchoolInfoView";
+import SchoolInfoView from "@/components/enquiry/SchoolInfoView";
 import { WINGS, WING_LABELS } from "@/config/constants";
 
 export default function PublicEnquiryPage() {
@@ -32,22 +32,11 @@ export default function PublicEnquiryPage() {
           </div>}
         </div>
 
-        {done && wing === WINGS.SCHOOL_OF_MUSIC ? (
+        {done ? (
           <SchoolInfoView wing={wing} />
         ) : (
         <div style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.07)", borderRadius: 18, padding: 22, boxShadow: "0 4px 14px rgba(0,0,0,0.05)" }}>
-          {done ? (
-            <div style={{ textAlign: "center", padding: "24px 8px" }}>
-              <div style={{ fontSize: 44 }}>✅</div>
-              <div style={{ fontSize: 18, fontWeight: 800, color: "#15803d", marginTop: 8 }}>Thank you!</div>
-              <div style={{ fontSize: 14, color: "#374151", marginTop: 6 }}>
-                We&apos;ve received your enquiry and will contact you shortly.
-              </div>
-              <EnquiryNextSteps wing={wing} />
-            </div>
-          ) : (
-            <EnquiryForm wing={wing} source="qr" submitLabel="Send enquiry" onCreated={() => { setDone(true); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
-          )}
+          <EnquiryForm wing={wing} source="qr" submitLabel="Send enquiry" onCreated={() => { setDone(true); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
         </div>
         )}
       </div>

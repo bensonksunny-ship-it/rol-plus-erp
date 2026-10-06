@@ -7,7 +7,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { WING_LABELS } from "@/config/constants";
-import { DEFAULT_SCHOOL_INFO, telHref, type SchoolInfo } from "@/lib/schoolInfo";
+import { defaultSchoolInfo, telHref, type SchoolInfo } from "@/lib/schoolInfo";
 import { loadSchoolInfo } from "@/services/schoolInfo.service";
 import SchoolGallery from "./SchoolGallery";
 import ClosePageButton from "@/components/public/ClosePageButton";
@@ -58,16 +58,16 @@ export default function SchoolInfoView({ wing, preview = false }: { wing: string
   const [info, setInfo] = useState<SchoolInfo | null>(null);
   useEffect(() => {
     let live = true;
-    loadSchoolInfo(wing).then(i => { if (live) setInfo(i); }).catch(() => { if (live) setInfo(DEFAULT_SCHOOL_INFO); });
+    loadSchoolInfo(wing).then(i => { if (live) setInfo(i); }).catch(() => { if (live) setInfo(defaultSchoolInfo(wing)); });
     return () => { live = false; };
   }, [wing]);
 
   const school = WING_LABELS[wing] ?? "our school";
-  const i = info ?? DEFAULT_SCHOOL_INFO;
+  const i = info ?? defaultSchoolInfo(wing);
   const leaders = i.leaders.filter(l => l.name);
   const hasAbout = !!(i.established || i.background || leaders.length);
   const hasFees = !!(i.classFrequency || i.tuitionFee || i.admissionFee);
-  const phone = i.phone || DEFAULT_SCHOOL_INFO.phone;
+  const phone = i.phone || defaultSchoolInfo(wing).phone;
 
   return (
     <div>
@@ -164,8 +164,8 @@ export default function SchoolInfoView({ wing, preview = false }: { wing: string
         </>
       )}
 
-      {/* Call to action */}
-      <div style={{ marginTop: 20, padding: 20, background: "#eef2ff", border: "1px solid #e0e7ff", borderRadius: 18, textAlign: "center" }}>
+      {/* Call to action — hidden until the wing has a phone number */}
+      {phone && <div style={{ marginTop: 20, padding: 20, background: "#eef2ff", border: "1px solid #e0e7ff", borderRadius: 18, textAlign: "center" }}>
         <div style={{ fontSize: 17, fontWeight: 800, color: "#312e81" }}>Have Questions or Ready to Join?</div>
         <div style={{ fontSize: 13.5, color: "#4338ca", margin: "4px 0 14px" }}>
           Connect directly with our admissions coordinator for instant assistance.
@@ -180,7 +180,7 @@ export default function SchoolInfoView({ wing, preview = false }: { wing: string
           </svg>
           Call Us: {phone}
         </a>
-      </div>
+      </div>}
 
       {!preview && <EnquiryNextSteps wing={wing} />}
     </div>
