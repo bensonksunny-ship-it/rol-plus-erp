@@ -345,6 +345,24 @@ tbody tr.row-admin {
   box-shadow: inset 3px 0 0 var(--color-accent-border);
 }
 
+/* ── Finance student rows: Due = orange, Paid = green ────────────────────── */
+/* Painted on the cells: the zebra rule above forces every <tr> background
+   with !important, so a row colour would never show. Cells aren't striped. */
+tbody tr.fin-row-due > td  { background: #ffedd5; }
+tbody tr.fin-row-paid > td { background: #dcfce7; }
+tbody tr.fin-row-due:hover > td  { background: #fed7aa; }
+tbody tr.fin-row-paid:hover > td { background: #bbf7d0; }
+tbody tr.fin-row-due.fin-row-open > td  { background: #fed7aa; }
+tbody tr.fin-row-paid.fin-row-open > td { background: #bbf7d0; }
+tbody tr.fin-row-due > td:first-child  { box-shadow: inset 4px 0 0 #f97316; }
+tbody tr.fin-row-paid > td:first-child { box-shadow: inset 4px 0 0 #22c55e; }
+:root[data-theme="dark"] tbody tr.fin-row-due > td  { background: rgba(249,115,22,0.20); }
+:root[data-theme="dark"] tbody tr.fin-row-paid > td { background: rgba(34,197,94,0.16); }
+:root[data-theme="dark"] tbody tr.fin-row-due:hover > td,
+:root[data-theme="dark"] tbody tr.fin-row-due.fin-row-open > td  { background: rgba(249,115,22,0.30); }
+:root[data-theme="dark"] tbody tr.fin-row-paid:hover > td,
+:root[data-theme="dark"] tbody tr.fin-row-paid.fin-row-open > td { background: rgba(34,197,94,0.24); }
+
 /* ── Print — A4 report layout ────────────────────────────────────────────── */
 @media print {
   @page { size: A4; margin: 12mm; }

@@ -49,6 +49,7 @@ import { classMarkState } from "@/lib/attendanceStatus";
 import { isSplitCentre, studentUnitKey } from "@/lib/batchUnits";
 import { NotificationList, useMyNotifications } from "@/components/notifications/NotificationBell";
 import { normAdmNo } from "@/lib/dedup";
+import { chargedAmountOf } from "@/lib/feeWaiver";
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
@@ -340,7 +341,7 @@ function TeacherDashboardContent() {
               const tx = d.data() as Record<string, unknown>;
               if (tx.method === "auto-monthly" || tx.method === "auto") return;
               const type = (tx.type as string) ?? "";
-              balance += (type === "fee_due" || type === "charge") ? Number(tx.amount ?? 0) : -Number(tx.amount ?? 0);
+              balance += type === "fee_due" ? chargedAmountOf(tx) : type === "charge" ? Number(tx.amount ?? 0) : -Number(tx.amount ?? 0);
             });
             return { uid: st.uid, name: st.name, instrument: st.instrument, pct, balance, status: st.status };
           } catch {

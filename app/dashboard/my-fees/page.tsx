@@ -7,6 +7,7 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import type { Transaction } from "@/types/finance";
+import { chargedAmountOf, isWaivedDue } from "@/lib/feeWaiver";
 
 export default function MyFeesPage() {
   return (
@@ -105,7 +106,7 @@ function MyFeesContent() {
       let computedBalance = 0;
       txList.forEach(tx => {
         const type = (tx as unknown as Record<string, unknown>).type as string ?? "";
-        computedBalance += (type === "fee_due" || type === "charge") ? tx.amount : -tx.amount;
+        computedBalance += type === "fee_due" ? chargedAmountOf(tx) : type === "charge" ? tx.amount : -tx.amount;
       });
       setBalance(computedBalance);
     } catch {
@@ -123,7 +124,7 @@ function MyFeesContent() {
   const balanceCredit = bal < 0;
 
   const paid    = transactions.filter(t => t.status === "completed" && t.type !== "fee_due" && t.type !== "charge");
-  const dues    = transactions.filter(t => t.status === "due" || t.type === "fee_due");
+  const dues    = transactions.filter(t => (t.status === "due" || t.type === "fee_due") && chargedAmountOf(t) > 0);
   const pending = transactions.filter(t => t.status === "pending");
 
   return (
@@ -222,7 +223,7 @@ function MyFeesContent() {
             const isPending = tx.status === "pending";
             const isFailed  = tx.status === "failed";
 
-            const typeLabel = isFeedue ? "Fee Due" : isDeposit ? "Payment" : isCharge ? "Charge" : "Payment";
+            const typeLabel = isFeedue ? (isWaivedDue(tx) ? "Fee Waived" : "Fee Due") : isDeposit ? "Payment" : isCharge ? "Charge" : "Payment";
             const typeColor = isFeedue
               ? { bg: "#fffbeb", border: "#fde68a",  text: "#b45309"  }
               : isDeposit

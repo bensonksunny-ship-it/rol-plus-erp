@@ -16,6 +16,7 @@ import {
 import type { Lesson, LessonItem, StudentLessonProgress } from "@/types/lesson";
 import type { AttendanceRecord } from "@/types/attendance";
 import type { Transaction } from "@/types/finance";
+import { chargedAmountOf } from "@/lib/feeWaiver";
 
 export default function StudentDashboardPage() {
   return (
@@ -195,7 +196,7 @@ function StudentDashboardContent() {
         const raw    = tx as unknown as Record<string, unknown>;
         const type   = (raw.type as string) ?? "";
         const isDebit = type === "fee_due" || type === "charge";
-        currentBalance += isDebit ? tx.amount : -tx.amount;
+        currentBalance += type === "fee_due" ? chargedAmountOf(tx) : isDebit ? tx.amount : -tx.amount;
       });
 
       const progressMap: Record<string, StudentLessonProgress> = {};

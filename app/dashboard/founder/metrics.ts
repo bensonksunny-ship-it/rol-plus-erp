@@ -13,6 +13,7 @@
 
 import { isCurrentlyActiveStudent } from "@/lib/activeStudents";
 import { normAdmNo } from "@/lib/dedup";
+import { chargedAmountOf } from "@/lib/feeWaiver";
 import { wingOf } from "@/lib/wing";
 import { studentDays } from "@/app/dashboard/attendance/matrix";
 import { classMarkState } from "@/lib/attendanceStatus";
@@ -124,7 +125,7 @@ export function summary(p: Prepared, scope: WingKey): WingSummary {
   const pending = dues.reduce((a, x) => a + x.amount, 0);
 
   // Fee collection velocity: due → payment, this month.
-  const dueRecs = p.transactions.filter(t => str(t.type) === "fee_due" && (str(t.billingMonth) || str(t.date).slice(0, 7)) === m0 && inScope(recWing(p, t), scope));
+  const dueRecs = p.transactions.filter(t => str(t.type) === "fee_due" && chargedAmountOf(t) > 0 && (str(t.billingMonth) || str(t.date).slice(0, 7)) === m0 && inScope(recWing(p, t), scope));
   const firstPay = new Map<string, string>();
   pays.filter(t => str(t.date).startsWith(m0)).forEach(t => {
     const u = str(t.studentUid), dt = str(t.date).slice(0, 10);
@@ -203,7 +204,7 @@ export function pendingDues(p: Prepared, scope: WingKey): { dues: Due[] } {
   const dueAmt = new Map<string, number>();
   p.transactions.forEach(t => {
     if (str(t.type) !== "fee_due" || !str(t.studentUid)) return;
-    if ((str(t.billingMonth) || str(t.date).slice(0, 7)) === m0) dueAmt.set(str(t.studentUid), num(t.amount));
+    if ((str(t.billingMonth) || str(t.date).slice(0, 7)) === m0) dueAmt.set(str(t.studentUid), chargedAmountOf(t));
   });
   const paid = new Set(p.payments.filter(t => str(t.date).startsWith(m0)).map(t => str(t.studentUid)));
   const byId = new Map(p.students.map(s => [s.id, s]));

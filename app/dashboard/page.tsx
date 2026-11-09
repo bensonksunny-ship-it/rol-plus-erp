@@ -23,6 +23,7 @@ import { getTeacherDisplayName } from "@/lib/teacherName";
 import type { TeacherQuality } from "@/types/quality";
 import type { Center, Wing } from "@/types";
 import InactivationRequestsPanel from "@/components/dashboard/InactivationRequestsPanel";
+import { chargedAmountOf } from "@/lib/feeWaiver";
 
 /** Keep only rows whose centre belongs to the active wing. */
 function scopeToWing<T extends { centerId?: string }>(rows: T[], centerIds: Set<string>): T[] {
@@ -341,7 +342,7 @@ function CommandCenter() {
       const raw = tx as unknown as Record<string, unknown>;
       if (!tx.studentUid || (raw.type as string) !== "fee_due") return;
       const bm = (raw.billingMonth as string) || tx.date.slice(0, 7);
-      if (bm === thisMonth) m.set(tx.studentUid, Number(raw.amount ?? 0));
+      if (bm === thisMonth && chargedAmountOf(raw) > 0) m.set(tx.studentUid, chargedAmountOf(raw));
     });
     return m;
   }, [transactions, thisMonth]);
@@ -2036,7 +2037,7 @@ function AdminDashboard() {
     txList.forEach(tx => {
       if (!tx.studentUid || tx.type !== "fee_due") return;
       const bm = tx.billingMonth || tx.month;
-      if (bm === thisMonth) m.set(tx.studentUid, tx.amount);
+      if (bm === thisMonth && chargedAmountOf(tx) > 0) m.set(tx.studentUid, chargedAmountOf(tx));
     });
     return m;
   }, [txList, thisMonth]);

@@ -29,6 +29,7 @@ import {
   type ClearHistoryOptions,
 } from "@/services/admin/delete.service";
 import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
+import { isWaivedDue } from "@/lib/feeWaiver";
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
 import type { CenterBatch } from "@/types";
 import { batchIdToStore, batchSchedule, effectiveBatches, explicitBatches, isDefaultBatchId } from "@/lib/batches";
@@ -2500,8 +2501,9 @@ export function LedgerEditor({
         const isEditingRow = editingTxId === tx.id;
         const isPendingDelete = txDeletePending === tx.id;
 
+        const waived = isFeeDue && isWaivedDue(raw);
         const label = isFeeDue
-          ? `Fee Due — ${fmtMonth(tx.billingMonth ?? (tx.date ?? "").slice(0, 7))}`
+          ? `${waived ? "Fee Waived" : "Fee Due"} — ${fmtMonth(tx.billingMonth ?? (tx.date ?? "").slice(0, 7))}${waived && raw.waiveReason ? ` · ${String(raw.waiveReason)}` : ""}`
           : isDeposit
           ? "Advance Deposit"
           : isAuto
@@ -2510,7 +2512,9 @@ export function LedgerEditor({
 
         // Two clear categories: charges/dues owed (red, +amount) vs
         // payments received from the student (green, -amount).
-        const badge = isPending
+        const badge = waived
+          ? { label: "Waived", background: "#ffedd5", color: "#c2410c" }
+          : isPending
           ? { label: "Due", background: "#fee2e2", color: "#dc2626" }
           : isCharge
           ? { label: "Charged", background: "#fef3c7", color: "#92400e" }

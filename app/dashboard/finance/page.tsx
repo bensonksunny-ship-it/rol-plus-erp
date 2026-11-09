@@ -2,7 +2,7 @@
 
 import { centreUnits, studentUnitKey, studentUnitLabel, unitTitle } from "@/lib/batchUnits";
 import type { CenterBatch } from "@/types";
-import { getCached, setCached } from "@/lib/dataCache";
+import { getCached, invalidateStudentViews, setCached } from "@/lib/dataCache";
 import { useState, useEffect, useMemo, useRef, useCallback, Fragment, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
@@ -27,8 +27,14 @@ import {
   outstandingDuesForStudent,
   isSettlingPayment,
   recordPayment,
+  waiveFeeDue,
   type DueSettlement,
 } from "@/services/finance/finance.service";
+import {
+  approveStudentDeactivation, canApproveDeactivation, requestStudentDeactivation,
+} from "@/services/student/deactivation.service";
+import { approveStudentBreak, requestStudentBreak } from "@/services/student/break.service";
+import { WAIVED, waivedAmountOf } from "@/lib/feeWaiver";
 import type {
   Transaction,
   EditableTransactionInput,
@@ -39,6 +45,10 @@ import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import { logAction } from "@/services/audit/audit.service";
 import type { Role } from "@/types";
+import { buildStudentRows, exportFinanceStatementPdf, isReceivedPayment } from "./statement";
+import PaymentModal, { type PayMethod, type PaymentFormValues } from "./PaymentModal";
+import { HISTORY_NOTE, fmtINR, fmtMonth, todayStr } from "./format";
+import { StudentStatusChip, UndueModal, type UndueSubmit } from "./RowStatusMenus";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -78,10 +88,8 @@ function isCustomFee(studentFee: number, centreDefault: number): boolean {
 const UNASSIGNED = "__unassigned__";
 function centreKey(s: { centerId: string; unitKey?: string }): string { return s.unitKey || s.centerId || UNASSIGNED; }
 
-type PayMethod      = "UPI" | "Cash" | "Bank";
-type DiscountType   = "fixed" | "percent";
 // Which inline panel is open for a student row
-type RowAction      = "pay" | "adjust" | "deposit" | "history";
+type RowAction      = "adjust" | "deposit" | "history";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -99,25 +107,13 @@ const STATUS_BADGE: Record<string, React.CSSProperties> = {
   completed: { background: "#dcfce7", color: "#16a34a" },
   pending:   { background: "#fef9c3", color: "#b45309" },
   failed:    { background: "#fee2e2", color: "#dc2626" },
+  waived:    { background: "#ffedd5", color: "#c2410c" },
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-function fmtINR(n: number): string {
-  return `₹${n.toLocaleString("en-IN")}`;
-}
 function currentMonth(): string {
   return new Date().toISOString().slice(0, 7);
-}
-function todayStr(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-/** "2025-04" → "April 2025" */
-function fmtMonth(ym: string): string {
-  const [y, m] = ym.split("-");
-  const names = ["January","February","March","April","May","June",
-                  "July","August","September","October","November","December"];
-  return `${names[parseInt(m, 10) - 1] ?? m} ${y}`;
 }
 /** Earliest selectable month — 3 years back */
 function minMonth(): string {
@@ -141,16 +137,20 @@ export default function FinancePage() {
 
 // Clicking a summary tile drills into the transactions behind that number.
 // null = the normal student list.
-type DrillDown = null | "collected" | "overdue" | "prepay";
+type DrillDown = null | "collected" | "prepay";
 
 /** Text colour for anything "due" — calm amber, not red. */
 const DUE_TEXT = "#b45309";
 
 function FinanceContent() {
-  const { user, isAdmin, isSuperAdmin }      = useAuth();
+  const { user, role, isAdmin, isSuperAdmin } = useAuth();
   const { wing }                            = useWing();
   const isSom                                = isSchoolOfMusic(wing);
   const canManageTx                          = isAdmin || isSuperAdmin;
+  // Break / discontinued / Un-due: this wing's approvers act directly; anyone
+  // else on Finance (e.g. Office Manager) sends a request instead.
+  const canDecideStatus                      = canApproveDeactivation(role, wing);
+  const approverLabel                        = isSom ? "Chief Teacher / Director" : "Admin";
   const searchParams                         = useSearchParams();
   const [drillDown, setDrillDown]            = useState<DrillDown>(null);
   // Deep-link support, e.g. from the dashboard's Pending Fees KPI card:
@@ -162,6 +162,7 @@ function FinanceContent() {
   const [students, setStudents]              = useState<StudentFeeRow[]>([]);
   const [centers, setCenters]                = useState<CenterOption[]>([]);
   const [loading, setLoading]                = useState(true);
+  const [pdfBusy, setPdfBusy]                = useState(false);
   const [attDatesMap, setAttDatesMap]        = useState<Map<string, string[]>>(new Map());
   const [attPopupUid, setAttPopupUid]        = useState<string | null>(null);
   const { toasts, toast, remove }            = useToast();
@@ -171,20 +172,14 @@ function FinanceContent() {
 
   // ── Inline row panel state ───────────────────────────────────────────────────
   const [activeUid, setActiveUid]            = useState<string | null>(null);
-  const [activeAction, setActiveAction]      = useState<RowAction>("pay");
+  const [activeAction, setActiveAction]      = useState<RowAction>("adjust");
 
-  // Pay form state
-  const [payAmount, setPayAmount]            = useState<string>("");
-  const [payMethod, setPayMethod]            = useState<PayMethod>("Cash");
-  const [payNote, setPayNote]                = useState<string>("");
-  const [payDate, setPayDate]                = useState<string>(todayStr());
-  // Which billing month this payment settles. Deliberately starts null — the
-  // admin picks explicitly rather than money silently landing on a guessed month.
-  const [payBillingMonth, setPayBillingMonth] = useState<string | null>(null);
-  const [discountType, setDiscountType]      = useState<DiscountType>("fixed");
-  const [discountValue, setDiscountValue]    = useState<string>("");
+  // Student the payment popup is open for.
+  const [payUid, setPayUid]                  = useState<string | null>(null);
+  // Clicking a student's Due opens Un-due (on break / discontinued).
+  const [undueUid, setUndueUid]              = useState<string | null>(null);
+  const [undueSaving, setUndueSaving]        = useState(false);
   const [paySubmitting, setPaySubmitting]    = useState(false);
-  const payInputRef                          = useRef<HTMLInputElement>(null);
 
   // Adjust fee state
   const [adjustFee, setAdjustFee]            = useState<string>("");
@@ -206,7 +201,6 @@ function FinanceContent() {
   const [depositNote, setDepositNote]        = useState<string>("");
   const [depositSubmitting, setDepositSubmitting] = useState(false);
   const depositInputRef                      = useRef<HTMLInputElement>(null);
-  const [feeDueDate, setFeeDueDate]                 = useState<string>(todayStr());
   const [feeDueSubmitting, setFeeDueSubmitting]     = useState(false);
   const [undoFeeDueSubmitting, setUndoFeeDueSubmitting] = useState(false);
   const [historyDeletePending, setHistoryDeletePending] = useState<string | null>(null);
@@ -468,24 +462,19 @@ function FinanceContent() {
     const students     = scopeStudents;
     const transactions = scopeTransactions;
     const today      = todayStr();
-    const isManualPayment = (t: Transaction) => {
-      const raw    = t as unknown as Record<string, unknown>;
-      const type   = (raw.type   as string) ?? "";
-      const method = (t.method   as string) ?? "";
-      return t.status === "completed"
-        && type   !== "fee_due"  && type   !== "charge"
-        && method !== "auto"     && method !== "auto-monthly";
-    };
     const monthTx    = transactions.filter(t =>
-      isManualPayment(t) && (t.date ?? "").startsWith(selectedMonth)
+      isReceivedPayment(t) && (t.date ?? "").startsWith(selectedMonth)
     );
     const total      = monthTx.reduce((s, t) => s + (t.amount ?? 0), 0);
     const todayAmt   = isCurrentMonth
-      ? transactions.filter(t => isManualPayment(t) && t.date?.startsWith(today))
+      ? transactions.filter(t => isReceivedPayment(t) && t.date?.startsWith(today))
           .reduce((s, t) => s + (t.amount ?? 0), 0)
       : 0;
-    const overdueStudents = students.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid));
-    const pendingBal      = overdueStudents.reduce((acc, s) => acc + (feeDueMap.get(s.uid)?.amount ?? 0), 0);
+    // Overdue is the ledger balance, not this month's fee_due settlements: those
+    // miss per-class charges and payments recorded without a month. One student's
+    // credit never offsets another's debt.
+    const overdueStudents = students.filter(s => s.balance > 0);
+    const pendingBal      = overdueStudents.reduce((acc, s) => acc + s.balance, 0);
     const activeStudents  = students.filter(s => s.rosterActive);
     const activeCount     = activeStudents.length;
     const paidActiveCount = activeStudents.filter(s => paidMap.has(s.uid)).length;
@@ -502,7 +491,11 @@ function FinanceContent() {
     const postpayCollected = postpayStudents.reduce((acc, s) => acc + (paidAmountMap.get(s.uid) ?? 0), 0);
     // Prepay students with fee generated but not yet paid
     const lowCreditCount   = prepayStudents.filter(s => feeDueMap.has(s.uid) && !paidMap.has(s.uid)).length;
-    return { total, todayAmt, pendingBal, activeCount, paidActiveCount, collectionPct, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
+    // Rest of the headline total: one-off admission fees, plus payments from
+    // students no longer on the list, so the breakdown always adds up to `total`.
+    const admissionCollected = monthTx.filter(t => t.type === "admission_fee").reduce((s, t) => s + (t.amount ?? 0), 0);
+    const otherCollected     = Math.max(0, total - prepayCollected - postpayCollected - admissionCollected);
+    return { total, todayAmt, admissionCollected, otherCollected, pendingBal, activeCount, paidActiveCount, collectionPct, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
   }, [scopeTransactions, scopeStudents, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap]);
 
   // ── Last tx per student (scoped to selected month) ───────────────────────────
@@ -520,17 +513,6 @@ function FinanceContent() {
     return m;
   }, [transactions, selectedMonth]);
 
-  // ── Derived: net pay amount after discount ───────────────────────────────────
-  function computeNetAmount(raw: string, dType: DiscountType, dVal: string): number {
-    const base = Number(raw);
-    if (!base || base <= 0) return 0;
-    const disc = Number(dVal) || 0;
-    if (dType === "percent") {
-      return Math.max(0, Math.round(base - (base * Math.min(disc, 100)) / 100));
-    }
-    return Math.max(0, base - disc);
-  }
-
   // ── Row panel helpers ────────────────────────────────────────────────────────
   function openPanel(uid: string, action: RowAction, student: StudentFeeRow) {
     // Close if already open with same action
@@ -541,15 +523,6 @@ function FinanceContent() {
     setActiveUid(uid);
     setActiveAction(action);
     // Reset all form states
-    // Amount is left for the admin to fill once they pick a month — selecting a
-    // month prefills that month's outstanding figure.
-    setPayAmount("");
-    setPayBillingMonth(null);
-    setPayMethod("Cash");
-    setPayNote("");
-    setPayDate(todayStr());
-    setDiscountType("fixed");
-    setDiscountValue("");
     setAdjustFee(
       action === "adjust"
         ? (student.feeCycle === "monthly" ? String(student.monthlyFee) : String(student.feePerClass))
@@ -561,36 +534,23 @@ function FinanceContent() {
     );
     setDepositMethod("Cash");
     setDepositNote("");
-    setFeeDueDate(selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`);
-    if (action === "pay")     setTimeout(() => payInputRef.current?.focus(),     60);
     if (action === "adjust")  setTimeout(() => adjustInputRef.current?.focus(),  60);
     if (action === "deposit") setTimeout(() => depositInputRef.current?.focus(), 60);
   }
 
   function closePanel() {
     setActiveUid(null);
-    setPayAmount("");
-    setPayNote("");
-    setPayDate(todayStr());
-    setDiscountValue("");
     setAdjustFee("");
     setDepositAmount("");
     setDepositNote("");
-    setFeeDueDate(selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`);
   }
 
   // ── Submit: record payment ───────────────────────────────────────────────────
-  async function submitPay(student: StudentFeeRow) {
-    const net = computeNetAmount(payAmount, discountType, discountValue);
-    if (!net || net <= 0) {
-      toast("Enter a valid amount (after discount must be > 0)", "error");
-      return;
-    }
+  async function submitPay(student: StudentFeeRow, form: PaymentFormValues) {
+    if (paySubmitting) return;
+    const { net, rawAmount, discountAmt, discountType, method, date, billingMonth } = form;
     setPaySubmitting(true);
     try {
-      const rawAmount   = Number(payAmount);
-      const discountAmt = rawAmount - net;
-
       // One shared service call — it writes the receipt, adjusts the balance,
       // and closes the targeted due only if this payment actually settles it.
       await recordPayment({
@@ -600,27 +560,25 @@ function FinanceContent() {
         rawAmount,
         discountAmt,
         discountType,
-        method:       payMethod,
+        method,
         receivedBy:   user?.displayName ?? user?.email ?? "admin",
-        date:         payDate || todayStr(),
-        note:         payNote.trim() || null,
-        billingMonth: payBillingMonth,
+        date,
+        billingMonth,
       });
 
       // Report what actually happened to the due, so a short payment doesn't
       // read as if the bill were cleared.
-      const target = payBillingMonth
-        ? dueSettlements.get(`${student.uid}|${payBillingMonth}`)
+      const target = billingMonth
+        ? dueSettlements.get(`${student.uid}|${billingMonth}`)
         : undefined;
       const stillOwed = target ? Math.max(0, target.remaining - net) : 0;
 
-      closePanel();
-      await fetchAll(selectedMonth);
-
+      setPayUid(null);
       const discMsg  = discountAmt > 0 ? ` · discount ${fmtINR(discountAmt)}` : "";
-      const monthMsg = payBillingMonth ? ` for ${fmtMonth(payBillingMonth)}` : "";
+      const monthMsg = billingMonth ? ` for ${fmtMonth(billingMonth)}` : "";
       const leftMsg  = stillOwed > 0 ? ` — ${fmtINR(stillOwed)} still due` : "";
-      toast(`✓ ${fmtINR(net)} from ${student.name}${monthMsg} via ${payMethod}${discMsg}${leftMsg}`, "success");
+      toast(`✓ ${fmtINR(net)} from ${student.name}${monthMsg} via ${method}${discMsg}${leftMsg}`, "success");
+      await fetchAll(selectedMonth);
     } catch (err) {
       console.error("Payment failed:", err);
       toast(`Payment failed: ${err instanceof Error ? err.message : "try again"}`, "error");
@@ -797,7 +755,7 @@ function FinanceContent() {
         type:         "fee_due",
         method:       "manual",
         billingMonth: selectedMonth,
-        date:         dueDate || feeDueDate || (selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`),
+        date:         dueDate || (selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`),
         status:       "due",
         createdAt:    serverTimestamp(),
         receivedBy:   user?.displayName ?? user?.email ?? "admin",
@@ -839,6 +797,56 @@ function FinanceContent() {
       toast("Failed to undo fee due. Try again.", "error");
     } finally {
       setUndoFeeDueSubmitting(false);
+    }
+  }
+
+  // ── Un-due: student on break / discontinued ─────────────────────────────────
+  // Waives the chosen unpaid months (kept in history as Waived) and records the
+  // student's status: applied at once for approvers, a request for others.
+  async function submitUndue(student: StudentFeeRow, v: UndueSubmit) {
+    if (!user || undueSaving || v.months.length === 0) return;
+    setUndueSaving(true);
+    const by = { uid: user.uid, role, name: user.displayName ?? undefined, wing };
+    const label = v.reason === "break" ? "On break" : "Discontinued";
+    const reason = v.note ? `${label} · ${v.note}` : label;
+    let waived = 0;
+    try {
+      for (const m of v.months) {
+        await waiveFeeDue({ dueId: m.dueId, studentUid: student.uid, amount: m.remaining, reason, by });
+        waived += m.remaining;
+      }
+
+      let next = student.status;
+      let statusMsg = "";
+      if (v.reason === "break" && student.status !== "on_break") {
+        if (canDecideStatus) {
+          const from = await approveStudentBreak(student.uid, by, { startDate: v.breakFrom, reason });
+          next = "on_break"; statusMsg = ` On break from ${from}.`;
+        } else if (student.status !== "break_requested") {
+          await requestStudentBreak(student.uid, by, reason);
+          next = "break_requested"; statusMsg = ` Break sent to ${approverLabel} to confirm.`;
+        }
+      } else if (v.reason === "discontinued" && student.status !== "inactive") {
+        if (student.status !== "deactivation_requested") await requestStudentDeactivation(student.uid, by, reason);
+        if (canDecideStatus) {
+          await approveStudentDeactivation(student.uid, by, null);
+          next = "inactive"; statusMsg = " Marked inactive.";
+        } else {
+          next = "deactivation_requested"; statusMsg = ` Discontinued sent to ${approverLabel} to confirm.`;
+        }
+      }
+
+      setStudents(prev => prev.map(s => s.uid !== student.uid ? s : { ...s, status: next }));
+      setUndueUid(null);
+      invalidateStudentViews();
+      await fetchAll(selectedMonth);
+      toast(`${fmtINR(waived)} un-due for ${student.name}.${statusMsg}`, "success");
+    } catch (err) {
+      const why = err instanceof Error ? err.message : "Try again.";
+      toast(waived > 0 ? `${fmtINR(waived)} waived, but the rest failed: ${why}` : `Couldn't un-due: ${why}`, "error");
+      if (waived > 0) { setUndueUid(null); await fetchAll(selectedMonth); }
+    } finally {
+      setUndueSaving(false);
     }
   }
 
@@ -896,24 +904,12 @@ function FinanceContent() {
   // Which slice of the ledger sits behind the summary tile the admin clicked.
   const drillDownTx = useMemo(() => {
     if (drillDown === null) return [];
-    if (drillDown === "overdue") {
-      // Dues still carrying a balance — includes part-paid ones, which the old
-      // status-only check silently dropped once any payment landed.
-      return transactions.filter(tx => {
-        if (tx.type !== "fee_due") return false;
-        if (!inScope(tx)) return false;
-        const bm = tx.billingMonth || (tx.date ?? "").slice(0, 7);
-        if (bm !== selectedMonth) return false;
-        const s = dueSettlements.get(`${tx.studentUid}|${bm}`);
-        return (s?.remaining ?? 0) > 0;
-      });
-    }
     if (drillDown === "prepay") {
       return filteredTx.filter(tx => tx.type === "deposit");
     }
     // "collected" — real money in (tuition receipts + admission fees).
     return filteredTx.filter(tx => isSettlingPayment(tx) || (tx.type === "admission_fee" && tx.status === "completed"));
-  }, [drillDown, transactions, filteredTx, dueSettlements, inScope, selectedMonth]);
+  }, [drillDown, filteredTx]);
 
   const filteredStudents = useMemo(() => {
     let list = scopeStudents;
@@ -947,7 +943,7 @@ function FinanceContent() {
       const k = centreKey(st);
       const e = stats.get(k) ?? { count: 0, overdue: 0, name: st.unitName };
       e.count++;
-      if (feeDueMap.has(st.uid) && !paidMap.has(st.uid)) e.overdue++;
+      if (st.balance > 0) e.overdue++;
       stats.set(k, e);
     });
     // One tab per class: a centre, or each batch of a centre with 2+ batches.
@@ -959,9 +955,50 @@ function FinanceContent() {
     });
     return tabs.sort((a, b) =>
       Number(a.id === UNASSIGNED) - Number(b.id === UNASSIGNED) || a.name.localeCompare(b.name));
-  }, [students, centers, feeDueMap, paidMap]);
+  }, [students, centers]);
   const totalOverdue = useMemo(() => centreTabs.reduce((n, t) => n + t.overdue, 0), [centreTabs]);
   const selectedCentreName = filterCenter === "all" ? "All Centers" : centreTabs.find(t => t.id === filterCenter)?.name ?? "Centre";
+
+  // Monthly statement PDF: the selected month + centre, from the numbers on screen.
+  async function downloadStatement() {
+    if (students.length === 0 && transactions.length === 0) {
+      toast("Finance data hasn't loaded, so there's nothing to export. Refresh and try again.", "error");
+      return;
+    }
+    setPdfBusy(true);
+    try {
+      await exportFinanceStatementPdf({
+        brand:      isSom ? "Rol's School of Music" : "ROL's Plus",
+        month:      selectedMonth,
+        monthLabel: fmtMonth(selectedMonth),
+        scopeName:  selectedCentreName,
+        kpis: {
+          revenue:       summary.total,
+          activeCount:   summary.activeCount,
+          overdueAmount: summary.pendingBal,
+          overdueCount:  summary.overdueCount,
+        },
+        rows: buildStudentRows(
+          selectedMonth,
+          scopeStudents.map(s => ({
+            uid:        s.uid,
+            name:       s.name,
+            centreKey:  centreKey(s),
+            centreName: s.unitName,
+            classType:  isSom ? "group" : s.classType,
+            active:     s.rosterActive,
+          })),
+          scopeTransactions,
+          id => centers.find(c => c.id === id)?.name ?? "No centre assigned",
+        ),
+      });
+    } catch (err) {
+      console.error("Statement PDF failed:", err);
+      toast("Couldn't create the PDF. Try again.", "error");
+    } finally {
+      setPdfBusy(false);
+    }
+  }
 
   // Subtotals for the centre headings in the All Centers list.
   const groupTotals = useMemo(() => {
@@ -971,11 +1008,11 @@ function FinanceContent() {
       const e = m.get(k) ?? { count: 0, due: 0, paid: 0 };
       e.count++;
       if (paidMap.has(st.uid)) e.paid += paidAmountMap.get(st.uid) ?? 0;
-      else if (feeDueMap.has(st.uid)) e.due += feeDueMap.get(st.uid)?.amount ?? 0;
+      if (st.balance > 0) e.due += st.balance;
       m.set(k, e);
     });
     return m;
-  }, [filteredStudents, paidMap, paidAmountMap, feeDueMap]);
+  }, [filteredStudents, paidMap, paidAmountMap]);
 
   function formatDate(value: unknown): string {
     if (!value || typeof value !== "string") return "-";
@@ -992,6 +1029,49 @@ function FinanceContent() {
     // from the dashboard layout's <main>, so none is added here.
     <div className="mx-auto w-full max-w-6xl">
       <ToastContainer toasts={toasts} onRemove={remove} />
+      {payUid && (() => {
+        const row = students.find(x => x.uid === payUid);
+        if (!row) return null;
+        const last = lastTxMap.get(row.uid);
+        const due  = feeDueMap.get(row.uid);
+        return (
+          <PaymentModal
+            student={row}
+            month={selectedMonth}
+            isCurrentMonth={isCurrentMonth}
+            isSom={isSom}
+            unpaid={outstandingDuesForStudent(dueSettlements, row.uid)}
+            dueThisMonth={due ? due.amount : null}
+            monthSettled={!due && dueSettlements.has(`${row.uid}|${selectedMonth}`)}
+            lastPayment={last ? { amount: last.amount, date: formatDate(last.date ?? last.createdAt) } : null}
+            saving={paySubmitting}
+            generatingDue={feeDueSubmitting}
+            undoingDue={undoFeeDueSubmitting}
+            onGenerateDue={dueDate => generateFeeDue(row, dueDate)}
+            onUndoDue={() => undoFeeDue(row)}
+            onConfirm={form => submitPay(row, form)}
+            onClose={() => setPayUid(null)}
+          />
+        );
+      })()}
+      {undueUid && (() => {
+        const row = students.find(x => x.uid === undueUid);
+        if (!row) return null;
+        const months = outstandingDuesForStudent(dueSettlements, row.uid)
+          .map(d => ({ dueId: d.dueId, billingMonth: d.billingMonth, remaining: d.remaining }));
+        if (months.length === 0) return null;
+        const dueTotal = months.reduce((a, m) => a + m.remaining, 0);
+        return (
+          <UndueModal
+            name={row.name} months={months}
+            otherBalance={Math.max(0, row.balance - dueTotal)}
+            status={row.status} direct={canDecideStatus} approverLabel={approverLabel}
+            saving={undueSaving}
+            onConfirm={v => submitUndue(row, v)}
+            onClose={() => setUndueUid(null)}
+          />
+        );
+      })()}
       {bulkFee && (() => {
         const inCentre = students.filter(st => st.centerId === bulkFee.centerId);
         const def = centreDefaultFee(bulkFee.centerId);
@@ -1061,26 +1141,37 @@ function FinanceContent() {
                     fontSize: 12, fontWeight: 600, cursor: "pointer",
                     background: "#fef3c7", color: "#92400e",
                   }}
-                  title="Jump back to current month"
+                  title="Current month"
                 >
                   ← Current
                 </button>
               )}
             </div>
             {!isCurrentMonth && (
-              <span style={{
+              <span title={HISTORY_NOTE} aria-label={`${fmtMonth(selectedMonth)}. ${HISTORY_NOTE}`} style={{
                 fontSize: 12, fontWeight: 700, padding: "3px 10px",
                 background: "#fef9c3", color: "#b45309",
-                border: "1px solid #fde68a", borderRadius: 6,
+                border: "1px solid #fde68a", borderRadius: 6, cursor: "help",
               }}>
-                📅 Viewing: {fmtMonth(selectedMonth)}
+                📅 {fmtMonth(selectedMonth)} ⓘ
               </span>
             )}
+            <button
+              onClick={downloadStatement}
+              disabled={loading || pdfBusy}
+              title={`Download the ${fmtMonth(selectedMonth)} statement for ${selectedCentreName}`}
+              style={{ ...st.pdfButton, opacity: loading || pdfBusy ? 0.6 : 1, cursor: loading || pdfBusy ? "default" : "pointer" }}
+            >
+              <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3v12M7 10l5 5 5-5M4 20h16" />
+              </svg>
+              {pdfBusy ? "PDF…" : "PDF"}
+            </button>
           </div>
           {summary.overdueCount > 0 && !loading && (
             <div style={st.overdueAlert}>
               <span aria-hidden style={st.dueDot} />
-              {summary.overdueCount} student{summary.overdueCount !== 1 ? "s" : ""} with dues
+              {summary.overdueCount} due
             </div>
           )}
         </div>
@@ -1097,7 +1188,7 @@ function FinanceContent() {
               <span>{t.name}</span>
               <span style={{ ...st.centreTabCount, ...(on ? { background: "rgba(255,255,255,0.25)", color: "#fff" } : {}) }}>{t.count}</span>
               {t.overdue > 0 && (
-                <span title={`${t.overdue} with dues`} style={st.centreTabDue}>{t.overdue}</span>
+                <span title={`${t.overdue} due`} style={st.centreTabDue}>{t.overdue}</span>
               )}
             </button>
           );
@@ -1105,43 +1196,47 @@ function FinanceContent() {
       </div>
 
       {/* ── Summary Cards — click one to see the transactions behind it ──────── */}
-      <div style={st.cardGrid}>
-        <SummaryCard
-          label={`Collection Rate — ${fmtMonth(selectedMonth)}`}
-          value={loading ? "…" : `${summary.collectionPct}%`}
-          accent="#059669" icon="💰"
-          hint={loading ? undefined : `${summary.paidActiveCount} / ${summary.activeCount} students paid`}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4" style={{ gap: 10, marginBottom: 20 }}>
+        <TotalReceivedCard
+          value={loading ? "…" : fmtINR(summary.total)}
+          period={fmtMonth(selectedMonth)}
+          loading={loading}
           active={drillDown === "collected"}
           onClick={() => setDrillDown(d => d === "collected" ? null : "collected")}
+          warning={summary.lowCreditCount > 0 ? `⚠ ${summary.lowCreditCount} unpaid${isSom ? "" : ` · ${summary.prepayCount} prepay`}` : undefined}
+          pills={[
+            ...(isCurrentMonth ? [{ label: "Today", amount: summary.todayAmt }] : []),
+            {
+              label: isSom ? "Advance" : "Prepay",
+              amount: summary.prepayCollected,
+              active: drillDown === "prepay",
+              onClick: () => setDrillDown(d => d === "prepay" ? null : "prepay"),
+            },
+            ...(!isSom ? [{ label: "Postpay", amount: summary.postpayCollected }] : []),
+            { label: "Admission", amount: summary.admissionCollected },
+            ...(summary.otherCollected > 0 ? [{ label: "Other", amount: summary.otherCollected }] : []),
+          ]}
+        />
+        <SummaryCard
+          label="Collection"
+          value={loading ? "…" : `${summary.collectionPct}%`}
+          accent="#2563eb" icon="📈"
+          hint={loading ? undefined : `${summary.paidActiveCount}/${summary.activeCount} paid`}
+          progress={loading ? undefined : summary.collectionPct}
+        />
+        <SummaryCard
+          label="Active"
+          value={loading ? "…" : String(summary.activeCount)}
+          accent="#4f46e5" icon="🎓"
+          hint={loading || isSom ? undefined : `${summary.groupCount} group · ${summary.personalCount} personal`}
         />
         <SummaryCard
           label="Overdue"
-          value={loading ? "…" : String(summary.overdueCount)}
+          value={loading ? "…" : fmtINR(summary.pendingBal)}
           accent="#d97706" icon="⏳"
-          hint={loading ? undefined : `${fmtINR(summary.pendingBal)} pending`}
-          active={drillDown === "overdue"}
-          onClick={() => setDrillDown(d => d === "overdue" ? null : "overdue")}
-        />
-        <SummaryCard
-          label="Active Students"
-          value={loading ? "…" : String(summary.activeCount)}
-          accent="#059669" icon="🎓"
-          hint={loading ? undefined : isSom
-            ? `${summary.prepayCount} prepaid · monthly`
-            : `${summary.groupCount} group · ${summary.personalCount} personal`}
-        />
-        <SummaryCard
-          label={isSom ? "Advance Collected" : "Prepay Collected"}
-          value={loading ? "…" : fmtINR(summary.prepayCollected)}
-          accent="#9d174d" icon="⬆"
-          urgent={summary.lowCreditCount > 0}
-          hint={loading ? undefined : summary.lowCreditCount > 0
-            ? `⚠ ${summary.lowCreditCount} due unpaid · ${summary.prepayCount} prepay`
-            : isSom
-              ? `${summary.prepayCount} students`
-              : `${summary.prepayCount} prepay · Postpay ${fmtINR(summary.postpayCollected)}`}
-          active={drillDown === "prepay"}
-          onClick={() => setDrillDown(d => d === "prepay" ? null : "prepay")}
+          hint={loading ? undefined : `${summary.overdueCount} due`}
+          active={drillDown === null && feeStatusFilter === "pending"}
+          onClick={() => { setDrillDown(null); setFeeStatusFilter(f => f === "pending" ? "all" : "pending"); }}
         />
       </div>
 
@@ -1151,7 +1246,7 @@ function FinanceContent() {
           <>
             <input
               type="search"
-              placeholder={filterCenter === "all" ? "Search name or ID…" : `Search name or ID in ${selectedCentreName}…`}
+              placeholder="Search name or ID…"
               value={studentSearch}
               onChange={e => setStudentSearch(e.target.value)}
               style={{ ...st.searchInput, flex: 1 }}
@@ -1166,17 +1261,17 @@ function FinanceContent() {
               </select>
             )}
             <select value={feeStatusFilter} onChange={e => setFeeStatusFilter(e.target.value as "all" | "pending")} style={st.filterSelect}>
-              <option value="all">All Fee Status</option>
-              <option value="pending">⚠ Pending balance</option>
+              <option value="all">All Status</option>
+              <option value="pending">⚠ Due</option>
             </select>
             {feeStatusFilter === "pending" && (
-              <button onClick={() => setFeeStatusFilter("all")} style={st.clearDate}>✕ Clear filter</button>
+              <button onClick={() => setFeeStatusFilter("all")} style={st.clearDate}>✕ Clear</button>
             )}
           </>
         ) : (
           <>
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={st.filterSelect}>
-              <option value="all">All Statuses</option>
+              <option value="all">All Status</option>
               <option value="completed">Completed</option>
               <option value="pending">Pending</option>
               <option value="failed">Failed</option>
@@ -1184,7 +1279,7 @@ function FinanceContent() {
             <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
               style={st.filterDate} />
             {filterDate && (
-              <button onClick={() => setFilterDate("")} style={st.clearDate}>✕ Clear date</button>
+              <button onClick={() => setFilterDate("")} style={st.clearDate}>✕ Clear</button>
             )}
           </>
         )}
@@ -1195,11 +1290,10 @@ function FinanceContent() {
         <div>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap" as const, gap: 10 }}>
             <div style={st.sectionTitle}>
-              {drillDown === "collected" ? `Payments collected — ${fmtMonth(selectedMonth)}`
-                : drillDown === "overdue" ? `Outstanding dues — ${fmtMonth(selectedMonth)}`
-                : `Prepay deposits — ${fmtMonth(selectedMonth)}`}
+              {drillDown === "collected" ? `Collected — ${fmtMonth(selectedMonth)}`
+                : `Deposits — ${fmtMonth(selectedMonth)}`}
             </div>
-            <button onClick={() => setDrillDown(null)} style={st.clearDate}>← Back to students</button>
+            <button onClick={() => setDrillDown(null)} style={st.clearDate}>← Back</button>
           </div>
           <TxTable
             transactions={drillDownTx}
@@ -1218,23 +1312,6 @@ function FinanceContent() {
       {/* ══ STUDENT LIST — the default view ════════════════════════════════════ */}
       {drillDown === null && (
         <div>
-          {/* Past month notice */}
-          {!isCurrentMonth && !loading && (
-            <div style={{
-              display: "flex", alignItems: "center", gap: 10,
-              background: "#fffbeb", border: "1px solid #fde68a",
-              borderRadius: 8, padding: "10px 14px", marginBottom: 10,
-              fontSize: 13, color: "#92400e",
-            }}>
-              <span style={{ fontSize: 16 }}>📅</span>
-              <span>
-                Showing historical data for <strong>{fmtMonth(selectedMonth)}</strong>.
-                Attendance, balance, and billing status reflect that month.
-                Any actions (pay/bill/payment) will update the <strong>live balance</strong>.
-              </span>
-            </div>
-          )}
-
           <div style={st.tableWrapper}>
             {loading ? (
               <div style={st.stateRow}>Loading…</div>
@@ -1272,14 +1349,21 @@ function FinanceContent() {
                     const fee        = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
                     const lowCredit  = isPrepay && s.balance >= -fee; // credit ≤ one fee cycle
 
+                    // Same test as the Amount column's "Due" tag.
+                    const isDueRow   = s.balance > 0 || (feeDueMap.has(s.uid) && !paidMap.has(s.uid));
+                    const isPaidRow  = !isDueRow && paidMap.has(s.uid);
+                    // Due → whole row orange, paid → whole row green. Painted on the
+                    // cells via globals.css (.fin-row-*): the theme's zebra striping
+                    // overrides any row background with !important.
+                    const rowClass = [isDueRow ? "fin-row-due" : isPaidRow ? "fin-row-paid" : "", isOpen ? "fin-row-open" : ""].join(" ").trim() || undefined;
+                    // Clicking Due opens Un-due (on break / discontinued) for approvers.
+                    const canUndueRow = canDecideStatus && outstandingDuesForStudent(dueSettlements, s.uid).length > 0;
                     const rowBg = isOpen
                       ? "#fffbeb"
                       : hasCredit
                           ? "#f0fdf4"
                           : "var(--color-surface)";
 
-                    const netPreview = computeNetAmount(payAmount, discountType, discountValue);
-                    const discountAmt = Number(payAmount) - netPreview;
 
                     return (
                       <>
@@ -1290,22 +1374,22 @@ function FinanceContent() {
                               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const }}>
                                 <span aria-hidden style={st.groupHeaderIcon}>🏫</span>
                                 <button onClick={() => setFilterCenter(groupKey)} style={st.groupHeaderBtn}
-                                  title={filterCenter === "all" ? "Show only this centre" : undefined}>
-                                  {groupKey === UNASSIGNED ? "No centre · dues pending" : s.unitName}{filterCenter === "all" ? " →" : ""}
+                                  title={filterCenter === "all" ? "Filter" : undefined}>
+                                  {groupKey === UNASSIGNED ? "No centre · Due" : s.unitName}{filterCenter === "all" ? " →" : ""}
                                 </button>
                                 <span style={st.groupHeaderPill}>{g?.count ?? 0} student{g?.count === 1 ? "" : "s"}</span>
                                 {isSom && groupKey !== UNASSIGNED && centreDefaultFee(s.centerId) > 0 && (
-                                  <span style={st.groupHeaderPill} title="Centre default monthly fee">Default {fmtINR(centreDefaultFee(s.centerId))}/mo</span>
+                                  <span style={st.groupHeaderPill} title="Centre default">Default {fmtINR(centreDefaultFee(s.centerId))}/mo</span>
                                 )}
                                 <span style={st.groupHeaderMeta}>
                                   {g && g.paid > 0 && <span style={{ color: "#16a34a" }}>Collected {fmtINR(g.paid)}</span>}
                                   {g && g.paid > 0 && g.due > 0 && " · "}
-                                  {g && g.due > 0 && <span style={{ color: DUE_TEXT, fontWeight: 600 }}>Pending {fmtINR(g.due)}</span>}
+                                  {g && g.due > 0 && <span style={{ color: DUE_TEXT, fontWeight: 600 }}>Due {fmtINR(g.due)}</span>}
                                 </span>
                                 {isSom && groupKey !== UNASSIGNED && (
                                   <button onClick={() => setBulkFee({ centerId: s.centerId, name: s.centerName })} style={st.groupHeaderAction}
-                                    title="Set the monthly fee for every student in this centre">
-                                    ⚙️ Set Fee for All
+                                    title="Set fee for whole centre">
+                                    ⚙️ Set All
                                   </button>
                                 )}
                               </div>
@@ -1315,6 +1399,7 @@ function FinanceContent() {
                         {/* ── Main data row ─────────────────────────────── */}
                         <tr
                           key={s.uid}
+                          className={rowClass}
                           style={{ background: rowBg, transition: "background 0.15s", cursor: "pointer" }}
                           onClick={(e) => {
                             if ((e.target as HTMLElement).closest("button")) return;
@@ -1325,19 +1410,20 @@ function FinanceContent() {
                           <td style={{ ...st.td, minWidth: isMobile ? 180 : 160 }}>
                             <div style={{ fontWeight: 600 }}>
                               {s.name}
-                              {!s.rosterActive && (
-                                <span title="Not on an active roster — kept on Finance until the balance is settled"
+                              <StudentStatusChip status={s.status} />
+                              {!s.rosterActive && s.status !== "on_break" && (
+                                <span title="Off roster · balance unsettled"
                                   style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" as const }}>
-                                  Inactive — dues pending
+                                  Inactive · Due
                                 </span>
                               )}
                             </div>
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
                               {isMobile ? `${s.centerName} · ${s.studentID}` : s.studentID}
                             </div>
-                            <button
+                            {!(isSom || s.billingMode === "prepay") && <button
                               onClick={(e) => { e.stopPropagation(); setAttPopupUid(s.uid); }}
-                              title="View attendance this month"
+                              title="Attendance"
                               style={{
                                 marginTop: 4, display: "inline-flex", alignItems: "center", gap: 4,
                                 background: "none", color: "var(--color-text-secondary)",
@@ -1346,7 +1432,7 @@ function FinanceContent() {
                               }}
                             >
                               {s.attendanceCount} classes
-                            </button>
+                            </button>}
                             {/* Mobile: type + paid/due status as plain text */}
                             {isMobile && (
                               <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 4 }}>
@@ -1354,13 +1440,14 @@ function FinanceContent() {
                                   ? <MonthlyFeeCell compact fee={s.monthlyFee}
                                       onOpen={() => setFeeEdit({ uid: s.uid, value: s.monthlyFee > 0 ? String(s.monthlyFee) : "" })} />
                                   : `${s.classType === "personal" ? "Personal" : "Group"} · ${s.feeCycle === "monthly" ? "Monthly" : "Per Class"}`}
-                                {paidMap.has(s.uid) ? (
+                                {isDueRow ? (
+                                  <button type="button" disabled={!canUndueRow} onClick={() => setUndueUid(s.uid)}
+                                    title={canUndueRow ? "Un-due: on break / discontinued" : undefined}
+                                    style={{ ...st.dueBtn, marginLeft: 6, fontSize: 11, padding: "1px 8px", cursor: canUndueRow ? "pointer" : "default" }}>
+                                    Due {fmtINR(s.balance > 0 ? s.balance : feeDueMap.get(s.uid)?.amount ?? 0)}{canUndueRow ? " ▾" : ""}
+                                  </button>
+                                ) : paidMap.has(s.uid) ? (
                                   <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
-                                ) : feeDueMap.has(s.uid) ? (
-                                  <span style={{ marginLeft: 6, fontWeight: 600, color: DUE_TEXT }}>
-                                    · Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
-                                    {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partly paid</span>}
-                                  </span>
                                 ) : null}
                               </div>
                             )}
@@ -1371,7 +1458,7 @@ function FinanceContent() {
                             <td style={st.td}>
                               {s.centerId
                                 ? <span style={{ fontWeight: 500, color: "#111827" }}>{s.centerName}</span>
-                                : <span style={{ color: "#9ca3af", fontStyle: "italic" }}>No centre assigned</span>}
+                                : <span style={{ color: "#9ca3af", fontStyle: "italic" }}>No centre</span>}
                             </td>
                           )}
 
@@ -1383,12 +1470,11 @@ function FinanceContent() {
                                   <MonthlyFeeCell fee={s.monthlyFee}
                                     onOpen={() => setFeeEdit({ uid: s.uid, value: s.monthlyFee > 0 ? String(s.monthlyFee) : "" })} />
                                   {isCustomFee(s.monthlyFee, centreDefaultFee(s.centerId)) && (
-                                    <span title={`Differs from the centre default (${fmtINR(centreDefaultFee(s.centerId))}/mo) — kept when you set the fee for the whole centre`}
+                                    <span title={`Centre default ${fmtINR(centreDefaultFee(s.centerId))}/mo`}
                                       style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#7c3aed", background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 99, padding: "1px 7px", whiteSpace: "nowrap" as const }}>
-                                      Custom Fee
+                                      Custom
                                     </span>
                                   )}
-                                  <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>Prepaid</div>
                                 </>
                               ) : (
                                 <>
@@ -1406,14 +1492,17 @@ function FinanceContent() {
                           {/* Due / Paid — desktop only */}
                           {!isMobile && (
                             <td style={{ ...st.td, fontWeight: 600 }}>
-                              {paidMap.has(s.uid) ? (
-                                <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
-                              ) : feeDueMap.has(s.uid) ? (
-                                <span style={st.dueTag}>
+                              {isDueRow ? (
+                                <button type="button" disabled={!canUndueRow} onClick={() => setUndueUid(s.uid)}
+                                  title={canUndueRow ? "Un-due: on break / discontinued" : undefined}
+                                  style={{ ...st.dueBtn, cursor: canUndueRow ? "pointer" : "default" }}>
                                   <span aria-hidden className="animate-pulse" style={st.dueDot} />
-                                  Due {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
-                                  {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partly paid</span>}
-                                </span>
+                                  Due {fmtINR(s.balance > 0 ? s.balance : feeDueMap.get(s.uid)?.amount ?? 0)}
+                                  {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partial</span>}
+                                  {canUndueRow && <span aria-hidden style={{ fontSize: 10, opacity: 0.7 }}>▾</span>}
+                                </button>
+                              ) : paidMap.has(s.uid) ? (
+                                <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
                               ) : (
                                 <span style={{ color: "#9ca3af" }}>—</span>
                               )}
@@ -1424,13 +1513,13 @@ function FinanceContent() {
                           <td style={{ ...st.td, whiteSpace: "nowrap" as const }}>
                             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                               <button
-                                onClick={() => openPanel(s.uid, "pay", s)}
+                                onClick={() => { closePanel(); setPayUid(s.uid); }}
                                 style={{
                                   ...st.actionBtn,
-                                  ...(isOpen && activeAction === "pay" ? st.actionBtnActive : {}),
+                                  ...(payUid === s.uid ? st.actionBtnActive : {}),
                                 }}
                               >
-                                💳 Payment
+                                💳 Pay
                               </button>
                               {isSom && (() => {
                                 const paid     = paidMap.has(s.uid);
@@ -1438,15 +1527,15 @@ function FinanceContent() {
                                 const noFee    = s.monthlyFee <= 0;
                                 const busy     = markingDueUid === s.uid;
                                 const disabled = paid || isDue || noFee || busy || feeDueSubmitting;
-                                const why = paid ? `Already paid for ${fmtMonth(selectedMonth)}`
-                                  : isDue ? `Fee already marked due for ${fmtMonth(selectedMonth)}`
-                                  : noFee ? "Set the monthly fee first (click the amount)"
-                                  : `Mark ${fmtINR(s.monthlyFee)} due for ${fmtMonth(selectedMonth)}`;
+                                const why = paid ? `Paid · ${fmtMonth(selectedMonth)}`
+                                  : isDue ? `Due · ${fmtMonth(selectedMonth)}`
+                                  : noFee ? "Set fee first"
+                                  : `Mark ${fmtINR(s.monthlyFee)} due · ${fmtMonth(selectedMonth)}`;
                                 return (
                                   <button onClick={() => quickMarkFeeDue(s)} disabled={disabled} title={why}
                                     style={{ ...st.actionBtn, background: "#fff1f2", color: "#be123c", border: "1px solid #fecdd3",
                                              opacity: disabled ? 0.45 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
-                                    {busy ? "Marking…" : isDue ? "✓ Due" : "⚠️ Mark Fee Due"}
+                                    {busy ? "Marking…" : isDue ? "✓ Due" : "⚠️ Mark Due"}
                                   </button>
                                 );
                               })()}
@@ -1473,329 +1562,26 @@ function FinanceContent() {
                                 padding: "10px 0", borderBottom: "1px solid #fde68a", marginBottom: 14,
                                 flexWrap: "wrap" as const, fontSize: 13, color: "#6b7280",
                               }}>
-                                <span>
-                                  <span style={{ fontWeight: 700, color: "#1d4ed8" }}>{s.attendanceCount}</span>
-                                  {" classes — "}{fmtMonth(selectedMonth)}
-                                </span>
+                                {!(isSom || s.billingMode === "prepay") && (
+                                  <span>
+                                    <span style={{ fontWeight: 700, color: "#1d4ed8" }}>{s.attendanceCount}</span>
+                                    {" classes · "}{fmtMonth(selectedMonth)}
+                                  </span>
+                                )}
                                 {s.feeCycle === "per_class" && (
                                   <span>
-                                    Est. fee:{" "}
+                                    Est.{" "}
                                     <span style={{ fontWeight: 700, color: "#7c3aed" }}>{fmtINR(s.estimatedFee)}</span>
                                   </span>
                                 )}
                                 {lastTxMap.get(s.uid) && (
                                   <span>
-                                    Last payment:{" "}
+                                    Last:{" "}
                                     <span style={{ fontWeight: 600 }}>{fmtINR(lastTxMap.get(s.uid)!.amount)}</span>
                                     {" · "}{formatDate(lastTxMap.get(s.uid)!.date ?? lastTxMap.get(s.uid)!.createdAt)}
                                   </span>
                                 )}
                               </div>
-
-                              {/* ════ PAY PANEL ════════════════════════════════ */}
-                              {activeAction === "pay" && (
-                                <div style={st.panel}>
-                                  <div style={st.panelTitle}>💳 Payment — {s.name}</div>
-
-                                  {/* ── Generate Fee Due ──────────────────────── */}
-                                  {!feeDueMap.has(s.uid) ? (
-                                    <div style={{ marginBottom: 14, padding: "12px 14px", background: "#fafafa", border: "1px solid #e5e7eb", borderRadius: 8 }}>
-                                      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
-                                        No fee due generated for <strong>{fmtMonth(selectedMonth)}</strong>.
-                                      </div>
-                                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" as const }}>
-                                        <label style={{ fontSize: 11, fontWeight: 600, color: "#374151" }}>Fee Due Date</label>
-                                        <input
-                                          type="date"
-                                          value={feeDueDate}
-                                          onChange={e => setFeeDueDate(e.target.value)}
-                                          style={{ fontSize: 13, border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", color: "#111827" }}
-                                        />
-                                      </div>
-                                      <button
-                                        onClick={() => generateFeeDue(s)}
-                                        disabled={feeDueSubmitting || !feeDueDate}
-                                        style={{ ...st.confirmBtn, background: "#f59e0b", opacity: (feeDueSubmitting || !feeDueDate) ? 0.6 : 1, cursor: (feeDueSubmitting || !feeDueDate) ? "not-allowed" : "pointer" }}
-                                      >
-                                        {feeDueSubmitting ? "Generating…" : `Generate Fee Due — ${fmtINR(isSom || s.feeCycle === "monthly" ? s.monthlyFee : s.estimatedFee)}`}
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <>
-                                    <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" as const }}>
-                                      <span style={{
-                                        fontSize: 12, padding: "3px 12px", borderRadius: 99, fontWeight: 700,
-                                        background: paidMap.has(s.uid) ? "#dcfce7" : "#fffbeb",
-                                        color:      paidMap.has(s.uid) ? "#16a34a" : DUE_TEXT,
-                                      }}>
-                                        {paidMap.has(s.uid) ? "✓ Paid" : `Due — ${fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}`}
-                                      </span>
-                                      <span style={{ fontSize: 11, color: "#9ca3af" }}>Fee generated for {fmtMonth(selectedMonth)}</span>
-                                      {!paidMap.has(s.uid) && (
-                                        <button
-                                          onClick={() => undoFeeDue(s)}
-                                          disabled={undoFeeDueSubmitting}
-                                          style={{ ...st.cancelBtn, fontSize: 11, padding: "3px 10px", opacity: undoFeeDueSubmitting ? 0.6 : 1, cursor: undoFeeDueSubmitting ? "not-allowed" : "pointer" }}
-                                        >
-                                          {undoFeeDueSubmitting ? "Undoing…" : "↩ Undo"}
-                                        </button>
-                                      )}
-                                    </div>
-
-                                  {/* Past month notice */}
-                                  {!isCurrentMonth && (
-                                    <div style={{ fontSize: 12, color: "#92400e", background: "#fef9c3", border: "1px solid #fde68a", borderRadius: 6, padding: "6px 10px", marginBottom: 10 }}>
-                                      📅 Viewing <strong>{fmtMonth(selectedMonth)}</strong>. Balance shown is historical. Payment will update the live balance.
-                                    </div>
-                                  )}
-
-                                  {/* ── Attendance × Fee breakdown card ─────────── */}
-                                  <div style={{
-                                    background: s.feeCycle === "per_class" ? "#f5f3ff" : "#eff6ff",
-                                    border: `1px solid ${s.feeCycle === "per_class" ? "#ddd6fe" : "#bfdbfe"}`,
-                                    borderRadius: 10,
-                                    padding: "12px 16px",
-                                    marginBottom: 12,
-                                    display: "flex",
-                                    flexWrap: "wrap" as const,
-                                    gap: 16,
-                                    alignItems: "center",
-                                  }}>
-                                    {s.feeCycle === "per_class" ? (
-                                      <>
-                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Classes — {fmtMonth(selectedMonth)}</span>
-                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#7c3aed", lineHeight: 1 }}>{s.attendanceCount}</span>
-                                          <span style={{ fontSize: 11, color: "#7c3aed" }}>classes attended</span>
-                                        </div>
-                                        <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>×</div>
-                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Fee Per Class</span>
-                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#374151", lineHeight: 1 }}>{fmtINR(s.feePerClass)}</span>
-                                          <span style={{ fontSize: 11, color: "#6b7280" }}>per class</span>
-                                        </div>
-                                        <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>=</div>
-                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Total Due</span>
-                                          <span style={{ fontSize: 22, fontWeight: 800, color: s.estimatedFee > 0 ? "#7c3aed" : "#9ca3af", lineHeight: 1 }}>{fmtINR(s.estimatedFee)}</span>
-                                          <span style={{ fontSize: 11, color: "#7c3aed" }}>estimated this month</span>
-                                        </div>
-                                        {s.attendanceCount === 0 && (
-                                          <span style={{ fontSize: 12, color: "#b45309", background: "#fef3c7", padding: "4px 10px", borderRadius: 6, marginLeft: "auto" }}>
-                                            ⚠ No attendance recorded yet
-                                          </span>
-                                        )}
-                                      </>
-                                    ) : (
-                                      <>
-                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Monthly Fee</span>
-                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#1d4ed8", lineHeight: 1 }}>{fmtINR(s.monthlyFee)}</span>
-                                          <span style={{ fontSize: 11, color: "#1d4ed8" }}>fixed monthly</span>
-                                        </div>
-                                        <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>·</div>
-                                        <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                          <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>Classes — {fmtMonth(selectedMonth)}</span>
-                                          <span style={{ fontSize: 22, fontWeight: 800, color: "#374151", lineHeight: 1 }}>{s.attendanceCount}</span>
-                                          <span style={{ fontSize: 11, color: "#6b7280" }}>attended</span>
-                                        </div>
-                                        {feeDueMap.has(s.uid) && s.balance > 0 && (
-                                          <>
-                                            <div style={{ fontSize: 20, color: "#9ca3af", fontWeight: 300 }}>→</div>
-                                            <div style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
-                                              <span style={{ fontSize: 11, color: "#6b7280", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: 0.5 }}>
-                                                {isCurrentMonth ? "Outstanding" : `Balance — ${fmtMonth(selectedMonth)}`}
-                                              </span>
-                                              <span style={{ fontSize: 22, fontWeight: 800, color: DUE_TEXT, lineHeight: 1 }}>{fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}</span>
-                                              <span style={{ fontSize: 11, color: DUE_TEXT }}>{isCurrentMonth ? "due now" : "as of that month"}</span>
-                                            </div>
-                                          </>
-                                        )}
-                                      </>
-                                    )}
-                                  </div>
-
-                                  {/* Context info */}
-                                  <div style={st.panelInfo}>
-                                    {feeDueMap.has(s.uid) && !paidMap.has(s.uid) && (
-                                      <span style={st.infoChipRed}>
-                                        Outstanding: {fmtINR(feeDueMap.get(s.uid)?.amount ?? 0)}
-                                      </span>
-                                    )}
-                                    {lastTxMap.get(s.uid) && (
-                                      <span style={st.infoChip}>
-                                        {isCurrentMonth ? "Last pay" : `Pay in ${fmtMonth(selectedMonth)}`}: {fmtINR(lastTxMap.get(s.uid)!.amount)} on {formatDate(lastTxMap.get(s.uid)!.date ?? lastTxMap.get(s.uid)!.createdAt)}
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  {/* ── Which month is this payment settling? ──── */}
-                                  {(() => {
-                                    const unpaid = outstandingDuesForStudent(dueSettlements, s.uid);
-                                    if (unpaid.length === 0) return null;
-                                    return (
-                                      <div style={st.monthPicker}>
-                                        <div style={st.monthPickerLabel}>
-                                          Apply this payment to
-                                          {unpaid.length > 1 && (
-                                            <span style={{ fontWeight: 400, color: "#92400e", marginLeft: 6 }}>
-                                              — {unpaid.length} months unpaid
-                                            </span>
-                                          )}
-                                        </div>
-                                        <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 6 }}>
-                                          {unpaid.map(d => {
-                                            const selected = payBillingMonth === d.billingMonth;
-                                            return (
-                                              <button
-                                                key={d.billingMonth}
-                                                type="button"
-                                                onClick={() => {
-                                                  setPayBillingMonth(selected ? null : d.billingMonth);
-                                                  if (!selected && !payAmount) setPayAmount(String(d.remaining));
-                                                }}
-                                                style={{ ...st.monthChip, ...(selected ? st.monthChipActive : {}) }}
-                                              >
-                                                <span style={{ fontWeight: 700 }}>{fmtMonth(d.billingMonth)}</span>
-                                                <span style={{ opacity: 0.85 }}>
-                                                  {fmtINR(d.remaining)} left
-                                                  {d.state === "partial" && ` · ${fmtINR(d.paidAmount)} paid`}
-                                                </span>
-                                              </button>
-                                            );
-                                          })}
-                                        </div>
-                                        {payBillingMonth === null && (
-                                          <div style={{ fontSize: 11, color: "#92400e", marginTop: 8 }}>
-                                            Pick a month, or leave unselected to record this as unallocated credit.
-                                          </div>
-                                        )}
-                                      </div>
-                                    );
-                                  })()}
-
-                                  <div style={st.panelRow}>
-                                    {/* Amount received */}
-                                    <div style={st.panelField}>
-                                      <label style={st.panelLabel}>Amount Received (₹)</label>
-                                      <input
-                                        ref={payInputRef}
-                                        type="number" min={1}
-                                        placeholder="0"
-                                        value={payAmount}
-                                        onChange={e => setPayAmount(e.target.value)}
-                                        style={st.panelInput}
-                                        onKeyDown={e => { if (e.key === "Enter") submitPay(s); if (e.key === "Escape") closePanel(); }}
-                                      />
-                                    </div>
-
-                                    {/* Discount */}
-                                    <div style={st.panelField}>
-                                      <label style={st.panelLabel}>Discount</label>
-                                      <div style={{ display: "flex", gap: 6 }}>
-                                        <div style={{ display: "flex", border: "1px solid #d1d5db", borderRadius: 6, overflow: "hidden" }}>
-                                          {(["fixed", "percent"] as DiscountType[]).map(dt => (
-                                            <button key={dt} onClick={() => setDiscountType(dt)}
-                                              style={{
-                                                padding: "7px 10px", border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                                background: discountType === dt ? "#f59e0b" : "#f9fafb",
-                                                color: discountType === dt ? "#fff" : "#374151",
-                                              }}>
-                                              {dt === "fixed" ? "₹" : "%"}
-                                            </button>
-                                          ))}
-                                        </div>
-                                        <input
-                                          type="number" min={0}
-                                          placeholder={discountType === "percent" ? "0–100" : "0"}
-                                          value={discountValue}
-                                          onChange={e => setDiscountValue(e.target.value)}
-                                          style={{ ...st.panelInput, flex: 1 }}
-                                        />
-                                      </div>
-                                    </div>
-
-                                    {/* Mode of payment */}
-                                    <div style={st.panelField}>
-                                      <label style={st.panelLabel}>Mode</label>
-                                      <div style={st.methodGroup}>
-                                        {(["Cash", "UPI", "Bank"] as PayMethod[]).map(m => (
-                                          <button key={m} onClick={() => setPayMethod(m)}
-                                            style={{
-                                              ...st.methodChip,
-                                              ...(payMethod === m ? st.methodChipActive : {}),
-                                            }}>
-                                            {m === "Cash" ? "💵" : m === "UPI" ? "📱" : "🏦"} {m}
-                                          </button>
-                                        ))}
-                                      </div>
-                                    </div>
-
-                                    {/* Note */}
-                                    <div style={{ ...st.panelField, flex: 2 }}>
-                                      <label style={st.panelLabel}>Note (optional)</label>
-                                      <input type="text" placeholder="e.g. April fees, partial payment…"
-                                        value={payNote} onChange={e => setPayNote(e.target.value)}
-                                        style={st.panelInput}
-                                        onKeyDown={e => { if (e.key === "Enter") submitPay(s); if (e.key === "Escape") closePanel(); }}
-                                      />
-                                    </div>
-
-                                    {/* Payment date */}
-                                    <div style={st.panelField}>
-                                      <label style={st.panelLabel}>
-                                        Payment Date
-                                        {payDate !== todayStr() && (
-                                          <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#b45309", background: "#fef3c7", padding: "1px 7px", borderRadius: 99 }}>
-                                            Past date
-                                          </span>
-                                        )}
-                                      </label>
-                                      <input
-                                        type="date"
-                                        value={payDate}
-                                        max={todayStr()}
-                                        onChange={e => setPayDate(e.target.value || todayStr())}
-                                        style={{
-                                          ...st.panelInput,
-                                          border: payDate !== todayStr() ? "1.5px solid #f59e0b" : st.panelInput.border,
-                                          background: payDate !== todayStr() ? "#fffbeb" : st.panelInput.background,
-                                        }}
-                                      />
-                                    </div>
-                                  </div>
-
-                                  {/* Net amount preview */}
-                                  {payAmount && (
-                                    <div style={st.netPreview}>
-                                      {discountAmt > 0 ? (
-                                        <>
-                                          <span>Gross: <strong>{fmtINR(Number(payAmount))}</strong></span>
-                                          <span style={{ color: "#059669" }}>− Discount: <strong>{fmtINR(discountAmt)}</strong></span>
-                                          <span style={{ color: "#1d4ed8", fontWeight: 700 }}>= Net: <strong>{fmtINR(netPreview)}</strong></span>
-                                        </>
-                                      ) : (
-                                        <span style={{ color: "#1d4ed8" }}>Amount to record: <strong>{fmtINR(Number(payAmount))}</strong></span>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  <div style={st.panelActions}>
-                                    <button onClick={() => submitPay(s)}
-                                      disabled={paySubmitting || !payAmount || netPreview <= 0}
-                                      style={{
-                                        ...st.confirmBtn,
-                                        opacity: paySubmitting || !payAmount || netPreview <= 0 ? 0.6 : 1,
-                                        cursor: paySubmitting || !payAmount || netPreview <= 0 ? "not-allowed" : "pointer",
-                                      }}>
-                                      {paySubmitting ? "Saving…" : "✓ Confirm Payment"}
-                                    </button>
-                                    <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
-                                  </div>
-                                    </>
-                                  )}
-                                </div>
-                              )}
 
                               {/* ════ ADJUST FEE PANEL ═════════════════════════ */}
                               {activeAction === "adjust" && (
@@ -1804,7 +1590,7 @@ function FinanceContent() {
 
                                   <div style={st.panelInfo}>
                                     <span style={st.infoChip}>
-                                      Current {s.feeCycle === "monthly" ? "monthly fee" : "per-class fee"}:{" "}
+                                      Current:{" "}
                                       <strong>{fmtINR(s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass)}</strong>
                                     </span>
                                     <span style={st.infoChip}>Cycle: <strong>{s.feeCycle === "monthly" ? "Monthly" : "Per Class"}</strong></span>
@@ -1812,25 +1598,16 @@ function FinanceContent() {
 
                                   <div style={st.panelRow}>
                                     <div style={st.panelField}>
-                                      <label style={st.panelLabel}>
-                                        New {s.feeCycle === "monthly" ? "Monthly Fee" : "Fee per Class"} (₹)
-                                      </label>
+                                      <label style={st.panelLabel} title="Applies to future billing">New Fee (₹) ⓘ</label>
                                       <input
                                         ref={adjustInputRef}
                                         type="number" min={1}
-                                        placeholder="Enter new fee"
+                                        placeholder="0"
                                         value={adjustFee}
                                         onChange={e => setAdjustFee(e.target.value)}
                                         style={{ ...st.panelInput, maxWidth: 200 }}
                                         onKeyDown={e => { if (e.key === "Enter") submitAdjust(s); if (e.key === "Escape") closePanel(); }}
                                       />
-                                    </div>
-                                    <div style={{ ...st.panelField, flex: 2 }}>
-                                      <label style={st.panelLabel}>Why adjusting?</label>
-                                      <div style={{ fontSize: 12, color: "#6b7280", paddingTop: 8, lineHeight: 1.5 }}>
-                                        This updates the student's fee directly in Firestore.
-                                        Future billing and estimations will use the new amount.
-                                      </div>
                                     </div>
                                   </div>
 
@@ -1843,7 +1620,7 @@ function FinanceContent() {
                                         opacity: adjustSubmitting || !adjustFee || Number(adjustFee) <= 0 ? 0.6 : 1,
                                         cursor: adjustSubmitting || !adjustFee || Number(adjustFee) <= 0 ? "not-allowed" : "pointer",
                                       }}>
-                                      {adjustSubmitting ? "Saving…" : "✓ Update Fee"}
+                                      {adjustSubmitting ? "Saving…" : "✓ Update"}
                                     </button>
                                     <button onClick={closePanel} style={st.cancelBtn}>Cancel</button>
                                   </div>
@@ -1864,10 +1641,10 @@ function FinanceContent() {
                                   });
                                 return (
                                   <div style={{ ...st.panel, borderLeft: "3px solid #6d28d9" }}>
-                                    <div style={st.panelTitle}>🧾 Transaction History — {s.name}</div>
+                                    <div style={st.panelTitle}>🧾 History — {s.name}</div>
                                     {studentTx.length === 0 ? (
                                       <div style={{ fontSize: 13, color: "#9ca3af", textAlign: "center" as const, padding: "16px 0" }}>
-                                        No transactions recorded yet.
+                                        No transactions
                                       </div>
                                     ) : (
                                       <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
@@ -1879,7 +1656,7 @@ function FinanceContent() {
                                           const isFailed   = tx.status === "failed";
 
                                           const isAdmFee   = tx.type === "admission_fee";
-                                          const typeLabel = isFeedue ? "Fee Due" : isAdmFee ? "Admission Fee" : isDeposit ? "Payment" : isCharge ? "Auto-charge" : "Payment";
+                                          const typeLabel = isFeedue ? "Due" : isAdmFee ? "Admission" : isDeposit ? "Payment" : isCharge ? "Charge" : "Payment";
                                           const typeColor = isFeedue
                                             ? { bg: "#fffbeb", border: "#fde68a", text: "#b45309" }
                                             : isDeposit
@@ -1922,6 +1699,14 @@ function FinanceContent() {
                                               <span style={{ fontWeight: 700, color: (isCharge || isFeedue) ? "#dc2626" : "#16a34a", minWidth: 70 }}>
                                                 {(isCharge || isFeedue) ? "+" : "−"}{fmtINR(tx.amount)}
                                               </span>
+
+                                              {/* Un-due: what was written off, and why */}
+                                              {tx.status === WAIVED && (
+                                                <span title={[tx.waiveReason, tx.waivedByName && `by ${tx.waivedByName}`].filter(Boolean).join(" · ")}
+                                                  style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: "#ffedd5", color: "#c2410c", border: "1px solid #fed7aa" }}>
+                                                  Waived −{fmtINR(waivedAmountOf(tx))}{tx.waiveReason ? ` · ${tx.waiveReason}` : ""}
+                                                </span>
+                                              )}
 
                                               {/* Payment date */}
                                               <span style={{ color: "#6b7280", fontSize: 12 }}>
@@ -2020,14 +1805,14 @@ function FinanceContent() {
               <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #e5e7eb" }}>
                 <div>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>📅 Attendance — {s.name}</div>
-                  <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>{fmtMonth(selectedMonth)} · {dates.length} class{dates.length !== 1 ? "es" : ""} attended</div>
+                  <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>{fmtMonth(selectedMonth)} · {dates.length} class{dates.length !== 1 ? "es" : ""}</div>
                 </div>
                 <button onClick={() => setAttPopupUid(null)} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1, padding: 4 }}>×</button>
               </div>
               {/* Body */}
               <div style={{ padding: "16px 20px", maxHeight: 340, overflowY: "auto" }}>
                 {dates.length === 0 ? (
-                  <div style={{ textAlign: "center", fontSize: 13, color: "#9ca3af", padding: "24px 0" }}>No attendance recorded for {fmtMonth(selectedMonth)}.</div>
+                  <div style={{ textAlign: "center", fontSize: 13, color: "#9ca3af", padding: "24px 0" }}>No attendance</div>
                 ) : (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                     {dates.map((dt, i) => {
@@ -2079,7 +1864,7 @@ function CentreFeeModal({ centreName, defaultFee, total, customCount, saving, on
         style={{ width: "100%", maxWidth: 380, background: "var(--color-surface)", borderRadius: 14, boxShadow: "0 20px 50px rgba(0,0,0,0.25)", padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
           <div style={{ fontSize: 14.5, fontWeight: 800, color: "var(--color-text-primary)" }}>
-            Set base monthly fee for all {total} student{total !== 1 ? "s" : ""} in {centreName}
+            Set Fee · {centreName}
           </div>
           <button onClick={onCancel} disabled={saving} aria-label="Close" style={{ border: "none", background: "none", fontSize: 16, color: "#9ca3af", cursor: "pointer" }}>✕</button>
         </div>
@@ -2093,16 +1878,16 @@ function CentreFeeModal({ centreName, defaultFee, total, customCount, saving, on
           <div style={{ display: "grid", gap: 6 }}>
             <label style={opt(!overwrite)}>
               <input type="radio" checked={!overwrite} onChange={() => setOverwrite(false)} style={{ marginTop: 2 }} />
-              <span>Skip the {customCount} student{customCount !== 1 ? "s" : ""} with a <b>Custom Fee</b> (keep their rate)</span>
+              <span>Skip {customCount} <b>Custom</b></span>
             </label>
             <label style={opt(overwrite)}>
               <input type="radio" checked={overwrite} onChange={() => setOverwrite(true)} style={{ marginTop: 2 }} />
-              <span>Apply to all {total}, replacing custom fees</span>
+              <span>Overwrite all {total}</span>
             </label>
           </div>
         )}
         <div style={{ fontSize: 11.5, color: "var(--color-text-secondary)" }}>
-          Also becomes the centre&apos;s default for new students. Fee dues already raised keep their amount.
+          Sets centre default. Raised dues unchanged.
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button onClick={onCancel} disabled={saving} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
@@ -2124,7 +1909,7 @@ function MonthlyFeeCell({ fee, compact, onOpen }: { fee: number; compact?: boole
   return (
     <button type="button" onClick={e => { e.stopPropagation(); onOpen(); }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      title={unset ? "No monthly fee set — click to set it" : "View fee details / change the monthly fee"}
+      title={unset ? "Set fee" : "Fee details"}
       style={{
         display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer", transition: "all 0.15s",
         fontSize: compact ? 11 : 12.5, fontWeight: 700, borderRadius: 8, padding: compact ? "1px 7px" : "4px 10px",
@@ -2196,13 +1981,13 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
         </div>
 
         <label style={{ fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)" }}>
-          Base monthly fee (₹)
+          Monthly fee (₹)
           <input autoFocus type="number" min={1} inputMode="numeric" value={value} disabled={saving} placeholder="e.g. 2500"
             onChange={e => onChange(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && valid) onSave(); }}
             style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4, padding: "8px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 14, color: "var(--color-text-primary)", background: "var(--color-surface)" }} />
         </label>
         <div style={{ fontSize: 11.5, color: "var(--color-text-secondary)", marginTop: -4 }}>
-          Group · prepaid · billed monthly. New fee dues use this amount; dues already raised keep theirs.
+          Raised dues unchanged.
         </div>
 
         <div style={sub}>{fmtMonth(month)}</div>
@@ -2210,29 +1995,29 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
         {row("Status", paidThisMonth !== null
           ? <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidThisMonth)}</span>
           : dueThisMonth !== null ? <span style={{ color: DUE_TEXT }}>Due {fmtINR(dueThisMonth)}</span>
-          : <span style={{ color: "#9ca3af" }}>Not raised yet</span>)}
-        {row("Current balance", student.balance > 0
+          : <span style={{ color: "#9ca3af" }}>Not raised</span>)}
+        {row("Balance", student.balance > 0
           ? <span style={{ color: DUE_TEXT }}>{fmtINR(student.balance)} owed</span>
           : student.balance < 0 ? <span style={{ color: "#16a34a" }}>{fmtINR(-student.balance)} credit</span> : "Settled")}
 
         <div style={sub}>Fee changes</div>
         {changes === null ? <div style={{ fontSize: 12, color: "#9ca3af" }}>Loading…</div>
-          : changes.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>No changes recorded yet.</div>
+          : changes.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
           : changes.map((c, i) => <Fragment key={i}>{row(fmtD(c.at), `${c.from > 0 ? fmtINR(c.from) : "—"} → ${fmtINR(c.to)}`)}</Fragment>)}
 
-        <div style={sub}>Discounts given</div>
-        {discounts.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None.</div>
+        <div style={sub}>Discounts</div>
+        {discounts.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
           : discounts.map(t => <Fragment key={t.id}>{row(fmtD(t.date), `−${fmtINR(Number(t.discountAmt))} on ${fmtINR(Number(t.rawAmount ?? t.amount))}`)}</Fragment>)}
 
-        <div style={sub}>Recent dues &amp; payments</div>
-        {recent.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>Nothing yet.</div>
-          : recent.map(t => <Fragment key={t.id}>{row(`${fmtD(t.date)} · ${t.type === "fee_due" ? "Fee due" : "Payment"}`,
+        <div style={sub}>Recent</div>
+        {recent.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
+          : recent.map(t => <Fragment key={t.id}>{row(`${fmtD(t.date)} · ${t.type === "fee_due" ? "Due" : "Payment"}`,
               <span style={{ color: t.type === "fee_due" ? "#dc2626" : "#16a34a" }}>{t.type === "fee_due" ? "+" : "−"}{fmtINR(t.amount)}</span>)}</Fragment>)}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
           <button onClick={onCancel} disabled={saving} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
           <button onClick={onSave} disabled={saving || !valid} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#d97706", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: saving || !valid ? "not-allowed" : "pointer", opacity: saving || !valid ? 0.55 : 1 }}>
-            {saving ? "Saving…" : "Save Fee"}
+            {saving ? "Saving…" : "Save"}
           </button>
         </div>
       </div>
@@ -2263,16 +2048,16 @@ function RowActionsMenu({ onAdjust, onDeposit, onHistory }: {
       <button
         onClick={e => { e.stopPropagation(); setOpen(v => !v); }}
         style={st.rowMenuBtn}
-        title="More actions"
+        title="More"
         aria-label="More actions"
       >
         ⋮
       </button>
       {open && (
         <div style={st.rowMenuPanel} onClick={e => e.stopPropagation()}>
-          <button onClick={() => { setOpen(false); onHistory(); }} style={st.rowMenuItem}>🧾 View history</button>
-          <button onClick={() => { setOpen(false); onAdjust();  }} style={st.rowMenuItem}>✏️ Adjust fee</button>
-          <button onClick={() => { setOpen(false); onDeposit(); }} style={st.rowMenuItem}>⬆ Add deposit</button>
+          <button onClick={() => { setOpen(false); onHistory(); }} style={st.rowMenuItem}>🧾 History</button>
+          <button onClick={() => { setOpen(false); onAdjust();  }} style={st.rowMenuItem}>✏️ Adjust</button>
+          <button onClick={() => { setOpen(false); onDeposit(); }} style={st.rowMenuItem}>⬆ Deposit</button>
         </div>
       )}
     </div>
@@ -2281,9 +2066,9 @@ function RowActionsMenu({ onAdjust, onDeposit, onHistory }: {
 
 // ─── Summary Card ─────────────────────────────────────────────────────────────
 
-function SummaryCard({ label, value, accent, icon, hint, urgent, onClick, active }: {
+function SummaryCard({ label, value, accent, icon, hint, urgent, onClick, active, progress }: {
   label: string; value: string; accent: string; icon: string; hint?: string; urgent?: boolean;
-  onClick?: () => void; active?: boolean;
+  onClick?: () => void; active?: boolean; progress?: number;
 }) {
   const clickable = !!onClick;
   return (
@@ -2305,13 +2090,65 @@ function SummaryCard({ label, value, accent, icon, hint, urgent, onClick, active
         <div style={st.cardIcon}>{icon}</div>
         <div style={st.cardLabel}>{label}</div>
         <div style={{ ...st.cardValue, color: accent }}>{value}</div>
+        {progress !== undefined && (
+          <div role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100} aria-label={label} style={st.progressTrack}>
+            <div style={{ height: "100%", width: `${Math.min(100, progress)}%`, background: accent, borderRadius: 3 }} />
+          </div>
+        )}
         {hint && <div style={st.cardHint}>{hint}</div>}
         {clickable && (
           <div style={{ fontSize: 10, fontWeight: 700, color: accent, marginTop: 6 }}>
-            {active ? "▲ Hide details" : "▼ View details"}
+            {active ? "▲ Hide" : "▼ Details"}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Primary KPI: money received in the selected month. The headline and the pills
+ * are sibling buttons, not nested, because a pill can open its own drill-down.
+ */
+function TotalReceivedCard({ value, period, loading, active, onClick, pills, warning }: {
+  value: string; period: string; loading: boolean; active: boolean; onClick: () => void;
+  pills: { label: string; amount: number; active?: boolean; onClick?: () => void }[];
+  warning?: string;
+}) {
+  const accent = "#059669";
+  return (
+    <div style={{
+      ...st.card,
+      background: `linear-gradient(180deg, ${accent}1f, transparent 70%), var(--color-surface)`,
+      borderColor: `${accent}66`,
+      boxShadow: active ? `0 0 0 2px ${accent}, 0 2px 10px rgba(0,0,0,0.10)` : st.card.boxShadow,
+    }}>
+      <div style={{ ...st.cardAccent, height: 6, background: accent }} />
+      <button type="button" onClick={onClick} aria-expanded={active} style={st.totalMain}>
+        <div style={st.cardIcon}>💰</div>
+        <div style={{ ...st.cardLabel, color: accent, fontWeight: 800 }}>Total Amount Received</div>
+        <div style={{ ...st.cardValue, fontSize: "clamp(26px, 2.6vw, 34px)", fontWeight: 800, color: accent }}>{value}</div>
+        <div style={st.cardHint}>{period}</div>
+        <div style={{ fontSize: 10, fontWeight: 700, color: accent, marginTop: 6 }}>
+          {active ? "▲ Hide" : "▼ Details"}
+        </div>
+      </button>
+      {!loading && (
+        <div style={st.totalPills}>
+          {pills.map(p => {
+            const text = <>{p.label} <b>{fmtINR(p.amount)}</b></>;
+            return p.onClick ? (
+              <button key={p.label} type="button" onClick={p.onClick} aria-pressed={!!p.active} title={`View ${p.label.toLowerCase()} deposits`}
+                style={{ ...st.totalPill, cursor: "pointer", borderColor: accent, ...(p.active ? { background: accent, color: "#fff" } : {}) }}>
+                {text}
+              </button>
+            ) : (
+              <span key={p.label} style={st.totalPill}>{text}</span>
+            );
+          })}
+          {warning && <div style={{ ...st.cardHint, width: "100%", marginTop: 0, color: DUE_TEXT, fontWeight: 600 }}>{warning}</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -2428,7 +2265,7 @@ function TxTable({
             <th style={st.th}>Method</th>
             <th style={st.th}>Status</th>
             <th style={st.th}>Date</th>
-            {canManage && <th style={st.th}>Actions</th>}
+            {canManage && <th style={st.th}>Action</th>}
           </tr>
         </thead>
         <tbody>
@@ -2445,7 +2282,7 @@ function TxTable({
                     <div style={{ fontWeight: 600 }}>{student?.name ?? tx.payerName ?? (tx.studentUid || "—")}</div>
                     {tx.type === "admission_fee" && (
                       <div style={{ marginTop: 3, display: "flex", gap: 4, flexWrap: "wrap" as const }}>
-                        <span style={{ ...st.badge, background: "#fff7ed", color: "#9a3412", border: "1px solid #fed7aa" }}>Admission Fee</span>
+                        <span style={{ ...st.badge, background: "#fff7ed", color: "#9a3412", border: "1px solid #fed7aa" }}>Admission</span>
                         {!student && tx.admissionNumber && <span style={st.studentIDChip}>{tx.admissionNumber}</span>}
                         {tx.reference && <span style={{ fontSize: 11, color: "#9ca3af" }}>Ref {tx.reference}</span>}
                       </div>
@@ -2502,7 +2339,7 @@ function TxTable({
                           ...st.txActionBtn,
                           ...(isEditing ? st.txActionBtnActive : {}),
                         }}
-                        title={isEditing ? "Close editor" : "Edit transaction"}
+                        title={isEditing ? "Close" : "Edit"}
                       >
                         {isEditing ? "Close" : "✏️ Edit"}
                       </button>
@@ -2515,10 +2352,10 @@ function TxTable({
                     <td colSpan={colCount} style={{ padding: "0 14px 14px", background: "#fffbeb" }}>
                       <div style={{ ...st.panel, borderLeft: "3px solid #1d4ed8" }}>
                         <div style={st.panelTitle}>
-                          ✏️ Edit Transaction — {student?.name ?? tx.studentUid}
+                          ✏️ Edit — {student?.name ?? tx.studentUid}
                           {tx.method === "auto-monthly" && tx.billingMonth && (
                             <span style={{ ...st.infoChip, marginLeft: 8, fontSize: 11 }}>
-                              Fee due — {fmtMonth(tx.billingMonth)}
+                              Due · {fmtMonth(tx.billingMonth)}
                             </span>
                           )}
                         </div>
@@ -2567,17 +2404,18 @@ function TxTable({
                               <option value="completed">completed</option>
                               <option value="pending">pending</option>
                               <option value="failed">failed</option>
+                              {tx.status === WAIVED && <option value="waived">waived</option>}
                             </select>
                           </div>
                         </div>
 
                         <div style={{ marginBottom: 12 }}>
-                          <label style={st.panelLabel}>Note (optional)</label>
+                          <label style={st.panelLabel}>Note</label>
                           <input
                             type="text"
                             value={editNote}
                             onChange={e => setEditNote(e.target.value)}
-                            placeholder="Add a note explaining the change…"
+                            placeholder="Optional"
                             style={st.panelInput}
                           />
                         </div>
@@ -2615,7 +2453,7 @@ function TxTable({
                             {deleteSubmitting
                               ? "Deleting…"
                               : isPendingDelete
-                                ? "⚠ Click again to confirm Delete"
+                                ? "⚠ Confirm Delete"
                                 : "🗑 Delete"}
                           </button>
 
@@ -2640,7 +2478,7 @@ function TxTable({
                                 cursor: editSaving ? "not-allowed" : "pointer",
                               }}
                             >
-                              {editSaving ? "Saving…" : "💾 Save Changes"}
+                              {editSaving ? "Saving…" : "💾 Save"}
                             </button>
                           </div>
                         </div>
@@ -2677,16 +2515,21 @@ const st: Record<string, React.CSSProperties> = {
   overdueAlert:{ fontSize: 12, color: "#92400e", fontWeight: 500, background: "#fffbeb", border: "1px solid #fde68a", display: "inline-flex", alignItems: "center", gap: 6, padding: "2px 10px", borderRadius: 99 },
   // Minimal "due" indicators — amber, never alarm red (failures / deletes keep red).
   dueTag:      { display: "inline-flex", alignItems: "center", gap: 6, padding: "2px 10px", borderRadius: 99, fontSize: 12, fontWeight: 500, color: "#b45309", background: "#fffbeb", border: "1px solid #fde68a", whiteSpace: "nowrap" },
+  // The Due tag as a button: opens Un-due.
+  dueBtn:      { display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px", borderRadius: 99, fontSize: 12, fontWeight: 700, color: "#9a3412", background: "#fed7aa", border: "1px solid #fb923c", whiteSpace: "nowrap", fontFamily: "inherit" },
   dueDot:      { width: 6, height: 6, borderRadius: "50%", background: "#f59e0b", flexShrink: 0, display: "inline-block" },
 
-  cardGrid:   { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 20 },
   card:       { background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 10, overflow: "hidden", display: "flex", flexDirection: "column" as const, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" },
   cardAccent: { height: 4, width: "100%" },
   cardBody:   { padding: "14px 18px" },
   cardIcon:   { fontSize: 20, marginBottom: 4 },
-  cardLabel:  { fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.04em" },
-  cardValue:  { fontSize: 24, fontWeight: 700 },
+  cardLabel:  { fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.04em", whiteSpace: "nowrap" as const },
+  cardValue:  { fontSize: 24, fontWeight: 700, whiteSpace: "nowrap" as const },
   cardHint:   { fontSize: 10, color: "#9ca3af", marginTop: 4, lineHeight: 1.3 },
+  progressTrack: { height: 6, borderRadius: 3, background: "var(--color-border)", overflow: "hidden", marginTop: 8 },
+  totalMain:  { display: "block", width: "100%", padding: "14px 18px 10px", background: "transparent", border: "none", textAlign: "left" as const, cursor: "pointer", color: "inherit", font: "inherit" },
+  totalPills: { display: "flex", flexWrap: "wrap" as const, gap: 6, padding: "0 18px 14px" },
+  totalPill:  { fontSize: 11, padding: "3px 8px", borderRadius: 999, border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-secondary)", whiteSpace: "nowrap" as const },
 
   tabs:      { display: "flex", gap: 4, marginBottom: 16, background: "var(--color-surface)", borderRadius: 8, padding: 4, border: "1px solid var(--color-border)" },
   tab:       { flex: 1, padding: "8px 0", borderRadius: 6, border: "none", background: "transparent", fontSize: 13, fontWeight: 500, color: "var(--color-text-secondary)", cursor: "pointer", textAlign: "center" as const, transition: "all 0.15s" },
@@ -2699,6 +2542,7 @@ const st: Record<string, React.CSSProperties> = {
   filterSummary: { fontSize: 12, color: "var(--color-text-secondary)", marginBottom: 10 },
   centreTabBar:  { display: "flex", gap: 8, overflowX: "auto", padding: "2px 2px 10px", marginBottom: 14, scrollbarWidth: "thin" },
   centreTab:     { display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0, padding: "8px 14px", borderRadius: 999, border: "1.5px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" },
+  pdfButton:   { display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600, background: "var(--color-accent)", color: "#fff", boxShadow: "var(--shadow-sm)" },
   centreTabActive: { background: "var(--color-accent)", borderColor: "var(--color-accent)", color: "#fff", boxShadow: "var(--shadow-sm)" },
   centreTabCount:  { fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 999, background: "var(--color-surface-3)", color: "var(--color-text-secondary)" },
   centreTabDue:    { fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 999, background: "#fef3c7", color: "#92400e" },
@@ -2737,7 +2581,6 @@ const st: Record<string, React.CSSProperties> = {
   panelTitle:  { fontSize: 14, fontWeight: 700, color: "#92400e", marginBottom: 12 },
   panelInfo:   { display: "flex", gap: 8, flexWrap: "wrap" as const, marginBottom: 14 },
   infoChip:    { fontSize: 12, background: "#f3f4f6", color: "#374151", padding: "3px 10px", borderRadius: 99, fontWeight: 500 },
-  infoChipRed: { fontSize: 12, background: "#fee2e2", color: "#dc2626", padding: "3px 10px", borderRadius: 99, fontWeight: 700 },
   infoChipGreen:{ fontSize: 12, background: "#dcfce7", color: "#16a34a", padding: "3px 10px", borderRadius: 99, fontWeight: 700 },
   partlyPaidTag: {
     display: "inline-block", marginLeft: 6, padding: "1px 8px", borderRadius: 99,

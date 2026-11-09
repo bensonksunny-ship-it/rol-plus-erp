@@ -23,6 +23,7 @@ import type {
   TransactionStatus,
 } from "@/types/finance";
 import { logAction } from "@/services/audit/audit.service";
+import { WAIVED, chargedAmountOf, waivedAmountOf } from "@/lib/feeWaiver";
 
 const TRANSACTIONS = "transactions";
 
@@ -222,16 +223,17 @@ export async function getFeeStructureByCenter(
  *
  * A "fee_due" transaction applies its charge the moment it's generated
  * (status "due"), independent of whether it's later marked "completed" by a
- * payment — so it counts as a charge regardless of status.
+ * payment — so it counts as a charge regardless of status. The one exception is
+ * a waiver ("Un-due"): the waived part stops counting (lib/feeWaiver.ts).
  */
 export function transactionBalanceEffect(tx: Transaction): number {
   // A one-off admission fee is separate from tuition — never part of the balance.
   if (tx.type === "admission_fee") return 0;
+  if (tx.type === "fee_due") return chargedAmountOf(tx);
   const isCharge =
     tx.method === "auto-monthly" ||
     tx.method === "auto" ||
-    tx.type === "charge" ||
-    tx.type === "fee_due";
+    tx.type === "charge";
   if (isCharge) return tx.amount;
   // Payments/deposits only count once actually received.
   if (tx.status !== "completed") return 0;
@@ -273,6 +275,8 @@ export interface DueSettlement {
   paidAmount:   number;   // total explicitly credited to this month
   remaining:    number;   // dueAmount − paidAmount, floored at 0
   state:        DueState;
+  /** Written off via Un-due; already taken out of dueAmount. */
+  waivedAmount: number;
 }
 
 /** True for a real money-in receipt (not a due, charge, or system auto-entry). */
@@ -332,12 +336,16 @@ export function computeDueSettlements(transactions: Transaction[]): Map<string, 
       dueId:        existing?.dueId ?? tx.id,
       studentUid:   tx.studentUid,
       billingMonth,
-      dueAmount:    (existing?.dueAmount ?? 0) + tx.amount,
+      // A waived due only still asks for the part that wasn't written off.
+      dueAmount:    (existing?.dueAmount ?? 0) + chargedAmountOf(tx),
       paidAmount:   0,
       remaining:    0,
       state:        "unpaid",
+      waivedAmount: (existing?.waivedAmount ?? 0) + waivedAmountOf(tx),
     });
-    legacyStatus.set(k, tx.status);
+    // A waived due carries no "completed" flag of its own; what's left of it
+    // (if anything) is reconciled from tagged payments like any other.
+    if (tx.status !== WAIVED || !legacyStatus.has(k)) legacyStatus.set(k, tx.status);
   }
 
   // 2) Credit only explicitly-tagged payments to their month.
@@ -365,11 +373,59 @@ export function computeDueSettlements(transactions: Transaction[]): Map<string, 
     // payments recorded which month they settled) showing correctly instead
     // of being re-guessed from unrelated same-month transactions.
     const wasCompleted = legacyStatus.get(k) === "completed";
-    s.remaining = wasCompleted ? 0 : s.dueAmount;
+    s.remaining = wasCompleted ? 0 : Math.max(0, s.dueAmount);
     s.state     = wasCompleted ? "paid" : "unpaid";
   });
 
   return settlements;
+}
+
+// ─── Un-due (waive a fee due) ─────────────────────────────────────────────────
+
+export interface WaiveFeeDueInput {
+  dueId:      string;
+  studentUid: string;
+  /** What's still unpaid on that month, the part being written off. */
+  amount:     number;
+  reason:     string;
+  by:         { uid: string; role: Role | string | null | undefined; name?: string | null };
+}
+
+/**
+ * "Un-due": the student isn't going to pay this month (break, discontinued,
+ * continuation not confirmed). The due is kept, marked waived with the reason,
+ * and only its unpaid part is written off. Payments already made stay.
+ */
+export async function waiveFeeDue(i: WaiveFeeDueInput): Promise<void> {
+  const reason = i.reason.trim();
+  if (!reason) throw new Error("A reason is required to un-due a fee.");
+  if (!(i.amount > 0)) throw new Error("Nothing left to waive on this due.");
+
+  const snap = await getDocFromServer(doc(db, TRANSACTIONS, i.dueId));
+  if (!snap.exists()) throw new Error("That fee due no longer exists. Refresh and try again.");
+  const due = { id: snap.id, ...snap.data() } as Transaction;
+  if (due.type !== "fee_due") throw new Error("Only a fee due can be waived.");
+  if (due.status === WAIVED) throw new Error("This due is already waived.");
+  const amount = Math.min(i.amount, due.amount);
+
+  await updateDoc(snap.ref, {
+    status:            WAIVED,
+    statusBeforeWaive: due.status,
+    waivedAmount:      amount,
+    waiveReason:       reason,
+    waivedBy:          i.by.uid,
+    waivedByName:      i.by.name ?? null,
+    waivedAt:          new Date().toISOString(),
+  });
+  await updateDoc(doc(db, "users", i.studentUid), {
+    currentBalance: increment(-amount),
+    updatedAt:      new Date().toISOString(),
+  });
+  logAction({
+    action: "FEE_DUE_WAIVED", initiatorId: i.by.uid, initiatorRole: (i.by.role ?? "admin") as Role,
+    approverId: null, approverRole: null, reason,
+    metadata: { studentUid: i.studentUid, dueId: i.dueId, amount, billingMonth: due.billingMonth ?? null },
+  });
 }
 
 /** Every month a student still owes something on, oldest first. */

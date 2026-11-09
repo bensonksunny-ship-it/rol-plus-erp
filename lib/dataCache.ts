@@ -30,3 +30,18 @@ export function setCached<T>(key: string, value: T): void {
 export function invalidateCache(key: string): void {
   cache.delete(key);
 }
+
+/** Drops every cached value whose key starts with one of `prefixes`. */
+export function invalidateCachePrefix(...prefixes: string[]): void {
+  Array.from(cache.keys()).forEach(k => { if (prefixes.some(p => k.startsWith(p))) cache.delete(k); });
+}
+
+/**
+ * A student's status changed (break, inactive…): forget every page's cached
+ * roster, so Students, Enrollments/Centres, Registry, Users, Teachers and the
+ * dashboard show the new status on their very next render instead of the old
+ * one until their background refetch lands.
+ */
+export function invalidateStudentViews(): void {
+  invalidateCachePrefix("students:", "centers:", "registry:", "users:", "teachers:", "dashboard:", "finance:");
+}

@@ -1,9 +1,10 @@
 "use client";
 
-// Dashboard approvals for student inactivation requests raised by teachers.
-// Shown to the current wing's approvers — ROL+: Admin (+ Founder); School of
-// Music: Director / Chief Teacher / Admin (+ Founder) — and only when there's
-// something to review.
+// Dashboard approvals for student status requests, both inactivation and break.
+// Teachers raise them, and so does Finance (Office Manager etc.) from a
+// student's row. Shown to the current wing's approvers (ROL+: Admin + Founder;
+// School of Music: Director / Chief Teacher / Admin + Founder), and only when
+// there's something to review.
 
 import { useCallback, useEffect, useState } from "react";
 import { collection, doc, getDoc, getDocs, query, where } from "firebase/firestore";
@@ -11,14 +12,19 @@ import { db } from "@/services/firebase/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import { useWing } from "@/hooks/useWing";
 import { inWing } from "@/lib/wing";
+import { invalidateStudentViews } from "@/lib/dataCache";
 import { computeStudentBalances } from "@/services/finance/finance.service";
 import {
   DEACTIVATION_REQUESTED, approveStudentDeactivation, canApproveDeactivation, rejectStudentDeactivation,
 } from "@/services/student/deactivation.service";
+import { BREAK_REQUESTED, approveStudentBreak, rejectStudentBreak } from "@/services/student/break.service";
 import type { Transaction } from "@/types/finance";
+
+type RequestKind = "inactive" | "break";
 
 interface RequestRow {
   uid: string;
+  kind: RequestKind;
   name: string;
   centerName: string;
   requestedBy: string | null;
@@ -44,14 +50,20 @@ export default function InactivationRequestsPanel() {
   const load = useCallback(async () => {
     try {
       const snap = await getDocs(query(collection(db, "users"),
-        where("role", "==", "student"), where("status", "==", DEACTIVATION_REQUESTED)));
+        where("role", "==", "student"), where("status", "in", [DEACTIVATION_REQUESTED, BREAK_REQUESTED])));
       const docs = snap.docs.filter(d => inWing(d.data(), wing));
       if (docs.length === 0) { setRows([]); return; }
 
+      const isBreak = (st: Record<string, unknown>) => st.status === BREAK_REQUESTED;
+      const requesterOf = (st: Record<string, unknown>) =>
+        ((isBreak(st) ? st.breakRequestedBy : st.deactivationRequestedBy) ?? null) as string | null;
+      const requesterNameOf = (st: Record<string, unknown>) =>
+        ((isBreak(st) ? st.breakRequestedByName : st.deactivationRequestedByName) ?? "") as string;
+
       const centreIds = Array.from(new Set(docs.map(d => d.data().centerId as string).filter(Boolean)));
       const requesterIds = Array.from(new Set(docs
-        .filter(d => !d.data().deactivationRequestedByName && d.data().deactivationRequestedBy)
-        .map(d => d.data().deactivationRequestedBy as string)));
+        .filter(d => !requesterNameOf(d.data()) && requesterOf(d.data()))
+        .map(d => requesterOf(d.data()) as string)));
 
       const [centres, requesters, ledgers] = await Promise.all([
         Promise.all(centreIds.map(id => getDoc(doc(db, "centers", id)))),
@@ -64,17 +76,19 @@ export default function InactivationRequestsPanel() {
       setRows(docs.map((d, i) => {
         const st = d.data();
         const txs = ledgers[i].docs.map(t => ({ id: t.id, ...t.data() }) as Transaction);
-        const by = (st.deactivationRequestedBy ?? null) as string | null;
+        const by = requesterOf(st);
+        const brk = isBreak(st);
         return {
           uid: d.id,
+          kind: brk ? "break" : "inactive",
           name: (st.displayName ?? st.name ?? "—") as string,
           centerName: centreName.get(st.centerId as string) ?? "—",
           requestedBy: by,
-          requesterName: (st.deactivationRequestedByName as string) || (by ? requesterName.get(by) ?? "" : ""),
-          requestedAt: (st.deactivationRequestedAt ?? "") as string,
-          reason: (st.deactivationReason ?? "") as string,
+          requesterName: requesterNameOf(st) || (by ? requesterName.get(by) ?? "" : ""),
+          requestedAt: ((brk ? st.breakRequestedAt : st.deactivationRequestedAt) ?? "") as string,
+          reason: ((brk ? st.breakReason : st.deactivationReason) ?? "") as string,
           balance: computeStudentBalances(txs).get(d.id) ?? 0,
-        };
+        } satisfies RequestRow;
       }).sort((a, b) => a.requestedAt.localeCompare(b.requestedAt)));
     } catch (err) {
       console.error("[InactivationRequestsPanel] load failed:", err);
@@ -89,15 +103,25 @@ export default function InactivationRequestsPanel() {
     setBusy(r.uid); setFlash(null);
     const by = { uid: user.uid, role, name: user.displayName, wing };
     try {
-      if (approve) await approveStudentDeactivation(r.uid, by, r.requestedBy);
-      else         await rejectStudentDeactivation(r.uid, by, r.requestedBy);
+      let text: string;
+      if (r.kind === "break") {
+        if (approve) {
+          const from = await approveStudentBreak(r.uid, by, { requestedBy: r.requestedBy });
+          text = `${r.name} is on break from ${from}.${r.balance > 0 ? ` ${INR(r.balance)} due stays on Finance. Un-due it there if it shouldn't be charged.` : ""}`;
+        } else {
+          await rejectStudentBreak(r.uid, by);
+          text = `Break rejected. ${r.name} stays active.`;
+        }
+      } else if (approve) {
+        await approveStudentDeactivation(r.uid, by, r.requestedBy);
+        text = `${r.name} is now inactive.${r.balance > 0 ? ` ${INR(r.balance)} outstanding stays on Finance until paid.` : ""}`;
+      } else {
+        await rejectStudentDeactivation(r.uid, by, r.requestedBy);
+        text = `Request rejected. ${r.name} stays active.`;
+      }
+      invalidateStudentViews();
       setRows(prev => prev.filter(x => x.uid !== r.uid));
-      setFlash({
-        ok: true,
-        text: approve
-          ? `${r.name} is now inactive.${r.balance > 0 ? ` ${INR(r.balance)} outstanding stays on Finance until paid.` : ""}`
-          : `Request rejected — ${r.name} stays active.`,
-      });
+      setFlash({ ok: true, text });
     } catch (e) {
       setFlash({ ok: false, text: e instanceof Error ? e.message : "Could not update the request." });
     } finally {
@@ -108,11 +132,11 @@ export default function InactivationRequestsPanel() {
   if (!allowed || (rows.length === 0 && !flash)) return null;
 
   return (
-    <section aria-label="Inactivation requests" style={{
+    <section aria-label="Student requests" style={{
       background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 14, padding: "14px 16px", marginBottom: 18,
     }}>
       <div style={{ fontSize: 14, fontWeight: 800, color: "#78350f", marginBottom: rows.length ? 10 : 0 }}>
-        ⚠ Inactivation Requests {rows.length > 0 && <span style={{ fontWeight: 600 }}>({rows.length})</span>}
+        ⚠ Student Requests {rows.length > 0 && <span style={{ fontWeight: 600 }}>({rows.length})</span>}
       </div>
       {flash && (
         <div role="status" style={{ fontSize: 12.5, marginBottom: 10, color: flash.ok ? "#15803d" : "#dc2626" }}>{flash.text}</div>
@@ -125,21 +149,21 @@ export default function InactivationRequestsPanel() {
           }}>
             <div style={{ flex: "1 1 260px", minWidth: 0 }}>
               <div style={{ fontSize: 13.5, color: "#111827" }}>
-                <b>Inactivation Request:</b> {r.name} <span style={{ color: "#6b7280" }}>({r.centerName})</span>
+                <b>{r.kind === "break" ? "Break Request:" : "Inactivation Request:"}</b> {r.name} <span style={{ color: "#6b7280" }}>({r.centerName})</span>
                 {r.requesterName && <> requested by <b>{r.requesterName}</b></>}
               </div>
               <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
                 {r.requestedAt && fmtDate(r.requestedAt)}
                 {r.reason && <> · “{r.reason}”</>}
                 {r.balance > 0
-                  ? <span style={{ color: "#b91c1c", fontWeight: 600 }}> · {INR(r.balance)} due — stays on Finance until paid</span>
+                  ? <span style={{ color: "#b91c1c", fontWeight: 600 }}> · {INR(r.balance)} due, stays on Finance until settled</span>
                   : <span> · no dues</span>}
               </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button type="button" disabled={busy === r.uid} onClick={() => decide(r, true)}
-                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", opacity: busy === r.uid ? 0.6 : 1 }}>
-                {busy === r.uid ? "…" : "Approve Inactivation"}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: r.kind === "break" ? "#0284c7" : "#dc2626", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", opacity: busy === r.uid ? 0.6 : 1 }}>
+                {busy === r.uid ? "…" : r.kind === "break" ? "Approve Break" : "Approve Inactivation"}
               </button>
               <button type="button" disabled={busy === r.uid} onClick={() => decide(r, false)}
                 style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #d1d5db", background: "#fff", color: "#374151", fontSize: 12.5, fontWeight: 700, cursor: "pointer", opacity: busy === r.uid ? 0.6 : 1 }}>
