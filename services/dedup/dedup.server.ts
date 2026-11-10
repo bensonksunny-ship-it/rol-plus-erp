@@ -21,7 +21,8 @@ export async function checkDuplicatesServer(keys: PersonKeys, opts: { enquiries?
   });
   apps.docs.forEach(d => {
     const a = d.data();
-    if (a.status === "enrolled" || str(a.enrolledStudentId)) return;
+    // Enrolled → represented by the student; moved to Enquiries → by its enquiry.
+    if (a.status === "enrolled" || a.status === "moved_to_enquiry" || str(a.enrolledStudentId)) return;
     out.push({ id: d.id, kind: "application", name: str(a.fullName), phone: str(a.phone), email: str(a.email), dob: str(a.dob), admissionNo: str(a.admissionNumber), status: "Application" });
   });
   enq?.docs.forEach(d => {

@@ -34,6 +34,9 @@ import { mergeApplicationIntoStudent, mergeIntoStudent } from "@/services/screen
 import { ToastContainer } from "@/components/ui/Toast";
 import { useToast } from "@/hooks/useToast";
 import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/ParentModals";
+import { canLeadWing } from "@/lib/elevatedAccount";
+import { TRANSFER_NOTE_MAX, isMovedToEnquiry } from "@/lib/enquiry";
+import { moveAdmissionToEnquiry } from "@/services/enquiry/enquiry.service";
 
 const s: Record<string, React.CSSProperties> = {
   card: {
@@ -685,6 +688,12 @@ export function AdmissionsList({
   const [deleteId,     setDeleteId]     = useState<string | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [movingId,     setMovingId]     = useState<string | null>(null);
+  // "Move to Enquiries" (wing leaders): the application being moved + the note.
+  const [enquiryFor,   setEnquiryFor]   = useState<Record<string, unknown> | null>(null);
+  const [enquiryNote,  setEnquiryNote]  = useState("");
+  const [enquiryBusy,  setEnquiryBusy]  = useState(false);
+  const [enquiryErr,   setEnquiryErr]   = useState("");
+  const canMoveToEnquiry = canLeadWing(user, wing);
   // Detail-panel action icons stay hidden until the header is hovered/focused,
   // or pinned open with the ••• button (touch screens have no hover).
   const [actionsOpen,  setActionsOpen]  = useState(false);
@@ -759,7 +768,7 @@ export function AdmissionsList({
   // those own the click / Escape, and dismissing them must not also drop the
   // applicant underneath. Clicks on the applicant cards are left to their own
   // onClick (select / toggle), and clicks inside any dialog are ignored.
-  const overlayOpen = !!(editing || deleteId || photoFor || completing || showForm || showChoice || showQr);
+  const overlayOpen = !!(editing || deleteId || photoFor || completing || showForm || showChoice || showQr || enquiryFor);
   useEffect(() => {
     if (!selectedId || overlayOpen) return;
     function onPointer(e: MouseEvent | TouchEvent) {
@@ -850,7 +859,7 @@ export function AdmissionsList({
       ? getAdmissionsByTeacher(user.uid)
       : getAllAdmissions()
     )
-      .then(list => setAdmissions(list.filter(a => (typeof a.wing === "string" ? a.wing : "rol_plus") === wing)))
+      .then(list => setAdmissions(list.filter(a => (typeof a.wing === "string" ? a.wing : "rol_plus") === wing && !isMovedToEnquiry(a))))
       .catch(() => {})
       .finally(() => setLoading(false));
   }
@@ -873,7 +882,8 @@ export function AdmissionsList({
       snap => {
         setAdmissions(snap.docs
           .map(d => d.data() as Record<string, unknown>)
-          .filter(a => (typeof a.wing === "string" ? a.wing : "rol_plus") === wing)
+          // Applications moved to Enquiries stay on file but leave the pipeline.
+          .filter(a => (typeof a.wing === "string" ? a.wing : "rol_plus") === wing && !isMovedToEnquiry(a))
           .sort((a, b) => String(b.submittedAt ?? "").localeCompare(String(a.submittedAt ?? ""))));
         setLoading(false);
       },
@@ -979,6 +989,31 @@ export function AdmissionsList({
       console.error("Move failed:", err);
     } finally {
       setMovingId(null);
+    }
+  }
+
+  /** Not enrolled yet → may be parked in Enquiries for follow-up. */
+  function canMoveRec(rec: Record<string, unknown>): boolean {
+    return canMoveToEnquiry && getApplicationStage(rec).key !== "enrolled" && !str(rec.enrolledStudentId);
+  }
+  function openMoveToEnquiry(rec: Record<string, unknown>) {
+    setEnquiryFor(rec); setEnquiryNote(""); setEnquiryErr("");
+  }
+  async function handleMoveToEnquiry() {
+    if (!enquiryFor) return;
+    const id = str(enquiryFor.id);
+    setEnquiryBusy(true); setEnquiryErr("");
+    try {
+      await moveAdmissionToEnquiry(id, enquiryNote.trim());
+      // The live list drops it too; remove now so the card goes at once.
+      setAdmissions(prev => prev.filter(a => str(a.id) !== id));
+      if (selected && str(selected.id) === id) setSelected(null);
+      toast((str(enquiryFor.fullName) || "Application") + " moved to Enquiries — Pending Follow-up.", "success");
+      setEnquiryFor(null);
+    } catch (err) {
+      setEnquiryErr(err instanceof Error ? err.message : "Could not move the application.");
+    } finally {
+      setEnquiryBusy(false);
     }
   }
 
@@ -1167,6 +1202,37 @@ export function AdmissionsList({
           onSave={async (updated, mergeInto) => { await handleSaveEdit(str(editing.id), updated, mergeInto); }}
           onCancel={() => setEditing(null)}
         />
+      )}
+
+      {/* Move to Enquiries confirmation */}
+      {enquiryFor && (
+        <div onClick={() => !enquiryBusy && setEnquiryFor(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="move-enq-title" onClick={e => e.stopPropagation()}
+            style={{ background: "#fff", borderRadius: 14, padding: "24px 24px 20px", maxWidth: 440, width: "100%", boxShadow: "0 24px 64px rgba(0,0,0,0.2)", boxSizing: "border-box" }}>
+            <div id="move-enq-title" style={{ fontSize: 16, fontWeight: 800, color: "#111", marginBottom: 4 }}>
+              📇 Move {str(enquiryFor.fullName) || "this application"} to Enquiries?
+            </div>
+            <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14, lineHeight: 1.5 }}>
+              It leaves the Admissions list and becomes a <strong>Pending Follow-up</strong> enquiry. The form, photo and screening stay on file, and you can restore the application from Enquiries at any time.
+            </div>
+            <label htmlFor="move-enq-note" style={{ ...s.label, marginBottom: 6 }}>Reason / follow-up note <span style={{ fontWeight: 400, color: "#9ca3af" }}>(optional)</span></label>
+            <textarea id="move-enq-note" value={enquiryNote} maxLength={TRANSFER_NOTE_MAX} rows={3} autoFocus
+              onChange={e => setEnquiryNote(e.target.value)}
+              placeholder="e.g. No response since screening — call parent next week"
+              style={{ ...s.input, resize: "vertical" as const, minHeight: 72 }} />
+            {enquiryErr && (
+              <div role="alert" style={{ marginTop: 10, background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", fontSize: 12.5, color: "#991b1b" }}>{enquiryErr}</div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16, flexWrap: "wrap" as const }}>
+              <button onClick={() => setEnquiryFor(null)} disabled={enquiryBusy} style={{ ...s.secondaryBtn, minWidth: 90 }}>Cancel</button>
+              <button onClick={handleMoveToEnquiry} disabled={enquiryBusy}
+                style={{ ...s.primaryBtn, background: "#d97706", minWidth: 150, opacity: enquiryBusy ? 0.6 : 1, cursor: enquiryBusy ? "not-allowed" : "pointer" }}>
+                {enquiryBusy ? "Moving…" : "Move to Enquiries"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Delete confirmation overlay */}
@@ -1425,6 +1491,13 @@ export function AdmissionsList({
                 }}
               >
                 🎹 Start Screening
+              </button>
+            )}
+            {canMoveRec(selected) && (
+              <button type="button" onClick={() => openMoveToEnquiry(selected)}
+                title="Stalled? Park it in Enquiries for a follow-up call — all data is kept"
+                style={{ padding: "8px 14px", borderRadius: 8, border: "1.5px solid #fcd34d", background: "#fffbeb", color: "#b45309", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                📇 Move to Enquiries
               </button>
             )}
             {/* Right-hand toolbar: icon-only actions (photo lives inside Edit), then close. */}
@@ -1771,6 +1844,14 @@ export function AdmissionsList({
                   ? instruments.map(inst => <span key={inst} style={{ background: "#ede9fe", color: "#4f46e5", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99 }}>{inst}</span>)
                   : <span style={{ color: "#9ca3af", fontSize: 12 }}>No instrument</span>}
               </div>
+
+              {canMoveRec(rec) && (
+                <button type="button" onClick={e => { e.stopPropagation(); openMoveToEnquiry(rec); }}
+                  title="Stalled? Park it in Enquiries for a follow-up call — all data is kept"
+                  style={{ alignSelf: "flex-start", padding: "4px 10px", borderRadius: 99, border: "1px solid #fcd34d", background: "#fffbeb", color: "#b45309", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  📇 Move to Enquiries
+                </button>
+              )}
 
               {/* Footer: centre · date + CTA */}
               <div

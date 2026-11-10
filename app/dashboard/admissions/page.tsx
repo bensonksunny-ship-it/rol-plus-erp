@@ -132,7 +132,8 @@ function AdmissionsWizard() {
   useEffect(() => {
     return subscribeEnquiries(
       WING,
-      list => setNewEnquiries(list.filter(e => e.status === "new").length),
+      // New leads + applications parked for a follow-up call.
+      list => setNewEnquiries(list.filter(e => e.status === "new" || e.status === "follow_up").length),
       () => setNewEnquiries(0),
     );
   }, [wing]);
@@ -249,6 +250,7 @@ function AdmissionsWizard() {
             onClose={() => setShowEnquiries(false)}
             onConvert={convertEnquiry}
             onShowQr={() => { setQrTarget("enquiry"); setShowQr(true); }}
+            canRestore={canEditQuestions}
           />
         )}
         {showSchoolInfo && (canEditSchoolInfo

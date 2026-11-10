@@ -30,6 +30,7 @@ import {
 } from "@/services/admin/delete.service";
 import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
 import { isWaivedDue } from "@/lib/feeWaiver";
+import { compareLedger } from "@/lib/ledgerOrder";
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
 import type { CenterBatch } from "@/types";
 import { batchIdToStore, batchSchedule, effectiveBatches, explicitBatches, isDefaultBatchId } from "@/lib/batches";
@@ -2426,9 +2427,9 @@ export function LedgerEditor({
   const [txDeleteSubmitting, setTxDeleteSubmitting] = useState(false);
   const txDeleteResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Chronological (newest first) statement: fee dues, payments, deposits, auto-charges.
+  // Newest month first; inside a month, Due before what was paid (lib/ledgerOrder).
   const statement = useMemo(() => {
-    return [...transactions].sort((a, b) => safeCompare(b.date, a.date));
+    return [...transactions].sort(compareLedger);
   }, [transactions]);
 
   function startTxEdit(tx: Transaction) {

@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 import EnquiryForm from "@/components/enquiry/EnquiryForm";
 import {
-  subscribeEnquiries, markEnquiryContacted,
+  subscribeEnquiries, markEnquiryContacted, restoreAdmissionFromEnquiry,
   type Enquiry, type EnquiryStatus,
 } from "@/services/enquiry/enquiry.service";
 import { formatPhone } from "@/lib/enquiry";
@@ -17,6 +17,7 @@ const ACCENT = "#d97706";
 
 const STATUS_STYLE: Record<EnquiryStatus, { label: string; color: string; bg: string }> = {
   new:       { label: "New",       color: "#b45309", bg: "#fef3c7" },
+  follow_up: { label: "Pending Follow-up", color: "#be123c", bg: "#ffe4e6" },
   contacted: { label: "Contacted", color: "#1d4ed8", bg: "#dbeafe" },
   converted: { label: "Converted", color: "#15803d", bg: "#dcfce7" },
 };
@@ -37,8 +38,10 @@ const actionBtn: React.CSSProperties = {
   fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 5,
 };
 
-export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = false }: {
+export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = false, canRestore = false }: {
   wing: string;
+  /** Wing leaders: may restore an application that was moved here. */
+  canRestore?: boolean;
   /** Hand the lead to the full admission form. */
   onConvert: (enquiry: Enquiry) => void;
   /** Opens the parent QR modal on the Quick Enquiry code. */
@@ -65,6 +68,7 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
 
   const counts = useMemo(() => ({
     new:       items.filter(e => e.status === "new").length,
+    follow_up: items.filter(e => e.status === "follow_up").length,
     contacted: items.filter(e => e.status === "contacted").length,
     converted: items.filter(e => e.status === "converted").length,
   }), [items]);
@@ -80,6 +84,20 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
       setItems(list => list.map(x => x.id === e.id ? { ...x, status: "contacted", contactedAt: new Date().toISOString() } : x));
     } catch (er) {
       setErr(er instanceof Error ? er.message : "Could not update the enquiry.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRestore(e: Enquiry) {
+    setBusyId(e.id);
+    setErr("");
+    try {
+      await restoreAdmissionFromEnquiry(e.id);
+      setFlash(`${e.studentName}'s application is back in Admissions with all its data.`);
+      setTimeout(() => setFlash(""), 4000);
+    } catch (er) {
+      setErr(er instanceof Error ? er.message : "Could not restore the application.");
     } finally {
       setBusyId(null);
     }
@@ -118,8 +136,11 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
 
       {/* Filters */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <button style={pill(filter === "open")} onClick={() => setFilter("open")}>Open ({counts.new + counts.contacted})</button>
+        <button style={pill(filter === "open")} onClick={() => setFilter("open")}>Open ({counts.new + counts.follow_up + counts.contacted})</button>
         <button style={pill(filter === "new")} onClick={() => setFilter("new")}>New ({counts.new})</button>
+        {counts.follow_up > 0 && (
+          <button style={pill(filter === "follow_up")} onClick={() => setFilter("follow_up")}>Follow-up ({counts.follow_up})</button>
+        )}
         <button style={pill(filter === "contacted")} onClick={() => setFilter("contacted")}>Contacted ({counts.contacted})</button>
         <button style={pill(filter === "converted")} onClick={() => setFilter("converted")}>Converted ({counts.converted})</button>
         <button style={pill(filter === "all")} onClick={() => setFilter("all")}>All ({items.length})</button>
@@ -146,6 +167,12 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>{e.studentName}</span>
                     <span style={{ fontSize: 11, fontWeight: 700, color: st.color, background: st.bg, borderRadius: 999, padding: "2px 9px" }}>{st.label}</span>
+                    {e.source === "admission" && (
+                      <span title="Moved here from an incomplete admission application — its full record is kept"
+                        style={{ fontSize: 11, fontWeight: 700, color: "#4338ca", background: "#e0e7ff", borderRadius: 999, padding: "2px 9px" }}>
+                        📝 From application{e.applicationRef ? ` ${e.applicationRef}` : ""}
+                      </span>
+                    )}
                     {e.source === "qr" && (
                       <span title="Submitted by a parent from their phone (QR code / enquiry link)" style={{ fontSize: 11, fontWeight: 700, color: "#6d28d9", background: "#ede9fe", borderRadius: 999, padding: "2px 9px" }}>📱 Online Lead</span>
                     )}
@@ -156,15 +183,30 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
                   <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 3 }}>
                     {[e.place, e.instrument || null, fmtDate(e.createdAt)].filter(Boolean).join(" · ")}
                   </div>
+                  {e.source === "admission" && <MovedApplicationInfo e={e} />}
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {e.status === "new" && (
+                  {(e.status === "new" || e.status === "follow_up") && (
                     <button disabled={busyId === e.id} onClick={() => handleContacted(e)}
                       style={{ ...actionBtn, background: "#fff", color: "#1d4ed8", border: "1px solid #bfdbfe", opacity: busyId === e.id ? 0.6 : 1 }}>
                       ☎ Mark contacted
                     </button>
                   )}
-                  {e.status !== "converted" ? (
+                  {e.source === "admission" && e.admissionId ? (
+                    e.status !== "converted" ? (
+                      canRestore ? (
+                        <button disabled={busyId === e.id} onClick={() => handleRestore(e)}
+                          title="Put the application back in Admissions — form, photo and screening intact"
+                          style={{ ...actionBtn, background: "#4f46e5", color: "#fff", border: "none", opacity: busyId === e.id ? 0.6 : 1 }}>
+                          {busyId === e.id ? "Restoring…" : "↩ Restore application"}
+                        </button>
+                      ) : null
+                    ) : (
+                      <span style={{ fontSize: 12, color: "#15803d", fontWeight: 600 }}>
+                        ✓ Restored to Admissions{e.convertedAt ? ` ${fmtDate(e.convertedAt)}` : ""}
+                      </span>
+                    )
+                  ) : e.status !== "converted" ? (
                     <button onClick={() => onConvert(e)}
                       style={{ ...actionBtn, background: ACCENT, color: "#fff", border: "none" }}>
                       Convert to admission →
@@ -184,14 +226,42 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
   );
 }
 
+/** Context for a lead moved over from an application: what was done, why it moved. */
+function MovedApplicationInfo({ e }: { e: Enquiry }) {
+  const a = e.applicationSummary ?? {};
+  const facts = [
+    a.age ? `Age ${a.age}` : null,
+    a.course || (a.instruments?.length ? a.instruments.join(", ") : null),
+    e.applicationDate ? `Applied ${fmtDate(e.applicationDate)}` : null,
+  ].filter(Boolean).join(" · ");
+  const steps: [string, boolean | undefined][] = [["Photo", a.hasPhoto], ["Screening", a.screened], ["Fee", a.feePaid]];
+  return (
+    <div style={{ marginTop: 8, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "8px 10px", fontSize: 12, color: "#475569" }}>
+      {facts && <div>{facts}</div>}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: facts ? 5 : 0 }}>
+        {steps.map(([label, done]) => (
+          <span key={label} style={{ fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "1px 8px", color: done ? "#15803d" : "#9ca3af", background: done ? "#dcfce7" : "#f3f4f6" }}>
+            {done ? "✓" : "–"} {label}
+          </span>
+        ))}
+      </div>
+      {e.transferNote && <div style={{ marginTop: 6, color: "#334155" }}>“{e.transferNote}”</div>}
+      <div style={{ marginTop: 4, fontSize: 11, color: "#94a3b8" }}>
+        Moved {e.movedAt ? fmtDate(e.movedAt) : ""}{e.movedByName ? ` by ${e.movedByName}` : ""} · full application kept on file
+      </div>
+    </div>
+  );
+}
+
 /**
  * Right-hand slide-over holding the whole enquiry workflow (form, filters,
  * Mark contacted / Convert, enquiry QR). Opened from the "Enquiries +" header
  * button on /dashboard/admissions so the main page stays focused on
  * applications and screening.
  */
-export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr }: {
+export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr, canRestore }: {
   wing: string;
+  canRestore?: boolean;
   onClose: () => void;
   onConvert: (enquiry: Enquiry) => void;
   onShowQr?: () => void;
@@ -219,7 +289,7 @@ export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr }: {
           <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1 }}>✕</button>
         </div>
         <div style={{ padding: 16, overflowY: "auto", flex: 1 }}>
-          <EnquiriesPanel wing={wing} onConvert={onConvert} onShowQr={onShowQr} />
+          <EnquiriesPanel wing={wing} onConvert={onConvert} onShowQr={onShowQr} canRestore={canRestore} />
         </div>
       </aside>
     </>

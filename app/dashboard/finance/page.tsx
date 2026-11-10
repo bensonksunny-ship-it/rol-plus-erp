@@ -48,6 +48,7 @@ import type { Role } from "@/types";
 import { buildStudentRows, exportFinanceStatementPdf, isReceivedPayment } from "./statement";
 import PaymentModal, { type PayMethod, type PaymentFormValues } from "./PaymentModal";
 import { HISTORY_NOTE, fmtINR, fmtMonth, todayStr } from "./format";
+import { compareLedger, ledgerMonthOf } from "@/lib/ledgerOrder";
 import { StudentStatusChip, UndueModal, type UndueSubmit } from "./RowStatusMenus";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -178,6 +179,30 @@ function FinanceContent() {
   const [payUid, setPayUid]                  = useState<string | null>(null);
   // Clicking a student's Due opens Un-due (on break / discontinued).
   const [undueUid, setUndueUid]              = useState<string | null>(null);
+  // That student's attended dates by month ("YYYY-MM" → dates), so the confirm
+  // step can warn before waiving a month they came to class in. null = loading.
+  const [undueAtt, setUndueAtt]              = useState<Record<string, string[]> | null>(null);
+  useEffect(() => {
+    if (!undueUid) return;
+    let cancelled = false;
+    setUndueAtt(null);
+    getDocs(query(collection(db, "attendance"), where("studentUid", "==", undueUid)))
+      .then(snap => {
+        const byMonth: Record<string, string[]> = {};
+        snap.docs.forEach(d => {
+          const a = d.data();
+          if (a.status !== "present") return;
+          const date = String(a.date ?? "");
+          if (!date) return;
+          (byMonth[date.slice(0, 7)] ??= []).push(date);
+        });
+        Object.values(byMonth).forEach(list => list.sort());
+        if (!cancelled) setUndueAtt(byMonth);
+      })
+      // Can't check attendance → treat as unknown rather than "none attended".
+      .catch(() => { if (!cancelled) setUndueAtt({ __error__: [] }); });
+    return () => { cancelled = true; };
+  }, [undueUid]);
   const [undueSaving, setUndueSaving]        = useState(false);
   const [paySubmitting, setPaySubmitting]    = useState(false);
 
@@ -807,7 +832,8 @@ function FinanceContent() {
     if (!user || undueSaving || v.months.length === 0) return;
     setUndueSaving(true);
     const by = { uid: user.uid, role, name: user.displayName ?? undefined, wing };
-    const label = v.reason === "break" ? "On break" : "Discontinued";
+    // Break / discontinued is optional; without it this is a plain waiver.
+    const label = v.reason === "break" ? "On break" : v.reason === "discontinued" ? "Discontinued" : "Un-due";
     const reason = v.note ? `${label} · ${v.note}` : label;
     let waived = 0;
     try {
@@ -1066,6 +1092,7 @@ function FinanceContent() {
             name={row.name} months={months}
             otherBalance={Math.max(0, row.balance - dueTotal)}
             status={row.status} direct={canDecideStatus} approverLabel={approverLabel}
+            attendance={undueAtt}
             saving={undueSaving}
             onConfirm={v => submitUndue(row, v)}
             onClose={() => setUndueUid(null)}
@@ -1634,11 +1661,7 @@ function FinanceContent() {
                                 // Financial Statement 1:1 instead of silently hiding entries.
                                 const studentTx = transactions
                                   .filter(t => t.studentUid === s.uid)
-                                  .sort((a, b) => {
-                                    const da = String(a.date ?? a.createdAt ?? "");
-                                    const db2 = String(b.date ?? b.createdAt ?? "");
-                                    return db2.localeCompare(da);
-                                  });
+                                  .sort(compareLedger);
                                 return (
                                   <div style={{ ...st.panel, borderLeft: "3px solid #6d28d9" }}>
                                     <div style={st.panelTitle}>🧾 History — {s.name}</div>
@@ -1669,9 +1692,7 @@ function FinanceContent() {
                                             : tx.method === "auto" || tx.method === "auto-monthly" ? "Auto"
                                             : tx.method;
 
-                                          const displayMonth = tx.billingMonth
-                                            ? fmtMonth(tx.billingMonth)
-                                            : fmtMonth((tx.date ?? tx.createdAt ?? "").slice(0, 7));
+                                          const displayMonth = fmtMonth(ledgerMonthOf(tx));
 
                                           return (
                                             <div key={tx.id} style={{
@@ -1957,7 +1978,7 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
 
   const n = Math.round(Number(value));
   const valid = Number.isFinite(n) && n > 0;
-  const recent = transactions.filter(t => t.type === "fee_due" || isSettlingPayment(t)).slice(0, 6);
+  const recent = transactions.filter(t => t.type === "fee_due" || isSettlingPayment(t)).sort(compareLedger).slice(0, 6);
   const discounts = transactions.filter(t => Number(t.discountAmt) > 0).slice(0, 5);
   const fmtD = (iso: string) => { const d = new Date(iso); return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); };
   const row = (k: string, v: React.ReactNode) => (
@@ -2011,7 +2032,7 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
 
         <div style={sub}>Recent</div>
         {recent.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
-          : recent.map(t => <Fragment key={t.id}>{row(`${fmtD(t.date)} · ${t.type === "fee_due" ? "Due" : "Payment"}`,
+          : recent.map(t => <Fragment key={t.id}>{row(`${fmtMonth(ledgerMonthOf(t))} · ${t.type === "fee_due" ? "Due" : "Paid"}`,
               <span style={{ color: t.type === "fee_due" ? "#dc2626" : "#16a34a" }}>{t.type === "fee_due" ? "+" : "−"}{fmtINR(t.amount)}</span>)}</Fragment>)}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>

@@ -20,3 +20,21 @@ export function formatPhone(raw: string): string {
   const d = normalizePhone(raw);
   return d.length === 10 ? `${d.slice(0, 5)} ${d.slice(5)}` : raw;
 }
+
+// ─── Admission → Enquiry transfer ────────────────────────────────────────────
+// A stale application can be moved to Enquiries for follow-up. The admission
+// document is kept untouched apart from these flags (photo, form answers and
+// the screening link all stay on it), so a restore brings everything back.
+
+/** `admissions.status` while the application sits in Enquiries. */
+export const MOVED_TO_ENQUIRY = "moved_to_enquiry";
+
+/** Enquiry status for a lead moved over from an application. */
+export const FOLLOW_UP_STATUS = "follow_up";
+
+export function isMovedToEnquiry(rec: { status?: unknown } | null | undefined): boolean {
+  return rec?.status === MOVED_TO_ENQUIRY;
+}
+
+/** Longest transfer note kept (characters). */
+export const TRANSFER_NOTE_MAX = 500;

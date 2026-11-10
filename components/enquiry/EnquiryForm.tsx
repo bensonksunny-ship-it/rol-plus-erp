@@ -4,7 +4,7 @@
 // public /enquiry page parents reach by scanning the QR code.
 
 import { useState, type FormEvent } from "react";
-import { createEnquiry, type EnquirySource } from "@/services/enquiry/enquiry.service";
+import { createEnquiry, type NewEnquiry } from "@/services/enquiry/enquiry.service";
 import { ENQUIRY_INSTRUMENTS, isValidPhone, normalizePhone } from "@/lib/enquiry";
 import { checkDuplicates } from "@/services/dedup/dedup.service";
 import DuplicateWarning, { isBlockingDuplicate, type DuplicateOverride } from "@/components/dedup/DuplicateWarning";
@@ -23,7 +23,7 @@ const input: React.CSSProperties = {
 
 export default function EnquiryForm({ wing, source, onCreated, submitLabel = "Save enquiry" }: {
   wing: string;
-  source: EnquirySource;
+  source: NewEnquiry["source"];
   onCreated?: (id: string) => void;
   submitLabel?: string;
 }) {
