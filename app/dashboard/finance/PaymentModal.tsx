@@ -244,7 +244,10 @@ export default function PaymentModal({
                         return (
                           <button
                             key={d.billingMonth} type="button" aria-pressed={selected}
-                            onClick={() => { setMonthPicked(true); selectMonth(selected ? null : d.billingMonth); }}
+                            // Radio semantics: a click only ever picks a month. Re-clicking
+                            // the selected chip used to clear it, which silently turned the
+                            // payment into unallocated credit and left the due open.
+                            onClick={() => { setMonthPicked(true); selectMonth(d.billingMonth); }}
                             style={{ ...m.monthChip, ...(selected ? m.chipActive : {}) }}
                           >
                             <span style={{ fontWeight: 700, color: !selected && isOverdueMonth(d.billingMonth) ? OVERDUE_TEXT : undefined }}>{dueLabel(d.billingMonth)}</span>

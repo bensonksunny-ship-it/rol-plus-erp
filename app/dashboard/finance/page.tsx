@@ -48,7 +48,7 @@ import type { Role } from "@/types";
 import { buildStudentRows, exportFinanceStatementPdf, isReceivedPayment } from "./statement";
 import PaymentModal, { type PayMethod, type PaymentFormValues } from "./PaymentModal";
 import { HISTORY_NOTE, fmtINR, fmtMonth, todayStr } from "./format";
-import { compareLedger, ledgerMonthOf } from "@/lib/ledgerOrder";
+import { ledgerMonthOf, ledgerMonths, ledgerRank, sortLedger } from "@/lib/ledgerOrder";
 import { StudentStatusChip, UndueModal, type UndueSubmit } from "./RowStatusMenus";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -1659,9 +1659,45 @@ function FinanceContent() {
                                 // Show every transaction for this student — including system
                                 // auto-charges — so this matches the Student Detail modal's
                                 // Financial Statement 1:1 instead of silently hiding entries.
-                                const studentTx = transactions
-                                  .filter(t => t.studentUid === s.uid)
-                                  .sort(compareLedger);
+                                // Newest month first; inside a month Due, then what was
+                                // paid for it — an untagged payment sits under the due it
+                                // closed, not under the month it happened to be typed in.
+                                // One line per month: Due → Payment(s) → month status.
+                                const studentTx = sortLedger(transactions.filter(t => t.studentUid === s.uid));
+                                const txMonths  = ledgerMonths(studentTx);
+                                const monthRows: { month: string; txs: typeof studentTx }[] = [];
+                                for (const tx of studentTx) {
+                                  const m = txMonths.get(tx) ?? ledgerMonthOf(tx);
+                                  const last = monthRows[monthRows.length - 1];
+                                  if (last && last.month === m) last.txs.push(tx); else monthRows.push({ month: m, txs: [tx] });
+                                }
+                                const removeBtn = (tx: Transaction) => canManageTx && (
+                                  <button
+                                    disabled={historyDeleteSubmitting}
+                                    title="Remove this entry"
+                                    onClick={() => {
+                                      if (historyDeletePending !== tx.id) {
+                                        setHistoryDeletePending(tx.id);
+                                        if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
+                                        historyDeleteTimer.current = setTimeout(() => setHistoryDeletePending(null), 4000);
+                                      } else {
+                                        if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
+                                        setHistoryDeletePending(null);
+                                        setHistoryDeleteSubmitting(true);
+                                        handleDeleteTx(tx.id).finally(() => setHistoryDeleteSubmitting(false));
+                                      }
+                                    }}
+                                    style={{
+                                      fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 4, cursor: "pointer",
+                                      border: `1px solid ${historyDeletePending === tx.id ? "#dc2626" : "#fca5a5"}`,
+                                      background: historyDeletePending === tx.id ? "#dc2626" : "#fef2f2",
+                                      color: historyDeletePending === tx.id ? "#fff" : "#dc2626",
+                                      opacity: historyDeleteSubmitting ? 0.6 : 1,
+                                    }}
+                                  >
+                                    {historyDeletePending === tx.id ? "Confirm?" : "Remove"}
+                                  </button>
+                                );
                                 return (
                                   <div style={{ ...st.panel, borderLeft: "3px solid #6d28d9" }}>
                                     <div style={st.panelTitle}>🧾 History — {s.name}</div>
@@ -1671,7 +1707,30 @@ function FinanceContent() {
                                       </div>
                                     ) : (
                                       <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
-                                        {studentTx.map(tx => {
+                                        {monthRows.map(({ month, txs }) => {
+                                          // Month status: what was raised (less waivers) vs what came in.
+                                          const dues    = txs.filter(t => t.type === "fee_due");
+                                          const pays    = txs.filter(t => ledgerRank(t) === 3 && t.status !== "failed");
+                                          const dueAmt  = dues.reduce((n, t) => n + Number(t.amount || 0) - (t.status === WAIVED ? waivedAmountOf(t) : 0), 0);
+                                          const paidAmt = pays.reduce((n, t) => n + Number(t.amount || 0), 0);
+                                          const orange  = { bg: "#fff7ed", fg: "#c2410c", bd: "#fed7aa" };
+                                          const monthStatus = dues.length === 0 ? null
+                                            : dueAmt <= 0 ? { label: "Waived", bg: "#ffedd5", fg: "#c2410c", bd: "#fed7aa" }
+                                            : paidAmt >= dueAmt ? { label: "✓ Paid", bg: "#dcfce7", fg: "#15803d", bd: "#86efac" }
+                                            : paidAmt > 0 ? { label: `${fmtINR(dueAmt - paidAmt)} left`, ...orange }
+                                            : { label: "Unpaid", ...orange };
+                                          return (
+                                            <div key={month || "none"} style={{
+                                              display: "flex", alignItems: "center", gap: 10,
+                                              padding: "8px 12px", borderRadius: 8,
+                                              background: "#f9fafb", border: "1px solid #e5e7eb",
+                                              fontSize: 13, flexWrap: "wrap" as const,
+                                            }}>
+                                              <span style={{ fontWeight: 700, color: "#111827", minWidth: 110 }}>
+                                                {month ? fmtMonth(month) : "—"}
+                                              </span>
+                                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const, flex: 1 }}>
+                                        {txs.map((tx, i) => {
                                           const isFeedue   = tx.type === "fee_due";
                                           const isDeposit  = tx.type === "deposit";
                                           const isCharge   = tx.type === "charge" || tx.method === "auto";
@@ -1692,21 +1751,15 @@ function FinanceContent() {
                                             : tx.method === "auto" || tx.method === "auto-monthly" ? "Auto"
                                             : tx.method;
 
-                                          const displayMonth = fmtMonth(ledgerMonthOf(tx));
-
                                           return (
-                                            <div key={tx.id} style={{
-                                              display: "flex", alignItems: "center", gap: 12,
-                                              padding: "8px 12px", borderRadius: 8,
-                                              background: isFailed ? "#fef2f2" : isPending ? "#fffbeb" : "#f9fafb",
+                                            <Fragment key={tx.id}>
+                                            {i > 0 && <span style={{ color: "#9ca3af", fontWeight: 700 }}>→</span>}
+                                            <span style={{
+                                              display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const,
+                                              padding: "3px 8px", borderRadius: 8,
+                                              background: isFailed ? "#fef2f2" : isPending ? "#fffbeb" : "#fff",
                                               border: `1px solid ${isFailed ? "#fecaca" : isPending ? "#fde68a" : "#e5e7eb"}`,
-                                              fontSize: 13, flexWrap: "wrap" as const,
                                             }}>
-                                              {/* Month / billing period */}
-                                              <span style={{ fontWeight: 700, color: "#111827", minWidth: 90 }}>
-                                                {displayMonth}
-                                              </span>
-
                                               {/* Type badge */}
                                               <span style={{
                                                 fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99,
@@ -1717,7 +1770,7 @@ function FinanceContent() {
 
                                               {/* Amount — charges/dues add to balance owed (+, red);
                                                   payments/deposits reduce it (−, green). */}
-                                              <span style={{ fontWeight: 700, color: (isCharge || isFeedue) ? "#dc2626" : "#16a34a", minWidth: 70 }}>
+                                              <span style={{ fontWeight: 700, color: (isCharge || isFeedue) ? "#dc2626" : "#16a34a" }}>
                                                 {(isCharge || isFeedue) ? "+" : "−"}{fmtINR(tx.amount)}
                                               </span>
 
@@ -1760,33 +1813,19 @@ function FinanceContent() {
                                                 </span>
                                               )}
 
-                                              {/* Delete */}
-                                              {canManageTx && (
-                                                <button
-                                                  disabled={historyDeleteSubmitting}
-                                                  onClick={() => {
-                                                    if (historyDeletePending !== tx.id) {
-                                                      setHistoryDeletePending(tx.id);
-                                                      if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
-                                                      historyDeleteTimer.current = setTimeout(() => setHistoryDeletePending(null), 4000);
-                                                    } else {
-                                                      if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
-                                                      setHistoryDeletePending(null);
-                                                      setHistoryDeleteSubmitting(true);
-                                                      handleDeleteTx(tx.id).finally(() => setHistoryDeleteSubmitting(false));
-                                                    }
-                                                  }}
-                                                  style={{
-                                                    marginLeft: "auto", fontSize: 11, fontWeight: 700,
-                                                    padding: "2px 8px", borderRadius: 4, cursor: "pointer",
-                                                    border: `1px solid ${historyDeletePending === tx.id ? "#dc2626" : "#fca5a5"}`,
-                                                    background: historyDeletePending === tx.id ? "#dc2626" : "#fef2f2",
-                                                    color: historyDeletePending === tx.id ? "#fff" : "#dc2626",
-                                                    opacity: historyDeleteSubmitting ? 0.6 : 1,
-                                                  }}
-                                                >
-                                                  {historyDeletePending === tx.id ? "Confirm?" : "Remove"}
-                                                </button>
+                                              {removeBtn(tx)}
+                                            </span>
+                                            </Fragment>
+                                          );
+                                        })}
+                                              </div>
+                                              {monthStatus && (
+                                                <span style={{
+                                                  marginLeft: "auto", fontSize: 11.5, fontWeight: 800, padding: "3px 10px", borderRadius: 99,
+                                                  background: monthStatus.bg, color: monthStatus.fg, border: `1px solid ${monthStatus.bd}`,
+                                                }}>
+                                                  {monthStatus.label}
+                                                </span>
                                               )}
                                             </div>
                                           );
@@ -1978,7 +2017,9 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
 
   const n = Math.round(Number(value));
   const valid = Number.isFinite(n) && n > 0;
-  const recent = transactions.filter(t => t.type === "fee_due" || isSettlingPayment(t)).sort(compareLedger).slice(0, 6);
+  // Same order as the History panel: Due above the payment that settled it.
+  const txMonths = ledgerMonths(transactions);
+  const recent = sortLedger(transactions.filter(t => t.type === "fee_due" || isSettlingPayment(t))).slice(-6);   // latest 6, still oldest→newest
   const discounts = transactions.filter(t => Number(t.discountAmt) > 0).slice(0, 5);
   const fmtD = (iso: string) => { const d = new Date(iso); return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); };
   const row = (k: string, v: React.ReactNode) => (
@@ -2032,7 +2073,7 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
 
         <div style={sub}>Recent</div>
         {recent.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
-          : recent.map(t => <Fragment key={t.id}>{row(`${fmtMonth(ledgerMonthOf(t))} · ${t.type === "fee_due" ? "Due" : "Paid"}`,
+          : recent.map(t => <Fragment key={t.id}>{row(`${fmtMonth(txMonths.get(t) ?? ledgerMonthOf(t))} · ${t.type === "fee_due" ? "Due" : "Paid"}`,
               <span style={{ color: t.type === "fee_due" ? "#dc2626" : "#16a34a" }}>{t.type === "fee_due" ? "+" : "−"}{fmtINR(t.amount)}</span>)}</Fragment>)}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>

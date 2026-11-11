@@ -30,7 +30,7 @@ import {
 } from "@/services/admin/delete.service";
 import { computeStudentBalances, editTransaction, deleteTransaction } from "@/services/finance/finance.service";
 import { isWaivedDue } from "@/lib/feeWaiver";
-import { compareLedger } from "@/lib/ledgerOrder";
+import { sortLedger } from "@/lib/ledgerOrder";
 import type { Transaction, EditableTransactionInput, PaymentMethod, TransactionStatus } from "@/types/finance";
 import type { CenterBatch } from "@/types";
 import { batchIdToStore, batchSchedule, effectiveBatches, explicitBatches, isDefaultBatchId } from "@/lib/batches";
@@ -2428,9 +2428,7 @@ export function LedgerEditor({
   const txDeleteResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Newest month first; inside a month, Due before what was paid (lib/ledgerOrder).
-  const statement = useMemo(() => {
-    return [...transactions].sort(compareLedger);
-  }, [transactions]);
+  const statement = useMemo(() => sortLedger(transactions), [transactions]);
 
   function startTxEdit(tx: Transaction) {
     setEditingTxId(tx.id);

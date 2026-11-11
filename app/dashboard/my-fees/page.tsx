@@ -8,6 +8,7 @@ import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import type { Transaction } from "@/types/finance";
 import { chargedAmountOf, isWaivedDue } from "@/lib/feeWaiver";
+import { ledgerMonthOf, ledgerMonths, sortLedger } from "@/lib/ledgerOrder";
 
 export default function MyFeesPage() {
   return (
@@ -96,10 +97,11 @@ function MyFeesContent() {
       }
 
       // Filter out auto and auto-monthly transactions — students never see these
-      const txList = txSnap.docs
+      // Same order as the admin's History panel: newest month first, Due above
+      // the payment that settled it (lib/ledgerOrder).
+      const txList = sortLedger(txSnap.docs
         .map(d => ({ id: d.id, ...d.data() }) as Transaction)
-        .filter(t => t.method !== "auto-monthly" && t.method !== "auto")
-        .sort((a, b) => (String(b.date ?? b.createdAt ?? "")).localeCompare(String(a.date ?? a.createdAt ?? "")));
+        .filter(t => t.method !== "auto-monthly" && t.method !== "auto"));
       setTx(txList);
 
       // Compute balance from visible transactions only (excludes hidden system charges)
@@ -123,6 +125,7 @@ function MyFeesContent() {
   const balanceOwed   = bal > 0;
   const balanceCredit = bal < 0;
 
+  const txMonths = ledgerMonths(transactions);
   const paid    = transactions.filter(t => t.status === "completed" && t.type !== "fee_due" && t.type !== "charge");
   const dues    = transactions.filter(t => (t.status === "due" || t.type === "fee_due") && chargedAmountOf(t) > 0);
   const pending = transactions.filter(t => t.status === "pending");
@@ -234,9 +237,7 @@ function MyFeesContent() {
 
             const methodLabel = isFeedue ? "Generated" : (tx.method ?? "—");
 
-            const displayMonth = tx.billingMonth
-              ? fmtMonth(tx.billingMonth)
-              : fmtMonth((tx.date ?? tx.createdAt as string ?? "").slice(0, 7));
+            const displayMonth = fmtMonth(txMonths.get(tx) ?? ledgerMonthOf(tx));
 
             return (
               <div
