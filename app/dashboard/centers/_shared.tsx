@@ -16,6 +16,7 @@ import { CancelClassMenu, CancelClassDialog } from "@/components/attendance/Canc
 import { formatTime12, formatTimeRange12, formatTimesIn12h } from "@/lib/timeFormat";
 import { getTeacherDisplayName } from "@/lib/teacherName";
 import { courseLabel } from "@/lib/course";
+import CourseCompletion, { readCourseInfo, canMarkCourseComplete } from "@/components/students/CourseCompletion";
 import { normAdmNo } from "@/lib/dedup";
 import { hasAdmissionNo, isActiveStudentStatus } from "@/lib/activeStudents";
 import { enforceSingleActiveCentre } from "@/services/student/singleCentre.service";
@@ -1903,6 +1904,9 @@ function StudentPreviewModal({ student, centerName, batchName, wing, onClose, on
   const [txs, setTxs]   = useState<Transaction[]>([]);
   const [err, setErr]   = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
+  // Bumped after "Mark Course Complete" to re-read the student (new course / graduated).
+  const [reloadKey, setReloadKey] = useState(0);
+  const [courseNote, setCourseNote] = useState("");
 
   useEffect(() => {
     let live = true;
@@ -1920,7 +1924,7 @@ function StudentPreviewModal({ student, centerName, batchName, wing, onClose, on
       }
     })();
     return () => { live = false; };
-  }, [student.uid]);
+  }, [student.uid, reloadKey]);
 
   // Escape closes just this preview (capture phase, so the centre modal underneath stays open).
   useEffect(() => {
@@ -2074,6 +2078,18 @@ function StudentPreviewModal({ student, centerName, batchName, wing, onClose, on
             {section("Academic", <>
               {row("Age", doc_ ? (ageOf(doc_) ? `${ageOf(doc_)} yrs` : "") : "")}
               {row("Course", course)}
+              {doc_ && (
+                <CourseCompletion
+                  uid={student.uid}
+                  studentName={student.name}
+                  info={readCourseInfo(doc_)}
+                  canEdit={canMarkCourseComplete(myRole)}
+                  by={{ uid: me?.uid ?? "", name: me?.displayName ?? me?.email ?? "", role: myRole ?? "" }}
+                  row={row}
+                  onCompleted={msg => { setCourseNote(msg); setReloadKey(k => k + 1); }}
+                />
+              )}
+              {courseNote && <div style={{ fontSize: 12, fontWeight: 600, color: "#15803d", padding: "3px 0" }}>✓ {courseNote}</div>}
               {row("Centre", centerName)}
               {row("Batch", batchName)}
             </>)}
@@ -3475,7 +3491,6 @@ function CenterCard({ center, batch, teachers, activeCount, onView, onEdit, onDe
     : cardBatches.length === 0 ? { name: DEFAULT_BATCH_NAME, days: rawC.daysOfWeek ?? [], start: rawC.startTime ?? "", end: rawC.endTime ?? "", teacherUid: center.teacherUid }
     : null;
   const shownTeacher = shown ? teachers.find(t => t.uid === shown.teacherUid) : undefined;
-  const shownTime = shown ? formatTimeRange12(shown.start, shown.end) : "";
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -3535,9 +3550,7 @@ function CenterCard({ center, batch, teachers, activeCount, onView, onEdit, onDe
             </span>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{shownTeacher ? getTeacherDisplayName(shownTeacher) : "Unassigned"}</span>
           </span>
-          <span style={{ color: "var(--color-text-secondary)" }}>
-            📅 {shown.days.join(", ") || "No days set"}{shownTime ? <> · ⏰ {shownTime}</> : null}
-          </span>
+          {/* Days & time are shown only inside the centre page — card face stays clean (both wings). */}
         </div>
       ) : (
         <div style={styles.cardMeta} title={cardBatches.map(b => b.name).filter(Boolean).join(", ") || undefined}>

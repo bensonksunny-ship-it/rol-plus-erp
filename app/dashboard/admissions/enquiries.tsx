@@ -38,8 +38,10 @@ const actionBtn: React.CSSProperties = {
   fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 5,
 };
 
-export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = false, canRestore = false }: {
+export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = false, canRestore = false, inModal = false }: {
   wing: string;
+  /** Inside the centred popup: controls stay pinned, only the lead list scrolls. */
+  inModal?: boolean;
   /** Wing leaders: may restore an application that was moved here. */
   canRestore?: boolean;
   /** Hand the lead to the full admission form. */
@@ -103,10 +105,10 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
     }
   }
 
-  return (
-    <div>
+  const controls = (
+    <>
       {/* Quick enquiry form */}
-      <div style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.07)", borderRadius: 18, padding: showForm ? 22 : "14px 20px", marginBottom: 16 }}>
+      <div style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.07)", borderRadius: 18, padding: showForm ? 22 : "14px 20px", marginBottom: inModal ? 12 : 16 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>Quick enquiry</div>
@@ -135,7 +137,7 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
       </div>
 
       {/* Filters */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: inModal ? 0 : 12 }}>
         <button style={pill(filter === "open")} onClick={() => setFilter("open")}>Open ({counts.new + counts.follow_up + counts.contacted})</button>
         <button style={pill(filter === "new")} onClick={() => setFilter("new")}>New ({counts.new})</button>
         {counts.follow_up > 0 && (
@@ -147,9 +149,13 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
       </div>
 
       {err && (
-        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "9px 13px", fontSize: 13, color: "#dc2626", marginBottom: 12 }}>{err}</div>
+        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "9px 13px", fontSize: 13, color: "#dc2626", marginBottom: inModal ? 0 : 12, marginTop: inModal ? 10 : 0 }}>{err}</div>
       )}
+    </>
+  );
 
+  const list = (
+    <>
       {/* Lead list */}
       {loading ? (
         <div style={{ padding: 30, textAlign: "center", fontSize: 13, color: "#9ca3af" }}>Loading enquiries…</div>
@@ -158,11 +164,11 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
           {items.length === 0 ? "No enquiries yet. Add one above or share the parent QR code." : "Nothing in this filter."}
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: inModal ? 12 : 10 }}>
           {shown.map(e => {
             const st = STATUS_STYLE[e.status] ?? STATUS_STYLE.new;
             return (
-              <div key={e.id} style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.07)", borderRadius: 14, padding: "14px 16px", display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+              <div key={e.id} style={{ background: "#fff", border: "1px solid rgba(0,0,0,0.07)", borderRadius: 14, padding: inModal ? "18px 20px" : "14px 16px", display: "flex", gap: inModal ? 18 : 14, alignItems: "center", flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 240px", minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 15, fontWeight: 800, color: "#111" }}>{e.studentName}</span>
@@ -222,6 +228,23 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
           })}
         </div>
       )}
+    </>
+  );
+
+  if (!inModal) return <div>{controls}{list}</div>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      {/* Pinned: Quick enquiry + filter tabs. With the form open it can
+          scroll on its own so the list never disappears. */}
+      <div style={{
+        flexShrink: 0, padding: "16px 24px 14px", borderBottom: "1px solid #eee",
+        ...(showForm ? { maxHeight: "50vh", overflowY: "auto" as const } : {}),
+      }}>
+        {controls}
+      </div>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 24 }}>
+        {list}
+      </div>
     </div>
   );
 }
@@ -254,10 +277,11 @@ function MovedApplicationInfo({ e }: { e: Enquiry }) {
 }
 
 /**
- * Right-hand slide-over holding the whole enquiry workflow (form, filters,
- * Mark contacted / Convert, enquiry QR). Opened from the "Enquiries +" header
- * button on /dashboard/admissions so the main page stays focused on
- * applications and screening.
+ * Centred popup holding the whole enquiry workflow (form, filters, Mark
+ * contacted / Convert, enquiry QR). Opened from the "Enquiries" header button
+ * on /dashboard/admissions, both wings. Title, Quick enquiry buttons and the
+ * filter tabs stay pinned; only the lead list scrolls. Closes on ✕, a click
+ * on the backdrop, or Escape.
  */
 export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr, canRestore }: {
   wing: string;
@@ -269,29 +293,36 @@ export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr, canRestore
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Keep the page behind still while the popup is open.
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
   }, [onClose]);
 
   return (
     <>
-      <style>{`@keyframes enqFade{from{opacity:0}to{opacity:1}}@keyframes enqSlide{from{transform:translateX(100%)}to{transform:translateX(0)}}`}</style>
-      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 900, animation: "enqFade 0.2s ease" }} />
-      <aside role="dialog" aria-label="Enquiries" style={{
-        position: "fixed", top: 0, right: 0, height: "100dvh", width: "min(600px, 100vw)", zIndex: 901,
-        background: "#faf9f7", display: "flex", flexDirection: "column", boxShadow: "-8px 0 32px rgba(0,0,0,0.18)",
-        animation: "enqSlide 0.25s cubic-bezier(0.4,0,0.2,1)",
+      <style>{`@keyframes enqFade{from{opacity:0}to{opacity:1}}@keyframes enqPop{from{opacity:0;transform:translateY(8px) scale(0.98)}to{opacity:1;transform:none}}`}</style>
+      <div onClick={onClose} style={{
+        position: "fixed", inset: 0, zIndex: 900, background: "rgba(0,0,0,0.4)",
+        backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+        animation: "enqFade 0.2s ease",
       }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #eee", background: "#fff", flexShrink: 0 }}>
-          <div>
-            <div style={{ fontSize: 17, fontWeight: 900, color: "#78350f" }}>Enquiries</div>
-            <div style={{ fontSize: 12, color: "#92400e", opacity: 0.8, marginTop: 2 }}>Leads from staff and the parent QR code</div>
+        <div role="dialog" aria-modal="true" aria-label="Enquiries" onClick={e => e.stopPropagation()} style={{
+          width: "100%", maxWidth: 896, maxHeight: "88vh", display: "flex", flexDirection: "column",
+          background: "#faf9f7", borderRadius: 16, overflow: "hidden",
+          boxShadow: "0 25px 60px rgba(0,0,0,0.28)", animation: "enqPop 0.22s cubic-bezier(0.4,0,0.2,1)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "16px 24px", borderBottom: "1px solid #eee", background: "#fff", flexShrink: 0 }}>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 900, color: "#78350f" }}>Enquiries</div>
+              <div style={{ fontSize: 12, color: "#92400e", opacity: 0.8, marginTop: 2 }}>Leads from staff and the parent QR code</div>
+            </div>
+            <button onClick={onClose} aria-label="Close" style={{ background: "#f3f4f6", border: "none", width: 34, height: 34, borderRadius: 999, fontSize: 16, cursor: "pointer", color: "#6b7280", lineHeight: 1 }}>✕</button>
           </div>
-          <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9ca3af", lineHeight: 1 }}>✕</button>
+          <EnquiriesPanel wing={wing} onConvert={onConvert} onShowQr={onShowQr} canRestore={canRestore} inModal />
         </div>
-        <div style={{ padding: 16, overflowY: "auto", flex: 1 }}>
-          <EnquiriesPanel wing={wing} onConvert={onConvert} onShowQr={onShowQr} canRestore={canRestore} />
-        </div>
-      </aside>
+      </div>
     </>
   );
 }

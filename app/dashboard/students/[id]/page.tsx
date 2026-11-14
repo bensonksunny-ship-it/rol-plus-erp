@@ -27,6 +27,7 @@ import { getScreeningByStudent } from "@/services/screening/screening.service";
 import type { ScreeningResult } from "@/types";
 import { effectiveBatches } from "@/lib/batches";
 import { DiagnosticCard } from "@/components/DiagnosticCard";
+import CourseCompletion, { readCourseInfo, canMarkCourseComplete, type CourseInfo } from "@/components/students/CourseCompletion";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
@@ -88,6 +89,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
   const [teacherOptions, setTeacherOptions] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading]           = useState(true);
   const [notFound, setNotFound]         = useState(false);
+  const [courseInfo, setCourseInfo]     = useState<CourseInfo | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -163,8 +165,9 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
         breakStartDate:   (s.breakStartDate   ?? null) as string | null,
         breakReason:      (s.breakReason ?? null) as string | null,
       });
+      setCourseInfo(readCourseInfo(s));
       setApplicationFields({
-        age:           (s.age           ?? "") as string,
+        age:          (s.age           ?? "") as string,
         dob:           (s.dob           ?? "") as string,
         parentName:    (s.parentName    ?? "") as string,
         workingStatus: (s.workingStatus ?? "") as string,
@@ -356,6 +359,10 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
                 applicationFields={applicationFields}
                 isAdmin={isAdmin}
                 onApplicationSaved={load}
+                courseInfo={courseInfo}
+                canComplete={canMarkCourseComplete(role) && (!isTeacherRole || isAllowed(student.centerId))}
+                completeBy={{ uid: user?.uid ?? "", name: user?.displayName ?? user?.email ?? "", role: role ?? "" }}
+                onCourseCompleted={msg => { load(); toast(msg, "success"); }}
               />
             )}
             {tab === "syllabus" && <StudentSyllabusContent studentId={student.id} hideBackBar viewOnly />}
@@ -452,8 +459,12 @@ function BackBar({ router }: { router: ReturnType<typeof useRouter> }) {
 
 // ─── Overview tab ──────────────────────────────────────────────────────────────
 
-function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSaved }: {
+function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSaved, courseInfo, canComplete, completeBy, onCourseCompleted }: {
   student: StudentRow; applicationFields: ApplicationFields | null; isAdmin: boolean; onApplicationSaved: () => void;
+  courseInfo: CourseInfo | null;
+  canComplete: boolean;
+  completeBy: { uid: string; name: string; role: string };
+  onCourseCompleted: (msg: string) => void;
 }) {
   const [centerDetailOpen, setCenterDetailOpen] = useState(false);
   const isSom = isSchoolOfMusic(s.wing);
@@ -481,6 +492,13 @@ function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSave
       <div style={{ display: "flex", flexDirection: "column" as const, gap: 8, marginBottom: 20 }}>
         <Row label="Instrument" value={s.instrument} />
         <Row label="Course"     value={s.course} />
+        {courseInfo && (
+          <CourseCompletion
+            uid={s.id} studentName={s.name} info={courseInfo} canEdit={canComplete} by={completeBy}
+            row={(label, value) => <Row key={label} label={label} value={value} />}
+            onCompleted={onCourseCompleted}
+          />
+        )}
         {!isSom && (
           <Row label="Class Type" value={
             <span style={{ ...p.badge, ...(s.classType === "personal" ? { background: "#fef9c3", color: "#92400e" } : { background: "#dcfce7", color: "#166534" }) }}>

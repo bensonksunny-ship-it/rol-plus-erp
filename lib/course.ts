@@ -44,6 +44,15 @@ export function nextCourseLevel(level: string): CourseLevel | null {
 /** One entry in a student's `levelHistory`. */
 export interface LevelHistoryEntry { from: string; to: string; at: string; by: string; byName: string }
 
+/**
+ * One finished course in a student's `completedCourses`. `completedOn` is the
+ * staff-entered date (YYYY-MM-DD); `at` is when it was recorded.
+ */
+export interface CourseCompletion {
+  course: string; level: string; completedOn: string; next: string | null;
+  at: string; by: string; byName: string;
+}
+
 /** "Promoted to Intermediate on 30 Sep 2026" / "Level set to Introduction on …". */
 export function levelHistoryText(h: LevelHistoryEntry): string {
   const rank = (l: string) => (COURSE_LEVELS as readonly string[]).indexOf(l);

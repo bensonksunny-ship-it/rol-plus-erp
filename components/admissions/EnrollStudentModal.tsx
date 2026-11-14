@@ -16,11 +16,13 @@ import { wingOf } from "@/lib/wing";
 import { explicitBatches, batchSchedule } from "@/lib/batches";
 import { canEnterAdmissionNo, cleanAdmissionNo } from "@/lib/admissionNumber";
 import { readScreeningMarks } from "@/lib/screeningQuestions";
-import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening } from "@/lib/generateAdmissionCard";
+import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening, admissionDateYMD } from "@/lib/generateAdmissionCard";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { enrollApplicant } from "@/services/screening/enroll.service";
 import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
+import EnrollmentConfirmationModal from "@/components/admissions/EnrollmentConfirmationModal";
+import { formatCourse } from "@/lib/course";
 import { AdmissionFinalPhase } from "@/components/admissions/AdmissionProgress";
 import { getWingSyllabus } from "@/services/lesson/lesson.service";
 import type { CenterBatch } from "@/types";
@@ -35,10 +37,6 @@ interface CentreOpt { id: string; name: string; monthlyFee?: number; batches: Ce
 type Screening = Record<string, unknown> & { id: string };
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
-function todayYMD(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 /** Fast Track slab → suggested syllabus level (staff can override). */
 function levelFromSlab(track: string): SyllabusLevel {
   if (track.includes("Zeta")) return "advanced";
@@ -155,13 +153,17 @@ export default function EnrollStudentModal({
     if (!feeTouched && centre?.monthlyFee) setFee(String(centre.monthlyFee));
   }, [centre, feeTouched]);
 
-  const [startDate, setStartDate] = useState(todayYMD());
+  // Date of Admission — prefilled from a date edited earlier (card / completion), else today.
+  const [startDate, setStartDate] = useState(() => admissionDateYMD(applicationProp));
   const [admNo, setAdmNo] = useState(() => str(application.admissionNumber));
   const admNoRef = useRef<HTMLInputElement>(null);
   const admNoMissing = admNo.trim() === "";
 
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  // "Confirm & Complete Enrollment" first opens a review of the key details;
+  // only its "Confirm Enrollment" writes the enrolment.
+  const [reviewing, setReviewing] = useState(false);
 
   const missing = [
     !screening && "screening",
@@ -171,7 +173,7 @@ export default function EnrollStudentModal({
     needsBatch && !batchId && "batch",
     !level && "syllabus level",
     !(Number(fee) > 0) && "monthly fee",
-    !startDate && "start date",
+    !startDate && "admission date",
     admNo.trim().length < 4 && "admission number",
   ].filter(Boolean) as string[];
 
@@ -188,9 +190,10 @@ export default function EnrollStudentModal({
       });
       // The admission card is a convenience — never fail the enrolment over it.
       await generateAdmissionCardPDF(
-        { ...application, id: admissionId, admissionNumber: result.admissionNo },
+        { ...application, id: admissionId, admissionNumber: result.admissionNo, admissionDate: startDate },
         fastTrackCardScreening(screening, instrument),
       ).catch(e => console.error("[EnrollStudentModal] admission card PDF:", e));
+      setReviewing(false);
       onEnrolled({ uid: result.uid, name, centreName: centre?.name ?? "", merged: result.merged });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Enrolment failed.");
@@ -200,15 +203,35 @@ export default function EnrollStudentModal({
 
   const marks = screening ? readScreeningMarks(screening) : null;
 
+  // The course saved on the application wins (enroll.service keeps it);
+  // otherwise it's the level + instrument picked here.
+  const courseName = str(application.course).trim()
+    || formatCourse(level ? SYLLABUS_LEVEL_LABELS[level] : "", SYLLABUS_INSTRUMENT_LABELS[instrument]);
+
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {reviewing && (
+        <EnrollmentConfirmationModal
+          summary={{
+            name,
+            admissionNo: admNo.trim(),
+            centreName: centre?.name ?? "",
+            phone: str(application.phone).trim(),
+            course: courseName,
+          }}
+          saving={saving}
+          error={err}
+          onConfirm={confirm}
+          onCancel={() => { setReviewing(false); setErr(""); }}
+        />
+      )}
       {showFee && (
         <AdmissionFeeModal
           application={{ ...application, id: admissionId }}
           onClose={() => setShowFee(false)}
           onPaid={fee => setApplication(a => ({ ...a, ...fee }))}
           onDownloadCard={rec => generateAdmissionCardPDF(
-            { ...rec, id: admissionId, admissionNumber: admNo.trim() || str(rec.admissionNumber) },
+            { ...rec, id: admissionId, admissionNumber: admNo.trim() || str(rec.admissionNumber), admissionDate: startDate },
             screening ? fastTrackCardScreening(screening, instrument) : null,
           )}
         />
@@ -315,9 +338,9 @@ export default function EnrollStudentModal({
           <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>Prepaid, billed monthly</div>
         </div>
         <div>
-          <label style={labelCss}>Start date *</label>
+          <label style={labelCss}>Date of admission *</label>
           <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={inputCss} />
-          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>First class — used as the admission date</div>
+          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>Printed on the admission card · change it if the admission was delayed</div>
         </div>
         <div>
           <label style={labelCss}>Admission number *</label>
@@ -341,7 +364,7 @@ export default function EnrollStudentModal({
           <button onClick={onClose} disabled={saving} style={{ padding: "10px 18px", borderRadius: 10, border: "1px solid #d1d5db", background: "#fff", color: "#374151", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
             Cancel
           </button>
-          <button onClick={confirm} disabled={!!missing.length || saving} style={{
+          <button onClick={() => { if (!missing.length && !saving) { setErr(""); setReviewing(true); } }} disabled={!!missing.length || saving} style={{
             padding: "10px 20px", borderRadius: 10, border: "none", fontSize: 13, fontWeight: 800,
             background: missing.length || saving ? "#e5e7eb" : "#065f46", color: missing.length || saving ? "#9ca3af" : "#fff",
             cursor: missing.length || saving ? "not-allowed" : "pointer",

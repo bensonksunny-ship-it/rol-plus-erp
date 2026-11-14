@@ -228,6 +228,7 @@ export async function enrollApplicant(i: EnrollInput): Promise<EnrollResult> {
       ...(match ? { mergedIntoExisting: true, mergeReasons: match.reasons } : {}),
       enrolledStudentId: uid,
       enrolledAt:        new Date().toISOString(),
+      ...(i.startDate ? { admissionDate: i.startDate } : {}),
       enrolledBy:        i.enrolledBy,
       enrolledCentreId:  i.centreId,
       enrolledBatchId:   i.batch?.id ?? null,

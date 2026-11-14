@@ -23,7 +23,7 @@ import {
 } from "@/services/screening/screening.service";
 import { AdmissionFormContent, OptionGroup, MultiOptionGroup, INSTRUMENT_OPTIONS } from "./admission-form";
 import { COURSE_LEVELS, formatCourse, isCourseLevel } from "@/lib/course";
-import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening } from "@/lib/generateAdmissionCard";
+import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening, admissionDateYMD } from "@/lib/generateAdmissionCard";
 import { MAX_TOTAL_MARKS, gradeForMarks, readScreeningMarks } from "@/lib/screeningQuestions";
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
 import { PhotoCaptureModal } from "./photo-capture-modal";
@@ -760,6 +760,17 @@ export function AdmissionsList({
   const [enrollCentre,     setEnrollCentre]     = useState("");
   const [enrolling,        setEnrolling]        = useState(false);
   const [enrollErr,        setEnrollErr]        = useState("");
+  // Date of Admission printed on the card — editable so a delayed admission
+  // still carries the right date. Saved on the application as `admissionDate`.
+  const [completingDate,   setCompletingDate]   = useState("");
+  const completingId = completing ? str(completing.admission.id) : "";
+  useEffect(() => {
+    if (completing) setCompletingDate(admissionDateYMD(completing.admission));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [completingId]);
+  const [cardDateFor,      setCardDateFor]      = useState<Record<string, unknown> | null>(null);
+  const [cardDate,         setCardDate]         = useState("");
+  const [cardDateSaving,   setCardDateSaving]   = useState(false);
   const { toasts, toast, remove: removeToast } = useToast();
 
   // Click / tap outside the expanded applicant detail card — or Escape — closes
@@ -768,7 +779,7 @@ export function AdmissionsList({
   // those own the click / Escape, and dismissing them must not also drop the
   // applicant underneath. Clicks on the applicant cards are left to their own
   // onClick (select / toggle), and clicks inside any dialog are ignored.
-  const overlayOpen = !!(editing || deleteId || photoFor || completing || showForm || showChoice || showQr || enquiryFor);
+  const overlayOpen = !!(editing || deleteId || photoFor || completing || showForm || showChoice || showQr || enquiryFor || cardDateFor);
   useEffect(() => {
     if (!selectedId || overlayOpen) return;
     function onPointer(e: MouseEvent | TouchEvent) {
@@ -1043,14 +1054,30 @@ export function AdmissionsList({
     return ft ? fastTrackCardScreening(ft, cardInstrument(admission.instrumentsToLearn)) : null;
   }
 
-  async function handleRedownload(admission: Record<string, unknown>) {
-    const id = str(admission.id);
+  /** Download card / form → first confirm (or edit) the Date of Admission. */
+  function handleRedownload(admission: Record<string, unknown>) {
+    setCardDate(admissionDateYMD(admission));
+    setCardDateFor(admission);
+  }
+
+  async function downloadCardWithDate() {
+    if (!cardDateFor || !cardDate || cardDateSaving) return;
+    const id = str(cardDateFor.id);
+    const updated = { ...cardDateFor, admissionDate: cardDate };
+    setCardDateSaving(true);
     setPdfLoading(id);
     try {
-      await generateAdmissionCardPDF(admission, await cardScreening(admission));
+      if (str(cardDateFor.admissionDate) !== cardDate) {
+        await updateAdmission(id, { admissionDate: cardDate });
+        setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, admissionDate: cardDate } : a));
+        setSelected(sel => sel && str(sel.id) === id ? { ...sel, admissionDate: cardDate } : sel);
+      }
+      await generateAdmissionCardPDF(updated, await cardScreening(updated));
+      setCardDateFor(null);
     } catch (err) {
       console.error("PDF generation failed:", err);
     } finally {
+      setCardDateSaving(false);
       setPdfLoading(null);
     }
   }
@@ -1060,8 +1087,9 @@ export function AdmissionsList({
     setCompletingSaving("saving");
     try {
       const id      = str(completing.admission.id);
-      const updated = { ...completing.admission, admissionNumber: completingAdmNo, admissionNoManual: true };
-      await updateAdmission(id, { admissionNumber: completingAdmNo, admissionNoManual: true });
+      const date    = completingDate || admissionDateYMD(completing.admission);
+      const updated = { ...completing.admission, admissionNumber: completingAdmNo, admissionNoManual: true, admissionDate: date };
+      await updateAdmission(id, { admissionNumber: completingAdmNo, admissionNoManual: true, admissionDate: date });
       setAdmissions(prev => prev.map(a => str(a.id) === id ? updated : a));
       setCompletingSaving("downloading");
       await generateAdmissionCardPDF(updated, completing.screening);
@@ -1121,6 +1149,9 @@ export function AdmissionsList({
       }
       await deleteAdmission(str(adm.id));
       setAdmissions(prev => prev.filter(a => str(a.id) !== str(adm.id)));
+      // Enrolment done → the admission card downloads to this device. Never fail the enrolment over it.
+      await generateAdmissionCardPDF(adm, completing.screening)
+        .catch(e => console.error("Admission card PDF after enrolment:", e));
       closeCompleting();
       toast(match
         ? "Existing profile detected — enrollment completed & updated information merged into Registry."
@@ -1264,6 +1295,30 @@ export function AdmissionsList({
         </div>
       )}
 
+      {/* ── Date of Admission check before a card / form download ── */}
+      {cardDateFor && (
+        <div onClick={cardDateSaving ? undefined : () => setCardDateFor(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 1200, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div role="dialog" aria-modal="true" aria-label="Date of admission" onClick={e => e.stopPropagation()}
+            style={{ background: "#fff", borderRadius: 16, width: "100%", maxWidth: 380, padding: 22, boxShadow: "0 24px 64px rgba(0,0,0,0.25)", boxSizing: "border-box" as const }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#111" }}>📄 {str(cardDateFor.admissionNumber) ? "Admission Card" : "Admission Form"}</div>
+            <div style={{ fontSize: 12.5, color: "#6b7280", marginTop: 3 }}>{str(cardDateFor.fullName)}</div>
+            <label style={{ fontSize: 13, fontWeight: 700, color: "#374151", display: "block", margin: "16px 0 8px" }}>Date of Admission</label>
+            <input type="date" value={cardDate} max={admissionDateYMD({})} autoFocus
+              onChange={e => setCardDate(e.target.value)}
+              style={{ width: "100%", boxSizing: "border-box" as const, padding: "10px 14px", borderRadius: 10, border: "1px solid #d1d5db", fontSize: 14, color: "#111", fontFamily: "inherit" }} />
+            <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 6 }}>Change it if the admission was delayed · saved for next time</div>
+            <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+              <button onClick={() => setCardDateFor(null)} disabled={cardDateSaving} style={{ ...s.secondaryBtn, flex: 1 }}>Cancel</button>
+              <button onClick={downloadCardWithDate} disabled={!cardDate || cardDateSaving}
+                style={{ ...s.primaryBtn, flex: 2, opacity: cardDate && !cardDateSaving ? 1 : 0.5, cursor: cardDate && !cardDateSaving ? "pointer" : "not-allowed" }}>
+                {cardDateSaving ? "Preparing PDF…" : "Download PDF"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Complete Admission modal (3 phases) ── */}
       {completing && (
         <div style={{ position: "fixed", inset: 0, zIndex: 400, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
@@ -1323,6 +1378,13 @@ export function AdmissionsList({
                     <span style={{ fontSize: 11, color: "#d97706" }}>{11 - completingAdmNo.length} more needed</span>
                   )}
                 </div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: "#374151", display: "block", margin: "16px 0 8px" }}>
+                  Date of Admission
+                </label>
+                <input type="date" value={completingDate} max={admissionDateYMD({})}
+                  onChange={e => setCompletingDate(e.target.value)}
+                  style={{ width: "100%", boxSizing: "border-box" as const, padding: "10px 14px", borderRadius: 10, border: "1px solid #d1d5db", fontSize: 14, color: "#111", fontFamily: "inherit" }} />
+                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 6 }}>Printed on the admission card · change it if the admission was delayed</div>
               </div>
               <div style={{ padding: "0 24px 20px", display: "flex", gap: 10 }}>
                 <button onClick={closeCompleting} disabled={!!completingSaving} style={{ ...s.secondaryBtn, flex: 1 }}>Cancel</button>
@@ -1923,7 +1985,7 @@ export function AdmissionsList({
             setAdmissions(prev => prev.map(a => str(a.id) === id ? { ...a, ...fee } : a));
             setSelected(sel => sel && str(sel.id) === id ? { ...sel, ...fee } : sel);
           }}
-          onDownloadCard={rec => handleRedownload(rec)}
+          onDownloadCard={async rec => handleRedownload(rec)}
         />
       )}
 

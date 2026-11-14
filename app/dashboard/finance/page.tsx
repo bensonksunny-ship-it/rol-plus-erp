@@ -502,8 +502,19 @@ function FinanceContent() {
     const pendingBal      = overdueStudents.reduce((acc, s) => acc + s.balance, 0);
     const activeStudents  = students.filter(s => s.rosterActive);
     const activeCount     = activeStudents.length;
-    const paidActiveCount = activeStudents.filter(s => paidMap.has(s.uid)).length;
-    const collectionPct   = activeCount > 0 ? Math.round((paidActiveCount / activeCount) * 100) : 0;
+    // Collection = paid ÷ students actually billed this month (a due raised for
+    // the selected month). Not-yet-billed joiners, advance payers and fully
+    // waived (Un-due) students are left out of both sides. Both wings.
+    const scopeUids = new Set(students.map(s => s.uid));
+    let billedCount = 0, paidBilledCount = 0;
+    dueSettlements.forEach(d => {
+      if (d.billingMonth !== selectedMonth || !scopeUids.has(d.studentUid)) return;
+      if (d.dueAmount <= 0) return;                     // waived in full
+      billedCount++;
+      if (d.state === "paid") paidBilledCount++;
+    });
+    const paidActiveCount = paidBilledCount;
+    const collectionPct   = billedCount > 0 ? Math.round((paidBilledCount / billedCount) * 100) : 0;
     const totalEstFee     = students.reduce((acc, s) => acc + s.estimatedFee, 0);
     const groupCount      = students.filter(s => s.classType === "group").length;
     const personalCount   = students.filter(s => s.classType === "personal").length;
@@ -520,8 +531,8 @@ function FinanceContent() {
     // students no longer on the list, so the breakdown always adds up to `total`.
     const admissionCollected = monthTx.filter(t => t.type === "admission_fee").reduce((s, t) => s + (t.amount ?? 0), 0);
     const otherCollected     = Math.max(0, total - prepayCollected - postpayCollected - admissionCollected);
-    return { total, todayAmt, admissionCollected, otherCollected, pendingBal, activeCount, paidActiveCount, collectionPct, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
-  }, [scopeTransactions, scopeStudents, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap]);
+    return { total, todayAmt, admissionCollected, otherCollected, pendingBal, activeCount, paidActiveCount, billedCount, collectionPct, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
+  }, [scopeTransactions, scopeStudents, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap, dueSettlements]);
 
   // ── Last tx per student (scoped to selected month) ───────────────────────────
   const lastTxMap = useMemo(() => {
@@ -948,7 +959,7 @@ function FinanceContent() {
       const q = studentSearch.toLowerCase();
       list = list.filter(s =>
         s.name.toLowerCase().includes(q) ||
-        s.studentID.toLowerCase().includes(q)
+        (s.admissionNo !== "—" && s.admissionNo.toLowerCase().includes(q))
       );
     }
     return [...list].sort((a, b) => {
@@ -1248,7 +1259,7 @@ function FinanceContent() {
           label="Collection"
           value={loading ? "…" : `${summary.collectionPct}%`}
           accent="#2563eb" icon="📈"
-          hint={loading ? undefined : `${summary.paidActiveCount}/${summary.activeCount} paid`}
+          hint={loading ? undefined : summary.billedCount > 0 ? `${summary.paidActiveCount}/${summary.billedCount} due paid` : "No dues raised"}
           progress={loading ? undefined : summary.collectionPct}
         />
         <SummaryCard
@@ -1446,7 +1457,7 @@ function FinanceContent() {
                               )}
                             </div>
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
-                              {isMobile ? `${s.centerName} · ${s.studentID}` : s.studentID}
+                              {[isMobile ? s.centerName : "", s.admissionNo !== "—" ? s.admissionNo : ""].filter(Boolean).join(" · ")}
                             </div>
                             {!(isSom || s.billingMode === "prepay") && <button
                               onClick={(e) => { e.stopPropagation(); setAttPopupUid(s.uid); }}
@@ -1539,37 +1550,47 @@ function FinanceContent() {
                           {/* Primary action */}
                           <td style={{ ...st.td, whiteSpace: "nowrap" as const }}>
                             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                              <button
-                                onClick={() => { closePanel(); setPayUid(s.uid); }}
-                                style={{
-                                  ...st.actionBtn,
-                                  ...(payUid === s.uid ? st.actionBtnActive : {}),
-                                }}
-                              >
-                                💳 Pay
-                              </button>
-                              {isSom && (() => {
-                                const paid     = paidMap.has(s.uid);
-                                const isDue    = feeDueMap.has(s.uid);
-                                const noFee    = s.monthlyFee <= 0;
-                                const busy     = markingDueUid === s.uid;
-                                const disabled = paid || isDue || noFee || busy || feeDueSubmitting;
-                                const why = paid ? `Paid · ${fmtMonth(selectedMonth)}`
-                                  : isDue ? `Due · ${fmtMonth(selectedMonth)}`
-                                  : noFee ? "Set fee first"
-                                  : `Mark ${fmtINR(s.monthlyFee)} due · ${fmtMonth(selectedMonth)}`;
+                              {/* Pay only while something is owed (a due raised/revised or a
+                                  balance). Once the payment is recorded it hides until a new
+                                  due appears. An invisible twin keeps the column width so rows
+                                  don't shift; advance money goes in via ⋯ → Deposit. Both wings. */}
+                              {(() => {
+                                const settled = !isDueRow;
                                 return (
-                                  <button onClick={() => quickMarkFeeDue(s)} disabled={disabled} title={why}
-                                    style={{ ...st.actionBtn, background: "#fff1f2", color: "#be123c", border: "1px solid #fecdd3",
-                                             opacity: disabled ? 0.45 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
-                                    {busy ? "Marking…" : isDue ? "✓ Due" : "⚠️ Mark Due"}
+                                  <button
+                                    onClick={() => { closePanel(); setPayUid(s.uid); }}
+                                    disabled={settled}
+                                    aria-hidden={settled || undefined}
+                                    tabIndex={settled ? -1 : undefined}
+                                    style={{
+                                      ...st.actionBtn,
+                                      ...(payUid === s.uid ? st.actionBtnActive : {}),
+                                      ...(settled ? { visibility: "hidden" as const } : {}),
+                                    }}
+                                  >
+                                    💳 Pay
                                   </button>
                                 );
                               })()}
+                              {/* Mark Due lives in ⋮ (SoM only) so the row stays clean —
+                                  Pay is the only visible action, and only while owed. */}
                               <RowActionsMenu
                                 onAdjust={() => openPanel(s.uid, "adjust", s)}
                                 onDeposit={() => openPanel(s.uid, "deposit", s)}
                                 onHistory={() => openPanel(s.uid, "history", s)}
+                                markDue={isSom ? (() => {
+                                  const busy = markingDueUid === s.uid || feeDueSubmitting;
+                                  const noFee = s.monthlyFee <= 0;
+                                  return {
+                                    // Already owed → nothing to mark; paid → allow marking again (revised due).
+                                    disabled: busy || noFee || isDueRow,
+                                    label: busy ? "Marking…"
+                                      : noFee ? "Mark Due · set fee first"
+                                      : isDueRow ? "✓ Already due"
+                                      : `${paidMap.has(s.uid) || feeDueMap.has(s.uid) ? "Mark Due again" : "Mark Due"} · ${fmtINR(s.monthlyFee)}`,
+                                    onClick: () => quickMarkFeeDue(s),
+                                  };
+                                })() : undefined}
                               />
                               {isOpen && (
                                 <button onClick={closePanel} style={st.closePanelBtn} title="Close">✕</button>
@@ -2090,8 +2111,10 @@ function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThis
 // Keeps "Payment" as the single obvious action on each row and tucks the rarely
 // used money operations behind ⋮, rather than showing four buttons per student.
 
-function RowActionsMenu({ onAdjust, onDeposit, onHistory }: {
+function RowActionsMenu({ onAdjust, onDeposit, onHistory, markDue }: {
   onAdjust: () => void; onDeposit: () => void; onHistory: () => void;
+  /** School of Music: raise (or re-raise) this month's fee due. */
+  markDue?: { label: string; disabled: boolean; onClick: () => void };
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -2120,6 +2143,15 @@ function RowActionsMenu({ onAdjust, onDeposit, onHistory }: {
           <button onClick={() => { setOpen(false); onHistory(); }} style={st.rowMenuItem}>🧾 History</button>
           <button onClick={() => { setOpen(false); onAdjust();  }} style={st.rowMenuItem}>✏️ Adjust</button>
           <button onClick={() => { setOpen(false); onDeposit(); }} style={st.rowMenuItem}>⬆ Deposit</button>
+          {markDue && (
+            <button
+              onClick={() => { if (markDue.disabled) return; setOpen(false); markDue.onClick(); }}
+              disabled={markDue.disabled}
+              style={{ ...st.rowMenuItem, color: "#be123c", opacity: markDue.disabled ? 0.45 : 1, cursor: markDue.disabled ? "not-allowed" : "pointer" }}
+            >
+              ⚠️ {markDue.label}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -2232,8 +2264,8 @@ function TxTable({
   isMobile?:    boolean;
 }) {
   const studentMap = useMemo(() => {
-    const m = new Map<string, { name: string; studentID: string }>();
-    students.forEach(s => m.set(s.uid, { name: s.name, studentID: s.studentID }));
+    const m = new Map<string, { name: string; admissionNo: string }>();
+    students.forEach(s => m.set(s.uid, { name: s.name, admissionNo: s.admissionNo !== "—" ? s.admissionNo : "" }));
     return m;
   }, [students]);
 
@@ -2349,9 +2381,9 @@ function TxTable({
                         {tx.reference && <span style={{ fontSize: 11, color: "#9ca3af" }}>Ref {tx.reference}</span>}
                       </div>
                     )}
-                    {student?.studentID && (
+                    {student?.admissionNo && (
                       <div style={{ marginTop: 2 }}>
-                        <span style={st.studentIDChip}>{student.studentID}</span>
+                        <span style={st.studentIDChip}>{student.admissionNo}</span>
                       </div>
                     )}
                     {isMobile && <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{centerName}</div>}

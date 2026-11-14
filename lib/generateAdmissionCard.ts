@@ -38,6 +38,22 @@ export function fastTrackCardScreening(sc: Record<string, unknown>, instrument: 
   };
 }
 
+/** Local today as YYYY-MM-DD. */
+export function todayYMD(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * The Date of Admission printed on the card / request form (YYYY-MM-DD):
+ * the staff-edited `admissionDate` on the application, else today. Lets a
+ * delayed admission still carry the right date.
+ */
+export function admissionDateYMD(admission: Record<string, unknown>): string {
+  const v = admission.admissionDate;
+  return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : todayYMD();
+}
+
 export function toAdmissionNumber(id: string): string {
   let n = 0;
   for (const ch of id) n = Math.floor((n * 31 + ch.charCodeAt(0)) % 100000000000);
@@ -77,12 +93,23 @@ const COL_GAP  = 8;
 const COL_W    = (CONTENT_W - COL_GAP) / 2;     // 87
 const COL2_X   = MARGIN + COL_W + COL_GAP;
 const LABEL_W  = 33;
-const FONT_SZ  = 7.5;
-const LINE_H   = 3.6;   // wrapped-line spacing
-const ROW_PAD  = 1.9;   // extra space under each row
-const SECTION_GAP = 4;  // space above each section header
 const FOOTER_Y = 282;
 const BOTTOM_LIMIT = FOOTER_Y - 6;
+
+// ─── Density ──────────────────────────────────────────────────────────────────
+// The form must always be ONE A4 page. It is drawn at the roomiest density
+// first; if anything spills onto a second page it is redrawn tighter.
+const DENSITIES = [
+  { FONT_SZ: 7.5, LINE_H: 3.6, ROW_PAD: 1.9, SECTION_GAP: 4,   BAND_H: 7,   BAND_AFTER: 4.5, PHOTO_W: 28, PHOTO_H: 36, RECEIPT_H: 38, SEAL_R: 15, SEAL_ROW_H: 36, shortAck: false },
+  { FONT_SZ: 7.3, LINE_H: 3.3, ROW_PAD: 1.2, SECTION_GAP: 2.5, BAND_H: 6,   BAND_AFTER: 4,   PHOTO_W: 25, PHOTO_H: 32, RECEIPT_H: 34, SEAL_R: 12, SEAL_ROW_H: 30, shortAck: false },
+  { FONT_SZ: 7,   LINE_H: 3.1, ROW_PAD: 0.8, SECTION_GAP: 1.5, BAND_H: 5.5, BAND_AFTER: 3.8, PHOTO_W: 22, PHOTO_H: 28, RECEIPT_H: 34, SEAL_R: 11, SEAL_ROW_H: 27, shortAck: true  },
+  // Last step: very long free-text answers are capped at two lines ("…").
+  { FONT_SZ: 6.6, LINE_H: 2.8, ROW_PAD: 0.6, SECTION_GAP: 1,   BAND_H: 5,   BAND_AFTER: 3.5, PHOTO_W: 20, PHOTO_H: 26, RECEIPT_H: 31, SEAL_R: 10, SEAL_ROW_H: 24, shortAck: true, maxLines: 2 },
+] as const;
+type Density = (typeof DENSITIES)[number] & { maxLines?: number };
+let D: Density = DENSITIES[0];
+/** Set by ensureSpace when content would run past the page; triggers a tighter redraw. */
+let overflowed = false;
 
 type KV = [label: string, value: string];
 
@@ -91,39 +118,41 @@ function dash(v: string): string { return v && v.trim() ? v.trim() : "—"; }
 
 // Section header — full content-width band, returns the y to start the rows at.
 function sh(doc: jsPDF, label: string, y: number): number {
-  y += SECTION_GAP;
+  y += D.SECTION_GAP;
   fill(doc, CLR.primarySoft);
-  doc.rect(MARGIN, y, CONTENT_W, 7, "F");
+  doc.rect(MARGIN, y, CONTENT_W, D.BAND_H, "F");
   fill(doc, CLR.primary);
-  doc.rect(MARGIN, y, 1.2, 7, "F");               // accent strip
+  doc.rect(MARGIN, y, 1.2, D.BAND_H, "F");        // accent strip
   color(doc, CLR.primary);
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(FONT_SZ);
-  doc.text(label.toUpperCase(), MARGIN + 3.5, y + 4.8);
-  return y + 7 + 4.5;                              // first row baseline
+  doc.setFontSize(D.FONT_SZ);
+  doc.text(label.toUpperCase(), MARGIN + 3.5, y + D.BAND_H / 2 + 1.3);
+  return y + D.BAND_H + D.BAND_AFTER;              // first row baseline
 }
 
 /** Lines for one label/value cell inside a column of width `w`. */
 function cellLines(doc: jsPDF, [label, value]: KV, w: number): { l: string[]; v: string[] } {
-  doc.setFontSize(FONT_SZ);
+  doc.setFontSize(D.FONT_SZ);
   doc.setFont("helvetica", "bold");
   const l = doc.splitTextToSize(label, LABEL_W - 2) as string[];
   doc.setFont("helvetica", "normal");
-  const v = doc.splitTextToSize(dash(value), w - LABEL_W) as string[];
+  let v = doc.splitTextToSize(dash(value), w - LABEL_W) as string[];
+  const cap = D.maxLines ?? 0;
+  if (cap && v.length > cap) v = [...v.slice(0, cap - 1), v[cap - 1].replace(/s*S*$/, "") + "…"];
   return { l, v };
 }
 
 function drawCell(doc: jsPDF, cell: { l: string[]; v: string[] }, x: number, y: number) {
-  doc.setFontSize(FONT_SZ);
+  doc.setFontSize(D.FONT_SZ);
   doc.setFont("helvetica", "bold");
   color(doc, CLR.gray500);
-  doc.text(cell.l, x, y, { lineHeightFactor: LINE_H / (FONT_SZ * 0.3528) });
+  doc.text(cell.l, x, y, { lineHeightFactor: D.LINE_H / (D.FONT_SZ * 0.3528) });
   doc.setFont("helvetica", "normal");
   color(doc, CLR.gray900);
-  doc.text(cell.v, x + LABEL_W, y, { lineHeightFactor: LINE_H / (FONT_SZ * 0.3528) });
+  doc.text(cell.v, x + LABEL_W, y, { lineHeightFactor: D.LINE_H / (D.FONT_SZ * 0.3528) });
 }
 
-const rowHeight = (lines: number) => Math.max(1, lines) * LINE_H + ROW_PAD;
+const rowHeight = (lines: number) => Math.max(1, lines) * D.LINE_H + D.ROW_PAD;
 
 /**
  * Two-column key/value grid. Cells fill left column then right column row by
@@ -158,6 +187,7 @@ function grid1(doc: jsPDF, rows: KV[], x: number, y: number, w: number): number 
 /** Start a new page when the next `h` mm would run into the footer. */
 function ensureSpace(doc: jsPDF, y: number, h: number): number {
   if (y + h <= BOTTOM_LIMIT) return y;
+  overflowed = true;   // the caller redraws at a tighter density
   doc.addPage();
   return MARGIN + 6;
 }
@@ -165,7 +195,7 @@ function ensureSpace(doc: jsPDF, y: number, h: number): number {
 /** Rounded chip sized to its text; returns the x after it (+ gap). */
 function chip(doc: jsPDF, text: string, x: number, y: number, bg: [number, number, number], fg: [number, number, number]): number {
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(FONT_SZ);
+  doc.setFontSize(D.FONT_SZ);
   const w = doc.getTextWidth(text) + 5;
   fill(doc, bg);
   doc.roundedRect(x, y, w, 7, 1.5, 1.5, "F");
@@ -213,6 +243,30 @@ export async function generateAdmissionCardPDF(
   admission: Record<string, unknown>,
   screening: Record<string, unknown> | null
 ) {
+  // One A4 page, always: roomiest density that fits wins.
+  let doc: jsPDF | null = null;
+  for (const density of DENSITIES) {
+    D = density;
+    overflowed = false;
+    doc = drawAdmissionDoc(admission, screening);
+    if (!overflowed) break;
+  }
+  D = DENSITIES[0];
+  // Last resort (extremely long free-text answers): keep page 1 only rather
+  // than hand out a two-page form.
+  while (doc!.getNumberOfPages() > 1) doc!.deletePage(doc!.getNumberOfPages());
+
+  const admNo     = s(admission.admissionNumber) || "";
+  const name      = s(admission.fullName).replace(/\s+/g, "-") || "Student";
+  const fileBase  = admNo ? "Admission-Card" : "Admission-Request-Form";
+  const fileSuffix = admNo ? `-${admNo}` : "";
+  doc!.save(`${fileBase}-${name}${fileSuffix}.pdf`);
+}
+
+function drawAdmissionDoc(
+  admission: Record<string, unknown>,
+  screening: Record<string, unknown> | null,
+): jsPDF {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const W = PAGE_W;
   const M = MARGIN;
@@ -253,14 +307,14 @@ export async function generateAdmissionCardPDF(
   doc.setFontSize(7.5);
   color(doc, CLR.gray500);
   doc.text(
-    new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" }),
+    `Date of Admission:  ${new Date(`${admissionDateYMD(admission)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}`,
     W - M, 32.5, { align: "right" }
   );
 
   // ── PHOTO + PERSONAL INFO ─────────────────────────────────────────────────
   // Content starts at y = 38 (2 mm gap after bands)
   let y = 38;
-  const PHOTO_W = 28, PHOTO_H = 36;
+  const PHOTO_W = D.PHOTO_W, PHOTO_H = D.PHOTO_H;
 
   stroke(doc, CLR.gray300);
   doc.setLineWidth(0.3);
@@ -289,7 +343,7 @@ export async function generateAdmissionCardPDF(
     ["Working Status:",    s(admission.workingStatus)],
   ], IX, y + 14, PAGE_W - MARGIN - IX);
 
-  y = Math.max(y + PHOTO_H, ry - ROW_PAD) + 1;
+  y = Math.max(y + PHOTO_H, ry - D.ROW_PAD) + 1;
 
   // ── CONTACT & LOCATION ────────────────────────────────────────────────────
   y = sh(doc, "Contact & Location", y);
@@ -385,8 +439,8 @@ export async function generateAdmissionCardPDF(
   // ── ADMISSION FEE RECEIPT ─────────────────────────────────────────────────
   const feeAmount = typeof admission.admissionFeeAmount === "number" ? admission.admissionFeeAmount : 0;
   if (admission.admissionFeePaid === true && feeAmount > 0) {
-    const BOX_H = 38;
-    y = ensureSpace(doc, y + SECTION_GAP, BOX_H + 2);
+    const BOX_H = D.RECEIPT_H;
+    y = ensureSpace(doc, y + D.SECTION_GAP, BOX_H + 2);
     const top = y;
 
     // Dashed receipt border
@@ -444,11 +498,11 @@ export async function generateAdmissionCardPDF(
     // Stamp
     stroke(doc, CLR.green);
     doc.setLineWidth(0.6);
-    doc.roundedRect(W - M - 28, top + BOX_H - 11, 24, 8, 1.5, 1.5, "S");
+    doc.roundedRect(W - M - 28, top + 15.5, 24, 6.5, 1.5, 1.5, "S");   // beside the amount, clear of the words line
     doc.setFont("helvetica", "bold");
     doc.setFontSize(10);
     color(doc, CLR.green);
-    doc.text("PAID", W - M - 16, top + BOX_H - 5.3, { align: "center" });
+    doc.text("PAID", W - M - 16, top + 20.3, { align: "center" });
 
     y = top + BOX_H + 2;
   }
@@ -459,7 +513,7 @@ export async function generateAdmissionCardPDF(
     const note = "You will be receiving your text book and note book when the teacher comes for the first class.";
     fill(doc, [255, 251, 235]);
     const lines = doc.splitTextToSize(note, CONTENT_W - 12) as string[];
-    const h = lines.length * LINE_H + 4;
+    const h = lines.length * D.LINE_H + 4;
     y = ensureSpace(doc, y - 3.5, h + 2);
     doc.roundedRect(M, y, CONTENT_W, h, 1.5, 1.5, "F");
     doc.setFont("helvetica", "bold");
@@ -468,14 +522,14 @@ export async function generateAdmissionCardPDF(
     doc.text("i", M + 4, y + 4.6);
     doc.setFont("helvetica", "normal");
     color(doc, CLR.gray900);
-    doc.text(lines, M + 9, y + 4.6, { lineHeightFactor: LINE_H / (8 * 0.3528) });
+    doc.text(lines, M + 9, y + 4.6, { lineHeightFactor: D.LINE_H / (8 * 0.3528) });
     y += h + 2;
   }
 
   // ── REQUEST FORM EXTRAS ───────────────────────────────────────────────────
   if (!isCard) {
     // Acknowledgement — 6 lines when no screening, 2 lines when screened
-    const ackLines = !screening
+    const ackLines = !screening && !D.shortAck
       ? [
           "The student/guardian confirms all information provided in this form is accurate and complete.",
           "Fees are to be paid as per the schedule communicated by the centre at the time of joining.",
@@ -491,13 +545,13 @@ export async function generateAdmissionCardPDF(
 
     y = sh(doc, "Acknowledgement", ensureSpace(doc, y, 20));
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(FONT_SZ);
+    doc.setFontSize(D.FONT_SZ);
     for (const line of ackLines) {
       const wrapped = doc.splitTextToSize(line, CONTENT_W - 8) as string[];
       y = ensureSpace(doc, y, rowHeight(wrapped.length));
       color(doc, CLR.gray700);
       doc.text("•", M + 2, y);
-      doc.text(wrapped, M + 6, y, { lineHeightFactor: LINE_H / (FONT_SZ * 0.3528) });
+      doc.text(wrapped, M + 6, y, { lineHeightFactor: D.LINE_H / (D.FONT_SZ * 0.3528) });
       y += rowHeight(wrapped.length);
     }
     y += 2;
@@ -506,8 +560,8 @@ export async function generateAdmissionCardPDF(
     y = ensureSpace(doc, y, 40);
 
     // ── SEAL + ADMISSION NUMBER + DIRECTOR (36 mm tall) ───────────────────
-    const ROW_H   = 36;
-    const SEAL_R  = 15;
+    const ROW_H   = D.SEAL_ROW_H;
+    const SEAL_R  = D.SEAL_R;
     const SEAL_CX = M + SEAL_R;
     const SEAL_CY = y + SEAL_R + 2;      // 2 mm top padding
 
@@ -578,9 +632,5 @@ export async function generateAdmissionCardPDF(
     );
   }
 
-  // ── SAVE ─────────────────────────────────────────────────────────────────
-  const name      = s(admission.fullName).replace(/\s+/g, "-") || "Student";
-  const fileBase  = isCard ? "Admission-Card" : "Admission-Request-Form";
-  const fileSuffix = admNo ? `-${admNo}` : "";
-  doc.save(`${fileBase}-${name}${fileSuffix}.pdf`);
+  return doc;
 }
