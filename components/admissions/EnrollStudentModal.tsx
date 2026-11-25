@@ -22,7 +22,9 @@ import { findFastTrackScreeningByName } from "@/services/screening/screening.ser
 import { enrollApplicant } from "@/services/screening/enroll.service";
 import AdmissionFeeModal from "@/components/admissions/AdmissionFeeModal";
 import EnrollmentConfirmationModal from "@/components/admissions/EnrollmentConfirmationModal";
-import { formatCourse } from "@/lib/course";
+import { findCourse, formatCourse, lowerCourses, type CourseOption } from "@/lib/course";
+import { CourseSelect, PrevCourseDialog } from "@/components/students/CourseSelect";
+import type { PrevCoursesAnswer } from "@/services/student/courseLevel.service";
 import { AdmissionFinalPhase } from "@/components/admissions/AdmissionProgress";
 import { getWingSyllabus } from "@/services/lesson/lesson.service";
 import type { CenterBatch } from "@/types";
@@ -137,9 +139,16 @@ export default function EnrollStudentModal({
   const needsBatch = batches.length > 1;
 
   // ── Course, fee, start date, admission number ─────────────────────────────
-  const [instrument, setInstrument] = useState<SyllabusInstrument>(() => cardInstrument(application.instrumentsToLearn));
-  const [level, setLevel] = useState<SyllabusLevel | "">("");
+  // One of the 9 courses. A listed course already on the application wins;
+  // otherwise the level is suggested from the screening slab.
+  const appCourse = findCourse(application.course);
+  const [instrument, setInstrument] = useState<SyllabusInstrument>(() =>
+    appCourse ? (appCourse.instrument.toLowerCase() as SyllabusInstrument) : cardInstrument(application.instrumentsToLearn));
+  const [level, setLevel] = useState<SyllabusLevel | "">(() => appCourse ? (appCourse.level.toLowerCase() as SyllabusLevel) : "");
   useEffect(() => { if (!level && screening) setLevel(levelFromSlab(slab)); }, [screening, slab, level]);
+  // Picking a course above Introduction asks about the previous course(s).
+  const [prevAsk, setPrevAsk] = useState<{ course: CourseOption; missing: string[] } | null>(null);
+  const [prevAnswer, setPrevAnswer] = useState<PrevCoursesAnswer | null>(null);
   const [slotCount, setSlotCount] = useState<number | null>(null);
   useEffect(() => {
     if (!level) return;
@@ -171,7 +180,8 @@ export default function EnrollStudentModal({
     !feePaid && "admission fee",
     !centreId && "centre",
     needsBatch && !batchId && "batch",
-    !level && "syllabus level",
+    !level && "course",
+    level && level !== "introduction" && !prevAnswer && "previous course answer",
     !(Number(fee) > 0) && "monthly fee",
     !startDate && "admission date",
     admNo.trim().length < 4 && "admission number",
@@ -184,9 +194,11 @@ export default function EnrollStudentModal({
     try {
       const batch = batches.find(b => b.id === batchId) ?? null;
       const result = await enrollApplicant({
-        application, admissionId, screening,
+        // The course picked here is the one saved on the student.
+        application: { ...application, course: courseName, courseLevel: SYLLABUS_LEVEL_LABELS[level] }, admissionId, screening,
         centreId, batch, admissionNo: admNo, instrument, syllabusLevel: level,
         monthlyFee: Number(fee), startDate, enrolledBy: user?.uid ?? "", wing: WING,
+        prevCourses: prevAnswer,
       });
       // The admission card is a convenience — never fail the enrolment over it.
       await generateAdmissionCardPDF(
@@ -203,10 +215,8 @@ export default function EnrollStudentModal({
 
   const marks = screening ? readScreeningMarks(screening) : null;
 
-  // The course saved on the application wins (enroll.service keeps it);
-  // otherwise it's the level + instrument picked here.
-  const courseName = str(application.course).trim()
-    || formatCourse(level ? SYLLABUS_LEVEL_LABELS[level] : "", SYLLABUS_INSTRUMENT_LABELS[instrument]);
+  // Course = the level + instrument picked in the course dropdown.
+  const courseName = level ? formatCourse(SYLLABUS_LEVEL_LABELS[level], SYLLABUS_INSTRUMENT_LABELS[instrument]) : "";
 
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -313,17 +323,29 @@ export default function EnrollStudentModal({
       {/* Course */}
       <div style={{ ...section, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
         <div>
-          <label style={labelCss}>Instrument *</label>
-          <select value={instrument} onChange={e => setInstrument(e.target.value as SyllabusInstrument)} style={{ ...inputCss, cursor: "pointer" }}>
-            {SYLLABUS_INSTRUMENTS.map(i => <option key={i} value={i}>{SYLLABUS_INSTRUMENT_LABELS[i]}</option>)}
-          </select>
-        </div>
-        <div>
-          <label style={labelCss}>Syllabus level *</label>
-          <select value={level} onChange={e => setLevel(e.target.value as SyllabusLevel)} style={{ ...inputCss, cursor: "pointer" }}>
-            <option value="">— Select —</option>
-            {SYLLABUS_LEVELS.map(l => <option key={l} value={l}>{SYLLABUS_LEVEL_LABELS[l]}</option>)}
-          </select>
+          <label style={labelCss}>Course *</label>
+          <CourseSelect value={courseName} style={{ ...inputCss, cursor: "pointer" }}
+            onChange={c => {
+              const missing = lowerCourses(c).map(x => x.label);
+              if (missing.length) setPrevAsk({ course: c, missing });
+              else { setPrevAnswer(null); setInstrument(c.instrument.toLowerCase() as SyllabusInstrument); setLevel(c.level.toLowerCase() as SyllabusLevel); }
+            }} />
+          {prevAsk && (
+            <PrevCourseDialog studentName={name} course={prevAsk.course.label} missing={prevAsk.missing}
+              onCancel={() => setPrevAsk(null)}
+              onAnswer={a => {
+                const c = prevAsk.course;
+                setPrevAnswer(a); setPrevAsk(null);
+                setInstrument(c.instrument.toLowerCase() as SyllabusInstrument); setLevel(c.level.toLowerCase() as SyllabusLevel);
+              }} />
+          )}
+          {level && level !== "introduction" && (
+            <div style={{ fontSize: 11.5, marginTop: 5, fontWeight: 600, color: !prevAnswer ? "#dc2626" : prevAnswer.finished ? "#15803d" : "#b45309" }}>
+              {!prevAnswer ? "Previous course: answer needed" : prevAnswer.finished ? "✓ Previous course finished" : "⚠ Previous course not finished"}
+              {" · "}<button type="button" onClick={() => { const c = findCourse(courseName); if (c) setPrevAsk({ course: c, missing: lowerCourses(c).map(x => x.label) }); }}
+                style={{ background: "none", border: "none", padding: 0, color: "#4f46e5", cursor: "pointer", fontSize: 11.5, fontWeight: 600 }}>{prevAnswer ? "change" : "answer"}</button>
+            </div>
+          )}
           <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>
             {slab ? `Suggested from ${slab}` : ""}{slotCount != null ? ` · ${slotCount} lesson${slotCount !== 1 ? "s" : ""}` : ""}
           </div>

@@ -558,9 +558,7 @@ function LessonImportContent() {
             <select value={scopeId} onChange={e => setScopeId(e.target.value)} style={s.select}>
               <option value="">— Select student —</option>
               {students.map(st => {
-                const label = st.studentID
-                  ? `[${st.studentID}] ${st.displayName || st.uid}`
-                  : st.admissionNo
+                const label = st.admissionNo
                     ? `[${st.admissionNo}] ${st.displayName || st.uid}`
                     : st.displayName || st.uid;
                 return (

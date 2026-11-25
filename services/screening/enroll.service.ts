@@ -26,6 +26,8 @@ import { admissionNoBlockedMessage, checkAdmissionNo } from "@/lib/admissionNumb
 import { linkAdmissionFeeToStudent } from "@/services/finance/finance.service";
 import { findEnrolmentMatch, mergeStudents, type EnrolmentMatch } from "@/services/dedup/dedup.service";
 import type { CenterBatch, Wing } from "@/types";
+import { findCourse } from "@/lib/course";
+import { prevCoursesPatch, type PrevCoursesAnswer } from "@/services/student/courseLevel.service";
 import type { SyllabusInstrument, SyllabusLevel } from "@/types/lesson";
 
 export interface EnrollInput {
@@ -45,6 +47,8 @@ export interface EnrollInput {
   enrolledBy:    string;
   /** Wing the applicant was admitted to — the student is created there (default School of Music). */
   wing?:         string;
+  /** Answer to "Has the student finished the previous course(s)?" (courses above Introduction). */
+  prevCourses?:  PrevCoursesAnswer | null;
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
@@ -169,6 +173,11 @@ export async function enrollApplicant(i: EnrollInput): Promise<EnrollResult> {
     firstClassDate:  i.startDate || null,
     instruments:     strArr(a.instrumentsToLearn),
     ...(str(a.course) ? { course: str(a.course), courseLevel: str(a.courseLevel) } : {}),
+    // Previous courses: Yes → completedCourses, No → unfinishedCourses ("Not finished").
+    ...(findCourse(a.course)
+      ? prevCoursesPatch(findCourse(a.course)!, match?.data.completedCourses ?? [], i.prevCourses ?? null,
+          { uid: i.enrolledBy, name: "", role: "" })
+      : {}),
     musicalSkill:    str(a.musicalSkill),
     photo:           str(a.photo) || null,
     screening:       { ...screeningData, id: screeningId, studentId: "" },

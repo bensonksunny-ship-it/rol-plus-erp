@@ -15,10 +15,14 @@
 import { useState } from "react";
 import { ROLES } from "@/config/constants";
 import {
-  COURSE_LEVELS, formatCourse, instrumentOfCourse, levelOfCourse, nextCourseLevel,
+  COURSE_LEVELS, completedLabels, courseProgress, findCourse, formatCourse, instrumentOfCourse, levelOfCourse, nextCourseLevel, normalizeCourse,
   type CourseCompletion as CourseCompletionEntry, type CourseLevel,
 } from "@/lib/course";
 import { completeStudentCourse, type LevelChangeBy } from "@/services/student/courseLevel.service";
+import { CertificateButton, CertificateReadyDialog } from "@/components/students/CertificateButton";
+import { UnconfirmedCourses } from "@/components/students/CourseSelect";
+import type { CertificateData } from "@/lib/courseCertificate";
+import { wingOf } from "@/lib/wing";
 
 export interface CourseInfo {
   level: CourseLevel | "";
@@ -28,6 +32,11 @@ export interface CourseInfo {
   graduated: boolean;
   graduatedOn: string;
   hasSyllabusSlot: boolean;
+  /** Previous courses answered "Not finished" when the course was picked. */
+  unfinished: string[];
+  /** For the completion certificate. */
+  admissionNo: string;
+  wing: string;
 }
 
 const s = (v: unknown) => (typeof v === "string" ? v.trim() : "");
@@ -38,11 +47,14 @@ export function readCourseInfo(d: Record<string, unknown>): CourseInfo {
   const instrument = (level && instrumentOfCourse(d.course)) || s(d.instrument);
   return {
     level, instrument,
-    course: s(d.course) || (level ? formatCourse(level, instrument) : instrument),
+    course: normalizeCourse(d.course) || (level ? formatCourse(level, instrument) : instrument),
     completed: Array.isArray(d.completedCourses) ? (d.completedCourses as CourseCompletionEntry[]) : [],
     graduated: d.graduated === true,
     graduatedOn: s(d.graduatedOn),
     hasSyllabusSlot: !!s(d.syllabusLevel),
+    unfinished: Array.isArray(d.unfinishedCourses) ? d.unfinishedCourses.map(String) : [],
+    admissionNo: s(d.admissionNumber) || s(d.admissionNo),
+    wing: wingOf(d as { wing?: unknown }),
   };
 }
 
@@ -52,7 +64,7 @@ export function canMarkCourseComplete(role: string | null | undefined): boolean 
     || role === ROLES.DIRECTOR || role === ROLES.CHIEF_TEACHER || role === ROLES.TEACHER;
 }
 
-function ymdToday(): string {
+export function ymdToday(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
@@ -65,8 +77,10 @@ function fmtDay(ymd: string): string {
  * Progress + Completed rows. `row` renders a label/value line in the host's
  * own style; `onCompleted` lets the host reload the student.
  */
-export default function CourseCompletion({ uid, studentName, info, canEdit, by, row, onCompleted }: {
+export default function CourseCompletion({ uid, studentName, info, canEdit, by, row, onCompleted, centreName }: {
   uid: string;
+  /** Centre name for the certificate. */
+  centreName?: string;
   studentName: string;
   info: CourseInfo;
   canEdit: boolean;
@@ -75,24 +89,34 @@ export default function CourseCompletion({ uid, studentName, info, canEdit, by, 
   onCompleted: (msg: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [ready, setReady] = useState<CertificateData | null>(null);
+  const cert = (course: string, completedOn: string): CertificateData =>
+    ({ studentName, course, completedOn, admissionNo: info.admissionNo, wing: info.wing, centre: centreName });
   const done = [...info.completed].sort((a, b) => a.completedOn.localeCompare(b.completedOn));
   const idx = info.level ? COURSE_LEVELS.indexOf(info.level) : -1;
+  // ✓ only for courses recorded as completed; lower ones not yet confirmed show "?".
+  const doneLabels = completedLabels(info.completed);
+  const listed = !!findCourse(info.course);
+  const hasUnconfirmed = courseProgress(info.course, info.completed, info.unfinished, false)
+    .some(st => st.state === "unconfirmed" || st.state === "not_finished");
 
   return (
     <>
       {row("Progress",
         <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const }}>
           {COURSE_LEVELS.map((l, i) => {
-            const past = i < idx || (info.graduated && i === idx);
             const cur  = i === idx && !info.graduated;
+            const past = !cur && (doneLabels.has(findCourse(formatCourse(l, info.instrument))?.label ?? "")
+              || (info.graduated && i === idx) || (!listed && i < idx));
+            const pending = !cur && !past && i < idx;
             return (
               <span key={l} style={{
                 fontSize: 11.5, fontWeight: 700, borderRadius: 999, padding: "2px 9px",
-                background: past ? "#dcfce7" : cur ? "#eef2ff" : "#f3f4f6",
-                color: past ? "#166534" : cur ? "#3730a3" : "#9ca3af",
-                border: `1px solid ${past ? "#86efac" : cur ? "#c7d2fe" : "#e5e7eb"}`,
-              }}>
-                {past ? "✓ " : ""}{l}
+                background: past ? "#dcfce7" : cur ? "#eef2ff" : pending ? "#fffbeb" : "#f3f4f6",
+                color: past ? "#166534" : cur ? "#3730a3" : pending ? "#b45309" : "#9ca3af",
+                border: `1px ${pending ? "dashed" : "solid"} ${past ? "#86efac" : cur ? "#c7d2fe" : pending ? "#fcd34d" : "#e5e7eb"}`,
+              }} title={pending ? "Not confirmed as finished — confirm under Completed" : undefined}>
+                {past ? "✓ " : pending ? "? " : ""}{l}
               </span>
             );
           })}
@@ -115,15 +139,20 @@ export default function CourseCompletion({ uid, studentName, info, canEdit, by, 
           )}
         </span>,
       )}
-      {done.length > 0 && row("Completed",
+      {(done.length > 0 || hasUnconfirmed) && row("Completed",
         <span style={{ display: "flex", flexDirection: "column" as const, gap: 2 }}>
+          <UnconfirmedCourses uid={uid} studentName={studentName} course={info.course}
+            completedCourses={info.completed} unfinishedCourses={info.unfinished} by={by}
+            canEdit={canEdit} onChanged={onCompleted} />
           {done.map((c, i) => (
             <span key={i} style={{ fontSize: 12.5 }}>
-              ✓ {c.course} · <span style={{ color: "#6b7280" }}>{fmtDay(c.completedOn)}</span>
+              ✓ {c.course} · <span style={{ color: "#6b7280" }}>{c.completedOn ? fmtDay(c.completedOn) : "Date unavailable"}</span>
+              {" "}<CertificateButton data={cert(normalizeCourse(c.course), c.completedOn)} />
             </span>
           ))}
         </span>,
       )}
+      {ready && <CertificateReadyDialog data={ready} onClose={() => setReady(null)} />}
       {open && info.level && (
         <CourseCompleteModal
           studentName={studentName} course={info.course} level={info.level} instrument={info.instrument}
@@ -134,6 +163,7 @@ export default function CourseCompletion({ uid, studentName, info, canEdit, by, 
               completedOn, hasSyllabusSlot: info.hasSyllabusSlot, by,
             });
             setOpen(false);
+            setReady(cert(info.course, completedOn));
             onCompleted(next ? `Course completed — now on ${formatCourse(next, info.instrument)}.` : `${studentName} has completed the final course 🎓`);
           }}
         />
@@ -143,7 +173,7 @@ export default function CourseCompletion({ uid, studentName, info, canEdit, by, 
 }
 
 /** Completion date (default today) → confirm → record + advance to the next course. */
-function CourseCompleteModal({ studentName, course, level, instrument, onClose, onConfirm }: {
+export function CourseCompleteModal({ studentName, course, level, instrument, onClose, onConfirm }: {
   studentName: string; course: string; level: CourseLevel; instrument: string;
   onClose: () => void; onConfirm: (completedOn: string) => Promise<void>;
 }) {
@@ -167,13 +197,14 @@ function CourseCompleteModal({ studentName, course, level, instrument, onClose, 
     <div onClick={e => { e.stopPropagation(); if (!saving) onClose(); }}
       style={{ position: "fixed", inset: 0, zIndex: 1300, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div role="dialog" aria-modal="true" aria-label="Mark course complete" onClick={e => e.stopPropagation()}
+        onKeyDown={e => { if (e.key === "Enter") e.preventDefault(); e.stopPropagation(); }}
         style={{ background: "#fff", borderRadius: 16, width: "100%", maxWidth: 440, boxShadow: "0 20px 60px rgba(0,0,0,0.25)", overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", padding: "18px 22px", borderBottom: "1px solid #e5e7eb" }}>
           <div>
             <div style={{ fontSize: 17, fontWeight: 700, color: "#111827" }}>✓ Mark Course Complete</div>
             <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>{studentName}</div>
           </div>
-          <button onClick={onClose} disabled={saving} aria-label="Close" style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#9ca3af" }}>✕</button>
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Close" style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#9ca3af" }}>✕</button>
         </div>
         <div style={{ padding: "18px 22px" }}>
           {err && <div style={{ background: "#fee2e2", color: "#dc2626", border: "1px solid #fca5a5", borderRadius: 6, padding: "9px 14px", marginBottom: 14, fontSize: 13 }}>{err}</div>}
@@ -193,8 +224,8 @@ function CourseCompleteModal({ studentName, course, level, instrument, onClose, 
           {future && <div style={{ fontSize: 12, color: "#dc2626", marginTop: 6 }}>Completion date can&apos;t be in the future.</div>}
         </div>
         <div style={{ padding: "14px 22px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 10, background: "#f9fafb" }}>
-          <button onClick={onClose} disabled={saving} style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", padding: "8px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={submit} disabled={blocked} style={{
+          <button type="button" onClick={onClose} disabled={saving} style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", padding: "8px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={blocked} style={{
             padding: "8px 18px", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 700,
             background: blocked ? "#9ca3af" : "#15803d", color: "#fff", cursor: blocked ? "not-allowed" : "pointer",
           }}>

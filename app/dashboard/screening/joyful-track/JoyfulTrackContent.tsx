@@ -312,13 +312,12 @@ export function JoyfulTrackContent({ onBack }: { onBack?: () => void } = {}) {
                       onMouseEnter={e => (e.currentTarget.style.background = "#fdf2f8")}
                       onMouseLeave={e => (e.currentTarget.style.background = "#fff")}>
                       <span style={{ fontWeight: 700 }}>{s.name}</span>
-                      <span style={{ fontSize: 11, color: "#9ca3af" }}>{s.studentID}</span>
                     </div>
                   ))}
                 </div>
               )}
             </div>
-            {selectedStudent && <div style={{ marginTop: 8, fontSize: 12, color: "#16a34a" }}>✓ Linked — {selectedStudent.studentID}</div>}
+            {selectedStudent && <div style={{ marginTop: 8, fontSize: 12, color: "#16a34a" }}>✓ Linked — {selectedStudent.name}</div>}
           </div>
 
           {/* Genres */}

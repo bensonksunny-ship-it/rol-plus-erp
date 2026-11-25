@@ -1,5 +1,6 @@
 "use client";
 
+import { normalizeCourse } from "@/lib/course";
 import { useState, useEffect } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/config/firebase";
@@ -120,7 +121,7 @@ function ReportsContent() {
             return {
               uid:             s.uid,
               name:            (s.name as string)           ?? "—",
-              course:          (s.course as string)         ?? "—",
+              course:          normalizeCourse(s.course) || "—",
               centerId:        (s.centerId as string)       ?? "—",
               progressPct:     computePct(assignment, progressList, allUnits),
               attendanceCount: attendance.length,

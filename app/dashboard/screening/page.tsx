@@ -650,7 +650,7 @@ function TrackScreeningForm({
             </div>
             {linkedStudent && (
               <div style={{ fontSize: 13, color: "#166534", marginBottom: 4 }}>
-                Diagnostic saved to student profile: {linkedStudent.name} ({linkedStudent.studentID})
+                Diagnostic saved to student profile: {linkedStudent.name}
               </div>
             )}
             <div style={{ fontSize: 13, color: "#166534", marginBottom: 24 }}>
@@ -753,7 +753,7 @@ function TrackScreeningForm({
                   <div style={{ position: "relative" }}>
                     {linkedStudent ? (
                       <div style={{ ...lmInput, display: "flex", alignItems: "center", justifyContent: "space-between", boxSizing: "border-box" as const }}>
-                        <span>{linkedStudent.name} <span style={{ color: "#9ca3af", fontSize: 11 }}>({linkedStudent.studentID})</span></span>
+                        <span>{linkedStudent.name}</span>
                         <button type="button" onClick={() => { setLinkedStudent(null); setStudentQuery(""); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 16, padding: 0 }}>✕</button>
                       </div>
                     ) : (
@@ -767,7 +767,6 @@ function TrackScreeningForm({
                             onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}
                             onMouseLeave={e => (e.currentTarget.style.background = "#fff")}>
                             <span style={{ fontWeight: 600, color: "#111" }}>{st.name}</span>
-                            <span style={{ fontSize: 11, color: "#9ca3af" }}>{st.studentID}</span>
                           </div>
                         ))}
                       </div>

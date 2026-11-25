@@ -27,8 +27,9 @@ import { getCached, setCached } from "@/lib/dataCache";
 import { normName, normPhone } from "@/lib/dedup";
 import MergeDuplicatesModal from "@/components/dedup/MergeDuplicatesModal";
 import { SYLLABUS_INSTRUMENT_LABELS, type SyllabusInstrument } from "@/types/lesson";
-import { COURSE_LEVELS, instrumentOfCourse, isCourseLevel, levelHistoryText, levelOfCourse, nextCourseLevel, type CourseLevel, type LevelHistoryEntry } from "@/lib/course";
-import { levelChangePatch, logLevelChange, setStudentCourseLevel, type LevelChangeBy } from "@/services/student/courseLevel.service";
+import { StudentCourseSelect, CourseSelect, PrevCourseDialog } from "@/components/students/CourseSelect";
+import { COURSE_LEVELS, findCourse, formatCourse, missingPrevCourses, normalizeCourse, type CourseOption, instrumentOfCourse, isCourseLevel, levelHistoryText, levelOfCourse, nextCourseLevel, type CourseLevel, type LevelHistoryEntry } from "@/lib/course";
+import { levelChangePatch, logLevelChange, prevCoursesPatch, setStudentCourseLevel, type LevelChangeBy, type PrevCoursesAnswer } from "@/services/student/courseLevel.service";
 
 // The register shows the wing currently selected (ROL+ or School of Music) —
 // same system for both, each wing's students kept separate.
@@ -52,6 +53,10 @@ interface Entry {
   courseLevel: CourseLevel | "";   // stored `courseLevel`, else parsed from the course title
   instrument:  string;   // instrument part of the course ("Intermediate to Drums" → "Drums")
   levelHistory: LevelHistoryEntry[];
+  hasSyllabusSlot: boolean;   // Wing 2 syllabus slot set — follows a course change
+  completedCourses: unknown;   // raw `completedCourses` — course status line
+  unfinishedCourses: unknown;  // raw `unfinishedCourses` — previous courses marked "Not finished"
+  graduated:   boolean;
   addedAt:     number;   // ms when the record was imported/created — newest sorts first
 }
 
@@ -545,7 +550,7 @@ function RegistryContent() {
                 const resolvedCentreName = centreName.get(centreRef) || centreNameAll.get(centreRef);
                 const inst = s.syllabusInstrument as SyllabusInstrument | undefined;
                 const course =
-                  (typeof s.course === "string" && s.course) ||
+                  (typeof s.course === "string" && normalizeCourse(s.course)) ||
                   (inst && SYLLABUS_INSTRUMENT_LABELS[inst]) ||
                   (Array.isArray(s.instruments) ? s.instruments.map(String).join(", ") : "") ||
                   "—";
@@ -583,6 +588,10 @@ function RegistryContent() {
                   courseLevel: levelOfCourse(s.courseLevel, s.course),
                   instrument:  instrumentOfCourse(course === "—" ? "" : course),
                   levelHistory: Array.isArray(s.levelHistory) ? (s.levelHistory as LevelHistoryEntry[]) : [],
+                  hasSyllabusSlot: !!s.syllabusLevel,
+                  completedCourses: s.completedCourses ?? [],
+                  unfinishedCourses: s.unfinishedCourses ?? [],
+                  graduated:   s.graduated === true,
                   // Imports back-date `createdAt` to the admission date, so the
                   // upload time lives in `importedAt`; other records use createdAt.
                   addedAt:     toMillis(s.importedAt) || toMillis(s.createdAt),
@@ -874,13 +883,13 @@ function RegistryContent() {
                   <th style={s.th} title="Serial number — position when sorted by the admission number's last 3 digits. Fixed: it doesn't change with search, filters or page." aria-sort="ascending">
                     SL
                   </th>
-                  {["Name", "Status"].map(h => <th key={h} style={s.th}>{h}</th>)}
+                  {["Name", "Course", "Status"].map(h => <th key={h} style={s.th}>{h}</th>)}
                   <th style={{ ...s.th, width: canImport ? 72 : 34 }} />
                 </tr>
               </thead>
               <tbody>
                 {rows.length === 0 && (
-                  <tr><td colSpan={canImport ? 5 : 4} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "28px 0" }}>
+                  <tr><td colSpan={canImport ? 6 : 5} style={{ ...s.td, textAlign: "center", color: "var(--color-text-muted)", padding: "28px 0" }}>
                     {entries.length === 0 ? "No students on the register yet." : "No matches."}
                   </td></tr>
                 )}
@@ -923,6 +932,12 @@ function RegistryContent() {
                           New
                         </span>
                       )}
+                    </td>
+                    <td style={s.td} onClick={ev => ev.stopPropagation()}>
+                      <StudentCourseSelect uid={e.uid} course={e.courseRaw || (e.course === "—" ? "" : e.course)}
+                        courseLevel={e.courseLevel} hasSyllabusSlot={e.hasSyllabusSlot} by={levelBy} canEdit={canImport}
+                        studentName={e.name} completedCourses={e.completedCourses} unfinishedCourses={e.unfinishedCourses}
+                        graduated={e.graduated} certificate={{ admissionNo: e.admissionNo, wing: WING, centre: e.centre }} />
                     </td>
                     <td style={s.td} onClick={ev => ev.stopPropagation()}>
                       {(() => {
@@ -969,7 +984,7 @@ function RegistryContent() {
                   </tr>
                   {open && (
                     <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
-                      <td colSpan={canImport ? 5 : 4} style={{ padding: 0, background: "var(--color-surface-2)" }}>
+                      <td colSpan={canImport ? 6 : 5} style={{ padding: 0, background: "var(--color-surface-2)" }}>
                         <div style={{
                           display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
                           gap: "10px 24px", padding: "14px 20px",
@@ -980,7 +995,6 @@ function RegistryContent() {
                           <DetailField label="Phone Number" value={e.phone} />
                           <DetailField label="Admission Number" value={e.admissionNo} emphasize />
                           <DetailField label="Course" value={e.course} />
-                          <CourseLevelControl entry={e} canEdit={canImport} by={levelBy} />
                           <DetailField label="Screening Grade" value={e.screening} />
                           {e.email && <DetailField label="Email" value={e.email} />}
                         </div>
@@ -1009,7 +1023,7 @@ function RegistryContent() {
                   <tr style={s.pasteTr}>
                     <td style={s.td} />
                     <td style={{ ...s.td, color: "var(--color-text-muted)" }}>＋</td>
-                    <td colSpan={3} style={{ padding: 0 }}
+                    <td colSpan={4} style={{ padding: 0 }}
                       onFocus={() => setPasteFocused(true)}
                       onBlur={ev => { if (!ev.currentTarget.contains(ev.relatedTarget as Node | null)) setPasteFocused(false); }}>
                       {pasteFocused && (
@@ -1149,11 +1163,14 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
     centerId:    entry.centerId,
     batchId:     entry.batchId,
     courseLevel: entry.courseLevel as string,
-    instrument:  entry.courseRaw ? instrumentOfCourse(entry.courseRaw) : blankDash(entry.instrument),
+    course:      entry.courseRaw || blankDash(entry.course),
     admittedOn:  isoToDateInput(entry.admittedOn),
     status:      toRegistryStatus(entry.status),
   }), [entry]);
   const [f, setF] = useState(initial);
+  // Picking a course above Introduction asks about the previous course(s).
+  const [prevAsk, setPrevAsk] = useState<{ course: CourseOption; missing: string[] } | null>(null);
+  const [prevAnswer, setPrevAnswer] = useState<PrevCoursesAnswer | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -1210,15 +1227,19 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
       Object.assign(patch, { batchId: b ? b.id : null, batch: b ? b.name : null });
       if (f.batchId !== initial.batchId) changed.push("batch");
     }
-    // Course = Level + Instrument. A level change goes through levelChangePatch
-    // (courseLevel + composite course + levelHistory entry).
-    const levelChanged = f.courseLevel !== initial.courseLevel && isCourseLevel(f.courseLevel);
-    if (levelChanged) {
-      Object.assign(patch, levelChangePatch(initial.courseLevel, f.courseLevel as CourseLevel, f.instrument.trim(), levelBy));
-      changed.push("courseLevel");
-    } else if (f.instrument.trim() !== initial.instrument) {
-      patch.course = isCourseLevel(f.courseLevel) ? `${f.courseLevel} to ${f.instrument.trim()}` : f.instrument.trim();
+    // Course = one of the 9 listed courses. A level change also goes through
+    // levelChangePatch (levelHistory entry); a Wing 2 syllabus slot follows.
+    const pickedCourse = f.course !== initial.course ? findCourse(f.course) : null;
+    const levelChanged = !!pickedCourse && pickedCourse.level !== initial.courseLevel;
+    if (pickedCourse) {
+      if (levelChanged) Object.assign(patch, levelChangePatch(initial.courseLevel, pickedCourse.level, pickedCourse.instrument, levelBy));
+      Object.assign(patch, { course: pickedCourse.label, courseLevel: pickedCourse.level, instrument: pickedCourse.instrument },
+        prevCoursesPatch(pickedCourse, entry.completedCourses, prevAnswer, levelBy));
+      if (entry.hasSyllabusSlot) {
+        Object.assign(patch, { syllabusLevel: pickedCourse.level.toLowerCase(), syllabusInstrument: pickedCourse.instrument.toLowerCase() });
+      }
       changed.push("course");
+      if (levelChanged) changed.push("courseLevel");
     }
     if (f.admittedOn !== initial.admittedOn) {
       patch.dateOfAdmission = f.admittedOn ? new Date(`${f.admittedOn}T00:00:00`).toISOString() : null;
@@ -1258,7 +1279,7 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
         approverId: null, approverRole: null, reason: null,
         metadata: { uid: entry.uid, fields: changed },
       });
-      if (levelChanged) logLevelChange(entry.uid, initial.courseLevel, f.courseLevel, levelBy);
+      if (levelChanged && pickedCourse) logLevelChange(entry.uid, initial.courseLevel, pickedCourse.level, levelBy);
       // The registry's live student subscription refreshes the table.
       onClose();
     } catch (err) {
@@ -1329,17 +1350,17 @@ function EditStudentModal({ entry, centres, existingAdmNos, canReactivate, initi
               </select>
             )}
           </label>
-          <label style={label}>Course Level
-            <select style={input} value={f.courseLevel} onChange={e => set("courseLevel", e.target.value)}>
-              {!isCourseLevel(initial.courseLevel) && <option value="">— Not set —</option>}
-              {COURSE_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
-            </select>
-          </label>
-          <label style={label}>Instrument
-            <input style={input} list="registry-course-options" value={f.instrument} onChange={e => set("instrument", e.target.value)} />
-            <datalist id="registry-course-options">
-              {Object.values(SYLLABUS_INSTRUMENT_LABELS).map(l => <option key={l} value={l} />)}
-            </datalist>
+          <label style={label}>Course
+            <CourseSelect style={input} value={f.course} onChange={c => {
+              const missing = missingPrevCourses(c, entry.completedCourses).map(x => x.label);
+              if (missing.length) setPrevAsk({ course: c, missing });
+              else { setPrevAnswer(null); set("course", c.label); }
+            }} />
+            {prevAsk && (
+              <PrevCourseDialog studentName={f.name} course={prevAsk.course.label} missing={prevAsk.missing}
+                onCancel={() => setPrevAsk(null)}
+                onAnswer={a => { setPrevAnswer(a); set("course", prevAsk.course.label); setPrevAsk(null); }} />
+            )}
           </label>
           <label style={label}>Date of Admission
             <input style={input} type="date" value={f.admittedOn} onChange={e => set("admittedOn", e.target.value)} />
@@ -1398,63 +1419,6 @@ function DetailField({ label, value, emphasize }: { label: string; value: string
       <div style={{ fontSize: 13, color: "var(--color-text-primary)", fontWeight: emphasize ? 700 : 400 }}>
         {value || "—"}
       </div>
-    </div>
-  );
-}
-
-/**
- * Course Level badge + quick progression (expanded registry row). Promote moves
- * one tier up; the dropdown sets any level (corrections). The live registry
- * subscription picks up the new `course`, as do rosters and the student profile.
- */
-function CourseLevelControl({ entry, canEdit, by }: { entry: Entry; canEdit: boolean; by: LevelChangeBy }) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr]   = useState("");
-  const level = entry.courseLevel;
-  const next  = nextCourseLevel(level);
-  const hasInstrument = !!entry.instrument && entry.instrument !== "—";
-
-  async function apply(to: CourseLevel) {
-    if (to === level) return;
-    setBusy(true); setErr("");
-    try {
-      await setStudentCourseLevel(entry.uid, level, to, hasInstrument ? entry.instrument : "", by);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to update level.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const badge: React.CSSProperties = {
-    display: "inline-block", fontSize: 11.5, fontWeight: 700, borderRadius: 999, padding: "2px 10px",
-    background: level ? "#eef2ff" : "var(--color-surface-2)", color: level ? "#3730a3" : "var(--color-text-muted)",
-    border: `1px solid ${level ? "#c7d2fe" : "var(--color-border)"}`,
-  };
-  return (
-    <div onClick={ev => ev.stopPropagation()}>
-      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--color-text-muted)", marginBottom: 4 }}>
-        Course Level
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-        <span style={badge}>{level || "Not set"}</span>
-        {canEdit && next && (
-          <button type="button" disabled={busy} onClick={() => apply(next)}
-            title={hasInstrument ? `Course becomes "${next} to ${entry.instrument}"` : undefined}
-            style={{ fontSize: 11.5, fontWeight: 700, borderRadius: 6, padding: "3px 9px", cursor: busy ? "default" : "pointer",
-              border: "1px solid #86efac", background: "#f0fdf4", color: "#15803d", opacity: busy ? 0.6 : 1 }}>
-            {busy ? "Saving…" : level ? `⬆ Promote to ${next}` : `Set ${next}`}
-          </button>
-        )}
-        {canEdit && (
-          <select value={level} disabled={busy} aria-label="Set course level" onChange={ev => isCourseLevel(ev.target.value) && apply(ev.target.value)}
-            style={{ fontSize: 11.5, borderRadius: 6, padding: "2px 4px", border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-secondary)" }}>
-            {!level && <option value="">Set level…</option>}
-            {COURSE_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
-          </select>
-        )}
-      </div>
-      {err && <div style={{ fontSize: 11.5, color: "#dc2626", marginTop: 4 }}>{err}</div>}
     </div>
   );
 }

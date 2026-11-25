@@ -200,7 +200,7 @@ function StudentSearch({ studentName, setStudentName, studentQuery, setStudentQu
         <div style={{ position: "relative" }}>
           {linkedStudent ? (
             <div style={{ ...inputStyle, display: "flex", alignItems: "center", justifyContent: "space-between", boxSizing: "border-box" as const }}>
-              <span style={{ fontSize: 13 }}>{linkedStudent.name} <span style={{ color: "#9ca3af", fontSize: 11, fontFamily: "monospace" }}>({linkedStudent.studentID})</span></span>
+              <span style={{ fontSize: 13 }}>{linkedStudent.name}</span>
               <button type="button" onClick={() => { setLinkedStudent(null); setStudentQuery(""); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 16, padding: 0, lineHeight: 1 }}>✕</button>
             </div>
           ) : (
@@ -217,7 +217,6 @@ function StudentSearch({ studentName, setStudentName, studentQuery, setStudentQu
                   onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}
                   onMouseLeave={e => (e.currentTarget.style.background = "#fff")}>
                   <span style={{ fontWeight: 600, color: "#111" }}>{st.name}</span>
-                  <span style={{ fontSize: 11, color: "#9ca3af", fontFamily: "monospace" }}>{st.studentID}</span>
                 </div>
               ))}
               {studsLoading && <div style={{ padding: "10px 14px", fontSize: 12, color: "#9ca3af" }}>Loading…</div>}
@@ -757,7 +756,6 @@ export function FastTrackContent({
             <div style={{ ...card, gridColumn: "span 5", background: "#f8f9fb" }}>
               <div style={labelStyle}>Assessment Summary</div>
               <div style={{ fontSize: 16, fontWeight: 700, color: "#111" }}>{studentName}</div>
-              {linkedStudent && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 3, fontFamily: "monospace" }}>{linkedStudent.studentID}</div>}
               <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 6, fontFamily: "monospace" }}>{assessmentId}</div>
             </div>
 

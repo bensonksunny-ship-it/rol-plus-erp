@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useState, useEffect, useRef, useMemo, Suspense, createContext, useContext, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
+import { createPortal } from "react-dom";
 import {
   collection, getDocs, setDoc, updateDoc, doc, getDoc,
   query, where, serverTimestamp, addDoc, increment, arrayUnion,
@@ -23,6 +24,11 @@ import { useWing } from "@/hooks/useWing";
 import { inWing, isSchoolOfMusic, wingOf } from "@/lib/wing";
 import { getCached, setCached } from "@/lib/dataCache";
 import Link from "next/link";
+import { completedLabels, courseProgress, findCourse, formatCourse, levelOfCourse, missingPrevCourses, normalizeCourse, type CourseCompletion, type CourseOption } from "@/lib/course";
+import { CourseSelect, PrevCourseDialog, StudentCourseSelect, UnconfirmedCourses } from "@/components/students/CourseSelect";
+import { CertificateButton, CertificateMenuButton } from "@/components/students/CertificateButton";
+import { levelChangePatch, prevCoursesPatch, type LevelChangeBy, type PrevCoursesAnswer } from "@/services/student/courseLevel.service";
+import { CAPABILITIES } from "@/config/permissions";
 import {
   clearStudentHistory,
   deleteUser as deleteUserRecord,
@@ -56,6 +62,14 @@ export interface StudentRow {
   wing:        string;   // "rol_plus" | "school_of_music"
   instrument:  string;
   course:      string;
+  /** Introduction / Intermediate / Advanced ("" when unknown). */
+  courseLevel?: string;
+  /** Wing 2 syllabus slot set — it follows a course change. */
+  hasSyllabusSlot?: boolean;
+  completedCourses?: CourseCompletion[];
+  /** Previous courses answered "Not finished" when the course was picked. */
+  unfinishedCourses?: string[];
+  graduated?: boolean;
   classType:   string;   // "group" | "personal"
   billingMode: string;   // "postpay" | "prepay"
   assignedTeacherUid:  string | null;
@@ -237,10 +251,9 @@ export default function StudentsPage() {
 }
 
 function StudentsContent() {
-  const { user, role }                  = useAuth();
+  const { user, role, can }             = useAuth();
   const { wing }                        = useWing();
   const isSom                           = isSchoolOfMusic(wing);
-  const router                          = useRouter();
   const searchParams                    = useSearchParams();
   const { isAllowed, filterCentres, teacherCentreIds, isTeacherRole } = useCentreAccess();
   // Seed from the last visit's cache so switching back to Students renders
@@ -256,6 +269,8 @@ function StudentsContent() {
   const [teacherMap, setTeacherMap]     = useState<Map<string, string>>(() => getCached(`students:${wing}:teacherMap`) ?? new Map());
   const [loading, setLoading]           = useState(() => !getCached<StudentRow[]>(`students:${wing}:students`));
   const [tab, setTab]                   = useState<StudentTab>("active");
+  // Student card popup — by id so it re-reads the row after an edit.
+  const [cardId, setCardId]             = useState<string | null>(null);
   const [requestsOpen, setRequestsOpen] = useState(false);
   const [breakRequestsOpen, setBreakRequestsOpen] = useState(false);
   const [editTarget, setEditTarget]         = useState<StudentRow | null>(null);
@@ -416,7 +431,12 @@ function StudentsContent() {
             : "",
           wing:        wingOf(s),
           instrument:  (s.instrument  ?? "-") as string,
-          course:      (s.course      ?? "-") as string,
+          course:      (typeof s.course === "string" && s.course.trim() ? normalizeCourse(s.course) : "-"),
+          courseLevel: levelOfCourse(s.courseLevel, s.course),
+          hasSyllabusSlot: !!s.syllabusLevel,
+          completedCourses: Array.isArray(s.completedCourses) ? (s.completedCourses as CourseCompletion[]) : [],
+          unfinishedCourses: Array.isArray(s.unfinishedCourses) ? (s.unfinishedCourses as string[]) : [],
+          graduated:   s.graduated === true,
           classType:   ((s.classType  as string) === "personal" ? "personal" : "group"),
           billingMode: ((s.billingMode as string) === "prepay" ? "prepay" : "postpay"),
           assignedTeacherUid:  assignedTUid,
@@ -642,7 +662,31 @@ function StudentsContent() {
     } catch { toast("Failed to end break.", "error"); }
   }
 
+  // Course changed (pick, previous courses, completion) → re-read that student
+  // and patch the cached list so cards, the popup, filters and insights update.
+  const onCourseSaved = useCallback(async (id: string, msg?: string) => {
+    if (msg) toast(msg, "success");
+    const snap = await getDoc(doc(db, "users", id)).catch(() => null);
+    const s = snap?.data();
+    if (!s) return;
+    setStudents(prev => {
+      const next = prev.map(x => x.id !== id ? x : {
+        ...x,
+        course:      typeof s.course === "string" && s.course.trim() ? normalizeCourse(s.course) : "-",
+        courseLevel: levelOfCourse(s.courseLevel, s.course),
+        instrument:  (s.instrument ?? x.instrument) as string,
+        hasSyllabusSlot: !!s.syllabusLevel,
+        completedCourses: Array.isArray(s.completedCourses) ? (s.completedCourses as CourseCompletion[]) : [],
+        unfinishedCourses: Array.isArray(s.unfinishedCourses) ? (s.unfinishedCourses as string[]) : [],
+        graduated:   s.graduated === true,
+      });
+      setCached(`students:${wing}:students`, next);
+      return next;
+    });
+  }, [wing, toast]);
+
   return (
+    <CourseSavedCtx.Provider value={onCourseSaved}>
     <div className="mx-auto max-w-[794px]" style={p.page}>
       <ToastContainer toasts={toasts} onRemove={remove} />
 
@@ -797,13 +841,7 @@ function StudentsContent() {
           sortDir={sortDir}
           onSort={toggleSort}
           showStatus={tab !== "active"}
-          isAdmin={isAdmin}
-          isTeacher={isTeacher}
-          onEdit={s => setEditTarget(s)}
-          onRequestDeactivation={s => requestDeactivation(s)}
-          onRequestBreak={s => setBreakTarget(s)}
-          onClearHistory={isAdmin ? s => setClearHistoryTarget(s) : undefined}
-          onDelete={isAdmin ? s => setDeleteTarget(s) : undefined}
+          onOpen={s => setCardId(s.id)}
         />
       ) : (
         <div>
@@ -826,7 +864,7 @@ function StudentsContent() {
                   </div>
                   <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
                     {group.students.map(s => (
-                      <StudentCard key={s.id} student={s} onClick={() => router.push(`/dashboard/students/${s.id}`)} />
+                      <StudentCard key={s.id} student={s} onClick={() => setCardId(s.id)} />
                     ))}
                   </div>
                 </div>
@@ -851,7 +889,7 @@ function StudentsContent() {
                   </div>
                   <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
                     {group.students.map(s => (
-                      <StudentCard key={s.id} student={s} onClick={() => router.push(`/dashboard/students/${s.id}`)} />
+                      <StudentCard key={s.id} student={s} onClick={() => setCardId(s.id)} />
                     ))}
                   </div>
                 </div>
@@ -862,6 +900,28 @@ function StudentsContent() {
           )}
         </div>
       )}
+
+      {/* ── Student card popup ── */}
+      {(() => {
+        const cs = cardId ? students.find(x => x.id === cardId) : undefined;
+        if (!cs) return null;
+        const then = (fn: () => void) => () => { setCardId(null); fn(); };
+        return (
+          <StudentCardModal
+            student={cs}
+            transactions={transactions.filter(t => t.studentUid === cs.id)}
+            canSeeFinance={can(CAPABILITIES.FINANCE_VIEW)}
+            isAdmin={isAdmin}
+            isTeacher={isTeacher}
+            onClose={() => setCardId(null)}
+            onEdit={then(() => setEditTarget(cs))}
+            onRequestDeactivation={then(() => requestDeactivation(cs))}
+            onRequestBreak={then(() => setBreakTarget(cs))}
+            onClearHistory={isAdmin ? then(() => setClearHistoryTarget(cs)) : undefined}
+            onDelete={isAdmin ? then(() => setDeleteTarget(cs)) : undefined}
+          />
+        );
+      })()}
 
       {/* ── Edit Modal ── */}
       {editTarget && (
@@ -881,6 +941,7 @@ function StudentsContent() {
             } as StudentRow));
             setEditTarget(null);
             toast("Student updated.", "success");
+            void onCourseSaved(updated.id);   // course status (previous courses) may have changed
           }}
           currentUserUid={user?.uid ?? ""}
           currentUserRole={role ?? "admin"}
@@ -996,33 +1057,89 @@ function StudentsContent() {
         </div>
       )}
     </div>
+    </CourseSavedCtx.Provider>
   );
 }
 
 // ─── Student Row ───────────────────────────────────────────────────────────────
 
-function StudentRow({ student: s, index, isAdmin, isTeacher, showStatus, expanded, onToggleExpand, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
-  student: StudentRow; index: number; isAdmin: boolean; isTeacher: boolean; showStatus: boolean;
-  expanded: boolean; onToggleExpand: () => void;
-  onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
-  onClearHistory?: () => void; onDelete?: () => void;
+type RowTab = "overview" | "academics" | "fees";
+const LEVEL_STEPS = ["Introduction", "Intermediate", "Advanced"] as const;
+/** [solid, gradient-end] pairs — picked per student so each card has its own colour. */
+const CARD_TONES: [string, string][] = [
+  ["#4f46e5", "#7c3aed"], ["#0891b2", "#2563eb"], ["#059669", "#0d9488"], ["#d97706", "#dc2626"],
+  ["#db2777", "#9333ea"], ["#7c3aed", "#c026d3"], ["#0f766e", "#0891b2"], ["#ea580c", "#db2777"],
+];
+const TAB_TONE: Record<RowTab, string> = { overview: "#4f46e5", academics: "#0891b2", fees: "#059669" };
+
+/** Students page hook-up for a saved course (see onCourseSaved); no-op elsewhere. */
+const CourseSavedCtx = createContext<(id: string, msg: string) => void>(() => {});
+
+/** The 9-course dropdown for one student; plain text for staff who can't manage students. */
+function StudentCourseField({ s, roomy = false }: { s: StudentRow; roomy?: boolean }) {
+  const { user, can } = useAuth();
+  const onSaved = useContext(CourseSavedCtx);
+  const by = useMemo<LevelChangeBy>(() => {
+    const u = user as { uid?: string; role?: string; displayName?: string; name?: string } | null;
+    return { uid: u?.uid ?? "unknown", name: String(u?.displayName ?? u?.name ?? ""), role: u?.role ?? ROLES.ADMIN };
+  }, [user]);
+  return (
+    <StudentCourseSelect uid={s.id} studentName={s.name} course={s.course === "-" ? "" : s.course} courseLevel={s.courseLevel}
+      hasSyllabusSlot={!!s.hasSyllabusSlot} by={by} canEdit={can(CAPABILITIES.STUDENTS_MANAGE)}
+      completedCourses={s.completedCourses} unfinishedCourses={s.unfinishedCourses} graduated={!!s.graduated}
+      certificate={{ admissionNo: s.admissionNo, wing: s.wing, centre: s.centerName }} roomy={roomy}
+      onChanged={msg => onSaved(s.id, msg)} />
+  );
+}
+
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? "") + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase() || "?";
+}
+function tonesOf(name: string): [string, string] {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return CARD_TONES[h % CARD_TONES.length];
+}
+
+function StudentRow({ student: s, index, showStatus, onOpen }: {
+  student: StudentRow; index: number; showStatus: boolean; onOpen: () => void;
 }) {
   const [hover, setHover] = useState(false);
-  const rowBg = expanded ? "#eef2ff" : hover ? "#f0f4ff" : index % 2 === 0 ? "#fff" : "#fafafa";
+  const rowBg = hover ? "#f5f7ff" : index % 2 === 0 ? "#fff" : "#fcfcfd";
   const ellipsis: React.CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const };
+  const [tone, tone2] = tonesOf(s.name);
+  const owes = s.balance > 0;
+
   return (
-    <>
-    <tr style={{ background: rowBg, transition: "background 0.12s", cursor: "pointer" }}
+    <tr style={{ background: rowBg, transition: "background 0.12s", cursor: "pointer", boxShadow: hover ? `inset 3px 0 0 ${tone}` : "none" }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      onClick={onToggleExpand}>
-      <td style={{ ...p.td, textAlign: "center" as const }}><span style={p.expandChevron}>{expanded ? "▾" : "▸"}</span></td>
-      <td style={{ ...p.td, ...ellipsis, fontWeight: 600, color: "#111827", maxWidth: 180 }} title={s.name}>{s.name}</td>
-      <td style={{ ...p.td, ...ellipsis, maxWidth: 170 }} title={s.batchName ? `${s.centerName} · ${s.batchName}` : s.centerName}>
+      onClick={onOpen}>
+      <td style={{ ...p.td, maxWidth: 240 }} title={s.name}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <span style={{
+            width: 34, height: 34, borderRadius: "50%", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+            background: `linear-gradient(135deg, ${tone}, ${tone2})`, color: "#fff", fontSize: 12, fontWeight: 700,
+            boxShadow: `0 2px 6px ${tone}55`,
+          }}>{initialsOf(s.name)}</span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ ...ellipsis, fontWeight: 600, color: "#0f172a" }}>{s.name}</div>
+            <div style={{ ...ellipsis, fontSize: 11.5, color: "#94a3b8" }}>
+              {s.admissionNo && s.admissionNo !== "-" ? s.admissionNo : "No adm. no."}
+              {s.course && s.course !== "-" ? ` · ${s.course}` : ""}
+            </div>
+          </div>
+        </div>
+      </td>
+      <td style={{ ...p.td, ...ellipsis, maxWidth: 170, color: "#334155" }} title={s.batchName ? `${s.centerName} · ${s.batchName}` : s.centerName}>
         {s.centerName}
         {s.batchName && <div style={{ fontSize: 11, color: "#4338ca", fontWeight: 600, ...ellipsis }}>🗂 {s.batchName}</div>}
       </td>
-      <td style={{ ...p.td, fontWeight: 700, color: s.balance > 0 ? "#d97706" : "#16a34a" }}>
-        {fmtINR(s.balance)}
+      <td style={p.td}>
+        <span style={{
+          display: "inline-block", padding: "3px 10px", borderRadius: 99, fontSize: 12.5, fontWeight: 700,
+          background: owes ? "#fff7ed" : "#f0fdf4", color: owes ? "#c2410c" : "#15803d",
+        }}>{fmtINR(s.balance)}</span>
       </td>
       {showStatus && (
         <td style={p.td}>
@@ -1031,75 +1148,333 @@ function StudentRow({ student: s, index, isAdmin, isTeacher, showStatus, expande
           </span>
         </td>
       )}
+      <td style={{ ...p.td, textAlign: "right" as const, color: hover ? tone : "#cbd5e1", fontSize: 18, width: 28 }}>›</td>
     </tr>
-    {expanded && (
-      <tr>
-        <td colSpan={showStatus ? 5 : 4} style={p.tdDetail}>
-          <div style={p.detailGrid}>
-            <div>
-              <div style={p.detailLabel}>Student ID</div>
-              <div style={p.detailValue}><span style={p.idChip}>{s.studentID}</span></div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Admission No.</div>
-              <div style={p.detailValue}><span style={p.admChip}>{s.admissionNo}</span></div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Email</div>
-              <div style={p.detailValue}>{s.email || "—"}</div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Phone</div>
-              <div style={p.detailValue}>{s.phone || "—"}</div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Date of Admission</div>
-              <div style={p.detailValue}>{s.createdAt ? s.createdAt.slice(0, 10) : "—"}</div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Type</div>
-              <div style={p.detailValue}>
-                {s.classType === "personal" ? "👤 Personal" : "👥 Group"}
-                {s.classType === "personal" && (
-                  <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>
-                    {s.assignedTeacherName
-                      ? `🎓 ${s.assignedTeacherName}`
-                      : <span style={{ color: "#d97706" }}>⚠ Unassigned</span>}
-                    {s.classDays.length > 0 && ` · ${s.classDays.join(", ")}`}
-                    {s.classTime ? ` · ${s.classTime}` : ""}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Instrument / Course</div>
-              <div style={p.detailValue}>{s.course && s.course !== "-" ? s.course : s.instrument}</div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Billing Frequency</div>
-              <div style={p.detailValue}>
-                {s.feeCycle === "per_class" ? `₹${s.feePerClass}/class` : s.monthlyFee > 0 ? `₹${s.monthlyFee}/mo` : "Monthly"}
-                {" · "}{s.billingMode === "prepay" ? "Prepay" : "Postpay"}
-              </div>
-            </div>
-            <div>
-              <div style={p.detailLabel}>Fee status</div>
-              <div style={p.detailValue}>{s.balance > 0 ? `₹${s.balance.toLocaleString("en-IN")} due` : "Fully paid"}</div>
-            </div>
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }} onClick={e => e.stopPropagation()}>
-            <StudentActionsMenu
-              student={s} isAdmin={isAdmin} isTeacher={isTeacher}
-              onEdit={onEdit} onRequestDeactivation={onRequestDeactivation} onRequestBreak={onRequestBreak}
-              onClearHistory={onClearHistory} onDelete={onDelete}
-            />
-          </div>
-        </td>
-      </tr>
-    )}
-    </>
   );
 }
+
+// ─── Student card popup (Table + Cards view) ──────────────────────────────────
+
+export function StudentCardModal({ student: s, transactions, canSeeFinance, isAdmin, isTeacher, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
+  student: StudentRow; transactions: Transaction[]; canSeeFinance: boolean;
+  isAdmin: boolean; isTeacher: boolean; onClose: () => void;
+  onEdit: () => void; onRequestDeactivation: () => void; onRequestBreak: () => void;
+  onClearHistory?: () => void; onDelete?: () => void;
+}) {
+  const [tab, setTab] = useState<RowTab>("overview");
+  const [tone, tone2] = tonesOf(s.name);
+  const owes = s.balance > 0;
+  const active = isActiveStatus(s.status);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div style={{ ...modal.overlay, zIndex: 900, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(3px)" }} onClick={onClose}>
+      <div role="dialog" aria-label={s.name} onClick={e => e.stopPropagation()}
+        style={{ background: "#fff", borderRadius: 20, width: "100%", maxWidth: 620, maxHeight: "90vh", display: "flex", flexDirection: "column" as const, overflow: "hidden", boxShadow: "0 24px 64px rgba(15,23,42,0.35)" }}>
+
+        {/* Colour header */}
+        <div style={{ position: "relative" as const, background: `linear-gradient(135deg, ${tone} 0%, ${tone2} 100%)`, color: "#fff", padding: "22px 22px 18px", flexShrink: 0, overflow: "hidden" }}>
+          <span style={{ position: "absolute" as const, width: 180, height: 180, borderRadius: "50%", background: "rgba(255,255,255,0.10)", top: -70, right: -40 }} />
+          <span style={{ position: "absolute" as const, width: 110, height: 110, borderRadius: "50%", background: "rgba(255,255,255,0.08)", bottom: -50, right: 110 }} />
+          <div style={{ position: "relative" as const, display: "flex", alignItems: "flex-start", gap: 14 }}>
+            <span style={{
+              width: 58, height: 58, borderRadius: 18, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+              background: "rgba(255,255,255,0.22)", border: "2px solid rgba(255,255,255,0.45)", fontSize: 21, fontWeight: 800,
+            }}>{initialsOf(s.name)}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 19, fontWeight: 800, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const }}>{s.name}</div>
+              <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>
+                {s.course && s.course !== "-" ? s.course : s.instrument}{" · "}{s.centerName}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const, marginTop: 10 }}>
+                <span style={hc.chip}>#{s.admissionNo && s.admissionNo !== "-" ? s.admissionNo : "No adm. no."}</span>
+                <span style={{ ...hc.chip, background: active ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.25)" }}>
+                  {active ? "● Active" : (s.status || "no status").replace(/_/g, " ")}
+                </span>
+                <span style={{ ...hc.chip, background: owes ? "rgba(251,146,60,0.95)" : "rgba(255,255,255,0.25)" }}>
+                  {owes ? `${fmtINR(s.balance)} due` : "No dues"}
+                </span>
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <StudentActionsMenu
+                student={s} isAdmin={isAdmin} isTeacher={isTeacher}
+                onEdit={onEdit} onRequestDeactivation={onRequestDeactivation} onRequestBreak={onRequestBreak}
+                onClearHistory={onClearHistory} onDelete={onDelete}
+              />
+              <button onClick={onClose} aria-label="Close" style={hc.close}>✕</button>
+            </div>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 6, padding: "12px 18px 0", flexShrink: 0, borderBottom: "1px solid #f1f5f9" }}>
+          {([
+            ["overview", "👤 Overview"],
+            ["academics", "📘 Academics"],
+            ["fees", "💰 Fees"],
+          ] as [RowTab, string][]).map(([k, label]) => {
+            const on = tab === k, c = TAB_TONE[k];
+            return (
+              <button key={k} role="tab" aria-selected={on} onClick={() => setTab(k)} style={{
+                border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700,
+                padding: "9px 14px 10px", borderRadius: "10px 10px 0 0",
+                background: on ? `${c}14` : "transparent", color: on ? c : "#64748b",
+                boxShadow: on ? `inset 0 -3px 0 ${c}` : "none",
+              }}>{label}</button>
+            );
+          })}
+        </div>
+
+        <div style={{ padding: "18px 20px 22px", overflowY: "auto" as const, flex: 1 }}>
+          {tab === "overview" && <RowOverview s={s} />}
+          {tab === "academics" && <RowAcademics s={s} />}
+          {tab === "fees" && <RowFees s={s} transactions={transactions} canSeeFinance={canSeeFinance} />}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+const hc: Record<string, React.CSSProperties> = {
+  chip:  { fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: 99, background: "rgba(255,255,255,0.22)", color: "#fff", whiteSpace: "nowrap" as const },
+  close: { width: 30, height: 30, borderRadius: 8, border: "1px solid rgba(255,255,255,0.4)", background: "rgba(255,255,255,0.15)", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 700 },
+};
+
+function InfoItem({ label, icon, tint, children, style }: { label: string; icon: string; tint: string; children: React.ReactNode; style?: React.CSSProperties }) {
+  return (
+    <div style={{ background: `${tint}0f`, border: `1px solid ${tint}2e`, borderRadius: 12, padding: "10px 12px", minWidth: 0, display: "flex", gap: 10, alignItems: "flex-start", ...style }}>
+      <span style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", background: `${tint}1f`, fontSize: 14 }}>{icon}</span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ ...p.detailLabel, color: tint }}>{label}</div>
+        <div style={p.detailValue}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function RowOverview({ s }: { s: StudentRow }) {
+  return (
+    <div style={rp.grid}>
+      <InfoItem label="Admission No." icon="🎫" tint="#d97706"><span style={p.admChip}>{s.admissionNo}</span></InfoItem>
+      <InfoItem label="Phone" icon="📞" tint="#059669">{s.phone ? <a href={`tel:${s.phone}`} style={rp.link}>{s.phone}</a> : "—"}</InfoItem>
+      <InfoItem label="Email" icon="✉️" tint="#7c3aed"><span style={{ wordBreak: "break-all" as const }}>{s.email && s.email !== "-" ? s.email : "—"}</span></InfoItem>
+      <InfoItem label="Admitted On" icon="📅" tint="#db2777">{s.createdAt ? fmtDate(s.createdAt.slice(0, 10)) : "—"}</InfoItem>
+      <InfoItem label="Centre" icon="🏫" tint="#0891b2">{s.centerName}{s.batchName ? ` · ${s.batchName}` : ""}</InfoItem>
+    </div>
+  );
+}
+
+function RowAcademics({ s }: { s: StudentRow }) {
+  const [att, setAtt] = useState<{ present: number; total: number } | "error" | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getDocs(query(collection(db, "attendance"), where("studentUid", "==", s.id)))
+      .then(snap => {
+        let present = 0, total = 0;
+        snap.docs.forEach(d => {
+          const r = d.data() as { status?: string; present?: boolean };
+          const counted = r.status ? r.status === "present" || r.status === "absent" : typeof r.present === "boolean";
+          if (!counted) return;
+          total += 1;
+          if (r.status ? r.status === "present" : r.present === true) present += 1;
+        });
+        if (alive) setAtt({ present, total });
+      })
+      .catch(() => { if (alive) setAtt("error"); });
+    return () => { alive = false; };
+  }, [s.id]);
+
+  const level = s.courseLevel ?? "";
+  const levelIdx = (LEVEL_STEPS as readonly string[]).indexOf(level);
+  const completed = s.completedCourses ?? [];
+  // A level is ✓ only when that course is recorded as completed — being on a
+  // higher course alone doesn't count (staff confirm it below).
+  const doneLabels = completedLabels(completed);
+  const instrument = findCourse(s.course)?.instrument ?? "";
+  const pathCourse = (l: string) => findCourse(formatCourse(l, instrument))?.label ?? "";
+  const { user, can } = useAuth();
+  const onCourseChanged = useContext(CourseSavedCtx);
+  const by = useMemo<LevelChangeBy>(() => {
+    const u = user as { uid?: string; role?: string; displayName?: string; name?: string } | null;
+    return { uid: u?.uid ?? "unknown", name: String(u?.displayName ?? u?.name ?? ""), role: u?.role ?? ROLES.ADMIN };
+  }, [user]);
+  const hasUnconfirmed = courseProgress(s.course, completed, s.unfinishedCourses, false)
+    .some(st => st.state === "unconfirmed" || st.state === "not_finished");
+  const pct = att && att !== "error" && att.total > 0 ? Math.round((att.present / att.total) * 100) : null;
+  const pctTone = pct === null ? "#94a3b8" : pct >= 75 ? "#16a34a" : pct >= 50 ? "#d97706" : "#dc2626";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column" as const, gap: 18 }}>
+      {/* Course gets the full width; Instrument + Class sit side by side below. */}
+      <InfoItem label="Course" icon="🎼" tint="#4f46e5" style={{ padding: "16px 18px", gap: 14, borderRadius: 14 }}>
+        <div style={{ marginTop: 6 }}><StudentCourseField s={s} roomy /></div>
+      </InfoItem>
+      <div style={rp.grid}>
+        <InfoItem label="Instrument" icon="🎹" tint="#db2777">{s.instrument && s.instrument !== "-" ? s.instrument : "—"}</InfoItem>
+        <InfoItem label="Class" icon={s.classType === "personal" ? "👤" : "👥"} tint="#0891b2">
+          {s.classType === "personal" ? "Personal" : "Group"}
+          {s.classType === "personal" && (
+            <div style={{ fontSize: 11.5, color: "#64748b", marginTop: 2 }}>
+              {s.assignedTeacherName ? `🎓 ${s.assignedTeacherName}` : <span style={{ color: "#d97706" }}>⚠ Unassigned</span>}
+              {s.classDays.length > 0 && ` · ${s.classDays.join(", ")}`}
+              {s.classTime ? ` · ${formatTime12(s.classTime)}` : ""}
+            </div>
+          )}
+        </InfoItem>
+      </div>
+
+      {/* Attendance */}
+      <div style={{ ...rp.box, background: `linear-gradient(135deg, ${pctTone}12, #fff)`, borderColor: `${pctTone}33` }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <div>
+            <div style={{ ...p.detailLabel, color: pctTone }}>✅ Attendance</div>
+            <div style={{ fontSize: 12.5, color: "#64748b" }}>
+              {att === null ? "Loading…" : att === "error" ? "Unavailable" : pct === null ? "No classes yet" : `${att.present} of ${att.total} classes present`}
+            </div>
+          </div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: pctTone }}>{pct === null ? "—" : `${pct}%`}</div>
+        </div>
+        {pct !== null && (
+          <div style={{ height: 8, background: "#e2e8f0", borderRadius: 99, marginTop: 10, overflow: "hidden" }}>
+            <div style={{ width: `${pct}%`, height: "100%", borderRadius: 99, background: `linear-gradient(90deg, ${pctTone}, ${pctTone}bb)` }} />
+          </div>
+        )}
+      </div>
+
+      {/* Level */}
+      <div>
+        <div style={{ ...p.detailLabel, color: "#4f46e5" }}>📈 Course Level</div>
+        <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" as const }}>
+          {LEVEL_STEPS.map((l, i) => {
+            const current = levelIdx === i;
+            const done = !current && (doneLabels.has(pathCourse(l)) || (!instrument && levelIdx > i));
+            const pending = !current && !done && levelIdx > i;   // below the current course, not confirmed
+            return (
+              <span key={l} title={pending ? "Not confirmed as finished — confirm under Completed Courses" : undefined} style={{
+                flex: "1 1 120px", textAlign: "center" as const, padding: "9px 10px", borderRadius: 12, fontSize: 12.5, fontWeight: 700,
+                border: `1px ${pending ? "dashed" : "solid"} ${current ? "transparent" : done ? "#bbf7d0" : pending ? "#fcd34d" : "#e2e8f0"}`,
+                background: current ? "linear-gradient(135deg, #4f46e5, #7c3aed)" : done ? "#f0fdf4" : pending ? "#fffbeb" : "#f8fafc",
+                color: current ? "#fff" : done ? "#15803d" : pending ? "#b45309" : "#94a3b8",
+                boxShadow: current ? "0 4px 12px rgba(79,70,229,0.3)" : "none",
+              }}>{done ? "✓ " : current ? "★ " : pending ? "? " : ""}{l}</span>
+            );
+          })}
+        </div>
+        {levelIdx < 0 && <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 6 }}>Level not set.</div>}
+      </div>
+
+      {/* Completed courses */}
+      <div>
+        <div style={{ ...p.detailLabel, color: "#d97706" }}>🏅 Completed Courses</div>
+        {completed.length === 0 && !hasUnconfirmed ? (
+          <div style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 4 }}>None yet.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column" as const, gap: 6, marginTop: 8 }}>
+            <UnconfirmedCourses uid={s.id} studentName={s.name} course={s.course === "-" ? "" : s.course}
+              completedCourses={completed} unfinishedCourses={s.unfinishedCourses} by={by}
+              canEdit={can(CAPABILITIES.STUDENTS_MANAGE)} onChanged={msg => onCourseChanged(s.id, msg)} />
+            {completed.map((c, i) => (
+              <div key={`${c.course}-${i}`} style={{ ...rp.listRow, background: "#fffbeb", borderColor: "#fde68a" }}>
+                <span style={{ fontWeight: 600, color: "#92400e" }}>🏅 {c.course}</span>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 12, color: "#b45309" }}>{c.completedOn ? fmtDate(c.completedOn) : "Date unavailable"}</span>
+                  <CertificateButton data={{ studentName: s.name, course: normalizeCourse(c.course), completedOn: c.completedOn, admissionNo: s.admissionNo, wing: s.wing, centre: s.centerName }} />
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
+        <Link href={`/dashboard/student-syllabus/${s.id}`} style={{ ...rp.ghostBtn, background: "#eef2ff", borderColor: "#c7d2fe", color: "#4338ca" }}>📖 Syllabus</Link>
+        <Link href={`/dashboard/students/${s.id}`} style={rp.ghostBtn}>Full profile →</Link>
+      </div>
+    </div>
+  );
+}
+
+function RowFees({ s, transactions, canSeeFinance }: { s: StudentRow; transactions: Transaction[]; canSeeFinance: boolean }) {
+  const owes = s.balance > 0;
+  const recent = useMemo(() => {
+    const ledger = sortLedger(transactions.filter(t => t.type !== "admission_fee"));
+    return ledger.slice(-6);
+  }, [transactions]);
+  const plan = s.feeCycle === "per_class"
+    ? `${fmtINR(s.feePerClass)} / class`
+    : s.monthlyFee > 0 ? `${fmtINR(s.monthlyFee)} / month` : "Monthly";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column" as const, gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+        <div style={{ ...rp.tile, border: "none", color: "#fff", background: owes ? "linear-gradient(135deg, #f97316, #dc2626)" : "linear-gradient(135deg, #22c55e, #0d9488)", boxShadow: owes ? "0 6px 16px rgba(234,88,12,0.28)" : "0 6px 16px rgba(22,163,74,0.25)" }}>
+          <div style={{ ...p.detailLabel, color: "rgba(255,255,255,0.85)" }}>Balance</div>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtINR(s.balance)}</div>
+          <div style={{ fontSize: 11.5, fontWeight: 600, opacity: 0.9 }}>{owes ? "Due" : "No dues"}</div>
+        </div>
+        <div style={{ ...rp.tile, background: "#eef2ff", borderColor: "#c7d2fe" }}>
+          <div style={{ ...p.detailLabel, color: "#4f46e5" }}>💳 Fee</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#312e81" }}>{plan}</div>
+        </div>
+        <div style={{ ...rp.tile, background: "#ecfeff", borderColor: "#a5f3fc" }}>
+          <div style={{ ...p.detailLabel, color: "#0891b2" }}>🔁 Billing</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#164e63" }}>{s.billingMode === "prepay" ? "Prepaid" : "Postpaid"}</div>
+        </div>
+      </div>
+
+      {canSeeFinance ? (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ ...p.detailLabel, color: "#059669" }}>🧾 Recent Activity</div>
+            <Link href={`/dashboard/finance?center=${encodeURIComponent(s.centerId)}`} style={{ ...rp.link, fontSize: 12 }}>Open in Finance →</Link>
+          </div>
+          {recent.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "#94a3b8", marginTop: 4 }}>No transactions yet.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column" as const, gap: 6, marginTop: 8 }}>
+              {recent.map(t => {
+                const waived = isWaivedDue(t);
+                const isDue = t.type === "fee_due" || t.type === "charge";
+                const label = waived ? "Waived" : isDue ? "Due" : "Payment";
+                const color = waived ? "#64748b" : isDue ? "#ea580c" : "#16a34a";
+                const when = t.billingMonth ? fmtMonth(t.billingMonth) : t.date ? fmtDate(t.date) : "";
+                return (
+                  <div key={t.id} style={{ ...rp.listRow, borderLeft: `4px solid ${color}` }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 9px", borderRadius: 99, background: `${color}1a`, color }}>{label}</span>
+                      <span style={{ fontSize: 12.5, color: "#334155" }}>{when}</span>
+                    </span>
+                    <span style={{ fontWeight: 700, color, textDecoration: waived ? "line-through" : "none" }}>{fmtINR(t.amount)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "#94a3b8" }}>Payment history is visible to finance staff.</div>
+      )}
+    </div>
+  );
+}
+
+const rp: Record<string, React.CSSProperties> = {
+  grid:      { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 },
+  box:       { border: "1px solid #e2e8f0", borderRadius: 14, padding: "12px 14px" },
+  tile:      { border: "1px solid #e2e8f0", borderRadius: 14, padding: "12px 14px", background: "#fff", display: "flex", flexDirection: "column" as const, gap: 4 },
+  listRow:   { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "9px 12px", border: "1px solid #f1f5f9", borderRadius: 10, background: "#fcfcfd", fontSize: 13 },
+  ghostBtn:  { display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 10, border: "1px solid #e2e8f0", background: "#fff", color: "#334155", fontSize: 12.5, fontWeight: 600, textDecoration: "none" },
+  link:      { color: "#4f46e5", fontWeight: 600, textDecoration: "none" },
+};
+
 
 // ─── Compact actions menu (Table view) ──────────────────────────────────────
 
@@ -1109,22 +1484,48 @@ function StudentActionsMenu({ student: s, isAdmin, isTeacher, onEdit, onRequestD
   onClearHistory?: () => void; onDelete?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  // Viewport position of the panel. It is portalled to <body> with fixed
+  // positioning so the table's overflow:auto wrapper can never clip it, and
+  // right-aligned to the ⋮ button so it opens inward (to the left).
+  const [pos, setPos] = useState<{ top: number; right: number; flipUp: boolean } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  function place() {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const flipUp = window.innerHeight - r.bottom < 260 && r.top > 260;
+    setPos({ top: flipUp ? r.top - 4 : r.bottom + 4, right: Math.max(8, window.innerWidth - r.right), flipUp });
+  }
 
   useEffect(() => {
     if (!open) return;
     function handleClickOutside(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (panelRef.current?.contains(t) || btnRef.current?.contains(t)) return;
+      setOpen(false);
     }
+    const close = () => setOpen(false);
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
   }, [open]);
 
   return (
-    <div ref={menuRef} style={{ position: "relative" as const, display: "inline-block" }}>
-      <button onClick={e => { e.stopPropagation(); setOpen(v => !v); }} style={p.moreBtn} title="Actions" aria-label="Actions">⋮</button>
-      {open && (
-        <div style={{ ...p.menuPanel, bottom: "auto", top: "calc(100% + 4px)" }} onClick={e => e.stopPropagation()}>
+    <div style={{ position: "relative" as const, display: "inline-block" }}>
+      <button ref={btnRef} onClick={e => { e.stopPropagation(); if (!open) place(); setOpen(v => !v); }} style={p.moreBtn} title="Actions" aria-label="Actions">⋮</button>
+      {open && pos && createPortal(
+        <div ref={panelRef}
+          style={{
+            ...p.menuPanel, position: "fixed" as const, left: "auto", right: pos.right, zIndex: 1000,
+            ...(pos.flipUp ? { top: "auto", bottom: window.innerHeight - pos.top } : { top: pos.top, bottom: "auto" }),
+          }}
+          onClick={e => e.stopPropagation()}>
           {(isAdmin || isTeacher) && (
             <button onClick={() => { setOpen(false); onEdit(); }} style={p.menuItem}>✏ Edit</button>
           )}
@@ -1141,7 +1542,8 @@ function StudentActionsMenu({ student: s, isAdmin, isTeacher, onEdit, onRequestD
           {onDelete && (
             <button onClick={() => { setOpen(false); onDelete(); }} style={{ ...p.menuItem, ...p.menuItemDanger }}>✕ Delete</button>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -1169,8 +1571,6 @@ function RequestsPanel({ requests, onApprove, onReject }: {
             <div>
               <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{s.name}</div>
               <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
-                <span style={p.idChip}>{s.studentID}</span>
-                {" · "}
                 {s.centerName}
                 {s.batchName && <span style={{ color: "#4338ca", fontWeight: 600 }}>{" · 🗂 "}{s.batchName}</span>}
                 {" · "}
@@ -1232,8 +1632,6 @@ function BreakRequestsPanel({ requests, onApprove, onReject }: {
               <div style={{ flex: 1, minWidth: 220 }}>
                 <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{s.name}</div>
                 <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
-                  <span style={p.idChip}>{s.studentID}</span>
-                  {" · "}
                   {s.centerName}
                   {s.batchName && <span style={{ color: "#4338ca", fontWeight: 600 }}>{" · 🗂 "}{s.batchName}</span>}
                   {" · "}
@@ -1302,8 +1700,6 @@ function OnBreakPanel({ students, onEndBreak, isAdmin }: {
             <div>
               <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{s.name}</div>
               <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}>
-                <span style={p.idChip}>{s.studentID}</span>
-                {" · "}
                 {s.centerName}
                 {s.batchName && <span style={{ color: "#4338ca", fontWeight: 600 }}>{" · 🗂 "}{s.batchName}</span>}
                 {" · "}
@@ -1485,6 +1881,19 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
   currentUserRole: string;
 }) {
   const isSom = isSchoolOfMusic(student.wing);
+  // Picking a course above Introduction asks about the previous course(s).
+  const [prevAsk, setPrevAsk] = useState<{ course: CourseOption; missing: string[] } | null>(null);
+  const [prevAnswer, setPrevAnswer] = useState<PrevCoursesAnswer | null>(null);
+  // "Yes, finished" → those courses count as completed right away in this modal
+  // (certificate button), and are written to the student on Save Changes.
+  const answeredCompleted = (course: string): CourseCompletion[] => {
+    const c = findCourse(course);
+    if (!c || !prevAnswer?.finished) return [];
+    return missingPrevCourses(c, student.completedCourses).map(x => ({
+      course: x.label, level: x.level, completedOn: prevAnswer.completedOn,
+      next: null, at: "", by: currentUserUid, byName: "",
+    }));
+  };
   const [form, setForm]     = useState<EditForm>({
     name:               blankIfDash(student.name),
     email:              blankIfDash(student.email),
@@ -1533,10 +1942,26 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
     // Blank optional fields are saved as "" (text) or null (fee / batch / time).
     const monthlyFeeValue = form.monthlyFee.trim() === "" ? null : Number(form.monthlyFee);
 
+    // Course from the 9-course dropdown → level (+ history on a change) and the Wing 2 syllabus slot follow.
+    const pickedCourse = findCourse(form.course);
+    const prevLevel = student.courseLevel ?? "";
+    const courseBy = { uid: currentUserUid, name: "", role: currentUserRole };
+    const coursePatch: Record<string, unknown> = !pickedCourse ? {} : {
+      ...(pickedCourse.label !== normalizeCourse(student.course) ? prevCoursesPatch(pickedCourse, student.completedCourses, prevAnswer, courseBy) : {}),
+      ...(pickedCourse.level !== prevLevel
+        ? levelChangePatch(prevLevel, pickedCourse.level, pickedCourse.instrument, { uid: currentUserUid, name: "", role: currentUserRole })
+        : {}),
+      courseLevel: pickedCourse.level,
+      ...(student.hasSyllabusSlot
+        ? { syllabusLevel: pickedCourse.level.toLowerCase(), syllabusInstrument: pickedCourse.instrument.toLowerCase() }
+        : {}),
+    };
+
     setSaving(true);
     try {
       // Update Firestore
       const payload: Record<string, unknown> = {
+        ...coursePatch,
         name:               form.name.trim(),
         displayName:        form.name.trim(),
         email:              form.email.trim().toLowerCase(),
@@ -1601,6 +2026,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
         batchId:             batchIdToStore(centerOptions.find(c => c.id === form.centerId)?.batches, form.batchId),
         instrument:          form.instrument.trim(),
         course:              form.course.trim(),
+        ...(pickedCourse ? { courseLevel: pickedCourse.level } : {}),
         classType:           isSom ? "group"  : (form.classType || "group"),
         billingMode:         isSom ? "prepay" : (form.billingMode || "postpay"),
         assignedTeacherUid:  !isSom && form.classType === "personal" ? (form.assignedTeacherUid || null) : null,
@@ -1618,41 +2044,63 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
     }
   }
 
+  const headName   = form.name.trim() || student.name;
+  const headCourse = findCourse(form.course)?.label || form.course || form.instrument;
+  const headActive = isActiveStatus(form.status);
+
   return (
-    <div style={modal.overlay} onClick={onClose}>
-      <div style={modal.box} onClick={e => e.stopPropagation()}>
-        {/* Header */}
-        <div style={modal.header}>
-          <div>
-            <div style={modal.title}>Edit Student</div>
-            <div style={modal.subtitle}><span style={p.idChip}>{student.studentID}</span> · {student.name}</div>
+    <div style={{ ...modal.overlay, background: "rgba(15,23,42,0.55)", backdropFilter: "blur(3px)" }} onClick={onClose}>
+      <style>{ES_CSS}</style>
+      <div role="dialog" aria-modal="true" aria-label={`Edit ${headName}`} className="es-modal" style={es.box} onClick={e => e.stopPropagation()}>
+        {/* Colour header */}
+        <div style={es.header}>
+          <span style={{ ...es.bubble, width: 190, height: 190, top: -80, right: -40 }} />
+          <span style={{ ...es.bubble, width: 110, height: 110, bottom: -55, right: 140, background: "rgba(255,255,255,0.08)" }} />
+          <div style={{ position: "relative" as const, display: "flex", alignItems: "center", gap: 16 }}>
+            <span style={es.avatar}>{initialsOf(headName)}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={es.eyebrow}>✏️ Edit Student</div>
+              <div style={es.name}>{headName}</div>
+              <div style={es.sub}>
+                {[newCentreName || "No centre", headCourse].filter(Boolean).join(" · ")}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" as const, marginTop: 10 }}>
+                {form.admissionNo.trim() && <span style={hc.chip}>#{form.admissionNo.trim()}</span>}
+                <span style={{ ...hc.chip, background: headActive ? "rgba(34,197,94,0.95)" : "rgba(255,255,255,0.25)" }}>
+                  {headActive ? "● Active" : (form.status || "no status").replace(/_/g, " ")}
+                </span>
+              </div>
+            </div>
+            <button type="button" onClick={onClose} aria-label="Close" style={{ ...hc.close, width: 34, height: 34, borderRadius: 10, alignSelf: "flex-start" }}>✕</button>
           </div>
-          <button onClick={onClose} style={modal.closeBtn}>✕</button>
         </div>
 
         {/* Body */}
-        <form onSubmit={handleSave}>
-          <div style={modal.body}>
-            {error && <div style={modal.errorBanner}>⚠ {error}</div>}
+        <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column" as const, minHeight: 0, flex: 1 }}>
+          <div style={es.body}>
+            {error && <div style={{ ...modal.errorBanner, borderRadius: 12, marginBottom: 0 }}>⚠ {error}</div>}
 
-            <div style={modal.sectionLabel}>Personal Info</div>
-            <div style={modal.grid}>
-              <Field label="Full Name *">
-                <input name="name" value={form.name} onChange={f} required style={p.input} />
-              </Field>
-              <Field label="Email">
-                <input name="email" type="email" value={form.email} onChange={f} style={p.input} />
-              </Field>
-              <Field label="Admission No. *">
-                <input name="admissionNo" value={form.admissionNo} onChange={f} required style={p.input} />
-              </Field>
-              <Field label="Phone *">
-                <input name="phone" value={form.phone} onChange={f} required placeholder="+91 98765 43210" style={p.input} />
-              </Field>
-            </div>
+            <section style={es.card(ES_PERSONAL)}>
+              <SectionHead icon="👤" title="Personal Information" hint="Name, admission number and contact" tone={ES_PERSONAL} />
+              <div style={es.grid}>
+                <Field label="Full Name *">
+                  <input name="name" value={form.name} onChange={f} required style={es.input} />
+                </Field>
+                <Field label="Admission No. *">
+                  <input name="admissionNo" value={form.admissionNo} onChange={f} required style={es.input} />
+                </Field>
+                <Field label="Phone *">
+                  <input name="phone" value={form.phone} onChange={f} required placeholder="+91 98765 43210" style={es.input} />
+                </Field>
+                <Field label="Email">
+                  <input name="email" type="email" value={form.email} onChange={f} placeholder="name@example.com" style={es.input} />
+                </Field>
+              </div>
+            </section>
 
-            <div style={modal.sectionLabel}>Academic Info</div>
-            <div style={modal.grid}>
+            <section style={es.card(ES_ACADEMIC)}>
+              <SectionHead icon="🎓" title="Academic & Billing Details" hint="Centre, course, fee and status" tone={ES_ACADEMIC} />
+              <div style={es.grid}>
               <Field label="Center">
                 <select
                   name="centerId"
@@ -1667,12 +2115,12 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                       monthlyFee: isSom && !prev.monthlyFee && centerFee ? String(centerFee) : prev.monthlyFee,
                     }));
                   }}
-                  style={p.input}>
+                  style={es.select}>
                   <option value="">— No center —</option>
                   {centerOptions.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
                 {centreMoving && prevCentreId && form.centerId && (
-                  <div role="status" style={{ marginTop: 6, fontSize: 12, lineHeight: 1.45, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "7px 10px" }}>
+                  <div role="status" style={{ marginTop: 6, fontSize: 12, lineHeight: 1.45, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "8px 11px" }}>
                     This student is currently in <b>{prevCentreName}</b>. Assigning to <b>{newCentreName}</b> will move them to the new centre — a student can be active in only one centre.
                   </div>
                 )}
@@ -1683,19 +2131,43 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
                     batches={centerOptions.find(c => c.id === form.centerId)?.batches ?? []}
                     value={form.batchId}
                     onChange={v => setForm(prev => ({ ...prev, batchId: v }))}
+                    style={es.select}
                   />
                 </Field>
               )}
+              <Field label="Instrument">
+                <input name="instrument" value={form.instrument} onChange={f} style={es.input} />
+              </Field>
+              <Field label="Course">
+                <CourseSelect value={form.course} style={es.select}
+                  onChange={c => {
+                    const missing = missingPrevCourses(c, student.completedCourses).map(x => x.label);
+                    if (missing.length) setPrevAsk({ course: c, missing });
+                    else { setPrevAnswer(null); setForm(prev => ({ ...prev, course: c.label, instrument: c.instrument })); }
+                  }} />
+                {prevAsk && (
+                  <PrevCourseDialog studentName={form.name} course={prevAsk.course.label} missing={prevAsk.missing}
+                    onCancel={() => setPrevAsk(null)}
+                    onAnswer={a => {
+                      const c = prevAsk.course;
+                      setPrevAnswer(a); setPrevAsk(null);
+                      setForm(prev => ({ ...prev, course: c.label, instrument: c.instrument }));
+                    }} />
+                )}
+              </Field>
               {isSom && (
                 <Field label="Monthly Fee (₹)">
-                  <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee} onChange={f} style={p.input} />
+                  <div style={{ position: "relative" as const }}>
+                    <span style={es.prefix}>₹</span>
+                    <input name="monthlyFee" type="number" min="0" step="1" value={form.monthlyFee} onChange={f} placeholder="0" style={{ ...es.input, paddingLeft: 32 }} />
+                  </div>
                 </Field>
               )}
               {!isSom && (
               <Field label="Class Type *">
                 <select name="classType" value={form.classType}
                   onChange={e => setForm(prev => ({ ...prev, classType: e.target.value, assignedTeacherUid: "", classDays: [], classTime: "" }))}
-                  style={p.input}>
+                  style={es.select}>
                   <option value="group">Group Class (batch at center)</option>
                   <option value="personal">Personal Class (one-on-one / private)</option>
                 </select>
@@ -1703,7 +2175,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
               )}
               {!isSom && (
               <Field label="Billing Mode *">
-                <select name="billingMode" value={form.billingMode} onChange={f} style={p.input}>
+                <select name="billingMode" value={form.billingMode} onChange={f} style={es.select}>
                   <option value="postpay">Postpay — billed first, pays after</option>
                   <option value="prepay">Prepay — payments advance, fee deducted</option>
                 </select>
@@ -1711,44 +2183,43 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
               )}
               {!isSom && form.classType === "personal" && (
                 <Field label="Assign Teacher">
-                  <select name="assignedTeacherUid" value={form.assignedTeacherUid} onChange={f} style={p.input}>
+                  <select name="assignedTeacherUid" value={form.assignedTeacherUid} onChange={f} style={es.select}>
                     <option value="">— Unassigned —</option>
                     {teacherOptions.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </Field>
               )}
               {!isSom && form.classType === "personal" && (
-                <Field label="Class Days">
-                  <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8, paddingTop: 4 }}>
-                    {DAYS_OF_WEEK.map(day => (
-                      <label key={day} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, cursor: "pointer" }}>
-                        <input type="checkbox" checked={form.classDays.includes(day)}
-                          onChange={e => setForm(prev => ({
-                            ...prev,
-                            classDays: e.target.checked
-                              ? [...prev.classDays, day]
-                              : prev.classDays.filter(d => d !== day),
-                          }))} />
-                        {day}
-                      </label>
-                    ))}
-                  </div>
+                <Field label="Class Time">
+                  <input type="time" name="classTime" value={form.classTime} onChange={f} style={es.input} />
                 </Field>
               )}
               {!isSom && form.classType === "personal" && (
-                <Field label="Class Time">
-                  <input type="time" name="classTime" value={form.classTime} onChange={f} style={p.input} />
-                </Field>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <Field label="Class Days">
+                    <div style={{ display: "flex", flexWrap: "wrap" as const, gap: 8 }}>
+                      {DAYS_OF_WEEK.map(day => {
+                        const on = form.classDays.includes(day);
+                        return (
+                          <label key={day} style={es.dayChip(on)}>
+                            <input type="checkbox" checked={on} style={{ position: "absolute" as const, opacity: 0, pointerEvents: "none" as const }}
+                              onChange={e => setForm(prev => ({
+                                ...prev,
+                                classDays: e.target.checked
+                                  ? [...prev.classDays, day]
+                                  : prev.classDays.filter(d => d !== day),
+                              }))} />
+                            {on ? "✓ " : ""}{day}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                </div>
               )}
-              <Field label="Instrument">
-                <input name="instrument" value={form.instrument} onChange={f} style={p.input} />
-              </Field>
-              <Field label="Course">
-                <input name="course" value={form.course} onChange={f} style={p.input} />
-              </Field>
               {!isSom && (
               <Field label="Fee Cycle">
-                <select name="feeCycle" value={form.feeCycle} onChange={f} style={p.input}>
+                <select name="feeCycle" value={form.feeCycle} onChange={f} style={es.select}>
                   <option value="monthly">Monthly</option>
                   <option value="per_class">Per Class</option>
                 </select>
@@ -1756,31 +2227,106 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
               )}
               {!isSom && form.feeCycle === "per_class" && (
                 <Field label="Fee Per Class (₹)">
-                  <input name="feePerClass" type="number" min="0" value={form.feePerClass} onChange={f} style={p.input} />
+                  <div style={{ position: "relative" as const }}>
+                    <span style={es.prefix}>₹</span>
+                    <input name="feePerClass" type="number" min="0" value={form.feePerClass} onChange={f} style={{ ...es.input, paddingLeft: 32 }} />
+                  </div>
                 </Field>
               )}
               <Field label="Status">
-                <select name="status" value={form.status} onChange={f} style={p.input}>
+                <select name="status" value={form.status} onChange={f} style={es.select}>
                   <option value="active">Active</option>
                   <option value="inactive">Inactive</option>
                   <option value="deactivation_requested">Deactivation Requested</option>
                 </select>
               </Field>
-            </div>
+              </div>
+            </section>
 
             {/* Ledger editing deliberately lives on the Finance page only, so
                 corrections to money happen in exactly one place. */}
           </div>
 
           {/* Footer */}
-          <div style={modal.footer}>
-            <button type="button" onClick={onClose} style={modal.cancelBtn}>Cancel</button>
+          <div style={es.footer}>
+            <CertificateMenuButton
+              student={{
+                studentName: student.name, admissionNo: student.admissionNo, wing: student.wing,
+                centre: centerOptions.find(c => c.id === student.centerId)?.name ?? student.centerName,
+              }}
+              completed={[...(student.completedCourses ?? []), ...answeredCompleted(form.course)]}
+              style={es.certBtn} />
+            <span style={{ fontSize: 12, color: "#94a3b8", marginRight: "auto" }}>* Required</span>
+            <button type="button" onClick={onClose} style={es.cancelBtn}>Cancel</button>
             <button type="submit" disabled={saving}
-              style={{ ...p.primaryBtn, opacity: saving ? 0.6 : 1 }}>
-              {saving ? "Saving…" : "Save Changes"}
+              style={{ ...es.saveBtn, opacity: saving ? 0.65 : 1, cursor: saving ? "default" : "pointer" }}>
+              {saving ? "Saving…" : "💾 Save Changes"}
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Edit modal styles ─────────────────────────────────────────────────────────
+
+const ES_PERSONAL = { tint: "#d97706", bg: "#fffaf3", border: "#fde8c8" };
+const ES_ACADEMIC = { tint: "#4f46e5", bg: "#f7f8ff", border: "#e0e4fb" };
+const ES_CHEVRON  = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`;
+// Focus ring + hover can't be inline styles; scoped to the edit modal.
+const ES_CSS = `
+.es-modal input:focus, .es-modal select:focus {
+  outline: none; border-color: #f97316 !important; background-color: #fff !important;
+  box-shadow: 0 0 0 3px rgba(249,115,22,0.22);
+}
+.es-modal input:hover:not(:focus):not(:disabled), .es-modal select:hover:not(:focus):not(:disabled) { border-color: #cbd5e1 !important; }
+.es-modal select:disabled { cursor: not-allowed; opacity: 0.75; }
+@media (max-width: 560px) { .es-modal form > div:first-child { padding: 18px 16px !important; } }
+`;
+
+const esField: React.CSSProperties = {
+  width: "100%", boxSizing: "border-box", height: 44, padding: "0 14px", borderRadius: 12,
+  border: "1.5px solid #e2e8f0", background: "#fff", color: "#0f172a", fontSize: 14,
+  fontFamily: "inherit", transition: "border-color 0.15s, box-shadow 0.15s",
+};
+
+const es = {
+  box: { background: "#fff", borderRadius: 22, width: "100%", maxWidth: 760, maxHeight: "92vh", display: "flex", flexDirection: "column" as const, overflow: "hidden", boxShadow: "0 28px 70px rgba(15,23,42,0.35)" },
+  header: { position: "relative" as const, overflow: "hidden", flexShrink: 0, padding: "24px 26px 20px", color: "#fff", background: "linear-gradient(135deg, #f97316 0%, #fb7185 100%)" },
+  bubble: { position: "absolute" as const, borderRadius: "50%", background: "rgba(255,255,255,0.12)" },
+  avatar: { width: 62, height: 62, borderRadius: 19, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,0.22)", border: "2px solid rgba(255,255,255,0.5)", fontSize: 22, fontWeight: 800 },
+  eyebrow: { fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" as const, opacity: 0.85 },
+  name: { fontSize: 20, fontWeight: 800, lineHeight: 1.2, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
+  sub: { fontSize: 13, opacity: 0.92, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const },
+  body: { padding: "24px 28px", overflowY: "auto" as const, flex: 1, display: "flex", flexDirection: "column" as const, gap: 20, background: "#fcfcfd" },
+  card: (t: typeof ES_PERSONAL): React.CSSProperties => ({ background: t.bg, border: `1px solid ${t.border}`, borderRadius: 18, padding: "18px 20px 20px" }),
+  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: "16px 18px" },
+  input: esField,
+  select: {
+    ...esField, appearance: "none" as const, WebkitAppearance: "none" as const, cursor: "pointer", paddingRight: 40,
+    backgroundImage: ES_CHEVRON, backgroundRepeat: "no-repeat", backgroundPosition: "right 14px center",
+    textOverflow: "ellipsis", whiteSpace: "nowrap" as const, overflow: "hidden",
+  } as React.CSSProperties,
+  prefix: { position: "absolute" as const, left: 14, top: "50%", transform: "translateY(-50%)", color: "#94a3b8", fontSize: 14, fontWeight: 700, pointerEvents: "none" as const },
+  dayChip: (on: boolean): React.CSSProperties => ({
+    position: "relative", display: "inline-flex", alignItems: "center", height: 36, padding: "0 14px", borderRadius: 99, cursor: "pointer",
+    fontSize: 13, fontWeight: 600, userSelect: "none",
+    border: `1.5px solid ${on ? "#6366f1" : "#e2e8f0"}`, background: on ? "#eef2ff" : "#fff", color: on ? "#4338ca" : "#475569",
+  }),
+  footer: { display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, flexWrap: "wrap" as const, padding: "16px 28px", borderTop: "1px solid #f1f5f9", background: "#fff", flexShrink: 0 },
+  certBtn: { height: 44, padding: "0 18px", borderRadius: 12, border: "1.5px solid #fdba74", background: "#fff7ed", color: "#c2410c", fontSize: 14, fontWeight: 700, fontFamily: "inherit", whiteSpace: "nowrap" as const },
+  cancelBtn: { height: 44, padding: "0 22px", borderRadius: 12, border: "1.5px solid #e2e8f0", background: "#fff", color: "#334155", fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  saveBtn: { height: 44, padding: "0 26px", borderRadius: 12, border: "none", color: "#fff", fontSize: 14, fontWeight: 700, fontFamily: "inherit", background: "linear-gradient(135deg, #f97316 0%, #fb7185 100%)", boxShadow: "0 8px 20px rgba(249,115,22,0.32)" },
+};
+
+function SectionHead({ icon, title, hint, tone }: { icon: string; title: string; hint: string; tone: typeof ES_PERSONAL }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+      <span style={{ width: 36, height: 36, borderRadius: 11, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 17, background: `${tone.tint}1a`, border: `1px solid ${tone.tint}33` }}>{icon}</span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: tone.tint }}>{title}</div>
+        <div style={{ fontSize: 12, color: "#64748b", marginTop: 1 }}>{hint}</div>
       </div>
     </div>
   );
@@ -1827,7 +2373,7 @@ export function ClearHistoryModal({ student, onClose, onCleared, currentUserUid,
         <div style={modal.header}>
           <div>
             <div style={{ ...modal.title, color: "#c2410c" }}>🗑 Clear Student History</div>
-            <div style={modal.subtitle}><span style={p.idChip}>{student.studentID}</span> · {student.name}</div>
+            <div style={modal.subtitle}>{student.name}</div>
           </div>
           <button onClick={onClose} style={modal.closeBtn}>✕</button>
         </div>
@@ -1935,7 +2481,7 @@ export function DeleteStudentModal({ student, onClose, onDeleted, currentUserUid
         <div style={modal.header}>
           <div>
             <div style={{ ...modal.title, color: "#991b1b" }}>✕ Delete Student</div>
-            <div style={modal.subtitle}><span style={p.idChip}>{student.studentID}</span> · {student.name}</div>
+            <div style={modal.subtitle}>{student.name}</div>
           </div>
           <button onClick={onClose} style={modal.closeBtn}>✕</button>
         </div>
@@ -2004,11 +2550,9 @@ function StudentCard({ student: s, onClick }: { student: StudentRow; onClick: ()
       </div>
       <div style={{ flex: "1 1 170px", minWidth: 0 }}>
         <div style={{ fontWeight: 600, fontSize: 13, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
-        <span style={p.idChip}>{s.studentID}</span>
       </div>
       <div style={{ flex: "1 1 160px", minWidth: 0, fontSize: 12, color: "#374151", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        <span style={{ fontWeight: 600 }}>{s.instrument}</span>
-        {s.course ? <span style={{ color: "#6b7280" }}> · {s.course}</span> : null}
+        <StudentCourseField s={s} />
       </div>
       <div style={{ flex: "0 0 auto", display: "flex", gap: 5, flexWrap: "wrap" as const }}>
         {!isSchoolOfMusic(s.wing) && (
@@ -2109,10 +2653,16 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
 }) {
   const [att, setAtt] = useState<AttAgg | "error" | null>(null);
   const [attLoading, setAttLoading] = useState(false);
+  // Guards the one-shot fetch. attLoading must NOT be an effect dependency:
+  // setting it re-ran the effect, whose cleanup cancelled the in-flight fetch
+  // and left the spinner stuck forever.
+  const attStartedRef = useRef(false);
+  const unmountedRef = useRef(false);
+  useEffect(() => () => { unmountedRef.current = true; }, []);
 
   useEffect(() => {
-    if (!open || att !== null || attLoading) return;
-    let cancelled = false;
+    if (!open || att !== null || attStartedRef.current) return;
+    attStartedRef.current = true;
     setAttLoading(true);
     (async () => {
       try {
@@ -2151,7 +2701,7 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
             .map(([label, v]) => { const pct = Math.round((v.p / v.t) * 100); return { label, value: pct, hint: `${pct}%` }; })
             .sort((a, b) => b.value - a.value)
             .slice(0, 8);
-        if (!cancelled) {
+        if (!unmountedRef.current) {
           setAtt({
             overallPct: gt > 0 ? Math.round((gp / gt) * 100) : 0,
             byCourse: toRows(byCourse),
@@ -2159,13 +2709,12 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
           });
         }
       } catch {
-        if (!cancelled) setAtt("error");
+        if (!unmountedRef.current) setAtt("error");
       } finally {
-        if (!cancelled) setAttLoading(false);
+        if (!unmountedRef.current) setAttLoading(false);
       }
     })();
-    return () => { cancelled = true; };
-  }, [open, att, attLoading, centerOptions, students]);
+  }, [open, att, centerOptions, students]);
 
   const stats = useMemo(() => {
     const total = students.length;
@@ -2288,10 +2837,7 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
   );
 }
 
-function StudentTableView({
-  students, sortKey, sortDir, onSort, showStatus, isAdmin, isTeacher,
-  onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete,
-}: {
+function StudentTableView({ students, sortKey, sortDir, onSort, showStatus, onOpen }: {
   students: StudentRow[];
   sortKey: "name" | "centerName" | "balance" | "status";
   sortDir: 1 | -1;
@@ -2300,13 +2846,8 @@ function StudentTableView({
   // column is noise there. Inactive can hold several (inactive/cancelled/
   // canceled/…), so it stays visible for that tab.
   showStatus: boolean;
-  isAdmin: boolean;
-  isTeacher: boolean;
-  onEdit: (s: StudentRow) => void;
-  onRequestDeactivation: (s: StudentRow) => void;
-  onRequestBreak: (s: StudentRow) => void;
-  onClearHistory?: (s: StudentRow) => void;
-  onDelete?: (s: StudentRow) => void;
+  /** Opens the student card popup. */
+  onOpen: (s: StudentRow) => void;
 }) {
   const sorted = useMemo(() => {
     const arr = [...students];
@@ -2319,11 +2860,6 @@ function StudentTableView({
     return arr;
   }, [students, sortKey, sortDir]);
 
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  function toggleExpand(id: string) {
-    setExpandedId(prev => (prev === id ? null : id));
-  }
-
   const arrow = (k: typeof sortKey) => (sortKey === k ? (sortDir === 1 ? " ▲" : " ▼") : "");
   const sortableTh = (k: typeof sortKey, label: string) => (
     <th style={{ ...p.th, cursor: "pointer", userSelect: "none" as const }} onClick={() => onSort(k)}>{label}{arrow(k)}</th>
@@ -2334,30 +2870,16 @@ function StudentTableView({
       <table style={p.table}>
         <thead>
           <tr>
-            <th style={{ ...p.th, width: 20 }}></th>
             {sortableTh("name", "Name")}
             {sortableTh("centerName", "Centre")}
             {sortableTh("balance", "Balance")}
             {showStatus && sortableTh("status", "Status")}
+            <th style={{ ...p.th, width: 28 }}></th>
           </tr>
         </thead>
         <tbody>
           {sorted.map((s, i) => (
-            <StudentRow
-              key={s.id}
-              student={s}
-              index={i}
-              isAdmin={isAdmin}
-              isTeacher={isTeacher}
-              showStatus={showStatus}
-              expanded={expandedId === s.id}
-              onToggleExpand={() => toggleExpand(s.id)}
-              onEdit={() => onEdit(s)}
-              onRequestDeactivation={() => onRequestDeactivation(s)}
-              onRequestBreak={() => onRequestBreak(s)}
-              onClearHistory={onClearHistory ? () => onClearHistory(s) : undefined}
-              onDelete={onDelete ? () => onDelete(s) : undefined}
-            />
+            <StudentRow key={s.id} student={s} index={i} showStatus={showStatus} onOpen={() => onOpen(s)} />
           ))}
         </tbody>
       </table>
@@ -2743,10 +3265,11 @@ export function Field({ label, children }: { label: string; children: React.Reac
  * to automatically (batchId stays null). Once real batches exist they replace
  * the default and the student can be placed in one of them.
  */
-export function BatchSelect({ batches, value, onChange }: {
+export function BatchSelect({ batches, value, onChange, style }: {
   batches:  CenterBatch[];
   value:    string;
   onChange: (batchId: string) => void;
+  style?:   React.CSSProperties;
 }) {
   const label = (b: CenterBatch) => {
     const sched = batchSchedule(b);
@@ -2754,13 +3277,13 @@ export function BatchSelect({ batches, value, onChange }: {
   };
   if (batches.length === 1 && isDefaultBatchId(batches[0].id)) {
     return (
-      <select value="" disabled style={{ ...p.input, color: "#6b7280" }} title="No batches defined for this centre — using the centre schedule">
+      <select value="" disabled style={{ ...p.input, ...style, color: "#6b7280" }} title="No batches defined for this centre — using the centre schedule">
         <option value="">{label(batches[0])} (centre schedule)</option>
       </select>
     );
   }
   return (
-    <select value={value} onChange={e => onChange(e.target.value)} style={p.input}>
+    <select value={value} onChange={e => onChange(e.target.value)} style={{ ...p.input, ...style }}>
       <option value="">— No batch —</option>
       {batches.map(b => <option key={b.id} value={b.id}>{label(b)}</option>)}
     </select>
@@ -2802,16 +3325,16 @@ export const p: Record<string, React.CSSProperties> = {
     borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer",
   },
 
-  tableWrap: { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "auto", boxShadow: "0 1px 4px rgba(0,0,0,0.05)" },
+  tableWrap: { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, overflow: "auto", boxShadow: "0 1px 2px rgba(16,24,40,0.04), 0 4px 16px rgba(16,24,40,0.05)" },
   table:     { width: "100%", minWidth: 760, borderCollapse: "collapse" as const },
   th: {
-    padding: "10px 10px", textAlign: "left" as const, fontSize: 12, fontWeight: 700,
-    color: "#4b5563", textTransform: "uppercase" as const, letterSpacing: "0.05em",
-    borderBottom: "1px solid #e5e7eb", whiteSpace: "nowrap" as const,
+    padding: "12px 14px", textAlign: "left" as const, fontSize: 11, fontWeight: 600,
+    color: "#64748b", textTransform: "uppercase" as const, letterSpacing: "0.06em",
+    borderBottom: "1px solid #eef2f6", whiteSpace: "nowrap" as const, background: "#f8fafc",
   },
-  td: { padding: "10px 10px", fontSize: 13.5, color: "#111827", borderBottom: "1px solid #f3f4f6" },
+  td: { padding: "12px 14px", fontSize: 13.5, color: "#0f172a", borderBottom: "1px solid #f1f5f9", verticalAlign: "middle" as const },
   expandChevron: { display: "inline-block", fontSize: 13, color: "#9ca3af", width: 12, textAlign: "center" as const },
-  tdDetail: { padding: "14px 20px", background: "#f8fafc", borderBottom: "1px solid #e5e7eb", cursor: "default" as const },
+  tdDetail: { padding: "4px 14px 16px", background: "#f8fafc", borderBottom: "1px solid #e5e7eb", cursor: "default" as const },
   detailGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "12px 24px" },
   detailLabel: { fontSize: 10.5, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.04em", color: "#9ca3af", marginBottom: 3 },
   detailValue: { fontSize: 13.5, color: "#111827" },
@@ -2826,7 +3349,7 @@ export const p: Record<string, React.CSSProperties> = {
   clearBtn:    { background: "#fff7ed", color: "#c2410c", border: "1px solid #fed7aa", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
   deleteBtn:   { background: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" },
 
-  moreBtn:     { background: "#f3f4f6", color: "#374151", border: "1px solid #e5e7eb", borderRadius: 6, width: 24, height: 24, fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 },
+  moreBtn:     { background: "#fff", color: "#374151", border: "1px solid #e2e8f0", borderRadius: 8, width: 30, height: 30, fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 },
   menuPanel:   { position: "absolute" as const, bottom: "calc(100% + 6px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.16)", minWidth: 180, overflow: "hidden", zIndex: 10 },
   menuItem:    { display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 14px", fontSize: 13, fontWeight: 500, color: "#111827", background: "none", border: "none", textAlign: "left" as const, cursor: "pointer", textDecoration: "none", boxSizing: "border-box" as const },
   menuItemDanger: { color: "#dc2626" },

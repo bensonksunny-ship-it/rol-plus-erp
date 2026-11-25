@@ -1,5 +1,6 @@
 "use client";
 
+import { normalizeCourse } from "@/lib/course";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { collection, doc, getDoc, getDocs, query, where } from "firebase/firestore";
@@ -72,7 +73,7 @@ function ParentContent() {
             studentID: (s.studentID ?? "—") as string,
             centerName,
             instrument: (s.instrument ?? "—") as string,
-            course: (s.course ?? "—") as string,
+            course: normalizeCourse(s.course) || "—",
             status: (s.status ?? s.studentStatus ?? "active") as string,
             balance,
             attThisMonth: { present, absent, total: monthAtt.length },
@@ -123,7 +124,7 @@ function ParentContent() {
 
       <div style={s.card}>
         <div style={s.childName}>{child.name}</div>
-        <div style={s.sub}>{child.studentID} · {child.centerName}</div>
+        <div style={s.sub}>{child.centerName}</div>
 
         <div style={s.statGrid}>
           <Stat label="Instrument" value={child.instrument} />

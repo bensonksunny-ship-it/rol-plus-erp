@@ -1,4 +1,7 @@
 // =============================================================================
+// The 9 offered courses (COURSES): Introduction to / Intermediate / Advanced ×
+// Keyboard / Guitar / Drums. Older records are spelled "Intermediate to
+// Keyboard" — normalizeCourse() reads them under today's names.
 // Course title = Course Level + Instrument, e.g. "Introduction to Keyboard".
 // Picked on the admission form (both wings); a Course Level allows exactly one
 // instrument. Saved on the application and the student as `courseLevel` +
@@ -12,25 +15,56 @@ export function isCourseLevel(v: unknown): v is CourseLevel {
   return typeof v === "string" && (COURSE_LEVELS as readonly string[]).includes(v);
 }
 
-/** "Introduction" + "Keyboard" → "Introduction to Keyboard"; either alone is returned as-is. */
+/**
+ * Course title from level + instrument. Only Introduction takes "to":
+ * "Introduction to Keyboard", "Intermediate Keyboard", "Advanced Keyboard".
+ * Either part alone is returned as-is.
+ */
 export function formatCourse(level: string | null | undefined, instrument: string | null | undefined): string {
   const l = (level ?? "").trim(), i = (instrument ?? "").trim();
-  return l && i ? `${l} to ${i}` : i || l;
+  if (!l || !i) return i || l;
+  return l.toLowerCase() === "introduction" ? `${l} to ${i}` : `${l} ${i}`;
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 
+// ── The 9 offered courses (both wings) ───────────────────────────────────────
+/** Instruments a course can be in — matches the syllabus instruments. */
+export const COURSE_INSTRUMENTS = ["Keyboard", "Guitar", "Drums"] as const;
+export type CourseInstrument = (typeof COURSE_INSTRUMENTS)[number];
+
+export interface CourseOption { label: string; level: CourseLevel; instrument: CourseInstrument }
+
+/** Introduction to Keyboard, Intermediate Keyboard, Advanced Keyboard, then Guitar, then Drums. */
+export const COURSES: CourseOption[] = COURSE_INSTRUMENTS.flatMap(instrument =>
+  COURSE_LEVELS.map(level => ({ label: formatCourse(level, instrument), level, instrument })));
+
+const COURSE_RE = /^(introduction|intermediate|advanced)\s+(?:to\s+)?(.+)$/i;
+
+/** Old or new spelling ("Intermediate to Drums" / "intermediate drums") → the listed course; null if not one of the 9. */
+export function findCourse(course: unknown): CourseOption | null {
+  const m = str(course).match(COURSE_RE);
+  if (!m) return null;
+  return COURSES.find(c => c.level.toLowerCase() === m[1].toLowerCase()
+    && c.instrument.toLowerCase() === m[2].trim().toLowerCase()) ?? null;
+}
+
+/** A stored course title in today's spelling — "Intermediate to Keyboard" → "Intermediate Keyboard"; anything else as-is. */
+export function normalizeCourse(course: unknown): string {
+  return findCourse(course)?.label ?? str(course);
+}
+
 /** Course Level from a stored `courseLevel`, else parsed from a course title; "" when none. */
 export function levelOfCourse(courseLevel: unknown, course: unknown): CourseLevel | "" {
   if (isCourseLevel(courseLevel)) return courseLevel;
-  const c = str(course).toLowerCase();
-  return COURSE_LEVELS.find(l => c.startsWith(`${l.toLowerCase()} to `)) ?? "";
+  const m = str(course).match(COURSE_RE);
+  return m ? COURSE_LEVELS.find(l => l.toLowerCase() === m[1].toLowerCase()) ?? "" : "";
 }
 
-/** The instrument part of a course title — "Intermediate to Drums" → "Drums"; other text as-is. */
+/** The instrument part of a course title — "Intermediate Drums" / "Intermediate to Drums" → "Drums"; other text as-is. */
 export function instrumentOfCourse(course: unknown): string {
   const c = str(course);
-  const m = c.match(/^(introduction|intermediate|advanced)\s+to\s+(.+)$/i);
+  const m = c.match(COURSE_RE);
   return m ? m[2].trim() : c;
 }
 
@@ -45,7 +79,7 @@ export function nextCourseLevel(level: string): CourseLevel | null {
 export interface LevelHistoryEntry { from: string; to: string; at: string; by: string; byName: string }
 
 /**
- * One finished course in a student's `completedCourses`. `completedOn` is the
+ * One finished course in a student's `completedCourses`. `completedOn` ("" = date unavailable) is the
  * staff-entered date (YYYY-MM-DD); `at` is when it was recorded.
  */
 export interface CourseCompletion {
@@ -69,7 +103,7 @@ export function levelHistoryText(h: LevelHistoryEntry): string {
  */
 export function courseLabel(d: Record<string, unknown> | null | undefined): string {
   if (!d) return "";
-  if (str(d.course)) return str(d.course);
+  if (str(d.course)) return normalizeCourse(d.course);
   const instruments = [
     ...(Array.isArray(d.instruments) ? d.instruments : []),
     ...(Array.isArray(d.instrumentsToLearn) ? d.instrumentsToLearn : []),
@@ -78,4 +112,52 @@ export function courseLabel(d: Record<string, unknown> | null | undefined): stri
   const single = unique.length === 1 ? unique[0] : str(d.instrument);
   if (str(d.courseLevel) && single) return formatCourse(str(d.courseLevel), single);
   return unique.join(", ") || str(d.instrument);
+}
+
+// ── Course progress (previous courses + the current one) ─────────────────────
+// Picking Intermediate/Advanced asks whether the lower courses of that
+// instrument were finished. Yes → they go into `completedCourses`; No → their
+// labels are kept in `unfinishedCourses` until someone confirms them.
+
+/** Lower courses of the same instrument — Advanced Drums → [Introduction to Drums, Intermediate Drums]. */
+export function lowerCourses(c: CourseOption): CourseOption[] {
+  const rank = COURSE_LEVELS.indexOf(c.level);
+  return COURSES.filter(x => x.instrument === c.instrument && COURSE_LEVELS.indexOf(x.level) < rank);
+}
+
+/** Course labels (today's spelling) found in a `completedCourses` array. */
+export function completedLabels(completed: unknown): Set<string> {
+  const out = new Set<string>();
+  if (Array.isArray(completed)) for (const e of completed) {
+    const label = normalizeCourse((e as { course?: unknown } | null)?.course);
+    if (label) out.add(label);
+  }
+  return out;
+}
+
+/** Lower courses of `c` not yet recorded as completed — the ones to ask about. */
+export function missingPrevCourses(c: CourseOption, completed: unknown): CourseOption[] {
+  const done = completedLabels(completed);
+  return lowerCourses(c).filter(x => !done.has(x.label));
+}
+
+export type CourseStepState = "completed" | "not_finished" | "unconfirmed" | "in_progress" | "graduated";
+export interface CourseStep { label: string; state: CourseStepState }
+
+/**
+ * Status of each course on the student's path: lower courses (Completed / Not
+ * finished / Not confirmed) then the current one (In progress, or Graduated
+ * after the final course). [] when the course isn't one of the 9.
+ */
+export function courseProgress(course: unknown, completed: unknown, unfinished: unknown, graduated: boolean): CourseStep[] {
+  const c = findCourse(course);
+  if (!c) return [];
+  const done = completedLabels(completed);
+  const notDone = new Set(Array.isArray(unfinished) ? unfinished.map(normalizeCourse) : []);
+  const steps: CourseStep[] = lowerCourses(c).map(x => ({
+    label: x.label,
+    state: done.has(x.label) ? "completed" : notDone.has(x.label) ? "not_finished" : "unconfirmed",
+  }));
+  steps.push({ label: c.label, state: graduated || done.has(c.label) ? "graduated" : "in_progress" });
+  return steps;
 }

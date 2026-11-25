@@ -22,7 +22,8 @@ import {
   moveAdmissionToWing,
 } from "@/services/screening/screening.service";
 import { AdmissionFormContent, OptionGroup, MultiOptionGroup, INSTRUMENT_OPTIONS } from "./admission-form";
-import { COURSE_LEVELS, formatCourse, isCourseLevel } from "@/lib/course";
+import { findCourse, formatCourse, isCourseLevel, normalizeCourse } from "@/lib/course";
+import { CourseSelect } from "@/components/students/CourseSelect";
 import { generateAdmissionCardPDF, cardInstrument, fastTrackCardScreening, admissionDateYMD } from "@/lib/generateAdmissionCard";
 import { MAX_TOTAL_MARKS, gradeForMarks, readScreeningMarks } from "@/lib/screeningQuestions";
 import { findFastTrackScreeningByName } from "@/services/screening/screening.service";
@@ -182,7 +183,7 @@ function EditAdmissionOverlay({
     }
   }
 
-  const courseOk = !!courseLevel && instrumentsToLearn.length === 1;
+  const courseOk = instrumentsToLearn.length === 1 && !!findCourse(formatCourse(courseLevel, instrumentsToLearn[0]));
   const course   = formatCourse(courseLevel, instrumentsToLearn[0]);
   const canSave  = fullName.trim().length > 0 && phone.trim().length > 0 && courseOk;
 
@@ -300,22 +301,14 @@ function EditAdmissionOverlay({
               <OptionGroup options={["Formal Music Learning","Skill Development","Entertainment"]} value={purposeOfLearning} onChange={setPurposeOfLearning} />
             </div>
             <div style={{ marginBottom: 12 }}>
-              <label style={s.label}>Instrument to Learn <span style={{ color: "#dc2626" }}>*</span></label>
-              <OptionGroup options={INSTRUMENT_OPTIONS}
-                value={instrumentsToLearn.length === 1 ? instrumentsToLearn[0] : ""}
-                onChange={v => setInstrumentsToLearn(v ? [v] : [])} />
-              {instrumentsToLearn.length > 1 && (
+              <label style={s.label}>Course <span style={{ color: "#dc2626" }}>*</span></label>
+              <CourseSelect style={s.input} value={courseOk ? course : ""}
+                onChange={c => { setInstrumentsToLearn([c.instrument]); setCourseLevel(c.level); }} />
+              {!courseOk && (instrumentsToLearn.length > 0 || courseLevel) && (
                 <div style={{ fontSize: 12, color: "#b45309", marginTop: 6 }}>
-                  Previously chosen: {instrumentsToLearn.join(", ")} — pick one instrument for the course.
+                  Previously chosen: {course || instrumentsToLearn.join(", ")} — pick one of the listed courses.
                 </div>
               )}
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <label style={s.label}>Course Level <span style={{ color: "#dc2626" }}>*</span></label>
-              <OptionGroup options={[...COURSE_LEVELS]} value={courseLevel} onChange={setCourseLevel} />
-              <div style={{ fontSize: 12, marginTop: 6, color: courseOk ? "#4f46e5" : "#9ca3af", fontWeight: courseOk ? 600 : 400 }}>
-                {courseOk ? `Course: ${course}` : "Pick one instrument and a course level — e.g. Introduction to Keyboard."}
-              </div>
             </div>
             <div style={{ marginBottom: 12 }}>
               <label style={s.label}>Previous Experience</label>
@@ -1691,7 +1684,7 @@ export function AdmissionsList({
             <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase" as const, letterSpacing: "0.06em", minWidth: 160, flexShrink: 0 }}>Course</div>
               {str(selected.course)
-                ? <div style={{ fontSize: 13, fontWeight: 700, color: "#4f46e5" }}>{str(selected.course)}</div>
+                ? <div style={{ fontSize: 13, fontWeight: 700, color: "#4f46e5" }}>{normalizeCourse(selected.course)}</div>
                 : <div style={{ fontSize: 12.5, color: "#b45309" }}>Course level not set — Edit to choose one</div>}
             </div>
             {arr(selected.instrumentsToLearn).length > 0 && (

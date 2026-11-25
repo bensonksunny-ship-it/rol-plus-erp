@@ -26,7 +26,8 @@ import { useWing } from "@/hooks/useWing";
 import { saveAdmission } from "@/services/screening/screening.service";
 import { newApplicationRef } from "@/lib/applicationRef";
 import type { Wing } from "@/types";
-import { COURSE_LEVELS, formatCourse } from "@/lib/course";
+import { findCourse, formatCourse } from "@/lib/course";
+import { CourseSelect } from "@/components/students/CourseSelect";
 import { checkDuplicates } from "@/services/dedup/dedup.service";
 import DuplicateWarning, { isBlockingDuplicate, type DuplicateOverride } from "@/components/dedup/DuplicateWarning";
 import type { DedupMatch } from "@/lib/dedup";
@@ -234,7 +235,7 @@ export function AdmissionFormContent({
 
   // The public /apply form (parents) skips Course Level; staff set it when editing the application.
   const askCourse = !publicWing;
-  const courseOk  = !askCourse || (!!courseLevel && instrumentsToLearn.length === 1);
+  const courseOk  = !askCourse || (instrumentsToLearn.length === 1 && !!findCourse(formatCourse(courseLevel, instrumentsToLearn[0])));
   const course    = askCourse ? formatCourse(courseLevel, instrumentsToLearn[0]) : "";
   const canSubmit = nameOk && dobOk && phone.trim().length > 0 && courseOk;
 
@@ -549,35 +550,23 @@ export function AdmissionFormContent({
           </div>
         )}
 
-        <div style={{ marginBottom: 20 }}>
-          <label style={s.label}>
-            Musical Instrument to Learn{" "}
-            {askCourse
-              ? <span style={{ color: "#dc2626" }}>*</span>
-              : <span style={{ color: "#9ca3af", fontWeight: 400, fontSize: 12 }}>(select all that apply)</span>}
-          </label>
-          {askCourse ? (
-            <OptionGroup
-              options={INSTRUMENT_OPTIONS}
-              value={instrumentsToLearn[0] ?? ""}
-              onChange={v => setInstrumentsToLearn(v ? [v] : [])}
-            />
-          ) : (
+        {askCourse ? (
+          <div style={{ marginBottom: 20 }}>
+            <label style={s.label}>Course <span style={{ color: "#dc2626" }}>*</span></label>
+            <CourseSelect style={s.input} value={course}
+              onChange={c => { setInstrumentsToLearn([c.instrument]); setCourseLevel(c.level); }} />
+          </div>
+        ) : (
+          <div style={{ marginBottom: 20 }}>
+            <label style={s.label}>
+              Musical Instrument to Learn{" "}
+              <span style={{ color: "#9ca3af", fontWeight: 400, fontSize: 12 }}>(select all that apply)</span>
+            </label>
             <MultiOptionGroup
               options={INSTRUMENT_OPTIONS}
               values={instrumentsToLearn}
               onChange={setInstrumentsToLearn}
             />
-          )}
-        </div>
-
-        {askCourse && (
-          <div style={{ marginBottom: 20 }}>
-            <label style={s.label}>Course Level <span style={{ color: "#dc2626" }}>*</span></label>
-            <OptionGroup options={[...COURSE_LEVELS]} value={courseLevel} onChange={setCourseLevel} />
-            <div style={{ fontSize: 12, marginTop: 6, color: courseOk ? "#4f46e5" : "#9ca3af", fontWeight: courseOk ? 600 : 400 }}>
-              {courseOk ? `Course: ${course}` : "Pick one instrument and a course level — e.g. Introduction to Keyboard."}
-            </div>
           </div>
         )}
 

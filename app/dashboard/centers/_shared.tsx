@@ -2087,6 +2087,7 @@ function StudentPreviewModal({ student, centerName, batchName, wing, onClose, on
                   by={{ uid: me?.uid ?? "", name: me?.displayName ?? me?.email ?? "", role: myRole ?? "" }}
                   row={row}
                   onCompleted={msg => { setCourseNote(msg); setReloadKey(k => k + 1); }}
+                  centreName={centerName}
                 />
               )}
               {courseNote && <div style={{ fontSize: 12, fontWeight: 600, color: "#15803d", padding: "3px 0" }}>✓ {courseNote}</div>}

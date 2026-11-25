@@ -258,7 +258,7 @@ function FinanceTab({
             <option value="">— Select student —</option>
             {students.map(st => (
               <option key={st.uid} value={st.uid}>
-                {st.name} ({st.studentID}) — {st.centerName}
+                {st.name} — {st.centerName}
               </option>
             ))}
           </select>
@@ -678,7 +678,7 @@ function StudentsTab({
               <option value="">— Select student —</option>
               {students.map(st => (
                 <option key={st.uid} value={st.uid}>
-                  {st.name} ({st.studentID})
+                  {st.name}
                 </option>
               ))}
             </select>

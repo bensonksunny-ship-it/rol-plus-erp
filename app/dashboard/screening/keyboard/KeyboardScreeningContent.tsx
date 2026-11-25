@@ -285,7 +285,6 @@ function StudentSearch({ value, onChange, onSelect, onBlur, results, loading, sh
                 background: "none", cursor: "pointer", fontFamily: "inherit", display: "flex",
                 alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #f3f4f6" }}>
               <span style={{ fontWeight: 600, fontSize: 13, color: "#111" }}>{s.name}</span>
-              <span style={{ fontSize: 11, color: "#9ca3af" }}>{s.studentID}</span>
             </button>
           ))}
         </div>
@@ -636,7 +635,7 @@ export function KeyboardScreeningContent({ onBack }: { onBack?: () => void }) {
                   onBlur={() => { if (!linkedStudent) { setStudentName(""); setShowDropdown(false); } }} />
                 {linkedStudent && (
                   <div style={{ marginTop: 8, fontSize: 12, color: "#059669", fontWeight: 600 }}>
-                    ✓ Linked: {linkedStudent.name} ({linkedStudent.studentID})
+                    ✓ Linked: {linkedStudent.name}
                   </div>
                 )}
               </div>

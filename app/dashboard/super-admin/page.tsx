@@ -1,5 +1,6 @@
 "use client";
 
+import { normalizeCourse } from "@/lib/course";
 import { useState, useEffect, useMemo } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/services/firebase/firebase";
@@ -132,7 +133,7 @@ function SuperAdminContent() {
             status:         ((s.status ?? s.studentStatus ?? "active") as string),
             currentBalance: Number(s.currentBalance ?? 0),
             instrument:     (s.instrument ?? "") as string,
-            course:         (s.course ?? "") as string,
+            course:         normalizeCourse(s.course),
             createdAt:      (s.createdAt?.toDate?.()?.toISOString() ?? s.createdAt ?? "") as string,
           };
         });

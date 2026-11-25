@@ -27,6 +27,9 @@ import { getScreeningByStudent } from "@/services/screening/screening.service";
 import type { ScreeningResult } from "@/types";
 import { effectiveBatches } from "@/lib/batches";
 import { DiagnosticCard } from "@/components/DiagnosticCard";
+import { CAPABILITIES } from "@/config/permissions";
+import { StudentCourseSelect } from "@/components/students/CourseSelect";
+import { normalizeCourse } from "@/lib/course";
 import CourseCompletion, { readCourseInfo, canMarkCourseComplete, type CourseInfo } from "@/components/students/CourseCompletion";
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
@@ -67,7 +70,7 @@ function isApplicationComplete(a: ApplicationFields): boolean {
 // ─── Content ─────────────────────────────────────────────────────────────────
 
 function StudentDetailContent({ studentId }: { studentId: string }) {
-  const { user, role }                 = useAuth();
+  const { user, role, can }            = useAuth();
   const router                         = useRouter();
   const searchParams                   = useSearchParams();
   const { isAllowed, isTeacherRole }   = useCentreAccess();
@@ -145,7 +148,7 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
         batchId:     (s.batchId ?? null) as string | null,
         wing:        wingOf(s),
         instrument:  (s.instrument  ?? "-") as string,
-        course:      (s.course      ?? "-") as string,
+        course:      (typeof s.course === "string" && s.course.trim() ? normalizeCourse(s.course) : "-"),
         classType:   ((s.classType  as string) === "personal" ? "personal" : "group"),
         billingMode: ((s.billingMode as string) === "prepay" ? "prepay" : "postpay"),
         assignedTeacherUid:  assignedTUid,
@@ -280,7 +283,6 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
               <div>
                 <div style={dp.name}>{student.name}</div>
                 <div style={{ display: "flex", gap: 6, marginTop: 5, flexWrap: "wrap" as const }}>
-                  <span style={p.idChip}>{student.studentID}</span>
                   <span style={{ ...p.badge, ...statusStyle }}>{student.status.replace(/_/g, " ")}</span>
                 </div>
               </div>
@@ -363,6 +365,8 @@ function StudentDetailContent({ studentId }: { studentId: string }) {
                 canComplete={canMarkCourseComplete(role) && (!isTeacherRole || isAllowed(student.centerId))}
                 completeBy={{ uid: user?.uid ?? "", name: user?.displayName ?? user?.email ?? "", role: role ?? "" }}
                 onCourseCompleted={msg => { load(); toast(msg, "success"); }}
+                canEditCourse={can(CAPABILITIES.STUDENTS_MANAGE)}
+                onCourseChanged={msg => { load(); toast(msg, "success"); }}
               />
             )}
             {tab === "syllabus" && <StudentSyllabusContent studentId={student.id} hideBackBar viewOnly />}
@@ -459,12 +463,14 @@ function BackBar({ router }: { router: ReturnType<typeof useRouter> }) {
 
 // ─── Overview tab ──────────────────────────────────────────────────────────────
 
-function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSaved, courseInfo, canComplete, completeBy, onCourseCompleted }: {
+function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSaved, courseInfo, canComplete, completeBy, onCourseCompleted, canEditCourse, onCourseChanged }: {
   student: StudentRow; applicationFields: ApplicationFields | null; isAdmin: boolean; onApplicationSaved: () => void;
   courseInfo: CourseInfo | null;
   canComplete: boolean;
   completeBy: { uid: string; name: string; role: string };
   onCourseCompleted: (msg: string) => void;
+  canEditCourse: boolean;
+  onCourseChanged: (msg: string) => void;
 }) {
   const [centerDetailOpen, setCenterDetailOpen] = useState(false);
   const isSom = isSchoolOfMusic(s.wing);
@@ -491,12 +497,19 @@ function OverviewTab({ student: s, applicationFields, isAdmin, onApplicationSave
       <div style={dp.cardHeader}>Academic Info</div>
       <div style={{ display: "flex", flexDirection: "column" as const, gap: 8, marginBottom: 20 }}>
         <Row label="Instrument" value={s.instrument} />
-        <Row label="Course"     value={s.course} />
+        <Row label="Course"     value={
+          <StudentCourseSelect uid={s.id} studentName={s.name} course={s.course === "-" ? "" : s.course}
+            courseLevel={courseInfo?.level ?? ""} hasSyllabusSlot={!!courseInfo?.hasSyllabusSlot}
+            completedCourses={courseInfo?.completed ?? []} unfinishedCourses={courseInfo?.unfinished ?? []}
+            graduated={!!courseInfo?.graduated} showMarkComplete={false}
+            by={completeBy} canEdit={canEditCourse} onChanged={onCourseChanged} />
+        } />
         {courseInfo && (
           <CourseCompletion
             uid={s.id} studentName={s.name} info={courseInfo} canEdit={canComplete} by={completeBy}
             row={(label, value) => <Row key={label} label={label} value={value} />}
             onCompleted={onCourseCompleted}
+            centreName={s.centerName}
           />
         )}
         {!isSom && (
