@@ -26,6 +26,7 @@ import {
   computeDueSettlements,
   outstandingDuesForStudent,
   isSettlingPayment,
+  paymentSettlesMonth,
   recordPayment,
   waiveFeeDue,
   type DueSettlement,
@@ -34,7 +35,7 @@ import {
   approveStudentDeactivation, canApproveDeactivation, requestStudentDeactivation,
 } from "@/services/student/deactivation.service";
 import { approveStudentBreak, requestStudentBreak } from "@/services/student/break.service";
-import { WAIVED, waivedAmountOf } from "@/lib/feeWaiver";
+import { WAIVED, waivedAmountOf, creditedAmountOf, discountAmountOf } from "@/lib/feeWaiver";
 import type {
   Transaction,
   EditableTransactionInput,
@@ -47,6 +48,7 @@ import { logAction } from "@/services/audit/audit.service";
 import type { Role } from "@/types";
 import { buildStudentRows, exportFinanceStatementPdf, isReceivedPayment } from "./statement";
 import PaymentModal, { type PayMethod, type PaymentFormValues } from "./PaymentModal";
+import StudentHistoryModal from "./StudentHistoryModal";
 import { HISTORY_NOTE, fmtINR, fmtMonth, todayStr } from "./format";
 import { ledgerMonthOf, ledgerMonths, ledgerRank, sortLedger } from "@/lib/ledgerOrder";
 import { StudentStatusChip, UndueModal, type UndueSubmit } from "./RowStatusMenus";
@@ -94,7 +96,7 @@ type RowAction      = "adjust" | "deposit" | "history";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
-/** Sky-blue "☕ N breaks" tag — matches the break colour used in attendance. */
+/** Sky-blue "N breaks" tag — matches the break colour used in attendance. */
 const BREAK_BADGE: React.CSSProperties = { background: "#e0f2fe", color: "#0369a1", border: "1px solid #7dd3fc" };
 
 const METHOD_STYLES: Record<string, React.CSSProperties> = {
@@ -219,9 +221,13 @@ function FinanceContent() {
   const [adjustFee, setAdjustFee]            = useState<string>("");
   const [adjustSubmitting, setAdjustSubmitting] = useState(false);
   // School of Music roster: inline monthly-fee edit + one-click "Mark Fee Due".
-  const [feeEdit,       setFeeEdit]       = useState<{ uid: string; value: string } | null>(null);
+  // School of Music: fee pill, Due tag, Pay and ⋮ all open one Fee & Payment
+  // window (PaymentModal with `som`), focused on the section that was clicked.
+  const [payFocus,      setPayFocus]      = useState<"fee" | "due" | "pay">("pay");
   const [feeEditSaving, setFeeEditSaving] = useState(false);
-  const [markingDueUid, setMarkingDueUid] = useState<string | null>(null);
+  function openFinance(uid: string, focus: "fee" | "due" | "pay") {
+    closePanel(); setPayFocus(focus); setPayUid(uid);
+  }
   // School of Music centre heading → "⚙️ Set Fee for All".
   const [bulkFee,       setBulkFee]       = useState<{ centerId: string; name: string } | null>(null);
   const [bulkSaving,    setBulkSaving]    = useState(false);
@@ -237,9 +243,8 @@ function FinanceContent() {
   const depositInputRef                      = useRef<HTMLInputElement>(null);
   const [feeDueSubmitting, setFeeDueSubmitting]     = useState(false);
   const [undoFeeDueSubmitting, setUndoFeeDueSubmitting] = useState(false);
-  const [historyDeletePending, setHistoryDeletePending] = useState<string | null>(null);
-  const [historyDeleteSubmitting, setHistoryDeleteSubmitting] = useState(false);
-  const historyDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // History opens as a pop-up (StudentHistoryModal), not an inline panel.
+  const [historyUid, setHistoryUid] = useState<string | null>(null);
 
   // Filters
   // The whole page (cards, list, drill-downs) is scoped to this centre.
@@ -475,6 +480,30 @@ function FinanceContent() {
     return m;
   }, [dueSettlements, transactions, selectedMonth, feeDueMap]);
 
+  // ── What a student owes, as the row / totals / KPI cards show it ───────────
+  // School of Music: the reconciled dues — every month up to the one being
+  // viewed with money still left on it, payments counted for the month they
+  // were paid FOR (not the day they were typed in). So October paid on 26 Nov
+  // reads Paid in the October view, matching History. Wing 1 keeps the ledger
+  // balance (per-class / prepay charges have no month due) — unchanged.
+  // Capped by today's ledger balance, so a payment recorded without a month
+  // (credit the settlement engine can't place) still clears what it covers.
+  const owedMap = useMemo(() => {
+    if (!isSom) return null;
+    const live = computeStudentBalances(transactions);
+    const m = new Map<string, number>();
+    dueSettlements.forEach(d => {
+      if (d.remaining <= 0 || d.billingMonth > selectedMonth) return;
+      m.set(d.studentUid, (m.get(d.studentUid) ?? 0) + d.remaining);
+    });
+    m.forEach((v, uid) => m.set(uid, Math.min(v, Math.max(0, live.get(uid) ?? 0))));
+    return m;
+  }, [isSom, dueSettlements, selectedMonth, transactions]);
+  const owedOf = useCallback(
+    (s: { uid: string; balance: number }) => owedMap ? (owedMap.get(s.uid) ?? 0) : Math.max(0, s.balance),
+    [owedMap],
+  );
+
   // ── Total amount paid this month per student ────────────────────────────────
   const paidAmountMap = useMemo(() => {
     const m = new Map<string, number>();
@@ -537,8 +566,8 @@ function FinanceContent() {
     // Overdue is the ledger balance, not this month's fee_due settlements: those
     // miss per-class charges and payments recorded without a month. One student's
     // credit never offsets another's debt.
-    const overdueStudents = students.filter(s => s.balance > 0);
-    const pendingBal      = overdueStudents.reduce((acc, s) => acc + s.balance, 0);
+    const overdueStudents = students.filter(s => owedOf(s) > 0);
+    const pendingBal      = overdueStudents.reduce((acc, s) => acc + owedOf(s), 0);
     const activeStudents  = students.filter(s => s.rosterActive);
     const activeCount     = activeStudents.length;
     // Collection = paid ÷ students actually billed this month (a due raised for
@@ -571,15 +600,14 @@ function FinanceContent() {
     const admissionCollected = monthTx.filter(t => t.type === "admission_fee").reduce((s, t) => s + (t.amount ?? 0), 0);
     const otherCollected     = Math.max(0, total - prepayCollected - postpayCollected - admissionCollected);
     return { total, todayAmt, admissionCollected, otherCollected, pendingBal, activeCount, paidActiveCount, billedCount, collectionPct, totalEstFee, overdueCount: overdueStudents.length, groupCount, personalCount, prepayCollected, postpayCollected, prepayCount, postpayCount, lowCreditCount };
-  }, [scopeTransactions, scopeStudents, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap, dueSettlements]);
+  }, [scopeTransactions, scopeStudents, selectedMonth, isCurrentMonth, feeDueMap, paidMap, paidAmountMap, dueSettlements, owedOf]);
 
   // ── Last tx per student (scoped to selected month) ───────────────────────────
   const lastTxMap = useMemo(() => {
     const m = new Map<string, Transaction>();
     // transactions are sorted newest-first; find the newest one in selected month per student
     transactions.forEach(tx => {
-      if (tx.status === "completed" && tx.studentUid && !m.has(tx.studentUid)
-          && tx.method !== "auto-monthly" && tx.method !== "auto") {
+      if (tx.studentUid && !m.has(tx.studentUid) && isSettlingPayment(tx)) {
         if ((tx.date ?? "").startsWith(selectedMonth)) {
           m.set(tx.studentUid, tx);
         }
@@ -590,6 +618,7 @@ function FinanceContent() {
 
   // ── Row panel helpers ────────────────────────────────────────────────────────
   function openPanel(uid: string, action: RowAction, student: StudentFeeRow) {
+    if (action === "history") { closePanel(); setHistoryUid(uid); return; }
     // Close if already open with same action
     if (activeUid === uid && activeAction === action) {
       closePanel();
@@ -693,11 +722,11 @@ function FinanceContent() {
   // ── School of Music: inline monthly fee (Amount column) ─────────────────────
   // Wing 2's model is always monthly, so this writes monthlyFee (+ feeCycle
   // "monthly" for records imported without one). Wing 1 never reaches here.
-  async function saveInlineMonthlyFee(student: StudentFeeRow) {
-    if (!feeEdit || feeEdit.uid !== student.uid) return;
-    const newFee = Math.round(Number(feeEdit.value));
+  async function saveInlineMonthlyFee(student: StudentFeeRow, value: number) {
+    if (feeEditSaving) return;
+    const newFee = Math.round(value);
     if (!Number.isFinite(newFee) || newFee <= 0) { toast("Enter a monthly fee above ₹0", "error"); return; }
-    if (newFee === student.monthlyFee && student.feeCycle === "monthly") { setFeeEdit(null); return; }
+    if (newFee === student.monthlyFee && student.feeCycle === "monthly") return;
     setFeeEditSaving(true);
     try {
       await updateDoc(doc(db, "users", student.uid), {
@@ -708,12 +737,11 @@ function FinanceContent() {
         approverId: null, approverRole: null, reason: null,
         metadata: { studentUid: student.uid, from: student.monthlyFee, to: newFee },
       });
-      setFeeEdit(null);
       await fetchAll(selectedMonth);
       toast(`Monthly fee for ${student.name} set to ${fmtINR(newFee)} / mo`, "success");
     } catch (err) {
       console.error("Inline fee update failed:", err);
-      toast("Couldn't update the fee. Try again.", "error");
+      toast("Couldn’t update the fee. Try again.", "error");
     } finally {
       setFeeEditSaving(false);
     }
@@ -761,16 +789,6 @@ function FinanceContent() {
     }
   }
 
-  /** Roster "⚠️ Mark Fee Due": raises this month's fee due without opening the Payment panel. */
-  async function quickMarkFeeDue(student: StudentFeeRow) {
-    setMarkingDueUid(student.uid);
-    try {
-      await generateFeeDue(student, selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`);
-    } finally {
-      setMarkingDueUid(null);
-    }
-  }
-
   // ── Submit: prepay advance deposit ──────────────────────────────────────────
   async function submitDeposit(student: StudentFeeRow) {
     const amt = Number(depositAmount);
@@ -808,10 +826,59 @@ function FinanceContent() {
     }
   }
 
+  // ── Mark Due amount for the Fee & Pay window ────────────────────────────────
+  // Monthly students: their monthly fee. Wing 1 per-class students: classes
+  // attended this month × rate, minus what is already billed for the month
+  // (attendance auto-charges + dues already raised) — never billed twice.
+  function markDueFor(s: StudentFeeRow): { amount: number; note?: string } {
+    if (isSom || s.feeCycle !== "per_class") return { amount: Math.max(0, s.monthlyFee) };
+    if (s.feePerClass <= 0) return { amount: 0, note: "Set the per-class fee first." };
+    const gross = s.attendanceCount * s.feePerClass;
+    const billed = transactions
+      .filter(t => t.studentUid === s.uid && (t.date ?? "").startsWith(selectedMonth)
+        && (t.type === "fee_due" || t.type === "charge" || t.method === "auto"))
+      .reduce((n, t) => n + Number(t.amount || 0), 0);
+    const amount = Math.max(0, gross - billed);
+    const calc = `${s.attendanceCount} class${s.attendanceCount === 1 ? "" : "es"} × ${fmtINR(s.feePerClass)}`;
+    if (s.attendanceCount === 0) return { amount: 0, note: `No classes attended in ${fmtMonth(selectedMonth)}.` };
+    if (amount === 0) return { amount: 0, note: `${calc} — already billed per class.` };
+    return { amount, note: billed > 0 ? `${calc} − ${fmtINR(billed)} already billed` : calc };
+  }
+
+  // Wing 1 fee box: changes only the amount (monthly fee or per-class rate) —
+  // never the billing setup (prepay/postpay, group/individual, cycle).
+  async function saveWing1Fee(student: StudentFeeRow, value: number) {
+    if (feeEditSaving) return;
+    const newFee = Math.round(value);
+    if (!Number.isFinite(newFee) || newFee <= 0) { toast("Enter a fee above ₹0", "error"); return; }
+    const perClass = student.feeCycle === "per_class";
+    const before = perClass ? student.feePerClass : student.monthlyFee;
+    if (newFee === before) return;
+    setFeeEditSaving(true);
+    try {
+      await updateDoc(doc(db, "users", student.uid), {
+        ...(perClass ? { feePerClass: newFee } : { monthlyFee: newFee }), updatedAt: new Date().toISOString(),
+      });
+      logAction({
+        action: "MONTHLY_FEE_SET", initiatorId: user?.uid ?? "", initiatorRole: (user?.role ?? ROLES.ADMIN) as Role,
+        approverId: null, approverRole: null, reason: perClass ? "per-class fee" : null,
+        metadata: { studentUid: student.uid, from: before, to: newFee, cycle: perClass ? "per_class" : "monthly" },
+      });
+      await fetchAll(selectedMonth);
+      toast(`Fee for ${student.name} set to ${fmtINR(newFee)}${perClass ? " / class" : " / mo"}`, "success");
+    } catch (err) {
+      console.error("Fee update failed:", err);
+      toast("Couldn’t update the fee. Try again.", "error");
+    } finally {
+      setFeeEditSaving(false);
+    }
+  }
+
   // ── Generate fee due record ──────────────────────────────────────────────────
-  async function generateFeeDue(student: StudentFeeRow, dueDate?: string) {
+  async function generateFeeDue(student: StudentFeeRow, dueDate?: string, amount?: number) {
     // School of Music is always billed monthly (some imported records carry no feeCycle).
-    const fee = isSom || student.feeCycle === "monthly" ? student.monthlyFee : student.estimatedFee;
+    // `amount`: what the Fee & Pay window offered (per-class = only unbilled classes).
+    const fee = amount ?? (isSom || student.feeCycle === "monthly" ? student.monthlyFee : student.estimatedFee);
     if (!fee || fee <= 0) {
       toast(
         student.feeCycle === "per_class"
@@ -855,6 +922,25 @@ function FinanceContent() {
   }
 
   // ── Undo generate fee due ────────────────────────────────────────────────────
+  // A due stamped Paid with no payment record behind it (e.g. the payment was
+  // removed): put it back to Due so it can be paid with a proper date.
+  const [reopening, setReopening] = useState(false);
+  async function reopenDue(student: StudentFeeRow, dueId: string) {
+    setReopening(true);
+    try {
+      await updateDoc(doc(db, "transactions", dueId), { status: "due", paidAt: null });
+      logAction({ action: "FEE_DUE_REOPENED", initiatorId: user?.uid ?? "unknown", initiatorRole: (user?.role ?? ROLES.ADMIN) as Role, approverId: null, approverRole: null, reason: null,
+        metadata: { studentUid: student.uid, dueId, billingMonth: selectedMonth } });
+      await fetchAll(selectedMonth);
+      toast(`${fmtMonth(selectedMonth)} set back to Due for ${student.name}`, "success");
+    } catch (err) {
+      console.error("Reopen due failed:", err);
+      toast("Couldn't reopen the due. Try again.", "error");
+    } finally {
+      setReopening(false);
+    }
+  }
+
   async function undoFeeDue(student: StudentFeeRow) {
     const entry = feeDueMap.get(student.uid);
     if (!entry) return;
@@ -993,7 +1079,7 @@ function FinanceContent() {
     else if (filterType === "personal") list = list.filter(s => s.classType   === "personal");
     else if (filterType === "prepay")   list = list.filter(s => s.billingMode === "prepay");
     else if (filterType === "postpay")  list = list.filter(s => s.billingMode === "postpay");
-    if (feeStatusFilter === "pending") list = list.filter(s => s.balance > 0);
+    if (feeStatusFilter === "pending") list = list.filter(s => owedOf(s) > 0);
     if (studentSearch.trim()) {
       const q = studentSearch.toLowerCase();
       list = list.filter(s =>
@@ -1009,7 +1095,7 @@ function FinanceContent() {
       // Secondary: student name, always A→Z within a centre.
       return a.name.localeCompare(b.name);
     });
-  }, [scopeStudents, studentSearch, filterType, feeStatusFilter, centerSortDir]);
+  }, [scopeStudents, studentSearch, filterType, feeStatusFilter, centerSortDir, owedOf]);
 
   // Centre tabs: every centre of the wing (plus any centre / "Unassigned"
   // bucket that only exists on student records), with student + overdue counts.
@@ -1019,7 +1105,7 @@ function FinanceContent() {
       const k = centreKey(st);
       const e = stats.get(k) ?? { count: 0, overdue: 0, name: st.unitName };
       e.count++;
-      if (st.balance > 0) e.overdue++;
+      if (owedOf(st) > 0) e.overdue++;
       stats.set(k, e);
     });
     // One tab per class: a centre, or each batch of a centre with 2+ batches.
@@ -1031,7 +1117,7 @@ function FinanceContent() {
     });
     return tabs.sort((a, b) =>
       Number(a.id === UNASSIGNED) - Number(b.id === UNASSIGNED) || a.name.localeCompare(b.name));
-  }, [students, centers]);
+  }, [students, centers, owedOf]);
   const totalOverdue = useMemo(() => centreTabs.reduce((n, t) => n + t.overdue, 0), [centreTabs]);
   const selectedCentreName = filterCenter === "all" ? "All Centers" : centreTabs.find(t => t.id === filterCenter)?.name ?? "Centre";
 
@@ -1084,11 +1170,11 @@ function FinanceContent() {
       const e = m.get(k) ?? { count: 0, due: 0, paid: 0 };
       e.count++;
       if (paidMap.has(st.uid)) e.paid += paidAmountMap.get(st.uid) ?? 0;
-      if (st.balance > 0) e.due += st.balance;
+      e.due += owedOf(st);
       m.set(k, e);
     });
     return m;
-  }, [filteredStudents, paidMap, paidAmountMap]);
+  }, [filteredStudents, paidMap, paidAmountMap, owedOf]);
 
   function formatDate(value: unknown): string {
     if (!value || typeof value !== "string") return "-";
@@ -1110,6 +1196,15 @@ function FinanceContent() {
         if (!row) return null;
         const last = lastTxMap.get(row.uid);
         const due  = feeDueMap.get(row.uid);
+        // When was the selected month paid? From its payments, else the due's own stamp.
+        const settledKey = `${row.uid}|${selectedMonth}`;
+        const settlement = dueSettlements.get(settledKey);
+        const monthPays  = transactions.filter(t => t.studentUid === row.uid && isSettlingPayment(t) && paymentSettlesMonth(t) === selectedMonth);
+        const dueDoc     = settlement ? transactions.find(t => t.id === settlement.dueId) : undefined;
+        const paidOnRaw  = monthPays.map(t => t.date ?? "").sort().pop() || ((dueDoc as { paidAt?: string } | undefined)?.paidAt ?? "");
+        const legacyOnly = !!settlement && settlement.state === "paid" && monthPays.length === 0;
+        const perClassRow = !isSom && row.feeCycle === "per_class";
+        const markDue = markDueFor(row);
         return (
           <PaymentModal
             student={row}
@@ -1120,13 +1215,48 @@ function FinanceContent() {
             dueThisMonth={due ? due.amount : null}
             monthSettled={!due && dueSettlements.has(`${row.uid}|${selectedMonth}`)}
             lastPayment={last ? { amount: last.amount, date: formatDate(last.date ?? last.createdAt) } : null}
+            paidOn={paidOnRaw ? formatDate(paidOnRaw) : null}
+            paidWithoutRecord={legacyOnly}
+            reopening={reopening}
+            onReopenDue={settlement ? () => reopenDue(row, settlement.dueId) : undefined}
             saving={paySubmitting}
             generatingDue={feeDueSubmitting}
             undoingDue={undoFeeDueSubmitting}
-            onGenerateDue={dueDate => generateFeeDue(row, dueDate)}
+            onGenerateDue={dueDate => generateFeeDue(row, dueDate, markDue.amount)}
             onUndoDue={() => undoFeeDue(row)}
             onConfirm={form => submitPay(row, form)}
             onClose={() => setPayUid(null)}
+            som={{
+              focus: payFocus,
+              feeKind: perClassRow ? "per_class" : "monthly",
+              currentFee: perClassRow ? row.feePerClass : row.monthlyFee,
+              dueAmount: markDue.amount,
+              dueNote: markDue.note,
+              payWithoutDue: !isSom && row.balance > 0,
+              centreDefault: isSom ? centreDefaultFee(row.centerId) : 0,
+              savingFee: feeEditSaving,
+              onSaveFee: fee => isSom ? saveInlineMonthlyFee(row, fee) : saveWing1Fee(row, fee),
+              monthWaived: !!settlement && settlement.remaining <= 0 && settlement.waivedAmount > 0 && settlement.paidAmount <= 0,
+              onUndue: canDecideStatus && outstandingDuesForStudent(dueSettlements, row.uid).length > 0 ? () => setUndueUid(row.uid) : undefined,
+              covered: undueUid === row.uid,
+            }}
+          />
+        );
+      })()}
+      {historyUid && (() => {
+        const row = students.find(x => x.uid === historyUid);
+        if (!row) return null;
+        const feeLabel = isSom || row.feeCycle === "monthly"
+          ? (row.monthlyFee > 0 ? `${fmtINR(row.monthlyFee)}/mo` : "Fee not set")
+          : row.feePerClass > 0 ? `${fmtINR(row.feePerClass)}/class` : "";
+        return (
+          <StudentHistoryModal
+            student={{ uid: row.uid, name: row.name, centerName: row.centerName, admissionNo: row.admissionNo, feeLabel }}
+            transactions={transactions.filter(t => t.studentUid === row.uid)}
+            settlements={dueSettlements}
+            canRemove={canManageTx}
+            onRemove={handleDeleteTx}
+            onClose={() => setHistoryUid(null)}
           />
         );
       })()}
@@ -1143,6 +1273,7 @@ function FinanceContent() {
             otherBalance={Math.max(0, row.balance - dueTotal)}
             status={row.status} direct={canDecideStatus} approverLabel={approverLabel}
             attendance={undueAtt}
+            stacked={payUid === row.uid}
             saving={undueSaving}
             onConfirm={v => submitUndue(row, v)}
             onClose={() => setUndueUid(null)}
@@ -1161,25 +1292,6 @@ function FinanceContent() {
             saving={bulkSaving}
             onSave={(fee, overwrite) => saveCentreFee(bulkFee.centerId, fee, overwrite)}
             onCancel={() => setBulkFee(null)}
-          />
-        );
-      })()}
-      {feeEdit && (() => {
-        const row = students.find(x => x.uid === feeEdit.uid);
-        if (!row) return null;
-        const due = feeDueMap.get(row.uid);
-        return (
-          <FeeDetailsModal
-            student={row}
-            month={selectedMonth}
-            value={feeEdit.value}
-            saving={feeEditSaving}
-            paidThisMonth={paidMap.has(row.uid) ? (paidAmountMap.get(row.uid) ?? 0) : null}
-            dueThisMonth={due ? due.amount : null}
-            transactions={transactions.filter(t => t.studentUid === row.uid)}
-            onChange={v => setFeeEdit({ uid: row.uid, value: v })}
-            onSave={() => saveInlineMonthlyFee(row)}
-            onCancel={() => setFeeEdit(null)}
           />
         );
       })()}
@@ -1307,7 +1419,7 @@ function FinanceContent() {
           accent="#4f46e5" icon="🎓"
           hint={loading ? undefined : [
             isSom ? "" : `${summary.groupCount} group · ${summary.personalCount} personal`,
-            breakStats.total > 0 ? `☕ ${breakStats.total} break${breakStats.total === 1 ? "" : "s"} · ${breakStats.studentsWithBreaks} student${breakStats.studentsWithBreaks === 1 ? "" : "s"}` : "",
+            breakStats.total > 0 ? `${breakStats.total} break${breakStats.total === 1 ? "" : "s"} · ${breakStats.studentsWithBreaks} student${breakStats.studentsWithBreaks === 1 ? "" : "s"}` : "",
           ].filter(Boolean).join(" · ") || undefined}
         />
         <SummaryCard
@@ -1398,19 +1510,18 @@ function FinanceContent() {
             ) : filteredStudents.length === 0 ? (
               <div style={st.stateRow}>No students found.</div>
             ) : (
-              <table style={{ ...st.table, minWidth: isMobile ? 280 : 960 }}>
+              <table style={{ ...st.table, minWidth: isMobile ? 280 : 780 }}>
                 <thead>
                   <tr>
-                    <th style={st.th}>Student</th>
-                    {!isMobile && (
-                      <th
-                        style={{ ...st.th, cursor: "pointer", userSelect: "none" as const }}
-                        onClick={() => setCenterSortDir(d => (d === 1 ? -1 : 1))}
-                        title="Sort by centre"
-                      >
-                        Center {centerSortDir === 1 ? "▲" : "▼"}
-                      </th>
-                    )}
+                    {/* No Centre column: every row sits under its centre heading. */}
+                    <th style={{ ...st.th, width: isMobile ? undefined : "46%" }}>
+                      Student
+                      <button type="button" onClick={() => setCenterSortDir(d => (d === 1 ? -1 : 1))}
+                        title="Sort centres A–Z / Z–A"
+                        style={{ marginLeft: 10, padding: "1px 8px", borderRadius: 999, border: "1px solid #e5e7eb", background: "#fff", color: "#6b7280", fontSize: 10.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textTransform: "none" as const, letterSpacing: 0 }}>
+                        Centres {centerSortDir === 1 ? "A–Z ▲" : "Z–A ▼"}
+                      </button>
+                    </th>
                     {!isMobile && <th style={st.th}>Type</th>}
                     {!isMobile && <th style={st.th}>Amount</th>}
                     <th style={st.th}>Action</th>
@@ -1423,14 +1534,15 @@ function FinanceContent() {
                     const g           = groupTotals.get(groupKey);
                     const isPrepay   = s.billingMode === "prepay";
                     const hasCredit  = isPrepay && s.balance < 0; // prepay credit remaining
-                    const isOpen     = activeUid === s.uid;
+                    const isOpen     = activeUid === s.uid && activeAction !== "history";
                     const month      = selectedMonth;
                     const creditAmt  = hasCredit ? Math.abs(s.balance) : 0;
                     const fee        = s.feeCycle === "monthly" ? s.monthlyFee : s.feePerClass;
                     const lowCredit  = isPrepay && s.balance >= -fee; // credit ≤ one fee cycle
 
                     // Same test as the Amount column's "Due" tag.
-                    const isDueRow   = s.balance > 0 || (feeDueMap.has(s.uid) && !paidMap.has(s.uid));
+                    const owed       = owedOf(s);
+                    const isDueRow   = owed > 0 || (feeDueMap.has(s.uid) && !paidMap.has(s.uid));
                     const isPaidRow  = !isDueRow && paidMap.has(s.uid);
                     // Due → whole row orange, paid → whole row green. Painted on the
                     // cells via globals.css (.fin-row-*): the theme's zebra striping
@@ -1449,24 +1561,23 @@ function FinanceContent() {
                       <>
                         {/* ── Centre heading (All Centers view) ─────────── */}
                         {startsGroup && (
-                          <tr key={`hdr-${groupKey}`}>
-                            <td colSpan={isMobile ? 2 : 5} style={st.groupHeader}>
+                          <tr key={`hdr-${groupKey}`} className="fin-group-row">
+                            <td colSpan={isMobile ? 2 : 4} style={st.groupHeader}>
                               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const }}>
-                                <span aria-hidden style={st.groupHeaderIcon}>🏫</span>
                                 <button onClick={() => setFilterCenter(groupKey)} style={st.groupHeaderBtn}
                                   title={filterCenter === "all" ? "Filter" : undefined}>
                                   {groupKey === UNASSIGNED ? "No centre · Due" : s.unitName}{filterCenter === "all" ? " →" : ""}
                                 </button>
-                                <span style={st.groupHeaderPill}>{g?.count ?? 0} student{g?.count === 1 ? "" : "s"}</span>
+                                <span style={st.groupHeaderMeta}>{g?.count ?? 0} student{g?.count === 1 ? "" : "s"}</span>
                                 {(breakStats.byGroup.get(groupKey) ?? 0) > 0 && (
                                   <button type="button"
                                     onClick={e => { e.stopPropagation(); setBreakPopup({ groupKey, title: groupKey === UNASSIGNED ? "No centre" : s.unitName }); }}
-                                    style={{ ...st.groupHeaderPill, ...BREAK_BADGE, cursor: "pointer", fontFamily: "inherit" }} title={`See break dates — ${fmtMonth(selectedMonth)}`}>
-                                    ☕ {breakStats.byGroup.get(groupKey)} break{breakStats.byGroup.get(groupKey) === 1 ? "" : "s"}
+                                    style={st.groupHeaderLink} title={`See break dates — ${fmtMonth(selectedMonth)}`}>
+                                    {breakStats.byGroup.get(groupKey)} break{breakStats.byGroup.get(groupKey) === 1 ? "" : "s"}
                                   </button>
                                 )}
                                 {isSom && groupKey !== UNASSIGNED && centreDefaultFee(s.centerId) > 0 && (
-                                  <span style={st.groupHeaderPill} title="Centre default">Default {fmtINR(centreDefaultFee(s.centerId))}/mo</span>
+                                  <span style={st.groupHeaderMeta} title="Centre default monthly fee">Default {fmtINR(centreDefaultFee(s.centerId))}</span>
                                 )}
                                 <span style={st.groupHeaderMeta}>
                                   {g && g.paid > 0 && <span style={{ color: "#16a34a" }}>Collected {fmtINR(g.paid)}</span>}
@@ -1505,7 +1616,7 @@ function FinanceContent() {
                                     onClick={e => { e.stopPropagation(); setBreakPopup({ uid: s.uid }); }}
                                     title={`See break dates — ${fmtMonth(selectedMonth)}`}
                                     style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" as const, cursor: "pointer", fontFamily: "inherit", ...BREAK_BADGE }}>
-                                    ☕ {ds.length} break{ds.length === 1 ? "" : "s"}
+                                    {ds.length} break{ds.length === 1 ? "" : "s"}
                                   </button>
                                 );
                               })()}
@@ -1517,7 +1628,7 @@ function FinanceContent() {
                               )}
                             </div>
                             <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
-                              {[isMobile ? s.centerName : "", s.admissionNo !== "—" ? s.admissionNo : ""].filter(Boolean).join(" · ")}
+                              {s.admissionNo !== "—" ? s.admissionNo : ""}
                             </div>
                             {!(isSom || s.billingMode === "prepay") && <button
                               onClick={(e) => { e.stopPropagation(); setAttPopupUid(s.uid); }}
@@ -1535,14 +1646,13 @@ function FinanceContent() {
                             {isMobile && (
                               <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 4 }}>
                                 {isSom
-                                  ? <MonthlyFeeCell compact fee={s.monthlyFee}
-                                      onOpen={() => setFeeEdit({ uid: s.uid, value: s.monthlyFee > 0 ? String(s.monthlyFee) : "" })} />
+                                  ? <MonthlyFeeCell compact fee={s.monthlyFee} />
                                   : `${s.classType === "personal" ? "Personal" : "Group"} · ${s.feeCycle === "monthly" ? "Monthly" : "Per Class"}`}
                                 {isDueRow ? (
-                                  <button type="button" disabled={!canUndueRow} onClick={() => setUndueUid(s.uid)}
-                                    title={canUndueRow ? "Un-due: on break / discontinued" : undefined}
-                                    style={{ ...st.dueBtn, marginLeft: 6, fontSize: 11, padding: "1px 8px", cursor: canUndueRow ? "pointer" : "default" }}>
-                                    Due {fmtINR(s.balance > 0 ? s.balance : feeDueMap.get(s.uid)?.amount ?? 0)}{canUndueRow ? " ▾" : ""}
+                                  <button type="button" disabled onClick={() => setUndueUid(s.uid)}
+                                    title={undefined}
+                                    style={{ ...st.dueBtn, marginLeft: 6, fontSize: 11, padding: "1px 8px", cursor: "default" }}>
+                                    Due {fmtINR(owed > 0 ? owed : feeDueMap.get(s.uid)?.amount ?? 0)}
                                   </button>
                                 ) : paidMap.has(s.uid) ? (
                                   <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
@@ -1551,22 +1661,12 @@ function FinanceContent() {
                             )}
                           </td>
 
-                          {/* Center — desktop only (folded into the Student cell on mobile) */}
-                          {!isMobile && (
-                            <td style={st.td}>
-                              {s.centerId
-                                ? <span style={{ fontWeight: 500, color: "#111827" }}>{s.centerName}</span>
-                                : <span style={{ color: "#9ca3af", fontStyle: "italic" }}>No centre</span>}
-                            </td>
-                          )}
-
                           {/* Type — desktop only */}
                           {!isMobile && (
                             <td style={st.td}>
                               {isSom ? (
                                 <>
-                                  <MonthlyFeeCell fee={s.monthlyFee}
-                                    onOpen={() => setFeeEdit({ uid: s.uid, value: s.monthlyFee > 0 ? String(s.monthlyFee) : "" })} />
+                                  <MonthlyFeeCell fee={s.monthlyFee} />
                                   {isCustomFee(s.monthlyFee, centreDefaultFee(s.centerId)) && (
                                     <span title={`Centre default ${fmtINR(centreDefaultFee(s.centerId))}/mo`}
                                       style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#7c3aed", background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 99, padding: "1px 7px", whiteSpace: "nowrap" as const }}>
@@ -1591,13 +1691,12 @@ function FinanceContent() {
                           {!isMobile && (
                             <td style={{ ...st.td, fontWeight: 600 }}>
                               {isDueRow ? (
-                                <button type="button" disabled={!canUndueRow} onClick={() => setUndueUid(s.uid)}
-                                  title={canUndueRow ? "Un-due: on break / discontinued" : undefined}
-                                  style={{ ...st.dueBtn, cursor: canUndueRow ? "pointer" : "default" }}>
+                                <button type="button" disabled onClick={() => setUndueUid(s.uid)}
+                                  title={undefined}
+                                  style={{ ...st.dueBtn, cursor: "default" }}>
                                   <span aria-hidden className="animate-pulse" style={st.dueDot} />
-                                  Due {fmtINR(s.balance > 0 ? s.balance : feeDueMap.get(s.uid)?.amount ?? 0)}
+                                  Due {fmtINR(owed > 0 ? owed : feeDueMap.get(s.uid)?.amount ?? 0)}
                                   {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partial</span>}
-                                  {canUndueRow && <span aria-hidden style={{ fontSize: 10, opacity: 0.7 }}>▾</span>}
                                 </button>
                               ) : paidMap.has(s.uid) ? (
                                 <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
@@ -1615,10 +1714,11 @@ function FinanceContent() {
                                   due appears. An invisible twin keeps the column width so rows
                                   don't shift; advance money goes in via ⋯ → Deposit. Both wings. */}
                               {(() => {
-                                const settled = !isDueRow;
+                                // SoM: the one way into the Fee & Payment window, so always shown.
+                                const settled = false;   // always shown: the one way into Fee & Pay (both wings)
                                 return (
                                   <button
-                                    onClick={() => { closePanel(); setPayUid(s.uid); }}
+                                    onClick={() => openFinance(s.uid, ((!isSom && s.feeCycle === "per_class") ? s.feePerClass : s.monthlyFee) <= 0 ? "fee" : !isDueRow ? "due" : "pay")}
                                     disabled={settled}
                                     aria-hidden={settled || undefined}
                                     tabIndex={settled ? -1 : undefined}
@@ -1628,29 +1728,14 @@ function FinanceContent() {
                                       ...(settled ? { visibility: "hidden" as const } : {}),
                                     }}
                                   >
-                                    💳 Pay
+                                    💳 Fee & Pay
                                   </button>
                                 );
                               })()}
-                              {/* Mark Due lives in ⋮ (SoM only) so the row stays clean —
-                                  Pay is the only visible action, and only while owed. */}
                               <RowActionsMenu
                                 onAdjust={() => openPanel(s.uid, "adjust", s)}
                                 onDeposit={() => openPanel(s.uid, "deposit", s)}
                                 onHistory={() => openPanel(s.uid, "history", s)}
-                                markDue={isSom ? (() => {
-                                  const busy = markingDueUid === s.uid || feeDueSubmitting;
-                                  const noFee = s.monthlyFee <= 0;
-                                  return {
-                                    // Already owed → nothing to mark; paid → allow marking again (revised due).
-                                    disabled: busy || noFee || isDueRow,
-                                    label: busy ? "Marking…"
-                                      : noFee ? "Mark Due · set fee first"
-                                      : isDueRow ? "✓ Already due"
-                                      : `${paidMap.has(s.uid) || feeDueMap.has(s.uid) ? "Mark Due again" : "Mark Due"} · ${fmtINR(s.monthlyFee)}`,
-                                    onClick: () => quickMarkFeeDue(s),
-                                  };
-                                })() : undefined}
                               />
                               {isOpen && (
                                 <button onClick={closePanel} style={st.closePanelBtn} title="Close">✕</button>
@@ -1662,7 +1747,7 @@ function FinanceContent() {
                         {/* ── Inline panel row ──────────────────────────────── */}
                         {isOpen && (
                           <tr key={`${s.uid}-panel`}>
-                            <td colSpan={isMobile ? 2 : 6} style={{ padding: isMobile ? "0 10px 14px" : "0 14px 16px", background: "#fffbeb" }}>
+                            <td colSpan={isMobile ? 2 : 4} style={{ padding: isMobile ? "0 10px 14px" : "0 14px 16px", background: "#fffbeb" }}>
 
                               {/* ── Attendance info strip ─────────────────────── */}
                               <div style={{
@@ -1735,187 +1820,6 @@ function FinanceContent() {
                                 </div>
                               )}
 
-                              {/* ════ HISTORY PANEL ══════════════════════════════ */}
-                              {activeAction === "history" && (() => {
-                                // Show every transaction for this student — including system
-                                // auto-charges — so this matches the Student Detail modal's
-                                // Financial Statement 1:1 instead of silently hiding entries.
-                                // Newest month first; inside a month Due, then what was
-                                // paid for it — an untagged payment sits under the due it
-                                // closed, not under the month it happened to be typed in.
-                                // One line per month: Due → Payment(s) → month status.
-                                const studentTx = sortLedger(transactions.filter(t => t.studentUid === s.uid));
-                                const txMonths  = ledgerMonths(studentTx);
-                                const monthRows: { month: string; txs: typeof studentTx }[] = [];
-                                for (const tx of studentTx) {
-                                  const m = txMonths.get(tx) ?? ledgerMonthOf(tx);
-                                  const last = monthRows[monthRows.length - 1];
-                                  if (last && last.month === m) last.txs.push(tx); else monthRows.push({ month: m, txs: [tx] });
-                                }
-                                const removeBtn = (tx: Transaction) => canManageTx && (
-                                  <button
-                                    disabled={historyDeleteSubmitting}
-                                    title="Remove this entry"
-                                    onClick={() => {
-                                      if (historyDeletePending !== tx.id) {
-                                        setHistoryDeletePending(tx.id);
-                                        if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
-                                        historyDeleteTimer.current = setTimeout(() => setHistoryDeletePending(null), 4000);
-                                      } else {
-                                        if (historyDeleteTimer.current) clearTimeout(historyDeleteTimer.current);
-                                        setHistoryDeletePending(null);
-                                        setHistoryDeleteSubmitting(true);
-                                        handleDeleteTx(tx.id).finally(() => setHistoryDeleteSubmitting(false));
-                                      }
-                                    }}
-                                    style={{
-                                      fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 4, cursor: "pointer",
-                                      border: `1px solid ${historyDeletePending === tx.id ? "#dc2626" : "#fca5a5"}`,
-                                      background: historyDeletePending === tx.id ? "#dc2626" : "#fef2f2",
-                                      color: historyDeletePending === tx.id ? "#fff" : "#dc2626",
-                                      opacity: historyDeleteSubmitting ? 0.6 : 1,
-                                    }}
-                                  >
-                                    {historyDeletePending === tx.id ? "Confirm?" : "Remove"}
-                                  </button>
-                                );
-                                return (
-                                  <div style={{ ...st.panel, borderLeft: "3px solid #6d28d9" }}>
-                                    <div style={st.panelTitle}>🧾 History — {s.name}</div>
-                                    {studentTx.length === 0 ? (
-                                      <div style={{ fontSize: 13, color: "#9ca3af", textAlign: "center" as const, padding: "16px 0" }}>
-                                        No transactions
-                                      </div>
-                                    ) : (
-                                      <div style={{ display: "flex", flexDirection: "column" as const, gap: 6 }}>
-                                        {monthRows.map(({ month, txs }) => {
-                                          // Month status: what was raised (less waivers) vs what came in.
-                                          const dues    = txs.filter(t => t.type === "fee_due");
-                                          const pays    = txs.filter(t => ledgerRank(t) === 3 && t.status !== "failed");
-                                          const dueAmt  = dues.reduce((n, t) => n + Number(t.amount || 0) - (t.status === WAIVED ? waivedAmountOf(t) : 0), 0);
-                                          const paidAmt = pays.reduce((n, t) => n + Number(t.amount || 0), 0);
-                                          const orange  = { bg: "#fff7ed", fg: "#c2410c", bd: "#fed7aa" };
-                                          const monthStatus = dues.length === 0 ? null
-                                            : dueAmt <= 0 ? { label: "Waived", bg: "#ffedd5", fg: "#c2410c", bd: "#fed7aa" }
-                                            : paidAmt >= dueAmt ? { label: "✓ Paid", bg: "#dcfce7", fg: "#15803d", bd: "#86efac" }
-                                            : paidAmt > 0 ? { label: `${fmtINR(dueAmt - paidAmt)} left`, ...orange }
-                                            : { label: "Unpaid", ...orange };
-                                          return (
-                                            <div key={month || "none"} style={{
-                                              display: "flex", alignItems: "center", gap: 10,
-                                              padding: "8px 12px", borderRadius: 8,
-                                              background: "#f9fafb", border: "1px solid #e5e7eb",
-                                              fontSize: 13, flexWrap: "wrap" as const,
-                                            }}>
-                                              <span style={{ fontWeight: 700, color: "#111827", minWidth: 110 }}>
-                                                {month ? fmtMonth(month) : "—"}
-                                              </span>
-                                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const, flex: 1 }}>
-                                        {txs.map((tx, i) => {
-                                          const isFeedue   = tx.type === "fee_due";
-                                          const isDeposit  = tx.type === "deposit";
-                                          const isCharge   = tx.type === "charge" || tx.method === "auto";
-                                          const isPending  = tx.status === "pending";
-                                          const isFailed   = tx.status === "failed";
-
-                                          const isAdmFee   = tx.type === "admission_fee";
-                                          const typeLabel = isFeedue ? "Due" : isAdmFee ? "Admission" : isDeposit ? "Payment" : isCharge ? "Charge" : "Payment";
-                                          const typeColor = isFeedue
-                                            ? { bg: "#fffbeb", border: "#fde68a", text: "#b45309" }
-                                            : isDeposit
-                                            ? { bg: "#fdf4ff", border: "#e9d5ff", text: "#7e22ce" }
-                                            : isCharge
-                                            ? { bg: "#fff7ed", border: "#fed7aa", text: "#c2410c" }
-                                            : { bg: "#f0fdf4", border: "#86efac", text: "#15803d" };
-
-                                          const methodLabel = isFeedue ? "Generated"
-                                            : tx.method === "auto" || tx.method === "auto-monthly" ? "Auto"
-                                            : tx.method;
-
-                                          return (
-                                            <Fragment key={tx.id}>
-                                            {i > 0 && <span style={{ color: "#9ca3af", fontWeight: 700 }}>→</span>}
-                                            <span style={{
-                                              display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const,
-                                              padding: "3px 8px", borderRadius: 8,
-                                              background: isFailed ? "#fef2f2" : isPending ? "#fffbeb" : "#fff",
-                                              border: `1px solid ${isFailed ? "#fecaca" : isPending ? "#fde68a" : "#e5e7eb"}`,
-                                            }}>
-                                              {/* Type badge */}
-                                              <span style={{
-                                                fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99,
-                                                background: typeColor.bg, border: `1px solid ${typeColor.border}`, color: typeColor.text,
-                                              }}>
-                                                {typeLabel}
-                                              </span>
-
-                                              {/* Amount — charges/dues add to balance owed (+, red);
-                                                  payments/deposits reduce it (−, green). */}
-                                              <span style={{ fontWeight: 700, color: (isCharge || isFeedue) ? "#dc2626" : "#16a34a" }}>
-                                                {(isCharge || isFeedue) ? "+" : "−"}{fmtINR(tx.amount)}
-                                              </span>
-
-                                              {/* Un-due: what was written off, and why */}
-                                              {tx.status === WAIVED && (
-                                                <span title={[tx.waiveReason, tx.waivedByName && `by ${tx.waivedByName}`].filter(Boolean).join(" · ")}
-                                                  style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: "#ffedd5", color: "#c2410c", border: "1px solid #fed7aa" }}>
-                                                  Waived −{fmtINR(waivedAmountOf(tx))}{tx.waiveReason ? ` · ${tx.waiveReason}` : ""}
-                                                </span>
-                                              )}
-
-                                              {/* Payment date */}
-                                              <span style={{ color: "#6b7280", fontSize: 12 }}>
-                                                {formatDate(tx.date ?? tx.createdAt)}
-                                              </span>
-
-                                              {/* Method */}
-                                              <span style={{
-                                                fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 4,
-                                                background: "#e0e7ff", color: "#3730a3",
-                                              }}>
-                                                {methodLabel}
-                                              </span>
-
-                                              {/* Status */}
-                                              {(isPending || isFailed) && (
-                                                <span style={{
-                                                  fontSize: 11, fontWeight: 700, padding: "2px 7px", borderRadius: 4,
-                                                  background: isFailed ? "#fef2f2" : "#fffbeb",
-                                                  color: isFailed ? "#dc2626" : "#d97706",
-                                                }}>
-                                                  {tx.status}
-                                                </span>
-                                              )}
-
-                                              {/* Note */}
-                                              {tx.note && (
-                                                <span style={{ fontSize: 11, color: "#9ca3af", fontStyle: "italic" as const }}>
-                                                  {tx.note}
-                                                </span>
-                                              )}
-
-                                              {removeBtn(tx)}
-                                            </span>
-                                            </Fragment>
-                                          );
-                                        })}
-                                              </div>
-                                              {monthStatus && (
-                                                <span style={{
-                                                  marginLeft: "auto", fontSize: 11.5, fontWeight: 800, padding: "3px 10px", borderRadius: 99,
-                                                  background: monthStatus.bg, color: monthStatus.fg, border: `1px solid ${monthStatus.bd}`,
-                                                }}>
-                                                  {monthStatus.label}
-                                                </span>
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })()}
 
                             </td>
                           </tr>
@@ -2097,129 +2001,18 @@ function CentreFeeModal({ centreName, defaultFee, total, customCount, saving, on
   );
 }
 
-// School of Music roster: the monthly fee as a clickable badge on the row
-// ("outside"); clicking opens FeeDetailsModal ("inside") to view and adjust it.
-function MonthlyFeeCell({ fee, compact, onOpen }: { fee: number; compact?: boolean; onOpen: () => void }) {
-  const [hover, setHover] = useState(false);
+// School of Music roster: the monthly fee shown on the row (display only —
+// it is changed in the Fee & Payment window, opened from "Fee & Pay").
+function MonthlyFeeCell({ fee, compact }: { fee: number; compact?: boolean }) {
   const unset = fee <= 0;
   return (
-    <button type="button" onClick={e => { e.stopPropagation(); onOpen(); }}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      title={unset ? "Set fee" : "Fee details"}
-      style={{
-        display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer", transition: "all 0.15s",
-        fontSize: compact ? 11 : 12.5, fontWeight: 700, borderRadius: 8, padding: compact ? "1px 7px" : "4px 10px",
-        color: unset ? "#b91c1c" : "var(--color-text-primary)",
-        background: unset ? (hover ? "#fee2e2" : "#fef2f2") : (hover ? "var(--color-surface-2)" : "var(--color-surface)"),
-        border: `1px solid ${unset ? "#fecaca" : hover ? "#9ca3af" : "var(--color-border)"}`,
-      }}>
-      {unset
-        ? <>⚙️ Set Fee</>
-        : <>{fmtINR(fee)}<span style={{ fontSize: 11, color: "var(--color-text-secondary)", fontWeight: 500 }}>/mo</span></>}
-      <span aria-hidden style={{ fontSize: 10, color: "var(--color-text-secondary)" }}>✎</span>
-    </button>
-  );
-}
-
-interface FeeChange { from: number; to: number; at: string }
-
-/** Fee details for one School of Music student: breakdown, history, and the monthly fee editor. */
-function FeeDetailsModal({ student, month, value, saving, paidThisMonth, dueThisMonth, transactions, onChange, onSave, onCancel }: {
-  student: StudentFeeRow; month: string; value: string; saving: boolean;
-  paidThisMonth: number | null; dueThisMonth: number | null; transactions: Transaction[];
-  onChange: (v: string) => void; onSave: () => void; onCancel: () => void;
-}) {
-  const [changes, setChanges] = useState<FeeChange[] | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    getDocs(query(collection(db, "audit_logs"), where("action", "==", "MONTHLY_FEE_SET"), where("metadata.studentUid", "==", student.uid)))
-      .then(snap => {
-        if (cancelled) return;
-        setChanges(snap.docs.map(d => {
-          const x = d.data(); const m = (x.metadata ?? {}) as { from?: number; to?: number };
-          const ts = x.timestamp as { toDate?: () => Date } | string | undefined;
-          const at = typeof ts === "string" ? ts : ts?.toDate?.().toISOString() ?? "";
-          return { from: Number(m.from ?? 0), to: Number(m.to ?? 0), at };
-        }).sort((p, q) => q.at.localeCompare(p.at)).slice(0, 5));
-      })
-      .catch(() => { if (!cancelled) setChanges([]); });
-    return () => { cancelled = true; };
-  }, [student.uid]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !saving) onCancel(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel, saving]);
-
-  const n = Math.round(Number(value));
-  const valid = Number.isFinite(n) && n > 0;
-  // Same order as the History panel: Due above the payment that settled it.
-  const txMonths = ledgerMonths(transactions);
-  const recent = sortLedger(transactions.filter(t => t.type === "fee_due" || isSettlingPayment(t))).slice(-6);   // latest 6, still oldest→newest
-  const discounts = transactions.filter(t => Number(t.discountAmt) > 0).slice(0, 5);
-  const fmtD = (iso: string) => { const d = new Date(iso); return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); };
-  const row = (k: string, v: React.ReactNode) => (
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5 }}>
-      <span style={{ color: "var(--color-text-secondary)" }}>{k}</span><span style={{ fontWeight: 600, color: "var(--color-text-primary)", textAlign: "right" }}>{v}</span>
-    </div>
-  );
-  const sub: React.CSSProperties = { fontSize: 11, fontWeight: 800, color: "var(--color-text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", marginTop: 4 };
-
-  return (
-    // Closes only via Cancel / ✕ / Esc — never a backdrop click (avoids losing a half-typed fee).
-    <div style={{ position: "fixed", inset: 0, zIndex: 700, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div role="dialog" aria-modal="true" aria-label={`Fee details — ${student.name}`}
-        style={{ width: "100%", maxWidth: 360, maxHeight: "90vh", overflowY: "auto", background: "var(--color-surface)", borderRadius: 14, boxShadow: "0 20px 50px rgba(0,0,0,0.25)", padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-          <div>
-            <div style={{ fontSize: 14.5, fontWeight: 800, color: "var(--color-text-primary)" }}>Monthly Fee</div>
-            <div style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>{student.name} · {student.centerName}</div>
-          </div>
-          <button onClick={onCancel} disabled={saving} aria-label="Close" style={{ border: "none", background: "none", fontSize: 16, color: "#9ca3af", cursor: "pointer" }}>✕</button>
-        </div>
-
-        <label style={{ fontSize: 12, fontWeight: 600, color: "var(--color-text-secondary)" }}>
-          Monthly fee (₹)
-          <input autoFocus type="number" min={1} inputMode="numeric" value={value} disabled={saving} placeholder="e.g. 2500"
-            onChange={e => onChange(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && valid) onSave(); }}
-            style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4, padding: "8px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 14, color: "var(--color-text-primary)", background: "var(--color-surface)" }} />
-        </label>
-        <div style={{ fontSize: 11.5, color: "var(--color-text-secondary)", marginTop: -4 }}>
-          Raised dues unchanged.
-        </div>
-
-        <div style={sub}>{fmtMonth(month)}</div>
-        {row("Fee", student.monthlyFee > 0 ? `${fmtINR(student.monthlyFee)} / mo` : <span style={{ color: "#b91c1c" }}>Not set</span>)}
-        {row("Status", paidThisMonth !== null
-          ? <span style={{ color: "#16a34a" }}>Paid {fmtINR(paidThisMonth)}</span>
-          : dueThisMonth !== null ? <span style={{ color: DUE_TEXT }}>Due {fmtINR(dueThisMonth)}</span>
-          : <span style={{ color: "#9ca3af" }}>Not raised</span>)}
-        {row("Balance", student.balance > 0
-          ? <span style={{ color: DUE_TEXT }}>{fmtINR(student.balance)} owed</span>
-          : student.balance < 0 ? <span style={{ color: "#16a34a" }}>{fmtINR(-student.balance)} credit</span> : "Settled")}
-
-        <div style={sub}>Fee changes</div>
-        {changes === null ? <div style={{ fontSize: 12, color: "#9ca3af" }}>Loading…</div>
-          : changes.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
-          : changes.map((c, i) => <Fragment key={i}>{row(fmtD(c.at), `${c.from > 0 ? fmtINR(c.from) : "—"} → ${fmtINR(c.to)}`)}</Fragment>)}
-
-        <div style={sub}>Discounts</div>
-        {discounts.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
-          : discounts.map(t => <Fragment key={t.id}>{row(fmtD(t.date), `−${fmtINR(Number(t.discountAmt))} on ${fmtINR(Number(t.rawAmount ?? t.amount))}`)}</Fragment>)}
-
-        <div style={sub}>Recent</div>
-        {recent.length === 0 ? <div style={{ fontSize: 12, color: "#9ca3af" }}>None</div>
-          : recent.map(t => <Fragment key={t.id}>{row(`${fmtMonth(txMonths.get(t) ?? ledgerMonthOf(t))} · ${t.type === "fee_due" ? "Due" : "Paid"}`,
-              <span style={{ color: t.type === "fee_due" ? "#dc2626" : "#16a34a" }}>{t.type === "fee_due" ? "+" : "−"}{fmtINR(t.amount)}</span>)}</Fragment>)}
-
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
-          <button onClick={onCancel} disabled={saving} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={onSave} disabled={saving || !valid} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#d97706", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: saving || !valid ? "not-allowed" : "pointer", opacity: saving || !valid ? 0.55 : 1 }}>
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-    </div>
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
+      fontSize: compact ? 11 : 12.5, fontWeight: 700, borderRadius: 8, padding: compact ? "1px 7px" : "4px 10px",
+      color: unset ? "var(--color-text-secondary)" : "var(--color-text-primary)",
+    }}>
+      {unset ? "-" : fmtINR(fee)}
+    </span>
   );
 }
 
@@ -2264,7 +2057,7 @@ function RowActionsMenu({ onAdjust, onDeposit, onHistory, markDue }: {
               disabled={markDue.disabled}
               style={{ ...st.rowMenuItem, color: "#be123c", opacity: markDue.disabled ? 0.45 : 1, cursor: markDue.disabled ? "not-allowed" : "pointer" }}
             >
-              ⚠️ {markDue.label}
+              💰 {markDue.label}
             </button>
           )}
         </div>
@@ -2755,11 +2548,11 @@ const st: Record<string, React.CSSProperties> = {
   centreTabActive: { background: "var(--color-accent)", borderColor: "var(--color-accent)", color: "#fff", boxShadow: "var(--shadow-sm)" },
   centreTabCount:  { fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 999, background: "var(--color-surface-3)", color: "var(--color-text-secondary)" },
   centreTabDue:    { fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 999, background: "#fef3c7", color: "#92400e" },
-  groupHeader:     { padding: "12px 14px", background: "var(--color-surface-2)", borderTop: "2px solid var(--color-border)", borderBottom: "1px solid var(--color-border)", borderLeft: "4px solid #4f46e5" },
-  groupHeaderIcon: { width: 28, height: 28, borderRadius: 8, background: "#eef2ff", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 },
-  groupHeaderBtn:  { background: "none", border: "none", padding: 0, fontSize: 14.5, fontWeight: 800, color: "var(--color-text-primary)", cursor: "pointer" },
-  groupHeaderPill: { fontSize: 11.5, fontWeight: 700, color: "var(--color-text-secondary)", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 99, padding: "2px 9px", whiteSpace: "nowrap" },
-  groupHeaderMeta: { fontSize: 12, color: "var(--color-text-secondary)" },
+  // Background/borders come from .fin-group-row in globals.css (theme-aware).
+  groupHeader:     { padding: "14px 14px 12px" },
+  groupHeaderBtn:  { background: "none", border: "none", padding: 0, fontSize: 15.5, fontWeight: 800, letterSpacing: "-0.01em", color: "var(--color-text-primary)", cursor: "pointer" },
+  groupHeaderMeta: { fontSize: 12.5, fontWeight: 600, color: "var(--color-text-secondary)", whiteSpace: "nowrap" },
+  groupHeaderLink: { background: "none", border: "none", padding: 0, fontSize: 12.5, fontWeight: 600, color: "var(--color-text-secondary)", cursor: "pointer", fontFamily: "inherit", textDecoration: "underline dotted", textUnderlineOffset: 3, whiteSpace: "nowrap" },
   groupHeaderAction: { marginLeft: "auto", background: "#d97706", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
   searchInput:   { padding: "7px 12px", border: "1px solid var(--color-border)", borderRadius: 6, fontSize: 13, background: "var(--color-surface)", color: "var(--color-text-primary)", minWidth: 140, flex: "1 1 140px" },
 

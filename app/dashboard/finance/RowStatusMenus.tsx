@@ -47,7 +47,9 @@ function fmtDay(iso: string): string {
   return isNaN(d.getTime()) ? iso : `${DAY[d.getDay()]} ${d.getDate()}`;
 }
 
-export function UndueModal({ name, months, otherBalance, status, direct, approverLabel, attendance, saving, onConfirm, onClose }: {
+export function UndueModal({ name, months, otherBalance, status, direct, approverLabel, attendance, saving, onConfirm, onClose, stacked }: {
+  /** Opened from the Fee & Payment window — sit above it. */
+  stacked?: boolean;
   name: string;
   /** Every month this student still owes on, oldest first. */
   months: UndueMonth[];
@@ -104,7 +106,7 @@ export function UndueModal({ name, months, otherBalance, status, direct, approve
 
   // Closes only via Cancel / ✕ / Esc, so a stray click can't drop the choice.
   return createPortal(
-    <div style={s.backdrop}>
+    <div style={stacked ? { ...s.backdrop, zIndex: 800 } : s.backdrop}>
       <form role="dialog" aria-modal="true" aria-label={`Un-due: ${name}`} style={s.dialog}
         onSubmit={e => {
           e.preventDefault();

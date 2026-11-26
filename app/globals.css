@@ -345,6 +345,21 @@ tbody tr.row-admin {
   box-shadow: inset 3px 0 0 var(--color-accent-border);
 }
 
+/* ── Finance centre heading rows: stand apart from the student rows ─────── */
+tbody tr.fin-group-row > td {
+  background: #eef2ff;
+  border-top: 3px solid #c7d2fe;
+  border-bottom: 2px solid #a5b4fc;
+  box-shadow: inset 4px 0 0 #4f46e5;
+}
+tbody tr.fin-group-row:hover > td { background: #eef2ff; }
+:root[data-theme="dark"] tbody tr.fin-group-row > td,
+:root[data-theme="dark"] tbody tr.fin-group-row:hover > td {
+  background: rgba(79,70,229,0.18);
+  border-top-color: rgba(129,140,248,0.35);
+  border-bottom-color: rgba(129,140,248,0.55);
+}
+
 /* ── Finance student rows: Due = orange, Paid = green ────────────────────── */
 /* Painted on the cells: the zebra rule above forces every <tr> background
    with !important, so a row colour would never show. Cells aren't striped. */

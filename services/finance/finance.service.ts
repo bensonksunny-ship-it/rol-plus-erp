@@ -379,6 +379,36 @@ export function computeDueSettlements(transactions: Transaction[]): Map<string, 
     s.state     = wasCompleted ? "paid" : "unpaid";
   });
 
+  // 4) A student can't owe more across their months than their ledger balance.
+  //    Payments recorded without a month (older flow) are never guessed onto a
+  //    month by date, but they do count in the balance — so cap the open months
+  //    at what's really owed: the newest months keep the shortfall, older ones
+  //    are treated as paid first (FIFO). A student whose ledger is at ₹0 or in
+  //    credit therefore shows every month Paid, everywhere.
+  const balance = new Map<string, number>();
+  for (const tx of transactions) {
+    if (!tx.studentUid) continue;
+    balance.set(tx.studentUid, (balance.get(tx.studentUid) ?? 0) + transactionBalanceEffect(tx));
+  }
+  const openByStudent = new Map<string, DueSettlement[]>();
+  settlements.forEach(s => {
+    if (s.remaining > 0) (openByStudent.get(s.studentUid) ?? openByStudent.set(s.studentUid, []).get(s.studentUid)!).push(s);
+  });
+  openByStudent.forEach((open, uid) => {
+    let owed = Math.max(0, balance.get(uid) ?? 0);
+    const totalOpen = open.reduce((n, s) => n + s.remaining, 0);
+    if (owed >= totalOpen) return;                       // nothing to cap
+    open.sort((x, y) => y.billingMonth.localeCompare(x.billingMonth));   // newest first keep the debt
+    for (const s of open) {
+      const keep = Math.min(s.remaining, owed);
+      owed -= keep;
+      if (keep === s.remaining) continue;
+      s.remaining  = keep;
+      s.paidAmount = Math.max(s.paidAmount, s.dueAmount - keep);
+      s.state      = keep <= 0 ? "paid" : "partial";
+    }
+  });
+
   return settlements;
 }
 
@@ -504,20 +534,36 @@ export async function recordPayment(input: RecordPaymentInput): Promise<void> {
   //    ledger rather than trusting a stale client snapshot, so concurrent
   //    payments can't both conclude the due is still short.
   if (!input.billingMonth) return;
+  await syncDueStatus(input.studentUid, input.billingMonth, payDate);
+}
 
+/**
+ * Re-stamp a month's fee_due from the payments that actually exist for it:
+ * "completed" + paidAt when fully covered, otherwise "due" + paidAt null.
+ * Called after a payment is recorded, edited or deleted — without it a
+ * deleted payment left its due stamped Paid, and computeDueSettlements'
+ * legacy fallback then reported the month as settled with no money behind it.
+ */
+export async function syncDueStatus(studentUid: string, billingMonth: string, paidOn?: string): Promise<void> {
   const snap = await getDocs(
-    query(collection(db, TRANSACTIONS), where("studentUid", "==", input.studentUid)),
+    query(collection(db, TRANSACTIONS), where("studentUid", "==", studentUid)),
   );
   const txs = snap.docs.map(d => ({ id: d.id, ...d.data() }) as Transaction);
-  const settlement = computeDueSettlements(txs).get(`${input.studentUid}|${input.billingMonth}`);
+  const settlement = computeDueSettlements(txs).get(`${studentUid}|${billingMonth}`);
   if (!settlement) return;
+  const due = txs.find(t => t.id === settlement.dueId);
+  if (!due || due.status === WAIVED) return;   // waived dues keep their own status
 
+  const covered = txs
+    .filter(t => isSettlingPayment(t) && paymentSettlesMonth(t) === billingMonth)
+    .reduce((n, t) => n + creditedAmountOf(t), 0);
   const dueRef = doc(db, TRANSACTIONS, settlement.dueId);
-  if (settlement.remaining <= 0) {
-    await updateDoc(dueRef, { status: "completed", paidAt: payDate });
-  } else {
-    // Still short — make sure a previously-closed due reopens if this write
-    // followed an edit that reduced an earlier payment.
+  if (covered > 0 && covered >= settlement.dueAmount) {
+    const latest = txs
+      .filter(t => isSettlingPayment(t) && paymentSettlesMonth(t) === billingMonth)
+      .map(t => t.date ?? "").sort().pop();
+    await updateDoc(dueRef, { status: "completed", paidAt: paidOn || latest || new Date().toISOString().slice(0, 10) });
+  } else if (due.status === "completed" || (due as { paidAt?: unknown }).paidAt) {
     await updateDoc(dueRef, { status: "due", paidAt: null });
   }
 }
@@ -575,6 +621,10 @@ export async function editTransaction(
       updatedAt:      new Date().toISOString(),
     });
   }
+
+  // 2b) A changed payment amount/status may open or close its month's due.
+  const editedMonth = oldTx.type !== "fee_due" ? paymentSettlesMonth(oldTx) : null;
+  if (oldTx.studentUid && editedMonth) await syncDueStatus(oldTx.studentUid, editedMonth);
 
   // 3) Audit
   logAction({
@@ -652,6 +702,10 @@ export async function deleteTransaction(
 
   // 3) Hard delete
   await deleteDoc(txRef);
+
+  // 3b) Removing a payment must reopen the due it had closed.
+  const deletedMonth = tx.type !== "fee_due" ? paymentSettlesMonth(tx) : null;
+  if (tx.studentUid && deletedMonth) await syncDueStatus(tx.studentUid, deletedMonth);
 
   // 4) Audit
   logAction({
