@@ -23,7 +23,7 @@ import type {
   TransactionStatus,
 } from "@/types/finance";
 import { logAction } from "@/services/audit/audit.service";
-import { WAIVED, chargedAmountOf, waivedAmountOf } from "@/lib/feeWaiver";
+import { WAIVED, chargedAmountOf, creditedAmountOf, waivedAmountOf } from "@/lib/feeWaiver";
 
 const TRANSACTIONS = "transactions";
 
@@ -235,9 +235,10 @@ export function transactionBalanceEffect(tx: Transaction): number {
     tx.method === "auto" ||
     tx.type === "charge";
   if (isCharge) return tx.amount;
-  // Payments/deposits only count once actually received.
+  // Payments/deposits only count once actually received. A discount given on
+  // the payment comes off the balance too (cash + discount).
   if (tx.status !== "completed") return 0;
-  return -tx.amount;
+  return -creditedAmountOf(tx);
 }
 
 /**
@@ -356,7 +357,8 @@ export function computeDueSettlements(transactions: Transaction[]): Map<string, 
     const k = key(tx.studentUid, month);
     const s = settlements.get(k);
     if (!s) continue;   // payment with no matching due — counts toward balance, not a settlement
-    s.paidAmount += tx.amount;
+    // Cash received + any discount given both settle the month.
+    s.paidAmount += creditedAmountOf(tx);
   }
 
   // 3) Resolve state.
@@ -491,9 +493,10 @@ export async function recordPayment(input: RecordPaymentInput): Promise<void> {
     createdAt:    serverTimestamp(),
   });
 
-  // 2) Reduce the denormalized balance cache.
+  // 2) Reduce the denormalized balance cache — by the cash and the discount.
+  const discount = input.discountAmt && input.discountAmt > 0 ? input.discountAmt : 0;
   await updateDoc(doc(db, "users", input.studentUid), {
-    currentBalance: increment(-input.amount),
+    currentBalance: increment(-(input.amount + discount)),
     updatedAt:      new Date().toISOString(),
   });
 

@@ -33,3 +33,22 @@ export function chargedAmountOf(record: TxLike): number {
 export function isWaivedDue(tx: TxLike): boolean {
   return waivedAmountOf(tx) > 0;
 }
+
+// ─── Payment discounts ───────────────────────────────────────────────────────
+// A payment's `amount` is the cash actually received (after discount). The
+// discount itself is a concession on the fee: it must also come off what the
+// student owes, otherwise a ₹2,800 due paid as ₹1,950 + ₹850 discount keeps
+// showing ₹850 due. Money-received totals (Collected, statements) still use
+// `amount` alone — only balances and due settlement add the discount.
+
+/** The discount given on a payment (0 for dues, charges and plain payments). */
+export function discountAmountOf(record: TxLike): number {
+  const tx = record as TxFields & { discountAmt?: unknown };
+  if (tx.type === "fee_due" || tx.type === "charge") return 0;
+  return Math.max(0, Number(tx.discountAmt ?? 0) || 0);
+}
+
+/** What a payment takes off the balance: cash received + any discount given. */
+export function creditedAmountOf(record: TxLike): number {
+  return (Number((record as TxFields).amount ?? 0) || 0) + discountAmountOf(record);
+}

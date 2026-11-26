@@ -8,7 +8,7 @@ import { useSearchParams } from "next/navigation";
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
   query, where, doc, serverTimestamp,
-  increment, writeBatch,
+  increment, writeBatch, onSnapshot,
 } from "firebase/firestore";
 import { db } from "@/config/firebase";
 import { useAuth } from "@/hooks/useAuth";
@@ -94,6 +94,9 @@ type RowAction      = "adjust" | "deposit" | "history";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
+/** Sky-blue "☕ N breaks" tag — matches the break colour used in attendance. */
+const BREAK_BADGE: React.CSSProperties = { background: "#e0f2fe", color: "#0369a1", border: "1px solid #7dd3fc" };
+
 const METHOD_STYLES: Record<string, React.CSSProperties> = {
   UPI:            { background: "#ede9fe", color: "#4f46e5" },
   Cash:           { background: "#dcfce7", color: "#16a34a" },
@@ -165,7 +168,13 @@ function FinanceContent() {
   const [loading, setLoading]                = useState(true);
   const [pdfBusy, setPdfBusy]                = useState(false);
   const [attDatesMap, setAttDatesMap]        = useState<Map<string, string[]>>(new Map());
+  // Breaks teachers marked in attendance (status "break") during the selected
+  // month: uid → sorted unique class dates. Display only — never feeds Due/Paid,
+  // Pay or collection maths.
+  const [breakDatesMap, setBreakDatesMap]    = useState<Map<string, string[]>>(new Map());
   const [attPopupUid, setAttPopupUid]        = useState<string | null>(null);
+  // ☕ break tag clicked: one student's break dates, or a whole centre heading's.
+  const [breakPopup, setBreakPopup]          = useState<{ uid: string } | { groupKey: string; title: string } | null>(null);
   const { toasts, toast, remove }            = useToast();
   // ── Month selector ───────────────────────────────────────────────────────────
   const [selectedMonth, setSelectedMonth]    = useState<string>(currentMonth());
@@ -405,6 +414,24 @@ function FinanceContent() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedMonth, wing]);
 
+  // Live: re-counts when the month changes or a teacher marks / clears a break.
+  useEffect(() => {
+    setBreakDatesMap(new Map());
+    return onSnapshot(
+      query(collection(db, "attendance"), where("status", "==", "break")),
+      snap => {
+        const m = new Map<string, Set<string>>();
+        snap.docs.forEach(d => {
+          const r = d.data() as { studentUid?: string; date?: string };
+          if (!r.studentUid || !(r.date ?? "").startsWith(selectedMonth)) return;
+          (m.get(r.studentUid) ?? m.set(r.studentUid, new Set()).get(r.studentUid)!).add(r.date!);
+        });
+        setBreakDatesMap(new Map(Array.from(m, ([uid, set]) => [uid, Array.from(set).sort()])));
+      },
+      err => console.warn("[finance] break listener:", err),
+    );
+  }, [selectedMonth]);
+
   // ── Fee-due generated this month per student ────────────────────────────────
   // Reconciles every due against the payments credited to it, so a part-paid
   // month reports what's actually left rather than counting as fully settled.
@@ -480,6 +507,18 @@ function FinanceContent() {
   // Same scope for the drill-down ledgers: by student, so a transaction whose
   // stored centerId is stale (student moved) still lands under the right centre.
   const scopeUidSet = useMemo(() => new Set(scopeStudents.map(s => s.uid)), [scopeStudents]);
+  /** Breaks this month in the selected centre scope, and per centre heading. */
+  const breakStats = useMemo(() => {
+    let total = 0, studentsWithBreaks = 0;
+    const byGroup = new Map<string, number>();
+    students.forEach(s => {
+      const n = breakDatesMap.get(s.uid)?.length ?? 0;
+      if (!n) return;
+      byGroup.set(centreKey(s), (byGroup.get(centreKey(s)) ?? 0) + n);
+      if (scopeUidSet.has(s.uid)) { total += n; studentsWithBreaks += 1; }
+    });
+    return { total, studentsWithBreaks, byGroup };
+  }, [students, breakDatesMap, scopeUidSet]);
   const inScope = useCallback((tx: Transaction) => filterCenter === "all"
     || (tx.studentUid ? scopeUidSet.has(tx.studentUid) : tx.centerId === filterCenter.split("|")[0]), [filterCenter, scopeUidSet]);
 
@@ -607,7 +646,7 @@ function FinanceContent() {
       const target = billingMonth
         ? dueSettlements.get(`${student.uid}|${billingMonth}`)
         : undefined;
-      const stillOwed = target ? Math.max(0, target.remaining - net) : 0;
+      const stillOwed = target ? Math.max(0, target.remaining - net - (discountAmt > 0 ? discountAmt : 0)) : 0;
 
       setPayUid(null);
       const discMsg  = discountAmt > 0 ? ` · discount ${fmtINR(discountAmt)}` : "";
@@ -1266,7 +1305,10 @@ function FinanceContent() {
           label="Active"
           value={loading ? "…" : String(summary.activeCount)}
           accent="#4f46e5" icon="🎓"
-          hint={loading || isSom ? undefined : `${summary.groupCount} group · ${summary.personalCount} personal`}
+          hint={loading ? undefined : [
+            isSom ? "" : `${summary.groupCount} group · ${summary.personalCount} personal`,
+            breakStats.total > 0 ? `☕ ${breakStats.total} break${breakStats.total === 1 ? "" : "s"} · ${breakStats.studentsWithBreaks} student${breakStats.studentsWithBreaks === 1 ? "" : "s"}` : "",
+          ].filter(Boolean).join(" · ") || undefined}
         />
         <SummaryCard
           label="Overdue"
@@ -1416,6 +1458,13 @@ function FinanceContent() {
                                   {groupKey === UNASSIGNED ? "No centre · Due" : s.unitName}{filterCenter === "all" ? " →" : ""}
                                 </button>
                                 <span style={st.groupHeaderPill}>{g?.count ?? 0} student{g?.count === 1 ? "" : "s"}</span>
+                                {(breakStats.byGroup.get(groupKey) ?? 0) > 0 && (
+                                  <button type="button"
+                                    onClick={e => { e.stopPropagation(); setBreakPopup({ groupKey, title: groupKey === UNASSIGNED ? "No centre" : s.unitName }); }}
+                                    style={{ ...st.groupHeaderPill, ...BREAK_BADGE, cursor: "pointer", fontFamily: "inherit" }} title={`See break dates — ${fmtMonth(selectedMonth)}`}>
+                                    ☕ {breakStats.byGroup.get(groupKey)} break{breakStats.byGroup.get(groupKey) === 1 ? "" : "s"}
+                                  </button>
+                                )}
                                 {isSom && groupKey !== UNASSIGNED && centreDefaultFee(s.centerId) > 0 && (
                                   <span style={st.groupHeaderPill} title="Centre default">Default {fmtINR(centreDefaultFee(s.centerId))}/mo</span>
                                 )}
@@ -1449,6 +1498,17 @@ function FinanceContent() {
                             <div style={{ fontWeight: 600 }}>
                               {s.name}
                               <StudentStatusChip status={s.status} />
+                              {(breakDatesMap.get(s.uid)?.length ?? 0) > 0 && (() => {
+                                const ds = breakDatesMap.get(s.uid)!;
+                                return (
+                                  <button type="button"
+                                    onClick={e => { e.stopPropagation(); setBreakPopup({ uid: s.uid }); }}
+                                    title={`See break dates — ${fmtMonth(selectedMonth)}`}
+                                    style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" as const, cursor: "pointer", fontFamily: "inherit", ...BREAK_BADGE }}>
+                                    ☕ {ds.length} break{ds.length === 1 ? "" : "s"}
+                                  </button>
+                                );
+                              })()}
                               {!s.rosterActive && s.status !== "on_break" && (
                                 <span title="Off roster · balance unsettled"
                                   style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" as const }}>
@@ -1871,6 +1931,61 @@ function FinanceContent() {
       )}
 
       {/* ══ ATTENDANCE POPUP ════════════════════════════════════════════════════ */}
+      {breakPopup && (() => {
+        const rows = "uid" in breakPopup
+          ? students.filter(x => x.uid === breakPopup.uid)
+          : students.filter(x => centreKey(x) === breakPopup.groupKey && (breakDatesMap.get(x.uid)?.length ?? 0) > 0);
+        const list = rows
+          .map(x => ({ s: x, dates: breakDatesMap.get(x.uid) ?? [] }))
+          .sort((a, b) => b.dates.length - a.dates.length || a.s.name.localeCompare(b.s.name));
+        const total = list.reduce((n, r) => n + r.dates.length, 0);
+        const title = "uid" in breakPopup ? (list[0]?.s.name ?? "Student") : breakPopup.title;
+        const DAY = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+        const close = () => setBreakPopup(null);
+        return (
+          <div role="dialog" aria-label={`Breaks — ${title}`}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+            onClick={close} onKeyDown={e => { if (e.key === "Escape") close(); }}>
+            <div style={{ background: "#fff", borderRadius: 14, width: "100%", maxWidth: 440, boxShadow: "0 20px 60px rgba(0,0,0,0.2)", overflow: "hidden" }} onClick={e => e.stopPropagation()}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #bae6fd", background: "linear-gradient(135deg, #e0f2fe, #f0f9ff)" }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: "#0c4a6e" }}>☕ Breaks — {title}</div>
+                  <div style={{ fontSize: 12, color: "#0369a1", marginTop: 3 }}>
+                    {fmtMonth(selectedMonth)} · {total} break{total !== 1 ? "s" : ""}{"uid" in breakPopup ? "" : ` · ${list.length} student${list.length !== 1 ? "s" : ""}`}
+                  </div>
+                </div>
+                <button autoFocus onClick={close} aria-label="Close" style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#0369a1", lineHeight: 1, padding: 4 }}>×</button>
+              </div>
+              <div style={{ padding: "16px 20px", maxHeight: 380, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+                {total === 0 ? (
+                  <div style={{ textAlign: "center", fontSize: 13, color: "#9ca3af", padding: "24px 0" }}>No breaks this month</div>
+                ) : list.map(({ s: x, dates }) => (
+                  <div key={x.uid}>
+                    {!("uid" in breakPopup) && (
+                      <div style={{ fontSize: 12.5, fontWeight: 700, color: "#111827", marginBottom: 6 }}>
+                        {x.name} <span style={{ fontWeight: 500, color: "#6b7280" }}>· {dates.length}</span>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {dates.map(dt => {
+                        const d = new Date(dt + "T00:00:00");
+                        return (
+                          <div key={dt} title={d.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+                            style={{ display: "flex", flexDirection: "column", alignItems: "center", background: "#e0f2fe", border: "1px solid #7dd3fc", borderRadius: 8, padding: "6px 10px", minWidth: 44 }}>
+                            <span style={{ fontSize: 10, color: "#0369a1", fontWeight: 600 }}>{DAY[d.getDay()]}</span>
+                            <span style={{ fontSize: 18, fontWeight: 800, color: "#0c4a6e", lineHeight: 1.1 }}>{d.getDate()}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {attPopupUid && (() => {
         const s     = students.find(x => x.uid === attPopupUid);
         const dates = attDatesMap.get(attPopupUid) ?? [];

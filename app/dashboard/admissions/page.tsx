@@ -33,6 +33,7 @@ import { EnquiriesDrawer } from "./enquiries";
 import { ScreeningQuestionsModal } from "@/components/screening/ScreeningQuestionsModal";
 import { SchoolInfoEditor } from "@/components/admissions/SchoolInfoEditor";
 import { SchoolInfoPreview } from "@/components/admissions/SchoolInfoPreview";
+import { AdmissionsSummaryStrip, monthKey, type FunnelKind } from "@/components/admissions/AdmissionsSummaryStrip";
 import { useRoleHub } from "@/hooks/useRoleHub";
 import { useAuth } from "@/hooks/useAuth";
 import { canLeadWing } from "@/lib/elevatedAccount";
@@ -118,6 +119,19 @@ function AdmissionsWizard() {
   const [qrTarget, setQrTarget]       = useState<"apply" | "enquiry" | null>(null);
   // Enquiries live in a slide-over opened from the "Enquiries +" header button.
   const [showEnquiries, setShowEnquiries] = useState(false);
+  // Monthly Summary: selected month + the card picked as a filter (null = none).
+  // New Enquiries → the Enquiries popup scoped to the month; Forms Filled /
+  // Enrollments → the applications list scoped to the month.
+  const [funnelMonth, setFunnelMonth] = useState(() => monthKey(new Date()));
+  const [funnelKind, setFunnelKind]   = useState<FunnelKind | null>(null);
+  function selectFunnel(kind: FunnelKind | null) {
+    setFunnelKind(kind);
+    if (kind === "enquiries") setShowEnquiries(true);
+  }
+  function closeEnquiries() {
+    setShowEnquiries(false);
+    setFunnelKind(k => (k === "enquiries" ? null : k));
+  }
   // "🎓 Enroll Student" → Student Enrollment & Batch Assignment modal.
   const [enrollFor, setEnrollFor] = useState<Record<string, unknown> | null>(null);
   const { toasts, toast, remove } = useToast();
@@ -129,6 +143,8 @@ function AdmissionsWizard() {
     toast(`Student ${r.name} successfully enrolled${r.centreName ? ` into ${r.centreName}` : ""}!`, "success");
   }
   const [newEnquiries, setNewEnquiries]   = useState(0);
+  // Another wing's records → start unfiltered.
+  useEffect(() => { setFunnelKind(null); }, [wing]);
   useEffect(() => {
     return subscribeEnquiries(
       WING,
@@ -170,7 +186,7 @@ function AdmissionsWizard() {
   }
 
   function convertEnquiry(e: Enquiry) {
-    setShowEnquiries(false);
+    closeEnquiries();
     resetWizard();
     setFromEnquiry(e);
     setMode("wizard");
@@ -228,7 +244,7 @@ function AdmissionsWizard() {
               style={{ ...btn, background: "#fff", color: "#4f46e5", border: "1.5px solid #c7d2fe", padding: "9px 14px" }}>
               <span aria-hidden>ℹ️</span> School Info
             </button>
-            <button onClick={() => setShowEnquiries(true)} title="Open enquiries — add a lead, follow up, convert"
+            <button onClick={() => { setFunnelKind(k => (k === "enquiries" ? null : k)); setShowEnquiries(true); }} title="Open enquiries — add a lead, follow up, convert"
               style={{ ...btn, background: ACCENT, color: "#fff", padding: "9px 16px", position: "relative" }}>
               <span aria-hidden style={{ fontSize: 15 }}>📇</span> Enquiries
               <span aria-hidden style={{ background: "rgba(255,255,255,0.25)", borderRadius: 6, width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 15, lineHeight: 1 }}>+</span>
@@ -244,10 +260,17 @@ function AdmissionsWizard() {
             </button>
           </div>
         </div>
+        {/* Monthly funnel — hidden for Teachers, who only see their own applications. */}
+        {activeRole !== ROLES.TEACHER && (
+          <AdmissionsSummaryStrip wing={WING}
+            month={funnelMonth} onMonthChange={setFunnelMonth}
+            active={funnelKind} onSelect={selectFunnel} />
+        )}
         {showEnquiries && (
           <EnquiriesDrawer
             wing={WING}
-            onClose={() => setShowEnquiries(false)}
+            onClose={closeEnquiries}
+            monthFilter={funnelKind === "enquiries" ? { month: funnelMonth, onClear: () => setFunnelKind(null) } : null}
             onConvert={convertEnquiry}
             onShowQr={() => { setQrTarget("enquiry"); setShowQr(true); }}
             canRestore={canEditQuestions}
@@ -264,6 +287,9 @@ function AdmissionsWizard() {
           }} />
         )}
         <AdmissionsList
+          funnel={funnelKind === "forms" || funnelKind === "enrolled"
+            ? { kind: funnelKind, month: funnelMonth, onClear: () => setFunnelKind(null) }
+            : null}
           onNewAdmission={() => setShowNewChoice(true)}
           onResume={async (rec, intent) => {
             if (intent === "enroll") { setEnrollFor(rec); return; }

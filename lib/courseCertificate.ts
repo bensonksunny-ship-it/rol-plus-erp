@@ -1,8 +1,8 @@
 // =============================================================================
 // Course completion certificate → JPEG download (client-side canvas). Both
 // wings. A4 portrait, formal examination-certificate layout: guitar emblem,
-// school name, student, "is awarded", course, dates/centre, one signature
-// ("Director / Founder") over a faint seal, metadata + serial, navy footer
+// school name, student, "is awarded", course, dates (no centre name), one signature
+// ("Founder / Director") over a faint seal, metadata + certificate no., navy footer
 // bar. The emblem (public/logos/school-of-music.png) is used for both wings;
 // a completion date of "" (date unavailable) leaves that line out.
 // =============================================================================
@@ -17,7 +17,9 @@ export interface CertificateData {
   completedOn: string;
   admissionNo?: string;
   /** Centre name, when known. */
-  centre?: string;
+  centre?: string;   // kept for callers; not printed (user: school name only)
+  /** Certificate number entered by staff (required to download; saved per course). */
+  certificateNo?: string;
   /** "rol_plus" | "school_of_music" */
   wing: string;
 }
@@ -143,7 +145,6 @@ export async function drawCertificate(d: CertificateData): Promise<HTMLCanvasEle
   const course = listed?.label ?? (normalizeCourse(d.course) || d.course);
   const completed = d.completedOn ? fmtYmd(d.completedOn) : "";
   const issued = new Date();
-  const centre = blank(d.centre) ? "" : d.centre!.trim();
   const admNo = blank(d.admissionNo) ? "" : d.admissionNo!.trim();
   const name = d.studentName.trim() || "Student";
   const cx = W / 2;
@@ -175,7 +176,7 @@ export async function drawCertificate(d: CertificateData): Promise<HTMLCanvasEle
   // Student
   ctx.fillStyle = NAVY; fit(ctx, name, 1300, 82, "bold", SANS, 40);
   ctx.fillText(name, cx, 680);
-  const sub = centre ? `student at ${centre}, ${school}` : `student of ${school}`;
+  const sub = `student of ${school}`;
   ctx.fillStyle = MUTED; fit(ctx, sub, 1300, 36, "", SANS, 22);
   ctx.fillText(sub, cx, 745);
 
@@ -197,10 +198,9 @@ export async function drawCertificate(d: CertificateData): Promise<HTMLCanvasEle
   ["Certificate of Course Completion", "in Contemporary & Graded Music"]
     .forEach((line, i) => ctx.fillText(line, cx, afterCourse + 110 + i * 54));
 
-  // Dates & centre
+  // Dates
   const meta = [
     completed ? `Date of Completion: ${completed}` : "",
-    centre ? `Centre: ${centre}` : "",
     `Certificate Issued: ${fmtLongDate(issued)}`,
   ].filter(Boolean);
   ctx.fillStyle = SLATE; ctx.font = `30px ${SANS}`;
@@ -212,7 +212,7 @@ export async function drawCertificate(d: CertificateData): Promise<HTMLCanvasEle
   ctx.strokeStyle = SLATE; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(cx - 260, sigY); ctx.lineTo(cx + 260, sigY); ctx.stroke();
   ctx.fillStyle = NAVY; ctx.font = `bold 32px ${SANS}`;
-  ctx.fillText("Director / Founder", cx, sigY + 48);
+  ctx.fillText("Founder / Director", cx, sigY + 48);
   ctx.fillStyle = MUTED; ctx.font = `28px ${SANS}`;
   ctx.fillText(school, cx, sigY + 88);
 
@@ -225,10 +225,9 @@ export async function drawCertificate(d: CertificateData): Promise<HTMLCanvasEle
   ctx.textAlign = "left"; ctx.fillStyle = SLATE; ctx.font = `24px ${SANS}`;
   left.forEach((line, i) => ctx.fillText(line, 130, 2000 + i * 36));
 
-  // Bottom-right serial: ROL-<admission no.>-<year> ("ROL" not doubled); only with an admission no.
-  const adm = admNo.replace(/\s+/g, "").toUpperCase();
-  if (adm) {
-    const serial = `${adm.startsWith("ROL") ? adm : `ROL-${adm}`}-${issued.getFullYear()}`;
+  // Bottom-right: the certificate number typed by staff when downloading.
+  const serial = (d.certificateNo ?? "").trim();
+  if (serial) {
     ctx.font = `bold 26px ${SANS}`;
     const sw = ctx.measureText(serial).width + 48, sx = W - 130 - sw, sy = 1990;
     ctx.fillStyle = "#ffffff"; ctx.fillRect(sx, sy, sw, 92);

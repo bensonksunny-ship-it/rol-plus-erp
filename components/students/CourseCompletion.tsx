@@ -147,12 +147,12 @@ export default function CourseCompletion({ uid, studentName, info, canEdit, by, 
           {done.map((c, i) => (
             <span key={i} style={{ fontSize: 12.5 }}>
               ✓ {c.course} · <span style={{ color: "#6b7280" }}>{c.completedOn ? fmtDay(c.completedOn) : "Date unavailable"}</span>
-              {" "}<CertificateButton data={cert(normalizeCourse(c.course), c.completedOn)} />
+              {" "}<CertificateButton uid={uid} data={cert(normalizeCourse(c.course), c.completedOn)} />
             </span>
           ))}
         </span>,
       )}
-      {ready && <CertificateReadyDialog data={ready} onClose={() => setReady(null)} />}
+      {ready && <CertificateReadyDialog uid={uid} data={ready} onClose={() => setReady(null)} />}
       {open && info.level && (
         <CourseCompleteModal
           studentName={studentName} course={info.course} level={info.level} instrument={info.instrument}

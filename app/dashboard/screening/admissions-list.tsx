@@ -38,6 +38,7 @@ import { NewAdmissionChoiceModal, ParentQrModal } from "@/components/admissions/
 import { canLeadWing } from "@/lib/elevatedAccount";
 import { TRANSFER_NOTE_MAX, isMovedToEnquiry } from "@/lib/enquiry";
 import { moveAdmissionToEnquiry } from "@/services/enquiry/enquiry.service";
+import { monthLabel, monthOf } from "@/components/admissions/AdmissionsSummaryStrip";
 
 const s: Record<string, React.CSSProperties> = {
   card: {
@@ -664,7 +665,10 @@ export function AdmissionsList({
   onStartScreening,
   onNewAdmission,
   onResume,
+  funnel,
 }: {
+  /** Monthly Summary card filter: forms submitted / students enrolled in `month` ("2026-11"). */
+  funnel?: { kind: "forms" | "enrolled"; month: string; onClear: () => void } | null;
   onStartScreening?: (name: string) => void;
   /** When set, the "＋ New Admission" buttons call this instead of a link/modal. */
   onNewAdmission?: () => void;
@@ -814,14 +818,23 @@ export function AdmissionsList({
   const enrolledCount = onResume ? admissions.filter(a => getApplicationStage(a).key === "enrolled").length : 0;
   // Closest-to-enrolment first: lifecycle rank (see getLifecycleRank), then newest application.
   const visibleAdmissions = useMemo(() => {
-    const list = onResume && !showEnrolled
+    // A funnel filter shows exactly that month's records — enrolled ones included.
+    const list = funnel
+      ? admissions.filter(a => monthOf(funnel.kind === "forms" ? a.submittedAt : a.enrolledAt) === funnel.month)
+      : onResume && !showEnrolled
       ? admissions.filter(a => getApplicationStage(a).key !== "enrolled")
       : admissions;
     return list
       .map(rec => ({ rec, rank: getLifecycleRank(rec) }))
       .sort((a, b) => b.rank - a.rank || str(b.rec.submittedAt).localeCompare(str(a.rec.submittedAt)))
       .map(x => x.rec);
-  }, [admissions, onResume, showEnrolled]);
+  }, [admissions, onResume, showEnrolled, funnel]);
+  // Bring the list into view when a summary card is picked.
+  const gridTopRef = useRef<HTMLDivElement>(null);
+  const funnelKey = funnel ? `${funnel.kind}:${funnel.month}` : "";
+  useEffect(() => {
+    if (funnelKey) gridTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [funnelKey]);
   const readyCount = useMemo(() => visibleAdmissions.filter(r => getLifecycleRank(r) === 4).length, [visibleAdmissions]);
 
   // Cards glide to their new place when the order changes (FLIP), and a card
@@ -1186,7 +1199,7 @@ export function AdmissionsList({
     </>
   );
 
-  if (admissions.length === 0) {
+  if (admissions.length === 0 && !funnel) {
     return (
       <>
         {formModal}
@@ -1759,11 +1772,31 @@ export function AdmissionsList({
       )}
 
       {/* ── Applications grid ── */}
+      <div ref={gridTopRef} style={{ scrollMarginTop: 80 }} />
+      {funnel && (
+        <div role="status" style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" as const, marginBottom: 12,
+          padding: "9px 12px 9px 14px", borderRadius: 12,
+          background: funnel.kind === "forms" ? "#fff7ed" : "#ecfdf5",
+          border: `1px solid ${funnel.kind === "forms" ? "#fed7aa" : "#a7f3d0"}`,
+          color: funnel.kind === "forms" ? "#9a3412" : "#065f46", fontSize: 13,
+        }}>
+          <span aria-hidden>{funnel.kind === "forms" ? "📝" : "🎓"}</span>
+          <span>
+            Filtered: <b>{funnel.kind === "forms" ? "Forms filled" : "Enrolled"}</b> in <b>{monthLabel(funnel.month)}</b>
+            <span style={{ opacity: 0.75 }}> · {visibleAdmissions.length} {visibleAdmissions.length === 1 ? "application" : "applications"}</span>
+          </span>
+          <button type="button" onClick={funnel.onClear}
+            style={{ marginLeft: "auto", padding: "5px 12px", borderRadius: 999, border: "1px solid currentColor", background: "#fff", color: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            ✕ Clear filter
+          </button>
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "#111" }}>
           Applications
           <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 400, marginLeft: 8 }}>({visibleAdmissions.length})</span>
-          {enrolledCount > 0 && (
+          {enrolledCount > 0 && !funnel && (
             <button onClick={() => setShowEnrolled(v => !v)}
               style={{ marginLeft: 10, padding: "3px 10px", borderRadius: 99, border: "1px solid #e5e7eb", background: showEnrolled ? "#f3f4f6" : "#fff", color: "#6b7280", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
               {showEnrolled ? "Hide" : "Show"} enrolled ({enrolledCount})
@@ -1788,6 +1821,11 @@ export function AdmissionsList({
         )}
       </div>
 
+      {funnel && visibleAdmissions.length === 0 && (
+        <div style={{ padding: "36px 16px", textAlign: "center", fontSize: 13, color: "#9ca3af", background: "#fafafa", borderRadius: 14, border: "1px dashed #e5e7eb" }}>
+          No {funnel.kind === "forms" ? "forms filled" : "enrollments"} in {monthLabel(funnel.month)}.
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
         {visibleAdmissions.map((rec, i) => {
           // Tier dividers — only when something is actually ready to enrol.

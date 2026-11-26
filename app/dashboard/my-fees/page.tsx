@@ -7,7 +7,7 @@ import ProtectedRoute from "@/components/layout/ProtectedRoute";
 import { ROLES } from "@/config/constants";
 import { useAuthContext } from "@/features/auth/AuthContext";
 import type { Transaction } from "@/types/finance";
-import { chargedAmountOf, isWaivedDue } from "@/lib/feeWaiver";
+import { chargedAmountOf, creditedAmountOf, isWaivedDue } from "@/lib/feeWaiver";
 import { ledgerMonthOf, ledgerMonths, sortLedger } from "@/lib/ledgerOrder";
 
 export default function MyFeesPage() {
@@ -108,7 +108,7 @@ function MyFeesContent() {
       let computedBalance = 0;
       txList.forEach(tx => {
         const type = (tx as unknown as Record<string, unknown>).type as string ?? "";
-        computedBalance += type === "fee_due" ? chargedAmountOf(tx) : type === "charge" ? tx.amount : -tx.amount;
+        computedBalance += type === "fee_due" ? chargedAmountOf(tx) : type === "charge" ? tx.amount : -creditedAmountOf(tx);
       });
       setBalance(computedBalance);
     } catch {

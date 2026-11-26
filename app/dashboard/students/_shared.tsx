@@ -687,7 +687,7 @@ function StudentsContent() {
 
   return (
     <CourseSavedCtx.Provider value={onCourseSaved}>
-    <div className="mx-auto max-w-[794px]" style={p.page}>
+    <div className="w-full" style={p.page}>
       <ToastContainer toasts={toasts} onRemove={remove} />
 
       {/* ── Header ── */}
@@ -794,7 +794,7 @@ function StudentsContent() {
                 color: listView === v ? "#4338ca" : "#6b7280",
                 boxShadow: listView === v ? "0 1px 2px rgba(0,0,0,0.1)" : "none",
               }}>
-              {v === "cards" ? "▦ Cards" : "☰ Table"}
+              {v === "cards" ? "▦ Cards" : "📖 Book"}
             </button>
           ))}
         </div>
@@ -835,13 +835,14 @@ function StudentsContent() {
             </div>
           )}
           {filteredRest.length === 0 ? null : listView === "table" ? (
-        <StudentTableView
+        <StudentBookSpread
           students={filteredRest}
           sortKey={sortKey}
           sortDir={sortDir}
           onSort={toggleSort}
           showStatus={tab !== "active"}
           onOpen={s => setCardId(s.id)}
+          resetKey={[tab, search, filterCenter, filterCourse, filterInstrument, filterFeeStatus, filterClassType].join("|")}
         />
       ) : (
         <div>
@@ -1102,58 +1103,7 @@ function tonesOf(name: string): [string, string] {
   return CARD_TONES[h % CARD_TONES.length];
 }
 
-function StudentRow({ student: s, index, showStatus, onOpen }: {
-  student: StudentRow; index: number; showStatus: boolean; onOpen: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const rowBg = hover ? "#f5f7ff" : index % 2 === 0 ? "#fff" : "#fcfcfd";
-  const ellipsis: React.CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" as const };
-  const [tone, tone2] = tonesOf(s.name);
-  const owes = s.balance > 0;
-
-  return (
-    <tr style={{ background: rowBg, transition: "background 0.12s", cursor: "pointer", boxShadow: hover ? `inset 3px 0 0 ${tone}` : "none" }}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      onClick={onOpen}>
-      <td style={{ ...p.td, maxWidth: 240 }} title={s.name}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-          <span style={{
-            width: 34, height: 34, borderRadius: "50%", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
-            background: `linear-gradient(135deg, ${tone}, ${tone2})`, color: "#fff", fontSize: 12, fontWeight: 700,
-            boxShadow: `0 2px 6px ${tone}55`,
-          }}>{initialsOf(s.name)}</span>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ ...ellipsis, fontWeight: 600, color: "#0f172a" }}>{s.name}</div>
-            <div style={{ ...ellipsis, fontSize: 11.5, color: "#94a3b8" }}>
-              {s.admissionNo && s.admissionNo !== "-" ? s.admissionNo : "No adm. no."}
-              {s.course && s.course !== "-" ? ` · ${s.course}` : ""}
-            </div>
-          </div>
-        </div>
-      </td>
-      <td style={{ ...p.td, ...ellipsis, maxWidth: 170, color: "#334155" }} title={s.batchName ? `${s.centerName} · ${s.batchName}` : s.centerName}>
-        {s.centerName}
-        {s.batchName && <div style={{ fontSize: 11, color: "#4338ca", fontWeight: 600, ...ellipsis }}>🗂 {s.batchName}</div>}
-      </td>
-      <td style={p.td}>
-        <span style={{
-          display: "inline-block", padding: "3px 10px", borderRadius: 99, fontSize: 12.5, fontWeight: 700,
-          background: owes ? "#fff7ed" : "#f0fdf4", color: owes ? "#c2410c" : "#15803d",
-        }}>{fmtINR(s.balance)}</span>
-      </td>
-      {showStatus && (
-        <td style={p.td}>
-          <span style={{ ...p.badge, ...ellipsis, maxWidth: 90, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
-            {s.status ? s.status.replace(/_/g, " ") : "no status"}
-          </span>
-        </td>
-      )}
-      <td style={{ ...p.td, textAlign: "right" as const, color: hover ? tone : "#cbd5e1", fontSize: 18, width: 28 }}>›</td>
-    </tr>
-  );
-}
-
-// ─── Student card popup (Table + Cards view) ──────────────────────────────────
+// ─── Student card popup (Book + Cards view) ──────────────────────────────────
 
 export function StudentCardModal({ student: s, transactions, canSeeFinance, isAdmin, isTeacher, onClose, onEdit, onRequestDeactivation, onRequestBreak, onClearHistory, onDelete }: {
   student: StudentRow; transactions: Transaction[]; canSeeFinance: boolean;
@@ -1386,7 +1336,7 @@ function RowAcademics({ s }: { s: StudentRow }) {
                 <span style={{ fontWeight: 600, color: "#92400e" }}>🏅 {c.course}</span>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontSize: 12, color: "#b45309" }}>{c.completedOn ? fmtDate(c.completedOn) : "Date unavailable"}</span>
-                  <CertificateButton data={{ studentName: s.name, course: normalizeCourse(c.course), completedOn: c.completedOn, admissionNo: s.admissionNo, wing: s.wing, centre: s.centerName }} />
+                  <CertificateButton uid={s.id} data={{ studentName: s.name, course: normalizeCourse(c.course), completedOn: c.completedOn, admissionNo: s.admissionNo, wing: s.wing, centre: s.centerName }} />
                 </span>
               </div>
             ))}
@@ -2249,7 +2199,7 @@ export function EditModal({ student, centerOptions, teacherOptions, transactions
 
           {/* Footer */}
           <div style={es.footer}>
-            <CertificateMenuButton
+            <CertificateMenuButton uid={student.id}
               student={{
                 studentName: student.name, admissionNo: student.admissionNo, wing: student.wing,
                 centre: centerOptions.find(c => c.id === student.centerId)?.name ?? student.centerName,
@@ -2619,11 +2569,11 @@ function BarList({ title, rows, color = CHART_HUE, emptyText = "No data" }: {
   );
 }
 
-function MiniMonthBars({ data }: { data: { label: string; value: number }[] }) {
+function MiniMonthBars({ title, data }: { title: string; data: { label: string; value: number }[] }) {
   const max = Math.max(1, ...data.map(d => d.value));
   return (
     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "13px 16px" }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 12 }}>New enrolments · last 12 months</div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 12 }}>{title}</div>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 5, height: 92 }}>
         {data.map((d, i) => (
           <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 3 }}>
@@ -2640,7 +2590,31 @@ function MiniMonthBars({ data }: { data: { label: string; value: number }[] }) {
   );
 }
 
-type AttAgg = { overallPct: number; byCourse: BarDatum[]; byCenter: BarDatum[] };
+/** Insights timeframe: Current = active students, this year, this month (default). */
+type InsightScope = "current" | "all";
+
+/** Attendance tallies per student — all-time and for the current month. */
+type AttRaw = { all: Map<string, { p: number; t: number }>; month: Map<string, { p: number; t: number }> };
+
+/** Merges labels that differ only by case/spacing ("keyboard" = "Keyboard ")
+ *  and shows the most common spelling (Title-cased when every spelling is lower-case). */
+function tallyNormalized<T>(items: T[], key: (x: T) => string, weight: (x: T) => number = () => 1): BarDatum[] {
+  const groups = new Map<string, { value: number; spellings: Map<string, number> }>();
+  items.forEach(x => {
+    const raw = (key(x) ?? "").trim().replace(/\s+/g, " ");
+    const label = !raw || raw === "-" ? "—" : raw;
+    const norm = label.toLowerCase();
+    const g = groups.get(norm) ?? { value: 0, spellings: new Map() };
+    g.value += weight(x);
+    g.spellings.set(label, (g.spellings.get(label) ?? 0) + 1);
+    groups.set(norm, g);
+  });
+  return Array.from(groups.values()).map(g => {
+    let best = Array.from(g.spellings.entries()).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0];
+    if (best === best.toLowerCase()) best = best.replace(/\b\w/g, c => c.toUpperCase());
+    return { label: best, value: g.value };
+  }).sort((a, b) => b.value - a.value);
+}
 
 function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onPickStatus }: {
   /** Students who count as Active (strict rule, computed by the page). */
@@ -2651,7 +2625,9 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
   onToggle: () => void;
   onPickStatus: (key: StatusPickKey) => void;
 }) {
-  const [att, setAtt] = useState<AttAgg | "error" | null>(null);
+  const [scope, setScope] = useState<InsightScope>("current");
+  const isAll = scope === "all";
+  const [att, setAtt] = useState<AttRaw | "error" | null>(null);
   const [attLoading, setAttLoading] = useState(false);
   // Guards the one-shot fetch. attLoading must NOT be an effect dependency:
   // setting it re-ran the effect, whose cleanup cancelled the in-flight fetch
@@ -2660,6 +2636,13 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
   const unmountedRef = useRef(false);
   useEffect(() => () => { unmountedRef.current = true; }, []);
 
+  const now = new Date();
+  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const year = String(now.getFullYear());
+  const monthName = now.toLocaleDateString("en-IN", { month: "short", year: "numeric" });
+
+  // One fetch holds both all-time and this-month tallies, so switching scope
+  // is instant and never re-reads Firestore.
   useEffect(() => {
     if (!open || att !== null || attStartedRef.current) return;
     attStartedRef.current = true;
@@ -2668,67 +2651,43 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
       try {
         const wingCenterIds = new Set(centerOptions.map(c => c.id));
         const snap = await getDocs(collection(db, "attendance"));
-        const perStudent = new Map<string, { present: number; total: number }>();
+        const raw: AttRaw = { all: new Map(), month: new Map() };
         snap.docs.forEach(d => {
-          const r = d.data() as { studentUid?: string; centerId?: string; status?: string; present?: boolean };
+          const r = d.data() as { studentUid?: string; centerId?: string; status?: string; present?: boolean; date?: string };
           if (r.centerId && !wingCenterIds.has(r.centerId)) return;
           const uid = r.studentUid;
           if (!uid) return;
-          const counted = r.status
-            ? r.status === "present" || r.status === "absent"
-            : typeof r.present === "boolean";
+          const counted = r.status ? r.status === "present" || r.status === "absent" : typeof r.present === "boolean";
           if (!counted) return;
           const isPresent = r.status ? r.status === "present" : r.present === true;
-          const cur = perStudent.get(uid) ?? { present: 0, total: 0 };
-          cur.total += 1;
-          if (isPresent) cur.present += 1;
-          perStudent.set(uid, cur);
+          const bump = (m: Map<string, { p: number; t: number }>) => {
+            const cur = m.get(uid) ?? { p: 0, t: 0 };
+            cur.t += 1; if (isPresent) cur.p += 1;
+            m.set(uid, cur);
+          };
+          bump(raw.all);
+          if ((r.date ?? "").startsWith(ym)) bump(raw.month);
         });
-        const byCourse = new Map<string, { p: number; t: number }>();
-        const byCenter = new Map<string, { p: number; t: number }>();
-        let gp = 0, gt = 0;
-        students.forEach(s => {
-          const a = perStudent.get(s.id);
-          if (!a || a.total === 0) return;
-          gp += a.present; gt += a.total;
-          const c = byCourse.get(s.course || "—") ?? { p: 0, t: 0 };
-          c.p += a.present; c.t += a.total; byCourse.set(s.course || "—", c);
-          const ce = byCenter.get(s.centerName || "—") ?? { p: 0, t: 0 };
-          ce.p += a.present; ce.t += a.total; byCenter.set(s.centerName || "—", ce);
-        });
-        const toRows = (m: Map<string, { p: number; t: number }>): BarDatum[] =>
-          Array.from(m.entries())
-            .map(([label, v]) => { const pct = Math.round((v.p / v.t) * 100); return { label, value: pct, hint: `${pct}%` }; })
-            .sort((a, b) => b.value - a.value)
-            .slice(0, 8);
-        if (!unmountedRef.current) {
-          setAtt({
-            overallPct: gt > 0 ? Math.round((gp / gt) * 100) : 0,
-            byCourse: toRows(byCourse),
-            byCenter: toRows(byCenter),
-          });
-        }
+        if (!unmountedRef.current) setAtt(raw);
       } catch {
         if (!unmountedRef.current) setAtt("error");
       } finally {
         if (!unmountedRef.current) setAttLoading(false);
       }
     })();
-  }, [open, att, centerOptions, students]);
+  }, [open, att, centerOptions, ym]);
+
+  /** Students the charts count: active only (Current) or every record (All-Time). */
+  const pool = useMemo(() => isAll ? students : students.filter(s => activeIds.has(s.id)), [students, activeIds, isAll]);
 
   const stats = useMemo(() => {
-    const total = students.length;
+    const total = pool.length;
     const active = students.filter(s => activeIds.has(s.id)).length;
-    const owing = students.filter(s => s.balance > 0);
+    const owing = pool.filter(s => s.balance > 0);
     const dues = owing.reduce((a, s) => a + s.balance, 0);
-    const ym = new Date().toISOString().slice(0, 7);
     const newThisMonth = students.filter(s => (s.createdAt ?? "").slice(0, 7) === ym).length;
+    const newThisYear = students.filter(s => (s.createdAt ?? "").slice(0, 4) === year).length;
 
-    const tally = (key: (s: StudentRow) => string): BarDatum[] => {
-      const m = new Map<string, number>();
-      students.forEach(s => { const k = (key(s) || "—").trim() || "—"; m.set(k, (m.get(k) ?? 0) + 1); });
-      return Array.from(m.entries()).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
-    };
     const cap = (rows: BarDatum[], n: number): BarDatum[] => {
       if (rows.length <= n) return rows;
       const rest = rows.slice(n).reduce((a, r) => a + r.value, 0);
@@ -2737,56 +2696,109 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
     const withPct = (rows: BarDatum[]): BarDatum[] =>
       rows.map(r => ({ ...r, hint: `${r.value} · ${total ? Math.round((r.value / total) * 100) : 0}%` }));
 
-    const statusRows = ([
+    const courseRows = tallyNormalized(pool, s => s.course);
+    const allStatus = [
       { label: "Active", key: "active" as StatusPickKey, value: active, color: "#16a34a" },
       { label: "On break", key: "on_break" as StatusPickKey, value: students.filter(s => s.status === "on_break").length, color: "#0284c7" },
       { label: "Break req.", key: "break_requests" as StatusPickKey, value: students.filter(s => s.status === "break_requested").length, color: "#0369a1" },
       { label: "Deact. req.", key: "requests" as StatusPickKey, value: students.filter(s => s.status === "deactivation_requested").length, color: "#d97706" },
       { label: "Inactive", key: "inactive" as StatusPickKey, value: students.filter(s => isInactiveStatus(s.status)).length, color: "#6b7280" },
-    ]).filter(r => r.value > 0);
+    ];
+    // Current hides the historical Inactive pile; All-Time shows everything.
+    const statusRows = allStatus.filter(r => r.value > 0 && (isAll || r.key !== "inactive"));
 
-    const months: { label: string; value: number }[] = [];
-    const now = new Date();
-    for (let i = 11; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      months.push({
-        label: d.toLocaleDateString("en-IN", { month: "short" }),
-        value: students.filter(s => (s.createdAt ?? "").slice(0, 7) === key).length,
-      });
+    // Current → Jan…this month of this year. All-Time → one bar per year.
+    let months: { label: string; value: number }[];
+    if (isAll) {
+      const byYear = new Map<string, number>();
+      students.forEach(s => { const y = (s.createdAt ?? "").slice(0, 4); if (/^\d{4}$/.test(y)) byYear.set(y, (byYear.get(y) ?? 0) + 1); });
+      months = Array.from(byYear.entries()).sort((a, b) => a[0].localeCompare(b[0])).slice(-12).map(([label, value]) => ({ label, value }));
+    } else {
+      months = [];
+      for (let m = 0; m <= now.getMonth(); m++) {
+        const d = new Date(now.getFullYear(), m, 1);
+        const key = `${year}-${String(m + 1).padStart(2, "0")}`;
+        months.push({
+          label: d.toLocaleDateString("en-IN", { month: "short" }),
+          value: students.filter(s => (s.createdAt ?? "").slice(0, 7) === key).length,
+        });
+      }
     }
 
     return {
-      total, active, dues, owingCount: owing.length, newThisMonth,
-      byCourse: withPct(cap(tally(s => s.course), 8)),
-      byInstrument: withPct(cap(tally(s => s.instrument), 8)),
-      byCenter: withPct(cap(tally(s => s.centerName), 8)),
-      courseGroups: tally(s => s.course).length,
+      total, active, dues, owingCount: owing.length, newThisMonth, newThisYear,
+      byCourse: withPct(cap(courseRows, 8)),
+      byInstrument: withPct(cap(tallyNormalized(pool, s => s.instrument), 8)),
+      byCenter: withPct(cap(tallyNormalized(pool, s => s.centerName), 8)),
+      courseGroups: courseRows.filter(r => r.label !== "—").length,
       statusRows, months,
     };
-  }, [students, activeIds]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pool, students, activeIds, isAll, ym, year]);
+
+  const attAgg = useMemo(() => {
+    if (!att || att === "error") return null;
+    const per = isAll ? att.all : att.month;
+    const rowsOf = (key: (s: StudentRow) => string): BarDatum[] => {
+      const withAtt = pool.filter(s => (per.get(s.id)?.t ?? 0) > 0);
+      const p = new Map(tallyNormalized(withAtt, key, s => per.get(s.id)!.p).map(r => [r.label, r.value]));
+      return tallyNormalized(withAtt, key, s => per.get(s.id)!.t)
+        .map(r => { const pct = Math.round(((p.get(r.label) ?? 0) / r.value) * 100); return { label: r.label, value: pct, hint: `${pct}%` }; })
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 8);
+    };
+    let gp = 0, gt = 0;
+    pool.forEach(s => { const a = per.get(s.id); if (a) { gp += a.p; gt += a.t; } });
+    return { overallPct: gt > 0 ? Math.round((gp / gt) * 100) : null, byCourse: rowsOf(s => s.course), byCenter: rowsOf(s => s.centerName) };
+  }, [att, pool, isAll]);
+
+  const scopeLabel = isAll ? "All-Time · all records" : `Active students · ${year}`;
+  const attLabel = isAll ? "all-time" : monthName;
 
   return (
     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.05)", overflow: "hidden" }}>
-      <button onClick={onToggle} style={{
-        width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "12px 18px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" as const,
-      }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 700, color: "#111827", flexWrap: "wrap" as const }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 18px", flexWrap: "wrap" as const }}>
+        <button onClick={onToggle} style={{
+          flex: "1 1 220px", display: "flex", alignItems: "center", gap: 10, padding: "2px 0", background: "none", border: "none",
+          cursor: "pointer", fontFamily: "inherit", textAlign: "left" as const, fontSize: 13, fontWeight: 700, color: "#111827", flexWrap: "wrap" as const,
+        }}>
           📊 Insights
+          {isAll && (
+            <span style={{ fontSize: 10.5, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: "#fef3c7", color: "#92400e", border: "1px solid #fde68a" }}>
+              All-Time View
+            </span>
+          )}
           <span style={{ fontSize: 12, fontWeight: 400, color: "#9ca3af" }}>
-            {stats.active} active · {stats.courseGroups} courses · {fmtINR(stats.dues)} outstanding
+            {isAll ? `${stats.total} records` : `${stats.active} active`} · {stats.courseGroups} courses · {fmtINR(stats.dues)} outstanding
           </span>
-        </span>
-        <span style={{ fontSize: 12, color: "#6b7280", flexShrink: 0 }}>{open ? "▲ Hide" : "▼ Show"}</span>
-      </button>
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <div role="tablist" aria-label="Insights timeframe" style={{ display: "inline-flex", gap: 2, background: "#f1f5f9", borderRadius: 999, padding: 3 }}>
+            {([["current", "Current"], ["all", "All-Time"]] as [InsightScope, string][]).map(([k, label]) => (
+              <button key={k} role="tab" aria-selected={scope === k} onClick={() => setScope(k)} style={{
+                border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 13px", borderRadius: 999,
+                background: scope === k ? "#fff" : "transparent",
+                color: scope === k ? (k === "all" ? "#b45309" : "#4338ca") : "#64748b",
+                boxShadow: scope === k ? "0 1px 3px rgba(15,23,42,0.12)" : "none",
+              }}>{label}</button>
+            ))}
+          </div>
+          <button onClick={onToggle} style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: "#6b7280", padding: 0 }}>
+            {open ? "▲ Hide" : "▼ Show"}
+          </button>
+        </div>
+      </div>
 
       {open && (
         <div style={{ padding: "2px 18px 20px", borderTop: "1px solid #f1f5f9" }}>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, margin: "14px 0" }}>
+          <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 10 }}>Showing: <strong style={{ color: isAll ? "#b45309" : "#4338ca" }}>{scopeLabel}</strong></div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" as const, margin: "10px 0 14px" }}>
             <StatTile label="Active" value={String(stats.active)} tone="#16a34a" sub="in active centres" />
-            <StatTile label="Outstanding dues" value={fmtINR(stats.dues)} tone={stats.dues > 0 ? "#d97706" : "#16a34a"} sub={`${stats.owingCount} owing`} />
-            <StatTile label="New this month" value={String(stats.newThisMonth)} tone="#4f46e5" />
+            <StatTile label="Outstanding dues" value={fmtINR(stats.dues)} tone={stats.dues > 0 ? "#d97706" : "#16a34a"}
+              sub={`${stats.owingCount} owing${isAll ? " · incl. inactive" : ""}`} />
+            {isAll
+              ? <StatTile label="All records" value={String(stats.total)} tone="#4f46e5" sub="active + inactive, all years" />
+              : <StatTile label="New this month" value={String(stats.newThisMonth)} tone="#4f46e5" sub={`${stats.newThisYear} in ${year}`} />}
           </div>
 
           {stats.statusRows.length > 0 && (
@@ -2813,10 +2825,10 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
           )}
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(258px, 1fr))", gap: 12 }}>
-            <BarList title="By course" rows={stats.byCourse} />
-            <BarList title="By instrument" rows={stats.byInstrument} />
-            <BarList title="By centre" rows={stats.byCenter} />
-            <MiniMonthBars data={stats.months} />
+            <BarList title={`By course · ${isAll ? "all-time" : "active"}`} rows={stats.byCourse} />
+            <BarList title={`By instrument · ${isAll ? "all-time" : "active"}`} rows={stats.byInstrument} />
+            <BarList title={`By centre · ${isAll ? "all-time" : "active"}`} rows={stats.byCenter} />
+            <MiniMonthBars title={isAll ? "New enrolments · by year" : `New enrolments · ${year}`} data={stats.months} />
           </div>
 
           <div style={{ marginTop: 12 }}>
@@ -2824,10 +2836,12 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
               <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}><Spinner /></div>
             ) : att === "error" ? (
               <div style={{ fontSize: 12, color: "#9ca3af" }}>Attendance data unavailable.</div>
-            ) : att ? (
+            ) : attAgg ? (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(258px, 1fr))", gap: 12 }}>
-                <BarList title={`Attendance by course · ${att.overallPct}% overall`} rows={att.byCourse} color="#16a34a" emptyText="No attendance recorded yet" />
-                <BarList title="Attendance by centre" rows={att.byCenter} color="#16a34a" emptyText="No attendance recorded yet" />
+                <BarList title={`Attendance by course · ${attLabel}${attAgg.overallPct !== null ? ` · ${attAgg.overallPct}% overall` : ""}`}
+                  rows={attAgg.byCourse} color="#16a34a" emptyText={isAll ? "No attendance recorded yet" : `No attendance in ${monthName} yet`} />
+                <BarList title={`Attendance by centre · ${attLabel}`} rows={attAgg.byCenter} color="#16a34a"
+                  emptyText={isAll ? "No attendance recorded yet" : `No attendance in ${monthName} yet`} />
               </div>
             ) : null}
           </div>
@@ -2837,52 +2851,230 @@ function InsightsPanel({ students, activeIds, centerOptions, open, onToggle, onP
   );
 }
 
-function StudentTableView({ students, sortKey, sortDir, onSort, showStatus, onOpen }: {
+// ─── Student book spread (the "📖 Book" list view) ────────────────────────────
+// Two pages side by side (stacked on narrow screens), BOOK_PER_PAGE students
+// each. ← / → (buttons or arrow keys) turn a spread. Goes back to pages 1–2
+// whenever the tab, search, filters or sort change. Both wings.
+
+const BOOK_PER_PAGE = 8;
+const BOOK_ROW_H    = 78;
+type BookSortKey = "name" | "centerName" | "balance" | "status";
+
+const BOOK_CSS = `
+.sbook { display: grid; grid-template-columns: 1fr; gap: 16px; perspective: 1600px; }
+.sbook-spine { display: none; }
+@media (min-width: 1024px) {
+  .sbook { grid-template-columns: 1fr 18px 1fr; gap: 0; }
+  .sbook-spine { display: block; }
+  .sbook-left  { border-radius: 18px 4px 4px 18px !important; box-shadow: inset -22px 0 26px -24px rgba(15,23,42,0.28), 0 10px 30px rgba(15,23,42,0.08) !important; }
+  .sbook-right { border-radius: 4px 18px 18px 4px !important; box-shadow: inset 22px 0 26px -24px rgba(15,23,42,0.28), 0 10px 30px rgba(15,23,42,0.08) !important; }
+}
+.sbook-row { transition: background 0.12s; }
+.sbook-row:hover { background: #f5f7ff; }
+.sbook-row:focus-visible { outline: 2px solid #6366f1; outline-offset: -2px; }
+.sbook-btn:not(:disabled):hover { background: #eef2ff !important; border-color: #a5b4fc !important; }
+@keyframes sbookNext { from { opacity: 0; transform: rotateY(-10deg) translateX(18px); } to { opacity: 1; transform: none; } }
+@keyframes sbookPrev { from { opacity: 0; transform: rotateY(10deg) translateX(-18px); } to { opacity: 1; transform: none; } }
+.sbook-turn-next { animation: sbookNext 0.32s cubic-bezier(0.2,0.7,0.2,1); transform-origin: left center; }
+.sbook-turn-prev { animation: sbookPrev 0.32s cubic-bezier(0.2,0.7,0.2,1); transform-origin: right center; }
+@media (prefers-reduced-motion: reduce) { .sbook-turn-next, .sbook-turn-prev { animation: none; } }
+`;
+
+function StudentBookSpread({ students, sortKey, sortDir, onSort, showStatus, onOpen, resetKey }: {
   students: StudentRow[];
-  sortKey: "name" | "centerName" | "balance" | "status";
+  sortKey: BookSortKey;
   sortDir: 1 | -1;
-  onSort: (k: "name" | "centerName" | "balance" | "status") => void;
-  // The Active tab only ever shows one status ("confirm"/"active") — the
-  // column is noise there. Inactive can hold several (inactive/cancelled/
-  // canceled/…), so it stays visible for that tab.
+  onSort: (k: BookSortKey) => void;
   showStatus: boolean;
-  /** Opens the student card popup. */
   onOpen: (s: StudentRow) => void;
+  /** Changes whenever tab / search / filters change → back to pages 1–2. */
+  resetKey: string;
 }) {
   const sorted = useMemo(() => {
     const arr = [...students];
     arr.sort((a, b) => {
-      let cmp = 0;
-      if (sortKey === "balance") cmp = a.balance - b.balance;
-      else cmp = safeCompare(a[sortKey], b[sortKey]);
+      const cmp = sortKey === "balance" ? a.balance - b.balance : safeCompare(a[sortKey], b[sortKey]);
       return cmp * sortDir;
     });
     return arr;
   }, [students, sortKey, sortDir]);
 
-  const arrow = (k: typeof sortKey) => (sortKey === k ? (sortDir === 1 ? " ▲" : " ▼") : "");
-  const sortableTh = (k: typeof sortKey, label: string) => (
-    <th style={{ ...p.th, cursor: "pointer", userSelect: "none" as const }} onClick={() => onSort(k)}>{label}{arrow(k)}</th>
-  );
+  const totalPages   = Math.max(1, Math.ceil(sorted.length / BOOK_PER_PAGE));
+  const totalSpreads = Math.ceil(totalPages / 2);
+  const [spread, setSpread] = useState(0);
+  const [dir, setDir]       = useState<"next" | "prev">("next");
+  // Filters / tab / sort changed → first spread (state reset during render).
+  const key = `${resetKey}#${sortKey}${sortDir}`;
+  const [seenKey, setSeenKey] = useState(key);
+  if (seenKey !== key) { setSeenKey(key); setSpread(0); setDir("next"); }
+  const cur = Math.min(spread, totalSpreads - 1);
+
+  const go = useCallback((delta: 1 | -1) => {
+    setDir(delta > 0 ? "next" : "prev");
+    setSpread(sp => Math.max(0, Math.min(totalSpreads - 1, Math.min(sp, totalSpreads - 1) + delta)));
+  }, [totalSpreads]);
+
+  // ← / → turn the page — not while typing or while a popup is open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(t.tagName))) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      e.preventDefault();
+      go(e.key === "ArrowRight" ? 1 : -1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [go]);
+
+  const leftNo   = cur * 2 + 1;
+  const rightNo  = leftNo + 1;
+  const pageOf   = (n: number) => sorted.slice((n - 1) * BOOK_PER_PAGE, n * BOOK_PER_PAGE);
+  const hasRight = rightNo <= totalPages;
+  const pagesLabel = hasRight ? `Pages ${leftNo}–${rightNo}` : `Page ${leftNo}`;
+  const turn = `sbook-turn-${dir}`;
+  const atStart = cur === 0;
+  const atEnd   = cur >= totalSpreads - 1;
+
+  const sortBtn = (k: BookSortKey, label: string) => {
+    const on = sortKey === k;
+    return (
+      <button key={k} type="button" onClick={() => onSort(k)} aria-pressed={on}
+        title={on ? "Click to reverse the order" : `Sort by ${label.toLowerCase()}`}
+        style={{
+          border: `1px solid ${on ? "#a5b4fc" : "#e2e8f0"}`, background: on ? "#eef2ff" : "#fff", color: on ? "#4338ca" : "#64748b",
+          fontSize: 12, fontWeight: 700, padding: "5px 11px", borderRadius: 999, cursor: "pointer", fontFamily: "inherit",
+        }}>
+        {label}{on ? (sortDir === 1 ? " ▲" : " ▼") : ""}
+      </button>
+    );
+  };
 
   return (
-    <div style={p.tableWrap}>
-      <table style={p.table}>
-        <thead>
-          <tr>
-            {sortableTh("name", "Name")}
-            {sortableTh("centerName", "Centre")}
-            {sortableTh("balance", "Balance")}
-            {showStatus && sortableTh("status", "Status")}
-            <th style={{ ...p.th, width: 28 }}></th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((s, i) => (
-            <StudentRow key={s.id} student={s} index={i} showStatus={showStatus} onOpen={() => onOpen(s)} />
-          ))}
-        </tbody>
-      </table>
+    <div>
+      <style>{BOOK_CSS}</style>
+      {/* Sort */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const, marginBottom: 12 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase" as const, letterSpacing: "0.06em", marginRight: 4 }}>Sort</span>
+        {sortBtn("name", "Name")}
+        {sortBtn("centerName", "Centre")}
+        {sortBtn("balance", "Balance")}
+        {showStatus && sortBtn("status", "Status")}
+      </div>
+
+      {/* Spread */}
+      <div className="sbook">
+        <BookPage key={`l${cur}`} className={`sbook-left ${turn}`} pageNo={leftNo} side="left"
+          students={pageOf(leftNo)} offset={(leftNo - 1) * BOOK_PER_PAGE} showStatus={showStatus} onOpen={onOpen} />
+        <div className="sbook-spine" aria-hidden style={{
+          background: "linear-gradient(90deg, rgba(15,23,42,0.10), rgba(255,255,255,0.6) 45%, rgba(255,255,255,0.6) 55%, rgba(15,23,42,0.10))",
+          borderTop: "1px solid #e7e1d6", borderBottom: "1px solid #e7e1d6",
+        }} />
+        {hasRight ? (
+          <BookPage key={`r${cur}`} className={`sbook-right ${turn}`} pageNo={rightNo} side="right"
+            students={pageOf(rightNo)} offset={(rightNo - 1) * BOOK_PER_PAGE} showStatus={showStatus} onOpen={onOpen} />
+        ) : (
+          <div key={`r${cur}`} className={`sbook-right ${turn}`} aria-hidden
+            style={{ ...bookPaper, alignItems: "center", justifyContent: "center", color: "#cbd5e1", fontSize: 13, fontStyle: "italic" }}>
+            — End of list —
+          </div>
+        )}
+      </div>
+
+      {/* Page-flip controls */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" as const, marginTop: 16 }}>
+        <button type="button" className="sbook-btn" onClick={() => go(-1)} disabled={atStart} style={bookNavBtn(atStart)}>
+          ← Previous Spread
+        </button>
+        <div aria-live="polite" style={{ fontSize: 13, color: "#475569", textAlign: "center" as const }}>
+          <b style={{ color: "#0f172a" }}>{pagesLabel}</b> of {totalPages}
+          <span style={{ color: "#94a3b8" }}> ({sorted.length} {sorted.length === 1 ? "student" : "students"})</span>
+          {totalSpreads > 1 && <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>Tip: ← → keys turn the pages</div>}
+        </div>
+        <button type="button" className="sbook-btn" onClick={() => go(1)} disabled={atEnd} style={bookNavBtn(atEnd)}>
+          Next Spread →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const bookPaper: React.CSSProperties = {
+  display: "flex", flexDirection: "column", minWidth: 0,
+  background: "linear-gradient(180deg, #fffefb 0%, #fdfbf6 100%)", border: "1px solid #ece6da",
+  borderRadius: 18, boxShadow: "0 10px 30px rgba(15,23,42,0.08)",
+  minHeight: BOOK_PER_PAGE * BOOK_ROW_H + 60,
+};
+const bookNavBtn = (disabled: boolean): React.CSSProperties => ({
+  height: 42, padding: "0 18px", borderRadius: 12, fontSize: 13, fontWeight: 700, fontFamily: "inherit",
+  border: `1.5px solid ${disabled ? "#e2e8f0" : "#c7d2fe"}`, background: "#fff",
+  color: disabled ? "#cbd5e1" : "#4338ca", cursor: disabled ? "not-allowed" : "pointer",
+});
+
+function BookPage({ students, pageNo, side, offset, showStatus, onOpen, className }: {
+  students: StudentRow[]; pageNo: number; side: "left" | "right"; offset: number;
+  showStatus: boolean; onOpen: (s: StudentRow) => void; className: string;
+}) {
+  return (
+    <section aria-label={`Page ${pageNo}`} className={className} style={bookPaper}>
+      <div style={{ flex: 1, padding: "8px 0" }}>
+        {students.map((s, i) => (
+          <BookRow key={s.id} s={s} n={offset + i + 1} showStatus={showStatus} onOpen={() => onOpen(s)} last={i === students.length - 1} />
+        ))}
+      </div>
+      <div style={{
+        display: "flex", justifyContent: side === "left" ? "flex-start" : "flex-end",
+        padding: "10px 22px 14px", borderTop: "1px dashed #ece6da",
+        fontSize: 12, fontWeight: 700, color: "#a8a29e", letterSpacing: "0.04em",
+      }}>
+        Page {pageNo}
+      </div>
+    </section>
+  );
+}
+
+function BookRow({ s, n, showStatus, onOpen, last }: { s: StudentRow; n: number; showStatus: boolean; onOpen: () => void; last: boolean }) {
+  const [tone, tone2] = tonesOf(s.name);
+  const owes = s.balance > 0;
+  const course = s.course && s.course !== "-" ? s.course : s.instrument && s.instrument !== "-" ? s.instrument : "";
+  const sub = [course, s.admissionNo && s.admissionNo !== "-" ? `#${s.admissionNo}` : "No adm. no."].filter(Boolean).join(" · ");
+  const ellipsis: React.CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+  return (
+    <div role="button" tabIndex={0} className="sbook-row" onClick={onOpen}
+      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
+      aria-label={`Open ${s.name}`}
+      style={{
+        display: "flex", alignItems: "center", gap: 14, minHeight: BOOK_ROW_H, boxSizing: "border-box",
+        padding: "16px 20px", cursor: "pointer", borderBottom: last ? "none" : "1px solid #f1ece2",
+      }}>
+      <span style={{ width: 20, flexShrink: 0, fontSize: 11, fontWeight: 700, color: "#cbd5e1", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{n}</span>
+      <span style={{
+        width: 42, height: 42, borderRadius: 13, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+        background: `linear-gradient(135deg, ${tone}, ${tone2})`, color: "#fff", fontSize: 14, fontWeight: 800, boxShadow: `0 3px 8px ${tone}44`,
+      }}>{initialsOf(s.name)}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ ...ellipsis, fontSize: 15, fontWeight: 700, color: "#0f172a" }} title={s.name}>{s.name}</div>
+        <div style={{ ...ellipsis, fontSize: 12.5, color: "#64748b", marginTop: 2 }} title={sub}>{sub}</div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 1, minWidth: 0, flexWrap: "wrap" as const, justifyContent: "flex-end" }}>
+        {s.centerName && s.centerName !== "-" && (
+          <span title={s.centerName} style={{ ...ellipsis, maxWidth: 150, fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: 99, background: "#eef2ff", color: "#4338ca" }}>
+            🏫 {s.centerName}
+          </span>
+        )}
+        {showStatus && (
+          <span style={{ ...p.badge, ...ellipsis, maxWidth: 110, ...(STATUS_BADGE[s.status.toLowerCase()] ?? { background: "#f3f4f6", color: "#6b7280" }) }}>
+            {s.status ? s.status.replace(/_/g, " ") : "no status"}
+          </span>
+        )}
+        <span style={{
+          fontSize: 12.5, fontWeight: 700, padding: "3px 10px", borderRadius: 99, whiteSpace: "nowrap",
+          background: owes ? "#fff7ed" : "#f0fdf4", color: owes ? "#c2410c" : "#15803d",
+        }}>{fmtINR(s.balance)}</span>
+      </div>
+      <span aria-hidden style={{ color: "#cbd5e1", fontSize: 20, flexShrink: 0 }}>›</span>
     </div>
   );
 }

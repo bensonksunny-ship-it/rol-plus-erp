@@ -352,7 +352,7 @@ export function StudentCourseSelect({
             onChanged?.(`${confirming.join(" and ")} marked as completed.`);
           }} />
       )}
-      {ready && <CertificateReadyDialog data={ready} onClose={() => setReady(null)} />}
+      {ready && <CertificateReadyDialog uid={uid} data={ready} onClose={() => setReady(null)} />}
       {completing && cur && (
         <CourseCompleteModal studentName={studentName} course={cur.label} level={cur.level} instrument={cur.instrument}
           onClose={() => setCompleting(false)}

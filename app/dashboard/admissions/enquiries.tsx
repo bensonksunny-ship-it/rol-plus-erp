@@ -12,6 +12,10 @@ import {
   type Enquiry, type EnquiryStatus,
 } from "@/services/enquiry/enquiry.service";
 import { formatPhone } from "@/lib/enquiry";
+import { monthLabel, monthOf } from "@/components/admissions/AdmissionsSummaryStrip";
+
+/** Monthly Summary "New Enquiries" card: leads created in `month` ("2026-11"). */
+export interface EnquiryMonthFilter { month: string; onClear: () => void }
 
 const ACCENT = "#d97706";
 
@@ -38,8 +42,10 @@ const actionBtn: React.CSSProperties = {
   fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 5,
 };
 
-export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = false, canRestore = false, inModal = false }: {
+export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = false, canRestore = false, inModal = false, monthFilter = null }: {
   wing: string;
+  /** Same rule as the summary card: non-application leads created that month. */
+  monthFilter?: EnquiryMonthFilter | null;
   /** Inside the centred popup: controls stay pinned, only the lead list scrolls. */
   inModal?: boolean;
   /** Wing leaders: may restore an application that was moved here. */
@@ -53,7 +59,7 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
   const [items, setItems]       = useState<Enquiry[]>([]);
   const [loading, setLoading]   = useState(true);
   const [err, setErr]           = useState("");
-  const [filter, setFilter]     = useState<EnquiryStatus | "open" | "all">("open");
+  const [filter, setFilter]     = useState<EnquiryStatus | "open" | "all">(monthFilter ? "all" : "open");
   const [showForm, setShowForm] = useState(showFormInitially);
   const [busyId, setBusyId]     = useState<string | null>(null);
   const [flash, setFlash]       = useState("");
@@ -68,16 +74,21 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
     );
   }, [wing]);
 
-  const counts = useMemo(() => ({
-    new:       items.filter(e => e.status === "new").length,
-    follow_up: items.filter(e => e.status === "follow_up").length,
-    contacted: items.filter(e => e.status === "contacted").length,
-    converted: items.filter(e => e.status === "converted").length,
-  }), [items]);
+  const month = monthFilter?.month ?? "";
+  const base = useMemo(() => month
+    ? items.filter(e => e.source !== "admission" && monthOf(e.createdAt) === month)
+    : items, [items, month]);
 
-  const shown = useMemo(() => items.filter(e =>
+  const counts = useMemo(() => ({
+    new:       base.filter(e => e.status === "new").length,
+    follow_up: base.filter(e => e.status === "follow_up").length,
+    contacted: base.filter(e => e.status === "contacted").length,
+    converted: base.filter(e => e.status === "converted").length,
+  }), [base]);
+
+  const shown = useMemo(() => base.filter(e =>
     filter === "all" ? true : filter === "open" ? e.status !== "converted" : e.status === filter,
-  ), [items, filter]);
+  ), [base, filter]);
 
   async function handleContacted(e: Enquiry) {
     setBusyId(e.id);
@@ -136,6 +147,16 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
         {flash && <div style={{ marginTop: 10, fontSize: 13, color: "#15803d", fontWeight: 600 }}>✓ {flash}</div>}
       </div>
 
+      {monthFilter && (
+        <div role="status" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, padding: "8px 12px 8px 14px", borderRadius: 12, background: "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", fontSize: 13 }}>
+          <span aria-hidden>📇</span>
+          <span>Filtered: <b>New enquiries</b> in <b>{monthLabel(monthFilter.month)}</b><span style={{ opacity: 0.75 }}> · {base.length}</span></span>
+          <button type="button" onClick={() => { setFilter("open"); monthFilter.onClear(); }}
+            style={{ marginLeft: "auto", padding: "5px 12px", borderRadius: 999, border: "1px solid currentColor", background: "#fff", color: "inherit", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            ✕ Clear filter
+          </button>
+        </div>
+      )}
       {/* Filters */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: inModal ? 0 : 12 }}>
         <button style={pill(filter === "open")} onClick={() => setFilter("open")}>Open ({counts.new + counts.follow_up + counts.contacted})</button>
@@ -145,7 +166,7 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
         )}
         <button style={pill(filter === "contacted")} onClick={() => setFilter("contacted")}>Contacted ({counts.contacted})</button>
         <button style={pill(filter === "converted")} onClick={() => setFilter("converted")}>Converted ({counts.converted})</button>
-        <button style={pill(filter === "all")} onClick={() => setFilter("all")}>All ({items.length})</button>
+        <button style={pill(filter === "all")} onClick={() => setFilter("all")}>All ({base.length})</button>
       </div>
 
       {err && (
@@ -161,7 +182,7 @@ export function EnquiriesPanel({ wing, onConvert, onShowQr, showFormInitially = 
         <div style={{ padding: 30, textAlign: "center", fontSize: 13, color: "#9ca3af" }}>Loading enquiries…</div>
       ) : shown.length === 0 ? (
         <div style={{ padding: "36px 16px", textAlign: "center", fontSize: 13, color: "#9ca3af", background: "#fafafa", borderRadius: 14, border: "1px dashed #e5e7eb" }}>
-          {items.length === 0 ? "No enquiries yet. Add one above or share the parent QR code." : "Nothing in this filter."}
+          {month && base.length === 0 ? `No new enquiries in ${monthLabel(month)}.` : items.length === 0 ? "No enquiries yet. Add one above or share the parent QR code." : "Nothing in this filter."}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: inModal ? 12 : 10 }}>
@@ -283,8 +304,9 @@ function MovedApplicationInfo({ e }: { e: Enquiry }) {
  * filter tabs stay pinned; only the lead list scrolls. Closes on ✕, a click
  * on the backdrop, or Escape.
  */
-export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr, canRestore }: {
+export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr, canRestore, monthFilter = null }: {
   wing: string;
+  monthFilter?: EnquiryMonthFilter | null;
   canRestore?: boolean;
   onClose: () => void;
   onConvert: (enquiry: Enquiry) => void;
@@ -320,7 +342,7 @@ export function EnquiriesDrawer({ wing, onClose, onConvert, onShowQr, canRestore
             </div>
             <button onClick={onClose} aria-label="Close" style={{ background: "#f3f4f6", border: "none", width: 34, height: 34, borderRadius: 999, fontSize: 16, cursor: "pointer", color: "#6b7280", lineHeight: 1 }}>✕</button>
           </div>
-          <EnquiriesPanel wing={wing} onConvert={onConvert} onShowQr={onShowQr} canRestore={canRestore} inModal />
+          <EnquiriesPanel wing={wing} onConvert={onConvert} onShowQr={onShowQr} canRestore={canRestore} inModal monthFilter={monthFilter} />
         </div>
       </div>
     </>
