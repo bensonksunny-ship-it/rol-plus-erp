@@ -1,9 +1,8 @@
 "use client";
 
-// Finance "Un-due": clicking a student's Due opens this dialog. The admin says
-// why the fee shouldn't be charged (the student is on break, or has
-// discontinued), picks the unpaid months, and both things happen together:
-// the dues are waived (kept in history) and the student's status is updated.
+// Finance "Un-due": a due raised by mistake. The admin picks the unpaid months
+// (and optionally marks the student on break / discontinued); the chosen dues
+// are DELETED, as if never raised. A concession is a payment discount, never this.
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -32,7 +31,7 @@ export function StudentStatusChip({ status }: { status: string }) {
 
 export type UndueReason = "break" | "discontinued";
 export interface UndueMonth { dueId: string; billingMonth: string; remaining: number }
-/** `reason` is optional: null = just waive the dues, leave the student's status alone. */
+/** `reason` is optional: null = just delete the dues, leave the student's status alone. */
 export interface UndueSubmit { reason: UndueReason | null; months: UndueMonth[]; note: string; breakFrom: string }
 
 const REASONS: { key: UndueReason; icon: string; title: string; sub: string; color: string; tint: string }[] = [
@@ -53,7 +52,7 @@ export function UndueModal({ name, months, otherBalance, status, direct, approve
   name: string;
   /** Every month this student still owes on, oldest first. */
   months: UndueMonth[];
-  /** Balance that isn't a monthly due (e.g. per-class charges); not waived here. */
+  /** Balance that isn't a monthly due (e.g. per-class charges); not removed here. */
   otherBalance: number;
   status: string;
   /** True when this user's status change applies at once; otherwise it's a request. */
@@ -168,7 +167,7 @@ export function UndueModal({ name, months, otherBalance, status, direct, approve
         ) : (
         <div style={s.body}>
           <div style={s.amountBox}>
-            <div style={s.amountLabel}>Waive</div>
+            <div style={s.amountLabel}>Remove due</div>
             <div style={s.amount}>{fmtINR(total)}</div>
           </div>
 

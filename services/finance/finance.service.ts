@@ -138,46 +138,7 @@ export async function createTransaction(
   return { id: snap.id, ...snap.data() } as Transaction;
 }
 
-// ─── Per-Class Billing ────────────────────────────────────────────────────────
-
-/**
- * Auto-charge a student per class attendance.
- * Used by the attendance page after a successful markAttendance.
- * Skips center/student existence validation — caller already verified.
- */
-export async function chargeStudentPerClass(
-  studentUid: string,
-  centerId: string,
-  amount: number,
-): Promise<void> {
-  if (amount <= 0) return;
-
-  await addDoc(collection(db, TRANSACTIONS), {
-    studentUid,
-    centerId,
-    amount,
-    method:     "auto",
-    receivedBy: "system",
-    date:       new Date().toISOString().slice(0, 10),
-    status:     "completed",
-    createdAt:  serverTimestamp(),
-  });
-
-  await updateDoc(doc(db, "users", studentUid), {
-    currentBalance: increment(amount),
-    updatedAt:      new Date().toISOString(),
-  });
-
-  logAction({
-    action:        "PER_CLASS_FEE_APPLIED",
-    initiatorId:   "system",
-    initiatorRole: "admin",
-    approverId:    null,
-    approverRole:  null,
-    reason:        null,
-    metadata:      { studentUid, centerId, amount },
-  });
-}
+// No automatic charges: dues are only ever raised by hand (Finance → Mark Due).
 
 /**
  * Get all transactions.
@@ -385,9 +346,12 @@ export function computeDueSettlements(transactions: Transaction[]): Map<string, 
   //    at what's really owed: the newest months keep the shortfall, older ones
   //    are treated as paid first (FIFO). A student whose ledger is at ₹0 or in
   //    credit therefore shows every month Paid, everywhere.
+  //    Old automatic charges (auto / auto-monthly / charge) are left out here:
+  //    they aren't monthly dues, so money paid must settle real dues first.
   const balance = new Map<string, number>();
   for (const tx of transactions) {
     if (!tx.studentUid) continue;
+    if (tx.type === "charge" || tx.method === "auto" || tx.method === "auto-monthly") continue;
     balance.set(tx.studentUid, (balance.get(tx.studentUid) ?? 0) + transactionBalanceEffect(tx));
   }
   const openByStudent = new Map<string, DueSettlement[]>();

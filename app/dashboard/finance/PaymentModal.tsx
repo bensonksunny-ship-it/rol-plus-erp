@@ -27,7 +27,7 @@ export interface SomControls {
   onSaveFee:      (fee: number) => void;
   /** This month's due was waived (Un-due) — nothing left to pay. */
   monthWaived:    boolean;
-  /** Opens Un-due (break / discontinued / waiver); undefined when not allowed. */
+  /** Opens Un-due (delete a mistaken due, optionally set break / discontinued); undefined → plain delete. */
   onUndue?:       () => void;
   /** Another dialog is on top — Esc / backdrop must not close this one. */
   covered:        boolean;
@@ -111,6 +111,8 @@ export default function PaymentModal({
   const [discountType, setDiscountType] = useState<DiscountType>("fixed");
   const [discountValue, setDiscountValue] = useState("");
   const [dueDate, setDueDate]           = useState(isCurrentMonth ? todayStr() : `${month}-01`);
+  // A due bills the month of its date — say so when that isn't the month on screen.
+  const dueBillsOther = /^\d{4}-\d{2}/.test(dueDate) && dueDate.slice(0, 7) !== month;
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const amountRef = useRef<HTMLInputElement>(null);
@@ -121,10 +123,24 @@ export default function PaymentModal({
   const curFee   = som ? som.currentFee : student.monthlyFee;
   const feeStart = curFee > 0 ? curFee : som?.centreDefault ?? 0;
   const [feeInput, setFeeInput] = useState(feeStart > 0 ? String(feeStart) : "");
-  useEffect(() => { setFeeInput(feeStart > 0 ? String(feeStart) : ""); }, [curFee]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // The fee is read-only until ✎ is clicked; a saved fee (curFee changes) closes the editor.
+  const [isEditingFee, setIsEditingFee] = useState(false);
+  const feeEditBtnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { setFeeInput(feeStart > 0 ? String(feeStart) : ""); setIsEditingFee(false); }, [curFee]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setIsEditingFee(false); }, [student.name]);
   const feeN      = Math.round(Number(feeInput));
   const feeValid  = Number.isFinite(feeN) && feeN > 0;
-  const feeDirty  = feeValid && feeN !== curFee;
+  const feeDirty  = isEditingFee && feeValid && feeN !== curFee;
+  function startFeeEdit() {
+    setFeeInput(feeStart > 0 ? String(feeStart) : "");
+    setIsEditingFee(true);
+    requestAnimationFrame(() => { feeRef.current?.focus(); feeRef.current?.select(); });
+  }
+  function cancelFeeEdit() {
+    setFeeInput(feeStart > 0 ? String(feeStart) : "");
+    setIsEditingFee(false);
+    requestAnimationFrame(() => feeEditBtnRef.current?.focus());
+  }
 
   const hasDue      = dueThisMonth !== null;
   // Any unpaid month can take a payment, not only the one being viewed.
@@ -173,7 +189,7 @@ export default function PaymentModal({
     return () => opener?.focus?.();
   }, []);
   useEffect(() => {
-    if (som?.focus === "fee") { feeRef.current?.focus(); feeRef.current?.select(); return; }
+    if (som?.focus === "fee") { feeEditBtnRef.current?.focus(); return; }
     if (som?.focus === "due") { dueRef.current?.scrollIntoView({ block: "nearest" }); dialogRef.current?.focus(); return; }
     (amountRef.current ?? dialogRef.current)?.focus();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -230,18 +246,37 @@ export default function PaymentModal({
             {/* ── 1 · Monthly fee ───────────────────────────────────────────── */}
             <section style={m.section}>
               <div style={m.secHead}><span style={m.secNo}>1</span> {som.feeKind === "per_class" ? "Fee per class" : "Monthly fee"}</div>
+              {!isEditingFee ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 18, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: "var(--color-text-primary)" }}>
+                    {curFee > 0 ? fmtINR(curFee) : "-"}
+                  </span>
+                  <button ref={feeEditBtnRef} type="button" onClick={startFeeEdit}
+                    aria-label={som.feeKind === "per_class" ? "Edit fee per class" : "Edit monthly fee"} title="Edit fee"
+                    style={m.feeEditBtn}>✎</button>
+                </div>
+              ) : (
               <div style={{ display: "flex", gap: 8, alignItems: "stretch", flexWrap: "wrap" }}>
                 <input ref={feeRef} type="number" min={1} inputMode="numeric" placeholder="e.g. 2500" aria-label={som.feeKind === "per_class" ? "Fee per class (₹)" : "Monthly fee (₹)"}
                   value={feeInput} disabled={som.savingFee}
                   onChange={e => setFeeInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); if (feeDirty) som.onSaveFee(feeN); } }}
+                  onKeyDown={e => {
+                    if (e.key === "Enter") { e.preventDefault(); if (feeDirty) som.onSaveFee(feeN); }
+                    // Esc leaves the editor, not the whole window.
+                    if (e.key === "Escape" && !som.savingFee) { e.preventDefault(); e.nativeEvent.stopPropagation(); cancelFeeEdit(); }
+                  }}
                   style={{ ...m.input, flex: "1 1 120px", fontSize: 14, fontWeight: 700, ...(feeInput !== "" && !feeValid ? { border: "1.5px solid #f87171" } : {}) }} />
                 <button type="button" onClick={() => som.onSaveFee(feeN)} disabled={!feeDirty || som.savingFee}
-                  style={{ ...m.confirmBtn, background: "#d97706", padding: "8px 16px", ...(!feeDirty || som.savingFee ? m.disabled : {}) }}>
-                  {som.savingFee ? "Saving…" : "Update Fee"}
+                  style={{ ...m.confirmBtn, background: "#d97706", padding: "7px 14px", ...(!feeDirty || som.savingFee ? m.disabled : {}) }}>
+                  {som.savingFee ? "Saving…" : "Save"}
+                </button>
+                <button type="button" onClick={cancelFeeEdit} disabled={som.savingFee}
+                  style={{ ...m.cancelBtn, padding: "7px 12px", ...(som.savingFee ? m.disabled : {}) }}>
+                  Cancel
                 </button>
               </div>
-              {((feeInput !== "" && !feeValid) || (som.centreDefault > 0 && feeN !== som.centreDefault)) && <div style={m.hint}>
+              )}
+              {isEditingFee && ((feeInput !== "" && !feeValid) || (som.centreDefault > 0 && feeN !== som.centreDefault)) && <div style={m.hint}>
                 {feeInput !== "" && !feeValid && <span style={{ color: "#b91c1c" }}>Enter an amount above ₹0.</span>}
                 {som.centreDefault > 0 && feeN !== som.centreDefault && (
                   <button type="button" onClick={() => setFeeInput(String(som.centreDefault))} style={m.linkBtn}>
@@ -259,6 +294,7 @@ export default function PaymentModal({
                   <Field label="Due Date">
                     <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} style={{ ...m.input, width: 160 }} />
                   </Field>
+                  {dueBillsOther && <div style={{ ...m.hint, marginTop: 0, flexBasis: "100%", color: "#b45309" }}>Bills {fmtMonth(dueDate.slice(0, 7))}, not {fmtMonth(month)}</div>}
                   <button type="button" onClick={() => onGenerateDue(dueDate)} disabled={generatingDue || !dueDate || som.dueAmount <= 0}
                     style={{ ...m.confirmBtn, background: "#f59e0b", ...(generatingDue || !dueDate || som.dueAmount <= 0 ? m.disabled : {}) }}>
                     {generatingDue ? "Marking…" : som.dueAmount > 0 ? `⚠️ Mark Due · ${fmtINR(som.dueAmount)}` : curFee <= 0 ? "Mark Due · set fee first" : "Mark Due"}
@@ -270,15 +306,10 @@ export default function PaymentModal({
                   <span style={{ ...m.duePill, background: "#fffbeb", color: isOverdueMonth(month) ? OVERDUE_TEXT : "#b45309" }}>
                     {fmtINR(dueThisMonth ?? 0)}
                   </span>
-                  {som.onUndue && (
-                    <button type="button" onClick={som.onUndue} style={{ ...m.cancelBtn, fontSize: 12, padding: "5px 12px", color: "#c2410c", borderColor: "#fed7aa", background: "#fff7ed" }}
-                      title="Waive this due — on break, discontinued or exempt">
-                      Mark Undue
-                    </button>
-                  )}
-                  <button type="button" onClick={onUndoDue} disabled={undoingDue} title="Delete a due marked by mistake"
-                    style={{ ...m.cancelBtn, fontSize: 12, padding: "5px 12px", ...(undoingDue ? m.disabled : {}) }}>
-                    {undoingDue ? "Undoing…" : "↩ Undo"}
+                  {/* Undue = the due was a mistake: it's deleted. A concession is a Discount on the payment. */}
+                  <button type="button" onClick={som.onUndue ?? onUndoDue} disabled={undoingDue} title="Due marked by mistake — remove it"
+                    style={{ ...m.cancelBtn, fontSize: 12, padding: "5px 12px", color: "#c2410c", borderColor: "#fed7aa", background: "#fff7ed", ...(undoingDue ? m.disabled : {}) }}>
+                    {undoingDue ? "Removing…" : "Mark Undue"}
                   </button>
                 </div>
               ) : (
@@ -443,6 +474,7 @@ export default function PaymentModal({
                 <Field label="Due Date">
                   <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} style={m.input} />
                 </Field>
+                {dueBillsOther && <div style={{ ...m.hint, color: "#b45309" }}>Bills {fmtMonth(dueDate.slice(0, 7))}, not {fmtMonth(month)}</div>}
                 <button
                   type="button" onClick={() => onGenerateDue(dueDate)} disabled={generatingDue || !dueDate}
                   style={{ ...m.confirmBtn, background: "#f59e0b", marginTop: 10, ...(generatingDue || !dueDate ? m.disabled : {}) }}
@@ -669,5 +701,6 @@ const m: Record<string, React.CSSProperties> = {
   secHead:    { display: "flex", alignItems: "center", gap: 8, fontSize: 12, fontWeight: 800, color: "var(--color-text-primary)", textTransform: "uppercase", letterSpacing: "0.04em" },
   secNo:      { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, borderRadius: 99, background: "#f59e0b", color: "#fff", fontSize: 10.5, fontWeight: 800 },
   hint:       { display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px 10px", fontSize: 11.5, color: "var(--color-text-secondary)", marginTop: -4 },
+  feeEditBtn: { width: 28, height: 28, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "1px solid var(--color-border)", borderRadius: 6, background: "var(--color-surface-2)", color: "var(--color-text-secondary)", fontSize: 14, cursor: "pointer", padding: 0 },
   linkBtn:    { border: "none", background: "none", padding: 0, color: "#b45309", fontSize: 11.5, fontWeight: 700, cursor: "pointer", textDecoration: "underline" },
 };

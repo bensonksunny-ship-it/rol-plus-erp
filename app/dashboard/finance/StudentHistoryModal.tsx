@@ -87,7 +87,7 @@ export default function StudentHistoryModal({ student, transactions, settlements
     const isDue     = tx.type === "fee_due";
     const isAdm     = tx.type === "admission_fee";
     const isDeposit = tx.type === "deposit";
-    const isCharge  = tx.type === "charge" || tx.method === "auto";
+    const isCharge  = tx.type === "charge" || tx.method === "auto" || tx.method === "auto-monthly";
     const failed    = tx.status === "failed";
     const pend      = tx.status === "pending";
     const type = isDue ? "Due" : isAdm ? "Admission" : isCharge ? "Charge" : isDeposit ? "Deposit" : "Payment";

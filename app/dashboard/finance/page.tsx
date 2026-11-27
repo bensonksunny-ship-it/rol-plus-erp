@@ -28,7 +28,6 @@ import {
   isSettlingPayment,
   paymentSettlesMonth,
   recordPayment,
-  waiveFeeDue,
   type DueSettlement,
 } from "@/services/finance/finance.service";
 import {
@@ -50,7 +49,7 @@ import { buildStudentRows, exportFinanceStatementPdf, isReceivedPayment } from "
 import PaymentModal, { type PayMethod, type PaymentFormValues } from "./PaymentModal";
 import StudentHistoryModal from "./StudentHistoryModal";
 import { HISTORY_NOTE, fmtINR, fmtMonth, todayStr } from "./format";
-import { ledgerMonthOf, ledgerMonths, ledgerRank, sortLedger } from "@/lib/ledgerOrder";
+import { ledgerMonthKey, ledgerMonthOf, ledgerMonths, ledgerRank, sortLedger } from "@/lib/ledgerOrder";
 import { StudentStatusChip, UndueModal, type UndueSubmit } from "./RowStatusMenus";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -344,6 +343,12 @@ function FinanceContent() {
       const monthEnd = `${month}-${String(lastDayOfMonth).padStart(2, "0")}`;
 
       const balanceMap = computeStudentBalances(txData, isCurrent ? undefined : monthEnd);
+      // Inactive / unassigned students stay listed only while they owe a real
+      // due (same rule as the Due badge) — an old automatic charge alone doesn't count.
+      const rosterSettlements = computeDueSettlements(txData);
+      const owingUids = new Set<string>();
+      rosterSettlements.forEach(x => { if (x.remaining > 0 && x.billingMonth <= month) owingUids.add(x.studentUid); });
+      const owesRealDue = (uid: string) => owingUids.has(uid);
 
       // Roster: active students in an active centre of this wing — plus anyone
       // else (inactive / unassigned) who still owes money, until it's settled.
@@ -353,7 +358,7 @@ function FinanceContent() {
           const cid = (d.data().centerId ?? "") as string;
           return cid ? wingCenterIds.has(cid) : inWing(d.data(), wing);
         })
-        .filter(d => isCurrentlyActiveStudent(d.data(), activeCenterIds) || (balanceMap.get(d.id) ?? 0) > 0)
+        .filter(d => isCurrentlyActiveStudent(d.data(), activeCenterIds) || owesRealDue(d.id))
         .map(d => {
         const s           = d.data();
         const c           = cMap.get(s.centerId as string);
@@ -488,8 +493,11 @@ function FinanceContent() {
   // balance (per-class / prepay charges have no month due) — unchanged.
   // Capped by today's ledger balance, so a payment recorded without a month
   // (credit the settlement engine can't place) still clears what it covers.
+  // Both wings: owed = real unpaid dues up to the selected month (Undue/waived
+  // and no-due months count 0), never the bare balance — an old automatic
+  // charge alone no longer paints a row Due. Per-class students too: their
+  // classes are billed by Mark Due (a fee_due), never by automatic charges.
   const owedMap = useMemo(() => {
-    if (!isSom) return null;
     const live = computeStudentBalances(transactions);
     const m = new Map<string, number>();
     dueSettlements.forEach(d => {
@@ -498,9 +506,9 @@ function FinanceContent() {
     });
     m.forEach((v, uid) => m.set(uid, Math.min(v, Math.max(0, live.get(uid) ?? 0))));
     return m;
-  }, [isSom, dueSettlements, selectedMonth, transactions]);
+  }, [dueSettlements, selectedMonth, transactions]);
   const owedOf = useCallback(
-    (s: { uid: string; balance: number }) => owedMap ? (owedMap.get(s.uid) ?? 0) : Math.max(0, s.balance),
+    (s: { uid: string }) => owedMap.get(s.uid) ?? 0,
     [owedMap],
   );
 
@@ -563,8 +571,7 @@ function FinanceContent() {
       ? transactions.filter(t => isReceivedPayment(t) && t.date?.startsWith(today))
           .reduce((s, t) => s + (t.amount ?? 0), 0)
       : 0;
-    // Overdue is the ledger balance, not this month's fee_due settlements: those
-    // miss per-class charges and payments recorded without a month. One student's
+    // Overdue = real unpaid dues up to this month (owedOf). Undue/no-due months count 0. One student's
     // credit never offsets another's debt.
     const overdueStudents = students.filter(s => owedOf(s) > 0);
     const pendingBal      = overdueStudents.reduce((acc, s) => acc + owedOf(s), 0);
@@ -888,16 +895,31 @@ function FinanceContent() {
       );
       return;
     }
+    // The due bills the month of the date picked in the window, never just the
+    // month the page happens to show (a 1 Feb due marked from the November view
+    // is February's). No date → the page's month, as before.
+    const date        = dueDate || (selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`);
+    const targetMonth = ledgerMonthKey(date) || selectedMonth;
     setFeeDueSubmitting(true);
     try {
+      // "Mark Due again" (revised fee) is only offered for the month on screen;
+      // a different month must not get a second due by accident.
+      if (targetMonth !== selectedMonth) {
+        const existing = await getDocs(query(collection(db, "transactions"),
+          where("studentUid", "==", student.uid), where("billingMonth", "==", targetMonth)));
+        if (existing.docs.some(d => d.data().type === "fee_due")) {
+          toast(`${student.name} already has a due for ${fmtMonth(targetMonth)} — open that month to change it`, "error");
+          return;
+        }
+      }
       await addDoc(collection(db, "transactions"), {
         studentUid:   student.uid,
         centerId:     student.centerId,
         amount:       fee,
         type:         "fee_due",
         method:       "manual",
-        billingMonth: selectedMonth,
-        date:         dueDate || (selectedMonth === currentMonth() ? todayStr() : `${selectedMonth}-01`),
+        billingMonth: targetMonth,
+        date,
         status:       "due",
         createdAt:    serverTimestamp(),
         receivedBy:   user?.displayName ?? user?.email ?? "admin",
@@ -909,10 +931,10 @@ function FinanceContent() {
       logAction({
         action: "FEE_DUE_MARKED", initiatorId: user?.uid ?? "", initiatorRole: (user?.role ?? ROLES.ADMIN) as Role,
         approverId: null, approverRole: null, reason: null,
-        metadata: { studentUid: student.uid, amount: fee, billingMonth: selectedMonth },
+        metadata: { studentUid: student.uid, amount: fee, billingMonth: targetMonth },
       });
       await fetchAll(selectedMonth);
-      toast(`Fee due of ${fmtINR(fee)} marked for ${student.name} — ${fmtMonth(selectedMonth)}`, "success");
+      toast(`Fee due of ${fmtINR(fee)} marked for ${student.name} — ${fmtMonth(targetMonth)}`, "success");
     } catch (err) {
       console.error("Generate fee due failed:", err);
       toast("Failed to generate fee due. Try again.", "error");
@@ -962,20 +984,21 @@ function FinanceContent() {
   }
 
   // ── Un-due: student on break / discontinued ─────────────────────────────────
-  // Waives the chosen unpaid months (kept in history as Waived) and records the
+  // Un-due = the due was raised by mistake: the chosen months' dues are DELETED
+  // (a concession is a payment discount, not this). Optionally records the
   // student's status: applied at once for approvers, a request for others.
   async function submitUndue(student: StudentFeeRow, v: UndueSubmit) {
     if (!user || undueSaving || v.months.length === 0) return;
     setUndueSaving(true);
     const by = { uid: user.uid, role, name: user.displayName ?? undefined, wing };
-    // Break / discontinued is optional; without it this is a plain waiver.
+    // Break / discontinued is optional; without it the dues are just removed.
     const label = v.reason === "break" ? "On break" : v.reason === "discontinued" ? "Discontinued" : "Un-due";
     const reason = v.note ? `${label} · ${v.note}` : label;
-    let waived = 0;
+    let removed = 0;
     try {
       for (const m of v.months) {
-        await waiveFeeDue({ dueId: m.dueId, studentUid: student.uid, amount: m.remaining, reason, by });
-        waived += m.remaining;
+        await deleteTransaction(m.dueId, user.uid, role ?? "admin");
+        removed += m.remaining;
       }
 
       let next = student.status;
@@ -1002,11 +1025,11 @@ function FinanceContent() {
       setUndueUid(null);
       invalidateStudentViews();
       await fetchAll(selectedMonth);
-      toast(`${fmtINR(waived)} un-due for ${student.name}.${statusMsg}`, "success");
+      toast(`Due ${fmtINR(removed)} removed for ${student.name}.${statusMsg}`, "success");
     } catch (err) {
       const why = err instanceof Error ? err.message : "Try again.";
-      toast(waived > 0 ? `${fmtINR(waived)} waived, but the rest failed: ${why}` : `Couldn't un-due: ${why}`, "error");
-      if (waived > 0) { setUndueUid(null); await fetchAll(selectedMonth); }
+      toast(removed > 0 ? `${fmtINR(removed)} removed, but the rest failed: ${why}` : `Couldn't un-due: ${why}`, "error");
+      if (removed > 0) { setUndueUid(null); await fetchAll(selectedMonth); }
     } finally {
       setUndueSaving(false);
     }
@@ -1542,7 +1565,9 @@ function FinanceContent() {
 
                     // Same test as the Amount column's "Due" tag.
                     const owed       = owedOf(s);
-                    const isDueRow   = owed > 0 || (feeDueMap.has(s.uid) && !paidMap.has(s.uid));
+                    // Only a real unpaid due colours the row — the same number the
+                    // pill, centre total and Overdue card use, so they never disagree.
+                    const isDueRow   = owed > 0;
                     const isPaidRow  = !isDueRow && paidMap.has(s.uid);
                     // Due → whole row orange, paid → whole row green. Painted on the
                     // cells via globals.css (.fin-row-*): the theme's zebra striping
@@ -1652,7 +1677,7 @@ function FinanceContent() {
                                   <button type="button" disabled onClick={() => setUndueUid(s.uid)}
                                     title={undefined}
                                     style={{ ...st.dueBtn, marginLeft: 6, fontSize: 11, padding: "1px 8px", cursor: "default" }}>
-                                    Due {fmtINR(owed > 0 ? owed : feeDueMap.get(s.uid)?.amount ?? 0)}
+                                    Due {fmtINR(owed)}
                                   </button>
                                 ) : paidMap.has(s.uid) ? (
                                   <span style={{ marginLeft: 6, fontWeight: 600, color: "#16a34a" }}>· Paid {fmtINR(paidAmountMap.get(s.uid) ?? 0)}</span>
@@ -1695,7 +1720,7 @@ function FinanceContent() {
                                   title={undefined}
                                   style={{ ...st.dueBtn, cursor: "default" }}>
                                   <span aria-hidden className="animate-pulse" style={st.dueDot} />
-                                  Due {fmtINR(owed > 0 ? owed : feeDueMap.get(s.uid)?.amount ?? 0)}
+                                  Due {fmtINR(owed)}
                                   {feeDueMap.get(s.uid)?.partial && <span style={st.partlyPaidTag}>Partial</span>}
                                 </button>
                               ) : paidMap.has(s.uid) ? (
